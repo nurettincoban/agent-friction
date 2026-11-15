@@ -3,8 +3,9 @@
 Raw event counts are not comparable when the two windows contain a different
 number of sessions, so the comparison uses *events per 10 sessions* for each
 hotspot. A hotspot counts as improved or regressed only when that rate moves by
-at least ``threshold`` (relative) and by at least one whole event in absolute
-terms, which keeps small-sample noise out of the verdict.
+at least ``threshold`` (relative) and by at least ``min_events`` events in absolute
+terms, which keeps small-sample noise out of the verdict. Hotspots with fewer
+than ``min_events`` events on both sides are always "unchanged".
 """
 
 from __future__ import annotations
@@ -37,7 +38,11 @@ def _rate(events: int, sessions: int) -> float:
 
 
 def compare(
-    before: dict[str, Any], after: dict[str, Any], *, threshold: float = 0.25
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    threshold: float = 0.25,
+    min_events: int = 2,
 ) -> list[Change]:
     """Classify every hotspot and command that appears in either analysis."""
     bs = int(before.get("totals", {}).get("sessions", 0))
@@ -55,11 +60,13 @@ def compare(
         ar = _rate(int(a["events"]), as_) if a else 0.0
         b_events = int(b["events"]) if b else 0
         a_events = int(a["events"]) if a else 0
-        if b is None:
+        if max(a_events, b_events) < min_events:
+            status = "unchanged"  # too few events on both sides to say anything
+        elif b is None:
             status = "new"
         elif a is None:
             status = "resolved"
-        elif abs(ar - br) >= threshold * max(br, 1e-9) and abs(a_events - b_events) >= 1:
+        elif abs(ar - br) >= threshold * max(br, 1e-9) and abs(a_events - b_events) >= min_events:
             status = "improved" if ar < br else "regressed"
         else:
             status = "unchanged"

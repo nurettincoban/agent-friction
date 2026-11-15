@@ -24,8 +24,8 @@ agent-friction · shopfront
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals
-  ██████▋     66.6 src/shopfront/api/schema_gen.py           4     12     11m  ● edit-miss×6, user-correction×3
-  ████▌       44.8 src/shopfront/checkout/service.py         3      6     19m  ● user-correction×3, edit-revert×2
+  ██████▋     66.0 src/shopfront/api/schema_gen.py           4     12     11m  ● edit-miss×6, user-correction×3
+  ████▎       42.1 src/shopfront/checkout/service.py         3      6     19m  ● user-correction×3, edit-revert×2
 
 Commands that keep failing
   █████▌      55.6 pytest                                    4      8      6m  ● command-failure×7, retry-loop×1
@@ -37,7 +37,7 @@ What to fix first
   2. pytest: Tell agents to use `make test`
      `pytest` failed 7 times in 4 sessions; 5 times the next successful command was `make test`.
   3. src/shopfront/checkout/service.py: Write down the rule the human keeps repeating
-     ...In their words: "Don't call legacy_charge() here, it's deprecated. Use PaymentClient.charge() instead."
+     ...In their words: "No, I said use PaymentClient, not the legacy module. [...]"
 ```
 
 That output is real: it comes from the synthetic sessions in [`tests/fixtures`](tests/fixtures).
@@ -60,7 +60,7 @@ backed by **evidence** you can trace to a transcript line.
 
 ## Install
 
-Requires Python 3.10+. No dependencies.
+Requires Python 3.10+. No dependencies. Not on PyPI yet, so install from GitHub:
 
 ```sh
 pipx install git+https://github.com/nurettincoban/agent-friction
@@ -80,7 +80,8 @@ agent-friction show "npm test"             # the same for a command, or a direct
 agent-friction sources                     # which transcripts it found
 ```
 
-By default it finds Claude Code sessions for the repo (and its subdirectories and git worktrees)
+By default it finds Claude Code sessions for the repo (its subdirectories, its git worktrees, and
+sessions started in a parent directory that worked inside it)
 under `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR`). Point it elsewhere with `--transcripts`.
 If the sessions were recorded where the repo lived at another path (a teammate's laptop, a CI
 runner, an old checkout), add `--repo-alias /that/path`.
@@ -143,9 +144,12 @@ Transcripts contain your code and sometimes your secrets, so:
 
 - Everything runs locally. No network calls, ever. The HTML report loads nothing external and
   ships a strict Content-Security-Policy.
-- Excerpts are redacted (API keys, tokens, private keys, passwords, emails, high-entropy strings,
-  your home directory) and truncated. Thinking blocks and assistant prose are never included.
-- `--no-excerpts` drops every quote from the transcript, leaving only counts and summaries.
+- Excerpts are redacted (API keys and tokens, `Authorization` headers, private keys, common
+  password forms, credentials in URLs and `curl -u`, emails, high-entropy strings, your home
+  directory) and truncated. Thinking blocks and assistant prose are never included.
+- `--no-excerpts` removes all transcript text: prompts, quoted corrections, search patterns,
+  command lines, and output. What remains is paths, normalized command names (like `pytest`),
+  counts, and timestamps.
 
 Redaction is pattern-based, so skim a report before you share it outside your team.
 See [SECURITY.md](SECURITY.md).
@@ -172,8 +176,6 @@ within a schema version.
   friction, and the rules try hard not to count it; they will sometimes be wrong both ways.
   `show` exists so you can check.
 - Correction detection is English-only phrase matching.
-- Sessions started in a *parent* directory of the repo are not auto-discovered; pass them with
-  `--transcripts`.
 - Time lost is a floor, not a measurement of human time.
 
 Reports of wrong or missed hotspots are the most valuable contribution you can make:

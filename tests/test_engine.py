@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -188,19 +189,72 @@ def test_output_is_deterministic_and_redacted(result: dict[str, Any]) -> None:
 
 
 def test_no_excerpts_removes_all_verbatim_text() -> None:
+    """With include_excerpts=False nothing a human typed, searched for or saw printed remains.
+
+    What does remain is structural: repo paths, tool names, counts and normalized
+    command names (the identity of a command hotspot).
+    """
     bare = story(include_excerpts=False)
     text = json.dumps(bare)
     for verbatim in (
-        "RefundPolicy",
-        "PaymentClient",
-        "ModuleNotFoundError",
+        "RefundPolicy",  # search patterns
+        "DiscountPolicy",
+        "*policy*",
+        "API_VERSION",
+        "PaymentClient",  # the human's corrections
+        "legacy_charge",
+        "deprecated",
         "hand-editing",
-        "Bearer",
+        "never delete",  # the reason given when declining a tool
+        "ModuleNotFoundError",  # command output
+        "conftest",
+        "Bearer",  # full command lines
+        "staging.shopfront.example",
+        "migrations/versions",
     ):
-        assert verbatim not in text
-    assert all(e["excerpt"] is None for h in bare["hotspots"] for e in h["evidence"])
+        assert verbatim not in text, verbatim
+    for section in ("hotspots", "commands", "directories"):
+        assert all(e["excerpt"] is None for h in bare[section] for e in h["evidence"])
     assert bare["hotspots"][0]["recommendations"]  # advice is still given, without quotes
     assert bare["commands"][0]["recommendations"][0]["id"] == "use-the-working-command"
+    assert bare["totals"] == story()["totals"]  # only the wording changes, never the numbers
+
+
+def test_only_unambiguous_corrections_are_quoted(result: dict[str, Any]) -> None:
+    text = json.dumps([h["recommendations"] for h in result["hotspots"]])
+    assert "I told you: PaymentClient only" in text
+    # the "probable" correction (two weaker cues) counts, but is not put in anyone's mouth
+    assert "Don't call legacy_charge() here" not in text
+    probable = [
+        e
+        for h in story(max_evidence=50)["hotspots"]
+        for e in h["evidence"]
+        if e["signal"] == "user-correction" and "confidence 0.4" in e["summary"]
+    ]
+    assert probable and all("Don't call legacy_charge" in e["excerpt"] for e in probable)
+
+
+def test_windows_transcripts_resolve_on_any_platform(tmp_path: Path) -> None:
+    recorded = "C:\\Users\\dev\\shop"
+    s = Session("win", cwd=recorded).user("go")
+    s.edit(recorded + "\\src\\a.py", error=builders.EDIT_NOT_FOUND)
+    s.edit("src\\a.py", error=builders.EDIT_NOT_FOUND)
+    s.edit("c:/Users/dev/shop/src/a.py", error=builders.EDIT_NOT_FOUND)
+    s.edit("C:\\Users\\dev\\elsewhere\\b.py", error=builders.EDIT_NOT_FOUND)
+    s.bash("npm test", "sh: 1: jest: not found", exit_code=127)
+    repo = tmp_path / "shop"
+    repo.mkdir()
+    out = analyze(
+        AnalyzeOptions(
+            repo=repo,
+            transcripts=[s.save(tmp_path / "t")],
+            repo_aliases=[recorded],
+            include_git=False,
+        )
+    )
+    assert [(h["path"], h["events"]) for h in out["hotspots"]] == [("src/a.py", 3)]
+    assert [c["path"] for c in out["commands"]] == ["npm test"]
+    assert "C:" not in json.dumps(out["hotspots"]) and "\\\\" not in json.dumps(out["sources"])
 
 
 def test_limits(result: dict[str, Any]) -> None:
@@ -280,10 +334,12 @@ def test_git_rework_is_merged_into_file_hotspots(tmp_path: Path) -> None:
         (repo / "a.py").write_text(content)
         stamp = f"2026-11-{day:02d}T12:00:00+00:00"
         env = {
-            "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp, "PATH": "/usr/bin:/bin",
-            "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
-            "HOME": str(tmp_path),
-        }  # fmt: skip
+            **os.environ,
+            "GIT_AUTHOR_DATE": stamp,
+            "GIT_COMMITTER_DATE": stamp,
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+        }
         identity = ["-c", "user.name=Dana", "-c", "user.email=dana@corp.test"]
         for args in (["add", "-A"], ["commit", "-q", "-m", message]):
             subprocess.run(["git", "-C", str(repo), *identity, *args], check=True, env=env)

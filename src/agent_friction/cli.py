@@ -120,6 +120,11 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
         help="omit transcript excerpts from evidence (safer for sharing)",
     )
     g.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="produce a report even when no session touched the repo (default: exit 1)",
+    )
+    g.add_argument(
         "--max-evidence",
         type=_positive_int,
         default=5,
@@ -195,6 +200,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="relative change in events/session that counts as a change (default 0.25)",
     )
     cmp_.add_argument(
+        "--min-events",
+        type=_positive_int,
+        default=2,
+        metavar="N",
+        help="ignore hotspots with fewer than N events on both sides (default 2)",
+    )
+    cmp_.add_argument(
+        "--min-sessions",
+        type=_positive_int,
+        default=3,
+        metavar="N",
+        help="below N sessions on either side, report but never trip the gate (default 3)",
+    )
+    cmp_.add_argument(
         "--fail-on-regression", action="store_true", help="exit 3 if anything regressed or is new"
     )
 
@@ -206,7 +225,9 @@ def build_parser() -> argparse.ArgumentParser:
 def _analyze(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
     from agent_friction.engine import AnalyzeOptions, analyze
 
-    return analyze(
+    if not repo.is_dir():
+        raise AgentFrictionError(f"{repo}: not a directory (pass the repository root)")
+    result = analyze(
         AnalyzeOptions(
             repo=repo,
             transcripts=args.transcripts,
@@ -219,6 +240,15 @@ def _analyze(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
             rework_window_days=args.rework_days,
         )
     )
+    if int(result.get("totals", {}).get("sessions", 0)) == 0 and not args.allow_empty:
+        window = " in the selected time window" if (args.since or args.until) else ""
+        raise AgentFrictionError(
+            f"found transcripts, but no agent session touched {repo.resolve()}{window}, "
+            "so there is nothing to analyse. Check the repo path, --since/--until, or "
+            "--repo-alias (if sessions were recorded at another path). "
+            "Pass --allow-empty to produce an empty report anyway."
+        )
+    return result
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -229,6 +259,14 @@ def _load_json(path: Path) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise AgentFrictionError(f"{path}: not valid JSON ({exc})") from None
     if not isinstance(data, dict) or "schema_version" not in data:
+        raise AgentFrictionError(
+            f"{path}: not an agent-friction result (make one with `scan -f json`)"
+        )
+    if data["schema_version"] == 1 and not (
+        isinstance(data.get("totals"), dict)
+        and isinstance(data["totals"].get("sessions"), int)
+        and all(isinstance(data.get(k), list) for k in ("hotspots", "commands"))
+    ):
         raise AgentFrictionError(
             f"{path}: not an agent-friction result (make one with `scan -f json`)"
         )
@@ -250,8 +288,15 @@ def _write(text: str, output: Path | None, stdout: TextIO) -> None:
 
 def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     fmt = args.format
-    if fmt is None:
-        fmt = _EXT_FORMAT.get(args.output.suffix.lower(), "terminal") if args.output else "terminal"
+    if fmt is None and args.output is not None:
+        fmt = _EXT_FORMAT.get(args.output.suffix.lower())
+        if fmt is None:
+            stderr.write(
+                f"agent-friction: can't tell the format from {args.output.name!r}; "
+                "use a .html, .md or .json extension, or pass --format\n"
+            )
+            return EXIT_USAGE
+    fmt = fmt or "terminal"
     result = _analyze(args, args.repo)
     if fmt == "json":
         text = render_json(result)
@@ -304,7 +349,16 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
     if not 0 < args.threshold < 10:
         stderr.write("agent-friction: --threshold must be between 0 and 10\n")
         return EXIT_USAGE
-    changes = compare(before, after, threshold=args.threshold)
+    changes = compare(before, after, threshold=args.threshold, min_events=args.min_events)
+    sessions = (int(before["totals"]["sessions"]), int(after["totals"]["sessions"]))
+    low_sample = min(sessions) < args.min_sessions
+    if low_sample:
+        stderr.write(
+            f"agent-friction: low sample ({sessions[0]} vs {sessions[1]} sessions, "
+            f"--min-sessions {args.min_sessions}); treat this comparison as anecdotal"
+            + (", so the regression gate is not applied" if args.fail_on_regression else "")
+            + "\n"
+        )
     if args.format == "json":
         payload = [
             {
@@ -321,7 +375,11 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         stdout.write(json.dumps({"changes": payload}, indent=2, sort_keys=True) + "\n")
     else:
         stdout.write(render_compare(before, after, changes, markdown=args.format == "markdown"))
-    if args.fail_on_regression and any(c.status in ("regressed", "new") for c in changes):
+    if (
+        args.fail_on_regression
+        and not low_sample
+        and any(c.status in ("regressed", "new") for c in changes)
+    ):
         return EXIT_GATE
     return EXIT_OK
 
@@ -332,8 +390,9 @@ def _cmd_sources(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
     found = discover_transcripts(args.repo)
     if not found:
         stderr.write(
-            f"agent-friction: no Claude Code transcripts found for {args.repo.resolve()}.\n"
-            "Pass files or directories with --transcripts, or see `agent-friction scan --help`.\n"
+            f"agent-friction: no Claude Code transcripts found for {args.repo.resolve()}. "
+            "Run this from the repository you use the agent in, set CLAUDE_CONFIG_DIR if your "
+            "config lives elsewhere, or pass transcript paths to `scan --transcripts`.\n"
         )
         return EXIT_ERROR
     for path in found:

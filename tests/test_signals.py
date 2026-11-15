@@ -240,12 +240,92 @@ def test_benign_and_out_of_repo_failures_are_ignored(tmp_path: Path) -> None:
     s.bash("git status --porcelain | grep foo", "", exit_code=1)
     s.bash("ls /nope", "ls: cannot access '/nope': No such file or directory", exit_code=2)
     s.bash("test -f x", "", exit_code=1)
+    s.bash("make list | grep -q deploy", "", exit_code=1)  # nothing matched
     s.tool("Bash", {"command": "sleep 99"}, "partial", tool_use_result={"interrupted": True})
     assert detect(s, tmp_path) == []
 
     elsewhere = Session(cwd="/somewhere/else").user("go")
     elsewhere.bash("make test", "boom", exit_code=2)
     assert detect(elsewhere, tmp_path) == []
+
+
+def test_inspection_commands_are_never_failures(tmp_path: Path) -> None:
+    s = Session().user("go")
+    for command in (
+        "sed -n '1,40p' src/a.py",
+        "awk '{print $1}' missing.txt",
+        "jq .name package.json",
+        "head -5 nope.txt",
+        "tail -n 3 nope.txt",
+        "cat nope.txt | wc -l",
+        "diff a.txt b.txt",
+        "git diff --stat HEAD~1",
+        "git status --short",
+        "git log --oneline -5",
+        "git show HEAD:nope.py",
+        "cd src && git status",
+    ):
+        s.bash(command, "fatal: bad revision", exit_code=128)
+    assert detect(s, tmp_path) == []
+
+
+def test_linters_and_exit_code_checks_are_ordinary_failures(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.bash("git diff --exit-code", "diff --git a/x b/x", exit_code=1)
+    s.bash("ruff check .", "src/a.py:1:1: F401 unused import\nFound 1 error.", exit_code=1)
+    s.bash("mypy", "src/a.py:3: error: Incompatible types in assignment", exit_code=1)
+    s.bash("npx eslint .", "1 problem (1 error, 0 warnings)", exit_code=1)
+    s.bash("pytest -q", "FAILED tests/test_io.py::test_timeout - assert timed out", exit_code=1)
+    s.bash("pytest -q", "E   PermissionError: [Errno 13] Permission denied: 'x'", exit_code=1)
+    s.bash("pytest -q", "E   FileNotFoundError: No such file or directory: 'x'", exit_code=1)
+    s.bash("pytest -q", "assert 'sh: foo: command not found' in captured.err", exit_code=1)
+    found = detect(s, tmp_path)
+    assert len(found) == 8 + 1  # eight failures plus the retry loop on pytest
+    for failure in by_signal(found, signals.COMMAND_FAILURE):
+        assert failure.detail["variant"] == "ordinary", failure.excerpt
+        assert failure.weight == signals.ORDINARY_FAILURE_WEIGHT and failure.interval is None
+
+
+@pytest.mark.parametrize(
+    ("output", "code"),
+    [
+        ("bash: frobnicate: command not found", 127),
+        ("sh: 1: jest: not found", 127),
+        ("zsh: command not found: pnpm", 127),
+        ("anything at all", 126),
+        ("bash: ./run.sh: Permission denied", 1),
+        ("bash: line 1: ./scripts/build.sh: No such file or directory", 1),
+        ("E   ModuleNotFoundError: No module named 'shop'", 4),
+        ("/usr/bin/python3: No module named pytest", 1),
+        ("ImportError while loading conftest '/r/tests/conftest.py'.", 4),
+        ("python: can't open file '/r/manage.py': [Errno 2] No such file or directory", 2),
+        ("Error: Cannot find module '/r/dist/index.js'", 1),
+        ("pytest: error: unrecognized arguments: --cov", 4),
+        ("ERROR: file or directory not found: tests/unit", 4),
+        ("error: unexpected argument '--fast' found", 2),
+        ("make: *** No rule to make target 'tset'.  Stop.", 2),
+        ('npm error Missing script: "tset"', 1),
+        ("fatal: not a git repository (or any of the parent directories): .git", 128),
+        ("error: could not find `Cargo.toml` in `/r` or any parent directory", 101),
+        ("Command timed out after 2m 0s", 1),
+        ("curl: (7) Failed to connect to localhost port 8000: Connection refused", 7),
+    ],
+)
+def test_invocation_error_shapes(output: str, code: int) -> None:
+    assert signals.is_invocation_error(f"some preamble\n{output}\ntrailer", code), output
+
+
+def test_chains_are_named_after_their_last_significant_command(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.bash("mkdir -p out && pytest tests/x.py", "1 failed", exit_code=1)
+    s.bash(
+        "touch x && uv pip install -e . && python -m pytest | tail -5",
+        "E   ModuleNotFoundError: No module named 'shop'",
+        exit_code=1,
+    )
+    first, second = detect(s, tmp_path)
+    assert keys(first)[0] == ("command", "pytest")
+    assert keys(second) == [("command", "python -m pytest")] and second.weight == 1.0
 
 
 def test_pipeline_real_failure_still_counts(tmp_path: Path) -> None:
@@ -354,40 +434,121 @@ def test_interrupt_negative_cases(tmp_path: Path) -> None:
 # ---- user-correction ----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("text", "expected"),
-    [
-        ("No, that's the wrong file", 1.0),
-        ("no. use the other one", 1.0),
-        ("Nope, try again", 1.0),
-        ("that's not what I asked for", 1.0),
-        ("This is wrong.", 1.0),
-        ("you broke the build", 1.0),
-        ("You didn\u2019t run the tests", 1.0),
-        ("please revert that change", 1.0),
-        ("undo the last edit", 1.0),
-        ("it's still failing with the same error", 1.0),
-        ("I said use pnpm", 1.0),
-        ("I told you not to touch the lockfile", 1.0),
-        ("why did you delete the fixture?", 1.0),
-        ("Don't use requests here, use httpx instead", 0.75),
-        ("actually, never mind the cache; stop there", 0.75),
-        ("Actually let's also add a test", 0.5),
-        ("don't forget the changelog", 0.5),
-        ("use the factory instead", 0.5),
-        ("the result is wrong for negative numbers", 0.5),
-        ("it should be sorted by date", 0.5),
-        ("Great, thanks! Now add pagination to the list endpoint.", 0.0),
-        ("no problem, carry on", 0.0),
-        ("Now do the same for the admin page", 0.0),
-        ("Looks good. Commit it.", 0.0),
-        ("Can you also update the docs?", 0.0),
-        ("not bad! next: the README", 0.0),
-        ("", 0.0),
-    ],
-)
-def test_correction_confidence(text: str, expected: float) -> None:
-    assert correction_confidence(text)[0] == expected
+STRONG_CORRECTIONS = [
+    "No, that's the wrong file",
+    "no. use the other one",
+    "Nope, try again",
+    "No - the other module",
+    "No, I said use PaymentClient, not the legacy module.",
+    "that's not what I asked for",
+    "This is wrong.",
+    "That is incorrect, the limit is 50",
+    "it's not working, same stack trace",
+    "you broke the build",
+    "You didn\u2019t run the tests",
+    "you forgot the migration",
+    "you removed the retry logic, put it back",
+    "You shouldn't have touched the lockfile",
+    "please revert that change",
+    "undo the last edit",
+    "Revert. We agreed on the old API",
+    "roll back those changes to config.py",
+    "it's still failing with the same error",
+    "Still broken on CI",
+    "the test is still not working",
+    "I said use pnpm",
+    "I told you not to touch the lockfile",
+    "I asked you to keep the old signature",
+    "I already said we don't support python 3.8",
+    "I never asked for a refactor",
+    "this is not what I wanted",
+    "why did you delete the fixture?",
+    "Why did you change the public API?",
+    "Great effort, but you broke the login page",
+]
+
+PROBABLE_CORRECTIONS = [
+    "Don't use requests here, use httpx instead",
+    "Don't call legacy_charge() here, it's deprecated. Use PaymentClient.charge() instead.",
+    "Actually, use the factory instead",
+    "stop editing the generated file, change the template instead",
+    "the result is wrong, it shouldn't include drafts",
+    "that helper is deprecated, don't import it",
+    "you used the old client again, that's a mistake",
+]
+
+BENIGN_FOLLOW_UPS = [
+    "No way, that was fast! Thanks",
+    "Looks good. Why do you think this approach is faster?",
+    "I said earlier we'd do b.py next, go ahead",
+    "It was not urgent but thanks for the quick fix",
+    "Don't forget to add tests",
+    "don't forget the changelog",
+    "Actually, can you also add a docstring?",
+    "Actually let's also add a test",
+    "that should be enough",
+    "never mind the README",
+    "actually, never mind the cache; stop there",
+    "Great, thanks! Now add pagination to the list endpoint.",
+    "no problem, carry on",
+    "No worries, take your time",
+    "no thanks, that's all for today",
+    "No, that's fine as it is",
+    "No need to add more tests",
+    "No rush on this one",
+    "Now do the same for the admin page",
+    "Looks good. Commit it.",
+    "Can you also update the docs?",
+    "not bad! next: the README",
+    "Thanks, that works. Don't change anything else, just commit.",
+    "Perfect. Instead of stopping here, let's also do the CLI.",
+    "Nice! What should we do about the wrong status code in the legacy endpoint?",
+    "use the factory instead",
+    "it should be sorted by date",
+    "Why do you prefer a dataclass here?",
+    "why are you so fast today",
+    "What would you do differently?",
+    "Please stop the dev server when you're done",
+    "Could you explain what this function does?",
+    "ok, next step: wire it into the router",
+    "Yes, go ahead and don't wait for me",
+    "Add a test for the case where the input is wrong",
+    "The docs say this flag is deprecated - can you check?",
+    "Run the tests again please",
+    "I think we should also handle the empty case",
+    "Is it supposed to return None there?",
+    "Let's revert to this topic later; first the parser",
+    "How do I undo a commit in git, by the way?",
+    "Before you continue: which Python version does CI use?",
+    "nothing else, thank you",
+    "note: we never deploy on Fridays",
+    "",
+]
+
+
+@pytest.mark.parametrize("text", STRONG_CORRECTIONS)
+def test_strong_corrections(text: str) -> None:
+    assert correction_confidence(text)[0] == signals.CORRECTION_STRONG, text
+
+
+@pytest.mark.parametrize("text", PROBABLE_CORRECTIONS)
+def test_probable_corrections_need_two_cues(text: str) -> None:
+    confidence, cues = correction_confidence(text)
+    assert confidence == signals.CORRECTION_PROBABLE and len(cues) >= 2, text
+
+
+@pytest.mark.parametrize("text", BENIGN_FOLLOW_UPS)
+def test_ordinary_follow_ups_are_not_corrections(text: str) -> None:
+    assert correction_confidence(text) == (0.0, []), text
+
+
+def test_a_friendly_conversation_produces_no_corrections(tmp_path: Path) -> None:
+    assert len(BENIGN_FOLLOW_UPS) >= 40
+    s = Session().user("start")
+    for text in BENIGN_FOLLOW_UPS:
+        s.edit(A, text or "x", "y").user(text or "ok")
+    found = detect(s, tmp_path)
+    assert by_signal(found, signals.USER_CORRECTION) == []
 
 
 def test_correction_phrases_are_only_read_at_the_start() -> None:

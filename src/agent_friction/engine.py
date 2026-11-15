@@ -132,7 +132,9 @@ class _Analysis:
         self.until = _utc(options.until)
         roots = repo_roots(self.repo)
         self.roots = roots
-        self.resolver = PathResolver(self.repo, [*roots[1:], *options.repo_aliases])
+        self.resolver = PathResolver(
+            self.repo, [*roots[1:], str(options.repo), *options.repo_aliases]
+        )
         self.touched: set[str] = set()
         self._is_file_cache: dict[str, bool | None] = {}
         self._facts: dict[str, recommend.FileFacts] = {}
@@ -175,7 +177,8 @@ class _Analysis:
         return redact.one_line(text, min(limit, max(self.options.excerpt_chars, 1)))
 
     def display_path(self, path: Path | str) -> str:
-        return redact.redact_home(str(path))
+        """Home shown as ``~`` and forward slashes on every platform."""
+        return redact.redact_home(str(path)).replace("\\", "/")
 
     # ---- pipeline --------------------------------------------------------------------
 
@@ -264,9 +267,10 @@ class _Analysis:
             searched = ", ".join(str(c / "projects") for c in claude_config_dirs())
             raise NoTranscriptsError(
                 f"No Claude Code transcripts found for {self.repo}. Looked in: {searched}. "
-                "Transcripts are stored per working directory, so run this from the "
-                "directory where you use the agent (or pass --repo), set CLAUDE_CONFIG_DIR "
-                "if your config lives elsewhere, or pass transcript paths explicitly. Logs "
+                "Transcripts are stored per working directory, so pass the path of the "
+                "repository the agent worked in, set "
+                "CLAUDE_CONFIG_DIR if your config lives elsewhere, or pass transcript files or "
+                "directories explicitly. Logs "
                 "from other agents can be converted to the generic JSONL format described "
                 "in docs/schema.md."
             )

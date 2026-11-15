@@ -258,7 +258,7 @@ class Session:
     def save(self, directory: Path, name: str | None = None) -> Path:
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{name or self.session_id}.jsonl"
-        path.write_text(self.text(), encoding="utf-8")
+        path.write_text(self.text(), encoding="utf-8", newline="\n")
         return path
 
 

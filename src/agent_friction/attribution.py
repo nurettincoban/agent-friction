@@ -24,8 +24,10 @@ _MAX_PATH_CHARS = 1024
 
 
 def to_posix(path: str) -> str:
-    """Normalize Windows separators so prefix matching works on any host."""
-    if _DRIVE_RE.match(path) or ("\\" in path and "/" not in path):
+    """Normalize Windows separators and drive-letter case so prefix matching works anywhere."""
+    if _DRIVE_RE.match(path):
+        return path[0].upper() + path[1:].replace("\\", "/")
+    if "\\" in path and "/" not in path:
         return path.replace("\\", "/")
     return path
 
@@ -52,7 +54,9 @@ class PathResolver:
         self.repo = repo
         self.home = to_posix(str(home if home is not None else Path.home())).rstrip("/")
         roots: list[str] = []
-        candidates: list[str] = [str(repo.absolute())]
+        # The spelling as given is kept too: a POSIX-style root stays usable on Windows,
+        # where ``absolute()`` would graft a drive letter onto it.
+        candidates: list[str] = [str(repo.absolute()), str(repo)]
         with contextlib.suppress(OSError):
             candidates.append(str(repo.resolve()))
         candidates.extend(str(r) for r in extra_roots)
@@ -60,9 +64,20 @@ class PathResolver:
             root = posixpath.normpath(to_posix(candidate))
             if _is_abs(root) and root not in roots:
                 roots.append(root)
+        if not roots:  # pragma: no cover - absolute() always yields an absolute path
+            roots.append("/")
         self.primary = roots[0]
         # Longest first so a worktree nested inside the repo wins over the repo.
         self.roots: tuple[str, ...] = tuple(sorted(roots, key=lambda r: (-len(r), r)))
+
+    @staticmethod
+    def normalize(path: Path | str) -> str:
+        """Lexically normalized POSIX spelling of an absolute path."""
+        return posixpath.normpath(to_posix(str(path)))
+
+    @staticmethod
+    def posix_set(paths: Iterable[Path | str]) -> frozenset[str]:
+        return frozenset(PathResolver.normalize(p) for p in paths)
 
     def _absolute(self, raw: str, cwd: str | None) -> str | None:
         path = raw.strip().strip("\"'`")
@@ -136,14 +151,41 @@ NO_SUBCOMMAND = frozenset(
 )
 #: After one of these subcommands the next word still identifies what runs.
 CONTINUING_SUBCOMMANDS = frozenset(
-    {"run", "exec", "compose", "pr", "issue", "repo", "x", "dlx", "tool", "task", "workspace"}
+    {
+        "run",
+        "exec",
+        "compose",
+        "pr",
+        "issue",
+        "repo",
+        "x",
+        "dlx",
+        "tool",
+        "task",
+        "workspace",
+        "pip",
+    }
     | {"run-script", "buildx", "api"}
 )
 #: Read-only inspection commands. Their failures are routine probing, not friction.
 INSPECTION_PROGRAMS = frozenset(
     {"ls", "cat", "head", "tail", "wc", "stat", "file", "find", "cd", "pwd", "echo", "which"}
     | {"type", "grep", "egrep", "fgrep", "rg", "test", "[", "diff", "cmp", "true", "false"}
-    | {"command", "du", "df", "ps", "tree", "sleep", "kill", "pkill", "lsof"}
+    | {"command", "du", "df", "ps", "tree", "sleep", "kill", "pkill", "lsof", "awk", "jq"}
+    | {"sed", "sort", "uniq", "cut", "tr", "less", "more", "printf", "date", "env", "printenv"}
+)
+#: Read-only subcommands of otherwise significant programs.
+INSPECTION_KEYS = frozenset(
+    {"git diff", "git status", "git log", "git show", "git branch", "git blame", "git grep"}
+    | {"git ls-files", "git rev-parse", "git remote", "git stash list", "git describe"}
+)
+#: Flags that turn an inspection command into one with a meaningful result.
+_NOT_INSPECTION_FLAGS = ("-i", "--in-place", "--exit-code", "--quiet")
+#: Filters whose exit status 1 means "nothing matched / differs", not "failed".
+MATCH_FILTERS = frozenset({"grep", "egrep", "fgrep", "rg", "diff", "cmp", "test", "["})
+#: Filesystem housekeeping: rarely the reason a chain of commands failed.
+HOUSEKEEPING_PROGRAMS = frozenset(
+    {"mkdir", "touch", "rm", "cp", "mv", "chmod", "chown", "ln", "tee", "xargs", "wait"}
 )
 
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -162,8 +204,9 @@ class ParsedCommand:
 
     key: str  # normalized command, "" if nothing recognisable
     program: str  # program of the primary segment (basename)
-    last_program: str  # program whose exit status the shell reports
+    last_program: str  # final program of the last pipeline (its status is reported)
     tokens: tuple[str, ...]  # arguments of the last statement, for path extraction
+    inspection: bool = False  # read-only probing: a failure is not friction
 
 
 def _tokenize(command: str) -> list[str]:
@@ -270,12 +313,32 @@ def _key(words: Sequence[str]) -> str:
     return " ".join(parts)
 
 
+def _is_inspection(words: Sequence[str]) -> bool:
+    program = _program_name(words[0]).rsplit("/", 1)[-1]
+    if program not in INSPECTION_PROGRAMS and _key(words) not in INSPECTION_KEYS:
+        return False
+    return not any(
+        w == f or w.startswith(f + "=") for w in words[1:] for f in _NOT_INSPECTION_FLAGS
+    )
+
+
+def _is_significant(words: Sequence[str]) -> bool:
+    program = _program_name(words[0]).rsplit("/", 1)[-1]
+    return (
+        program not in SETUP_PROGRAMS
+        and program not in HOUSEKEEPING_PROGRAMS
+        and not _is_inspection(words)
+    )
+
+
 def parse_command(command: str) -> ParsedCommand:
     """Normalize a shell command line. Rules are documented in docs/methodology.md.
 
     The shell reports the exit status of the *last* statement, so that is the
     one we name: in ``npm run build; npm test`` a failure is ``npm test``'s.
-    Within it, setup commands (``cd x && ...``) and pipeline tails are skipped.
+    Within it, a ``&&`` chain is named after its last significant command
+    (``mkdir -p out && pytest`` is ``pytest``): setup, housekeeping and
+    read-only inspection steps are passed over, as are pipeline tails.
     """
     statements = [
         [(words, piped) for words, piped in ((_strip_prefixes(w), p) for w, p in st) if words]
@@ -285,10 +348,13 @@ def parse_command(command: str) -> ParsedCommand:
     if not statements:
         return ParsedCommand("", "", "", ())
     segments = statements[-1]
-    heads = [words for words, piped in segments if not piped]
+    heads = [words for words, piped in segments if not piped] or [segments[0][0]]
     primary = next(
-        (w for w in heads if _program_name(w[0]) not in SETUP_PROGRAMS),
-        heads[0] if heads else segments[0][0],
+        (w for w in reversed(heads) if _is_significant(w)),
+        next(
+            (w for w in reversed(heads) if _program_name(w[0]) not in SETUP_PROGRAMS),
+            heads[0],
+        ),
     )
     last = segments[-1][0]
     return ParsedCommand(
@@ -301,6 +367,7 @@ def parse_command(command: str) -> ParsedCommand:
             if _program_name(words[0]) not in SETUP_PROGRAMS
             for word in words[1:]
         ),
+        inspection=_is_inspection(primary),
     )
 
 

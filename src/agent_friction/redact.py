@@ -64,14 +64,27 @@ _RULES: tuple[_Rule, ...] = (
         "[REDACTED:jwt]",
     ),
     (
+        "authorization",
+        re.compile(
+            r"(?i)\b(authorization[\"']?\s*[:=]\s*[\"']?)((?:bearer|basic|token|digest)\s+)?"
+            r"[^\s\"']+"
+        ),
+        r"\1\2[REDACTED:token]",
+    ),
+    (
         "bearer",
-        re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"),
+        re.compile(r"(?i)\b(bearer|basic)\s+(?!\[REDACTED)[A-Za-z0-9._~+/=-]{8,}"),
         r"\1 [REDACTED:token]",
     ),
     (
         "url-credentials",
-        re.compile(r"\b([a-z][a-z0-9+.-]*://)[^\s/:@]+:[^\s/@]+@"),
+        re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/:@]+:[^\s/@]+@"),
         r"\1[REDACTED:credentials]@",
+    ),
+    (
+        "user-flag",
+        re.compile(r"(?<![\w-])(-u|--user)(\s+|=)[\"']?[^\s:\"']+:[^\s\"']+"),
+        r"\1\2[REDACTED:credentials]",
     ),
     (
         "cli-secret",
@@ -83,6 +96,14 @@ _RULES: tuple[_Rule, ...] = (
         re.compile(
             rf"(?i)\b([\w-]*(?:{_SECRET_KEY_WORDS})[\"']?\s*[:=]\s*[\"']?)"
             r"(?!\[REDACTED)([^\s\"',;&]{4,})"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
+        "prose-secret",
+        re.compile(
+            r"(?i)\b((?:password|passwd|passphrase|pwd|secret|token|api[ _-]?key|access[ _-]?key)"
+            r"\s+(?:is|was)\s+[\"'`]?)(?!\[REDACTED)([^\s\"'`,;]{4,})"
         ),
         r"\1[REDACTED]",
     ),

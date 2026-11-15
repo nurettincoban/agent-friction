@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 from agent_friction import model
 from agent_friction.attribution import (
-    INSPECTION_PROGRAMS,
+    MATCH_FILTERS,
     ParsedCommand,
     PathResolver,
     parse_command,
@@ -68,16 +68,20 @@ CORRECTION_MAX_FILES = 5
 CORRECTION_SCAN_CHARS = 2000
 #: Files named in a failing command that are attributed, at most.
 COMMAND_MAX_FILES = 5
+#: Confidence of a message with an unambiguous correction phrase.
 CORRECTION_STRONG = 1.0
-CORRECTION_TWO_WEAK = 0.75
-CORRECTION_ONE_WEAK = 0.5
+#: Confidence of a message with two or more distinct weaker cues. One cue is not enough.
+CORRECTION_PROBABLE = 0.4
+#: Weaker cues needed for a "probable" correction.
+CORRECTION_MIN_CUES = 2
 
 CATALOG: tuple[SignalDef, ...] = (
     SignalDef(
         USER_CORRECTION,
         "User correction",
-        "A human prompt that follows agent work and reads as a correction "
-        '("no, …", "I said …", "revert that", "still failing", "don\'t …").',
+        "A human prompt that follows agent work and opens with an unambiguous correction "
+        '("No, …", "I told you …", "revert that", "still failing", "you broke …"), or with '
+        "two weaker cues together. Single weak cues and friendly follow-ups do not count.",
         "Human attention is the most expensive resource in the loop; a correction means the "
         "agent's work on these files had to be redirected by hand.",
         "Files the agent touched in the preceding turn that the message names; otherwise "
@@ -203,62 +207,125 @@ CATALOG: tuple[SignalDef, ...] = (
 BY_ID: dict[str, SignalDef] = {s.id: s for s in CATALOG}
 SEVERITY: dict[str, float] = {s.id: s.severity for s in CATALOG}
 
-#: Output patterns that mark a command failure as a setup/invocation problem.
+#: Output shapes that mark a command failure as a setup/invocation problem. Each is
+#: anchored to a whole line as the shell, the interpreter or the tool itself prints it,
+#: so words like "timed out" or "permission denied" inside test output do not qualify.
 INVOCATION_ERROR_RE = re.compile(
-    r"command not found|not recognized as an? (?:internal|name)|no such file or directory"
-    r"|modulenotfounderror|no module named|cannot find module|importerror"
-    r"|permission denied|unrecognized (?:argument|option)|unknown (?:option|flag|command|argument)"
-    r"|invalid (?:option|choice)|^usage: |no rule to make target|not a git repository"
-    r"|missing script|enoent|eacces|connection refused|could not connect|timed out"
-    r"|executable file not found|is not installed|no such (?:command|option)"
-    r"|command timed out|could not find a version|not found in path",
-    re.I | re.M,
+    r"^(?:"
+    # the shell could not find or run the program
+    r"(?:[\w./-]+: )?(?:line \d+: |\d+: )?[^\s:]+: (?:command )?not found"
+    r"|(?:zsh: )?command not found(?:: \S+)?"
+    r"|.* is not recognized as an internal or external command.*"
+    r"|(?:[\w./-]+: )?(?:line \d+: )?[^\s:]+: (?:No such file or directory|Permission denied)"
+    r"|.*executable file not found in \$PATH.*"
+    # the interpreter could not start the program
+    r"|(?:E\s+)?ModuleNotFoundError: No module named .*"
+    r"|(?:[\w./-]+: )?No module named \S+"
+    r"|ImportError while loading conftest .*"
+    r"|(?:[\w./-]+: )?can't open file .*"
+    r"|(?:Error|node:internal\S*): Cannot find module .*"
+    r"|.*Cannot find module '[^']+'\s*"
+    # the tool rejected how it was called
+    r"|(?:[\w./-]+: )?(?:error|ERROR): (?:unrecognized arguments?|unknown (?:option|flag|command)"
+    r"|unexpected argument|no such (?:option|command)|invalid choice|file or directory not found)"
+    r"\b.*"
+    r"|(?:[\w./-]+: )?(?:unrecognized|unknown|invalid|illegal) option\b.*"
+    r"|Error: No such (?:command|option)\b.*"
+    r"|Usage: .*\n(?:.*\n)*?.*Error: .*"
+    # the project is not set up the way the command assumes
+    r"|make(?:\[\d+\])?: \*\*\* No rule to make target .*"
+    r"|.*No rule to make target .*"
+    r"|npm (?:ERR!|error) (?:Missing script|enoent|code ENOENT).*"
+    r"|fatal: not a git repository.*"
+    r"|error: could not find `Cargo\.toml`.*"
+    r"|(?:ERROR|error): (?:Could not find a version|No matching distribution|"
+    r"externally-managed-environment).*"
+    r"|go: (?:cannot find main module|go\.mod file not found).*"
+    # the harness or the network gave up before the program could do its job
+    r"|Command timed out after .*"
+    r"|curl: \(\d+\) .*"
+    r")$",
+    re.M,
 )
 #: Exit codes the shell itself uses for "cannot execute" and "not found".
 INVOCATION_EXIT_CODES = frozenset({126, 127})
+
+
+def is_invocation_error(output: str, exit_code: int | None) -> bool:
+    """True when a failed command never got to do its job (setup or usage problem)."""
+    return exit_code in INVOCATION_EXIT_CODES or bool(INVOCATION_ERROR_RE.search(output))
+
+
+#: Friendly openers. A message that starts like this is not a correction unless it
+#: also contains an unambiguous phrase.
+_POSITIVE_OPENING_RE = re.compile(
+    r"^(?:thanks|thank you|thx|great|nice|perfect|awesome|excellent|cool|good|well done"
+    r"|looks good|lgtm|love it|amazing|wonderful|yes|yep|yeah|sure|ok|okay|sounds good)\b",
+    re.I,
+)
 
 _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     (label, re.compile(pattern, re.I))
     for label, pattern in (
         (
+            # "No, ..." / "No. ..." / "Nope - ..." but not "no thanks", "no problem", "no way".
             "no, …",
-            r"^(?:no|nope|nah)\b(?![,!. ]+(?:problem|worries|rush|thanks|thank you|need\b))",
+            r"^(?:no|nope|nah)\s*[,.;:!—-]+\s*"
+            r"(?!(?:thanks|thank you|problem|worries|rush|need|that's (?:fine|ok|okay|great|all)"
+            r"|it's (?:fine|ok|okay)|all good|go ahead|way)\b)\S",
         ),
         (
-            "that's not/wrong",
-            r"\b(?:that|this|it)(?:'s| is| was) (?:not|wrong|incorrect)\b",
+            "that's wrong",
+            r"\b(?:that|this|it)(?:'s| is| was) (?:wrong|incorrect|broken|not (?:what|right"
+            r"|correct|how|working|the right|true))\b",
         ),
         (
             "you broke/forgot/…",
-            r"\byou (?:broke|removed|deleted|forgot|missed|ignored|misunderstood"
-            r"|didn'?t|did not|shouldn'?t|should not|weren'?t supposed)\b",
+            r"\byou (?:broke|removed|deleted|forgot|missed|ignored|misunderstood|overwrote"
+            r"|(?:didn't|did not) (?:\w+ )?(?:run|read|follow|do|use|update|fix|check|add|listen"
+            r"|test|change|remove|answer)"
+            r"|(?:shouldn't|should not) have|(?:weren't|were not) supposed)\b",
         ),
         (
             "revert/undo",
-            r"\b(?:revert|undo|roll ?back) (?:that|this|it|your|those|these|all|the)\b",
+            r"(?:^(?:please )?(?:revert|undo)\b"
+            r"|\b(?:revert|undo|roll ?back) (?:that|this|it|your|those|these|all of|the "
+            r"(?:last|previous|change|changes|edit|edits|commit))\b)",
         ),
         (
             "still failing",
-            r"\bstill (?:failing|fails|broken|not working|doesn'?t work|does not work"
-            r"|wrong|the same|errors?|crash(?:es|ing)?)\b",
+            r"\bstill (?:failing|fails|broken|not working|not fixed|doesn't work|does not work"
+            r"|wrong|the same (?:error|problem|issue|bug)|crash(?:es|ing)?)\b",
         ),
         (
-            "I said/told you",
-            r"\bi (?:said|told you|asked (?:you )?(?:for|to|not)|meant|didn'?t ask"
-            r"|did not ask|never asked|already (?:said|told))\b",
+            "I told you",
+            r"\bi (?:told you|already (?:said|told|asked)|specifically (?:said|asked)"
+            r"|(?:didn't|did not|never) ask(?:ed)?"
+            r"|(?:said|asked)(?: you)? (?:not )?to\b"
+            r"|said (?:use|don't|do not|no\b|not\b|only))",
         ),
         ("not what I asked", r"\bnot what i (?:asked|wanted|meant|said)\b"),
-        ("why did you", r"\bwhy (?:did|are|would|do) you\b"),
+        (
+            "why did you",
+            r"\bwhy did you (?:delete|remove|change|edit|touch|rewrite|revert|add|create|skip"
+            r"|ignore|use|modify|disable|comment out|run|do that|not|drop|rename|move|replace)\b",
+        ),
     )
 )
 _WEAK_CORRECTION: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     (label, re.compile(pattern, re.I))
     for label, pattern in (
-        ("actually, …", r"^actually\b"),
-        ("don't/stop/never", r"\b(?:don'?t|do not|never|stop)\b"),
+        ("actually", r"^actually\b"),
+        (
+            "don't",
+            r"\b(?:don't|do not) (?!forget|worry|bother|need|hesitate|mind|have to|think)\w+",
+        ),
+        ("stop", r"\bstop (?:\w+ing|that|it|doing)\b"),
         ("instead", r"\binstead\b"),
-        ("wrong/incorrect", r"\b(?:wrong|incorrect)\b"),
-        ("should/shouldn't", r"\b(?:should(?:n'?t| not)|should (?:be|use|have))\b"),
+        ("wrong", r"\b(?:wrong|incorrect|mistake)\b"),
+        ("shouldn't", r"\b(?:shouldn't|should not|should have|supposed to)\b"),
+        ("again", r"\byou (?:\w+ )?(?:\w+ed|did|used|put|broke) (?:\S+ ){0,4}again\b"),
+        ("deprecated", r"\b(?:deprecated|not allowed|forbidden|off limits)\b"),
     )
 )
 
@@ -266,18 +333,20 @@ _WEAK_CORRECTION: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 def correction_confidence(text: str) -> tuple[float, list[str]]:
     """Confidence in [0, 1] that ``text`` is a correction, and the matched phrase labels.
 
-    Any strong phrase gives 1.0. Otherwise one weak phrase gives 0.5 and two or
-    more distinct weak phrases give 0.75. No match gives 0.
+    An unambiguous phrase gives 1.0. Otherwise two or more distinct weaker
+    cues give 0.4, unless the message opens with thanks or praise. A single
+    weaker cue ("don't forget ...", "actually, can you also ...") is ordinary
+    conversation and gives 0.
     """
-    head = text.strip()[:CORRECTION_HEAD_CHARS].replace("\u2019", "'")
+    head = text.strip()[:CORRECTION_HEAD_CHARS].replace("’", "'")
     strong = [label for label, pattern in _STRONG_CORRECTION if pattern.search(head)]
     if strong:
         return CORRECTION_STRONG, strong
+    if _POSITIVE_OPENING_RE.match(head):
+        return 0.0, []
     weak = [label for label, pattern in _WEAK_CORRECTION if pattern.search(head)]
-    if len(weak) >= 2:
-        return CORRECTION_TWO_WEAK, weak
-    if weak:
-        return CORRECTION_ONE_WEAK, weak
+    if len(weak) >= CORRECTION_MIN_CUES:
+        return CORRECTION_PROBABLE, weak
     return 0.0, []
 
 
@@ -656,7 +725,7 @@ class _Detector:
         if result.ok:
             state.fail_runs[key] = 0
             state.retry.pop(key, None)
-            if cmd.program not in INSPECTION_PROGRAMS:
+            if not cmd.inspection:
                 for finding, failed_key, _ in state.pending:
                     if failed_key != key:
                         finding.detail["recovered_by"] = key
@@ -664,14 +733,12 @@ class _Detector:
                 state.pending = []
             return
         code = result.exit_code
-        if cmd.program in INSPECTION_PROGRAMS or (
-            code == 1 and cmd.last_program in INSPECTION_PROGRAMS
-        ):
-            return
+        if cmd.inspection:
+            return  # probing (ls, cat, git status, ...) is not friction
+        if code == 1 and cmd.last_program in MATCH_FILTERS and cmd.last_program != cmd.program:
+            return  # `... | grep x` with nothing matched
         call = action.call
-        invocation = code in INVOCATION_EXIT_CODES or bool(
-            INVOCATION_ERROR_RE.search(result.output)
-        )
+        invocation = is_invocation_error(result.output, code)
         targets = [Target(model.COMMAND, key)]
         # A setup/invocation error says nothing about the files on the command line.
         for candidate in () if invocation else path_candidates(cmd.tokens):

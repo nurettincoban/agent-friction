@@ -153,3 +153,45 @@ def test_parse_when() -> None:
     assert parse_when("12h", now=now).hour == 12
     assert parse_when("2026-01-31").tzinfo is not None
     assert parse_when("2026-01-31T09:00:00Z").hour == 9
+
+
+def test_scan_nonexistent_repo_is_an_error(tmp_path: Path) -> None:
+    code, _, err = run("scan", str(tmp_path / "nope"), "-t", str(FIXTURES / "transcripts"))
+    assert code == EXIT_ERROR and "not a directory" in err
+
+
+def test_scan_with_no_sessions_in_window_is_an_error() -> None:
+    code, _, err = run("scan", *INPUT, "--since", "2030-01-01")
+    assert code == EXIT_ERROR and "no agent session touched" in err
+    code, out, _ = run("scan", *INPUT, "--since", "2030-01-01", "--allow-empty")
+    assert code == EXIT_OK and "No recurring friction" in out
+
+
+def test_unknown_output_extension_is_a_usage_error(tmp_path: Path) -> None:
+    code, _, err = run("scan", *INPUT, "-o", str(tmp_path / "report.txt"))
+    assert code == EXIT_USAGE and "--format" in err
+    code, _, _ = run("scan", *INPUT, "-o", str(tmp_path / "report.txt"), "-f", "markdown")
+    assert code == EXIT_OK
+
+
+def test_compare_low_sample_does_not_trip_gate(tmp_path: Path) -> None:
+    before = tmp_path / "before.json"
+    run("scan", *INPUT, "-o", str(before))
+    data = json.loads(before.read_text(encoding="utf-8"))
+    data["hotspots"][0]["events"] = 100
+    data["totals"]["sessions"] = 2
+    after = tmp_path / "after.json"
+    after.write_text(json.dumps(data), encoding="utf-8")
+    code, _, err = run("compare", str(before), str(after), "--fail-on-regression")
+    assert code == EXIT_OK and "low sample" in err
+    code, _, _ = run(
+        "compare", str(before), str(after), "--fail-on-regression", "--min-sessions", "1"
+    )
+    assert code == EXIT_GATE
+
+
+def test_compare_rejects_hollow_result(tmp_path: Path) -> None:
+    hollow = tmp_path / "hollow.json"
+    hollow.write_text('{"schema_version": 1}', encoding="utf-8")
+    code, _, err = run("compare", str(hollow), str(hollow))
+    assert code == EXIT_ERROR and "not an agent-friction result" in err

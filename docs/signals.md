@@ -38,19 +38,40 @@ else is dropped. "Turn" means the agent's work between two human prompts.
 **What:** a human prompt that (a) is not the first prompt of the session,
 (b) follows at least one tool call by the agent, and (c) starts with a
 correction phrase. Only the first 280 characters are inspected, so a pasted
-log that happens to contain "revert" does not count.
+log that happens to contain "revert" does not count. The rules favour
+precision over recall: ordinary follow-ups must not be counted.
 
-- Strong phrases (confidence 1.0): a leading "no" / "nope" (not "no problem",
-  "no worries", ...), "that's not / that's wrong", "you broke / forgot /
-  removed / ignored / didn't ...", "revert / undo / roll back that",
-  "still failing / broken / not working", "I said / I told you / I meant /
-  I didn't ask", "not what I asked", "why did you".
-- Weak phrases: a leading "actually", "don't / do not / never / stop",
-  "instead", "wrong / incorrect", "should be / should use / shouldn't".
-  One weak phrase gives confidence 0.5, two or more distinct ones 0.75.
+- **Unambiguous phrases (confidence 1.0):**
+  - a leading "No," / "No." / "Nope -" followed by more text (not "no thanks",
+    "no problem", "no worries", "no need", "no, that's fine", "no way");
+  - "that's / this is / it was wrong | incorrect | broken | not what | not
+    right | not how | not working";
+  - "you broke / removed / deleted / forgot / missed / ignored / overwrote",
+    "you didn't run | read | follow | use | fix | check ...", "you shouldn't
+    have", "you weren't supposed";
+  - a leading "revert" / "undo", or "revert | undo | roll back that | this |
+    it | your | those | the last ...";
+  - "still failing | broken | not working | not fixed | wrong | crashing",
+    "still the same error";
+  - "I told you", "I already said", "I said use / don't / not / only", "I said
+    to", "I asked you to", "I never asked", "I didn't ask";
+  - "not what I asked | wanted | meant | said";
+  - "why did you delete | remove | change | add | use | skip | ignore ...".
+- **Weaker cues:** a leading "actually"; "don't <verb>" (not "don't forget /
+  worry / bother / need"); "stop <doing>"; "instead"; "wrong / incorrect /
+  mistake"; "shouldn't / should have / supposed to"; "you ... again";
+  "deprecated / not allowed". **Two or more distinct cues** make a *probable*
+  correction (confidence 0.4). **One cue alone is not an event**: "don't
+  forget the tests", "actually, can you also ...", "use X instead" are normal
+  conversation. A message that opens with thanks or praise ("great", "looks
+  good", "thanks", "yes") is never a probable correction.
 
-The confidence multiplies the severity. Slash commands, harness-generated
-messages, tool results and prompts inside subagents are never corrections.
+The confidence multiplies the severity (a probable correction is worth 1.6,
+less than an edit miss). Recommendations quote only unambiguous corrections.
+Slash commands, harness-generated messages, tool results and prompts inside
+subagents are never corrections. The phrase lists are English only; the test
+suite pins them against a corpus of corrections and of benign follow-ups
+(thanks, praise, questions, next-step requests; `tests/test_signals.py`).
 
 **Why it is friction:** human attention is the scarcest resource in the loop.
 
@@ -61,9 +82,10 @@ none, the correction is split evenly over the files edited in that turn (the
 `totals`, shown on no hotspot). A file the human mentions but the agent never
 touched is not blamed.
 
-**False positives:** "don't forget to ..." and "it should be sorted" are often
-plain instructions (hence 0.5). **False negatives:** polite or indirect
-corrections ("hmm, could we use X?"), and corrections in other languages.
+**False positives:** a "No, ..." that answers a question the agent asked;
+rhetorical "why did you ...". **False negatives (many, by design):** polite or
+indirect corrections ("hmm, could we use X?"), single-cue corrections ("use
+pnpm instead"), and corrections in other languages.
 
 ## `retry-loop` — Retry loop
 
@@ -149,28 +171,39 @@ in a later session.
 **What:** a shell command exits non-zero (or the tool reports an error).
 
 - *Setup/invocation errors* count fully (weight 1.0): exit codes 126/127, or
-  output matching patterns such as "command not found", "No module named",
-  "Cannot find module", "No such file or directory", "permission denied",
-  "unrecognized argument", "usage:", "No rule to make target", "Missing
-  script", "connection refused", "timed out". Full list:
-  `INVOCATION_ERROR_RE`.
-- *Ordinary failures* (anything else, typically a test that legitimately
-  fails) count at weight 0.3 and claim no lost time. A red test during
-  development is the tool working as intended.
-- *Ignored:* read-only inspection commands (`ls`, `cat`, `grep`, `rg`, `find`,
-  `test`, `diff`, `which`, ...), pipelines ending in one of them with exit
-  code 1, interrupted commands, declined commands, and commands run with a
-  working directory outside the repo.
+  an output **line** with the shape the shell, interpreter or tool itself
+  prints when the command never got to do its job: `bash: x: command not
+  found`, `bash: ./x.sh: No such file or directory | Permission denied`,
+  `ModuleNotFoundError: No module named ...`, `ImportError while loading
+  conftest`, `can't open file`, `Cannot find module`, `error: unrecognized
+  arguments`, `make: *** No rule to make target`, `npm error Missing script`,
+  `fatal: not a git repository`, `Command timed out after ...` (the harness),
+  `curl: (N) ...`. The full list is `INVOCATION_ERROR_RE`. Words such as
+  "timed out" or "permission denied" elsewhere in the output (a failing test
+  about timeouts) do not qualify.
+- *Ordinary failures* (anything else: a red test, a linter or type checker
+  reporting problems, `git diff --exit-code`) count at weight 0.3 and claim no
+  lost time. A red test during development is the tool working as intended.
+- *Ignored:* read-only inspection commands (`ls`, `cat`, `head`, `tail`, `wc`,
+  `grep`, `rg`, `find`, `sed` without `-i`, `awk`, `jq`, `diff`, `test`,
+  `which`, `git diff | status | log | show | blame`, ...); pipelines ending in
+  `grep`/`rg`/`diff`/`test` with exit code 1 ("nothing matched"); interrupted
+  commands; declined commands; and commands run with a working directory
+  outside the repo.
 
 **Why:** agents guess how to build, test and run things; a wrong guess costs a
 round trip in every session until the right command is written down.
 
-**Attribution:** the normalized command (see methodology). Ordinary failures
-are also attributed to repo files named on the command line; setup errors are
-not, because the files are not the cause.
+**Attribution:** the normalized command (see methodology). In a chain such as
+`mkdir -p out && pytest tests/x.py` that is the last significant command
+(`pytest`), not the setup in front of it. Ordinary failures are also
+attributed to repo files named on the command line; setup errors are not,
+because the files are not the cause.
 
-**False positives:** the invocation patterns can match a program's own output
-(a test asserting on "No such file or directory").
+**False positives / limits:** in `a && b` we cannot see which step failed and
+name the last one. A program that prints one of the anchored shapes itself
+(a test runner echoing a shell error on its own line) is misread as a setup
+error.
 
 ## `edit-thrash` — Edit thrash
 

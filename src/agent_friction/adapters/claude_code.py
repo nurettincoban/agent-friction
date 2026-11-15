@@ -132,13 +132,15 @@ def _tool_result(
         return None
     text = _flatten(block.get("content"))
     event = Event(kind=model.TOOL_RESULT, line=line, call_id=call_id, **base)
-    is_error = block.get("is_error") is True or "<tool_use_error>" in text
-    clean = common.strip_error_tags(text)
+    # Trust the flag. The error tag only counts when the result starts with it:
+    # a successful command may well print "<tool_use_error>" (e.g. from a test file).
+    is_error = block.get("is_error") is True or text.lstrip().startswith("<tool_use_error>")
+    clean = common.strip_error_tags(text) if is_error else text.strip()
     info: dict[str, Any] = structured if isinstance(structured, dict) else {}
     reason = common.rejection_reason(text)
     if reason is not None:
         event.ok, event.error, event.reason = False, model.ERR_REJECTED, reason
-    elif INTERRUPT_PREFIX in text or info.get("interrupted") is True:
+    elif clean.startswith(INTERRUPT_PREFIX) or info.get("interrupted") is True:
         event.ok, event.error = False, model.ERR_INTERRUPTED
     else:
         code = common.exit_code(clean)

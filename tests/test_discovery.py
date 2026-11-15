@@ -9,6 +9,8 @@ import pytest
 
 from agent_friction import discovery
 from agent_friction.discovery import discover_transcripts, encode_cwd
+from agent_friction.engine import AnalyzeOptions, analyze
+from tests import builders
 from tests.builders import Session
 
 
@@ -26,11 +28,9 @@ def test_config_dirs(tmp_path: Path) -> None:
     assert discovery.claude_config_dirs({"CLAUDE_CONFIG_DIR": "/custom/cfg"}, home) == [
         Path("/custom/cfg")
     ]
-    both = os.pathsep.join(["/one", "/two"])
-    assert discovery.claude_config_dirs({"CLAUDE_CONFIG_DIR": both}, home) == [
-        Path("/one"),
-        Path("/two"),
-    ]
+    # one directory, taken literally (no splitting on ":" or ";")
+    odd = "/cfg:with;separators"
+    assert discovery.claude_config_dirs({"CLAUDE_CONFIG_DIR": odd}, home) == [Path(odd)]
 
 
 def project(config: Path, cwd: Path | str, name: str = "sess") -> Path:
@@ -60,6 +60,39 @@ def test_discovers_repo_subdirectories_and_subagents(
     project(config, tmp_path / "unrelated", "unrelated")
 
     assert discover_transcripts(repo) == sorted([root_session, agent_file, sub_session])
+
+
+def test_sessions_started_in_a_parent_directory_are_discovered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    repo = home / "code" / "app"
+    repo.mkdir(parents=True)
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    home_dir = config / "projects" / encode_cwd(home)
+
+    # Started in ~, works on files of the repo by absolute path.
+    relevant = Session("from-home", cwd=str(home)).user("fix app")
+    relevant.edit(str(repo / "a.py"), error=builders.EDIT_NOT_FOUND)
+    relevant_file = relevant.save(home_dir)
+    # Started in ~/code; only its subagent ever names the repo.
+    parent = Session("via-subagent", cwd=str(home / "code")).user("delegate")
+    parent_file = parent.save(config / "projects" / encode_cwd(home / "code"))
+    sub = Session("via-subagent", cwd=str(home / "code"), sidechain=True).user("task")
+    sub.read(str(repo / "b.py"))
+    sub_file = sub.save(parent_file.parent / "via-subagent" / "subagents", "agent-1")
+    # Started in ~ but about something else entirely: not picked up.
+    Session("unrelated", cwd=str(home)).user("tidy my dotfiles").read(str(home / ".bashrc")).save(
+        home_dir
+    )
+
+    assert discover_transcripts(repo) == sorted([relevant_file, parent_file, sub_file])
+    assert discovery.discover_project_dirs(repo, [config], include_ancestors=False) == []
+
+    out = analyze(AnalyzeOptions(repo=repo, include_git=False))
+    assert out["totals"]["sessions"] == 2
+    assert [(h["path"], h["signals"]) for h in out["hotspots"]] == [("a.py", {"edit-miss": 1})]
 
 
 def test_exact_match_is_kept_when_no_cwd_can_be_read(tmp_path: Path) -> None:

@@ -7,7 +7,8 @@ constants live next to the code that uses them and are listed here.
 ## Pipeline
 
 1. **Locate transcripts.** Claude Code project directories for the repo, its
-   subdirectories and its git worktrees (or the paths you pass).
+   subdirectories, its git worktrees and its parent directories (or the paths
+   you pass). See [Discovery](#discovery).
 2. **Normalize.** Each transcript becomes a list of events: tool call, tool
    result, human message, interrupt. Thinking blocks and assistant prose are
    discarded at this step and never reach the output.
@@ -17,6 +18,21 @@ constants live next to the code that uses them and are listed here.
 5. **Score, estimate time, grade confidence** per hotspot.
 6. **Recommend** from the signal mix.
 7. **Redact** every piece of transcript text that is emitted.
+
+## Discovery
+
+Claude Code keeps one directory per working directory under
+`<config>/projects/`, named after the path with every non-alphanumeric
+character replaced by `-`. `<config>` is `$CLAUDE_CONFIG_DIR` (a single
+directory) if set, otherwise `~/.claude` and `~/.config/claude`.
+
+- Directories for the repo root, its git worktrees and their subdirectories
+  are used. Because the encoding is lossy (`/a/b-c` and `/a/b/c` collide),
+  each session is checked against the working directory recorded inside it.
+- Directories for **parent directories** of the repo are scanned too, because
+  starting the agent in `~` or a monorepo root is common. A session from
+  there is read only if it (or one of its subagent transcripts) contains the
+  repo's path, and then only its events inside the repo count.
 
 ## Sessions
 
@@ -43,10 +59,13 @@ together:
 
 1. Heredoc bodies are cut off; the last `;`/newline-separated statement is
    used, because its exit status is the one the shell reports.
-2. In that statement, setup commands (`cd`, `export`, `source`, `set`, `echo`,
-   ...) and pipeline tails (`| tail -20`) are skipped; redirections, leading
+2. In that statement, pipeline tails (`| tail -20`), redirections, leading
    `VAR=value` assignments and wrappers (`sudo`, `env`, `time`, `timeout N`,
-   ...) are stripped.
+   ...) are stripped. Of a `&&`/`||` chain, the **last significant** command
+   names it: setup (`cd`, `export`, `source`, `echo`, ...), housekeeping
+   (`mkdir`, `touch`, `rm`, `cp`, `mv`, ...) and read-only inspection steps
+   are passed over, so `mkdir -p out && pytest tests/x.py` is `pytest`. If
+   nothing significant is left, the last command is used.
 3. Executables under `bin/`, `.venv/`, `node_modules/` or given by absolute
    path become their basename; `python3`, `python3.12` become `python`.
 4. Interpreters keep `-m module` or the script path (`python -m pytest`,
@@ -56,7 +75,8 @@ together:
    `run`, `exec`, `compose`, `pr`, ... (`npm run build`, `uv run pytest`).
 
 Examples: `CI=1 npm test -- foo` -> `npm test`;
-`cd api && pytest tests/x.py -x 2>&1 | tail` -> `pytest`.
+`cd api && pytest tests/x.py -x 2>&1 | tail` -> `pytest`;
+`touch x && uv pip install -e . && python -m pytest | tail -5` -> `python -m pytest`.
 
 ## Score (0-100)
 
@@ -70,8 +90,8 @@ score            = 100 x (1 - exp(-intensity / 10))
 ```
 
 - **severity** is the per-signal constant from the [catalog](signals.md).
-- **weight** is 1 except: `user-correction` uses its confidence (0.5, 0.75 or
-  1.0), and an ordinary `command-failure` uses 0.3.
+- **weight** is 1 except: `user-correction` uses its confidence (1.0, or 0.4
+  for a "probable" correction), and an ordinary `command-failure` uses 0.3.
 - **share** is 1 except when one correction is split over several files.
 - **log2 per session** gives diminishing returns: a session contributes one
   more point each time its friction doubles, so one pathological session
@@ -147,7 +167,7 @@ the evidence that triggered them.
 | `make-edits-land` | 2+ `edit-miss` on a file that is neither large nor generated (wording depends on whether misses were mostly ambiguous or not-found) |
 | `document-what-rewrites-this-file` | 2+ `stale-edit` of the "modified since read" kind |
 | `path-agents-expect` | 2+ `path-miss` |
-| `write-down-the-rule` | corrections whose attributed shares sum to 0.5 or more; quotes up to 3 |
+| `write-down-the-rule` | corrections whose attributed shares sum to 0.5 or more; quotes up to 3, unambiguous (confidence 1.0) ones only |
 | `state-the-boundary` | 2+ `tool-rejected`, or 1 with a stated reason |
 | `clarify-before-acting` | 2+ `user-interrupt` |
 | `add-a-fast-check` | 2+ `edit-thrash` / `edit-revert` events |
@@ -164,16 +184,23 @@ the evidence that triggered them.
 Transcripts contain secrets. The engine therefore:
 
 - never emits thinking blocks or assistant prose;
-- keeps all free text from transcripts in exactly two places, `excerpt` and
-  the quotes inside recommendation details, both of which disappear with
-  `include_excerpts=False` (summaries are structural: tool, path, counts);
+- keeps everything a human typed, searched for or saw printed (prompts,
+  search patterns, command lines, command output, reasons for declining,
+  commit subjects) in exactly two places: `excerpt` and the quotes inside
+  recommendation details. Both disappear with `include_excerpts=False`.
+  What remains then is structural: tool names, repo-relative paths, counts,
+  commit hashes and **normalized command names** such as `pytest` or
+  `npm run build` (the identity of a command hotspot; arguments are never
+  part of it);
 - redacts **before** truncating (default 240 characters), so a secret cannot
   be cut in half and slip through;
 - applies these rules, in order: private-key blocks; AWS access keys; vendor
   API keys (Anthropic, OpenAI-style `sk-`, GitHub, GitLab, Slack, Google,
-  Stripe, npm, Hugging Face); JWTs; `Bearer`/`Basic` credentials; credentials
-  in URLs; `--password x` style flags; `password=`, `token:`, `api_key=`,
-  `secret=` ... assignments; e-mail addresses; hex strings of 32+ characters;
+  Stripe, npm, Hugging Face); JWTs; `Authorization:` header values;
+  `Bearer`/`Basic` credentials; credentials in URLs (`scheme://user:pass@`);
+  `-u user:pass` / `--user`; `--password x` style flags; `password=`,
+  `token:`, `api_key=`, `secret=` ... assignments; prose such as "the
+  password is x"; e-mail addresses; hex strings of 32+ characters;
   mixed-case alphanumeric strings of 24+ characters with Shannon entropy of
   at least 4.0 bits per character; home directories (`/home/x`, `/Users/x`,
   `C:\Users\x`, the real home) become `~`.
@@ -198,10 +225,14 @@ a user name) and appear in `sources[].path` and `evidence[].source`.
 - **Corrections are attributed by proximity.** If the human corrects
   something unrelated to the files just edited, the attribution is wrong.
 - **Command grouping is coarse.** `pytest tests/a.py` and `pytest tests/b.py`
-  are one hotspot; `pytest` and `python -m pytest` are two.
-- **Only what is recorded.** Sessions started in a parent directory of the
-  repo are not auto-discovered (pass them explicitly). Rework that never
-  reaches the current branch is invisible. Squashed merges lose agent
+  are one hotspot; `pytest` and `python -m pytest` are two. When `a && b`
+  fails we cannot tell which step failed and name the last significant one.
+- **Corrections are under-counted on purpose.** Only unambiguous phrasing, or
+  two weaker cues together, counts; polite, indirect and non-English
+  corrections are missed.
+- **Only what is recorded.** A session started above the repo is found only
+  if it mentions the repo's absolute path. Rework that never reaches the
+  current branch is invisible. Squashed merges lose agent
   trailers.
 - **Time is wall-clock.** A machine that slept mid-call would inflate an
   interval; the 5-minute cap bounds the damage.

@@ -1,7 +1,7 @@
 # Schemas
 
 1. [Analysis result](#analysis-result) — what `analyze()` returns and
-   `--json` prints.
+   `--format json` (`-f json`) prints.
 2. [Generic event format](#generic-event-format) — the JSONL input for
    transcripts from agents other than Claude Code.
 
@@ -22,10 +22,10 @@ fields may be added within a version, never removed or re-typed.
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `repo` | required | Repository root. |
-| `transcripts` | `None` | Files or directories (searched recursively for `*.jsonl`). `None` auto-discovers Claude Code transcripts for the repo, its subdirectories and worktrees. The format of each file is detected from its first lines. |
+| `transcripts` | `None` | Files or directories (searched recursively for `*.jsonl`). `None` auto-discovers Claude Code transcripts for the repo, its subdirectories, worktrees and parent directories (see methodology, Discovery). The format of each file is detected from its first lines. |
 | `since`, `until` | `None` | Only events inside this window (naive datetimes are UTC). |
 | `include_git` | `True` | Add `human-rework` from `git log`. Silently unavailable outside a git repo. |
-| `include_excerpts` | `True` | `False` removes every verbatim quote (excerpts and quotes in recommendations). |
+| `include_excerpts` | `True` | `False` removes everything verbatim: excerpts become `null` and recommendations stop quoting prompts, search patterns, error lines and reasons. Paths and normalized command names remain. |
 | `max_evidence` | `5` | Evidence items per hotspot. |
 | `max_hotspots` | `50` | Maximum entries in each of `hotspots`, `commands`, `directories`. |
 | `now` | `None` | Fixed `generated_at`, for reproducible output. |
@@ -122,7 +122,7 @@ auto-discovery would use.
 | `signal` | Signal id. |
 | `session_id` | Transcript session, or `git:<sha>` of the agent commit. |
 | `timestamp` | ISO-8601 UTC; `null` only for generic events without `ts`. |
-| `summary` | What happened, built from structure only (tool, path, counts). Never contains free text from the transcript. |
+| `summary` | What happened, built from structure only: tool name, repo-relative path, normalized command name, counts, commit hashes. Never contains prompts, search patterns, command arguments or output. |
 | `excerpt` | Redacted, truncated transcript text (error output, the command, the human's words, the search pattern), or `null`. Always `null` with `include_excerpts=False`. May contain newlines. |
 | `source` | Transcript file (home as `~`) or `"git"`. |
 | `line` | 1-based line number in `source`; `0` for git. |

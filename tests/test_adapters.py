@@ -277,3 +277,16 @@ def test_generic_format(tmp_path: Path) -> None:
     assert (ev[5].tool, ev[6].empty) == ("ripgrep", True)
     assert (ev[7].op, ev[8].error, ev[8].reason) == ("other", "rejected", "no")
     assert ev[9].kind == "interrupt"
+
+
+def test_error_tag_inside_successful_output_is_not_an_error(tmp_path: Path) -> None:
+    printed = 'def test_x():\n    assert "<tool_use_error>String to replace not found" in out\n'
+    s = Session().user("go")
+    s.bash("sed -n '1,5p' tests/test_edit.py", printed)
+    s.tool("Read", {"file_path": "/repo/a.py"}, "1\u2192[Request interrupted by user] is a marker")
+    s.tool("Edit", {"file_path": "/repo/a.py"}, builders.NOT_READ)  # tag first, no is_error flag
+    results = [
+        e for e in parse_transcript(s.save(tmp_path)).streams[0].events if e.kind == "tool_result"
+    ]
+    assert [(r.ok, r.error) for r in results] == [(True, ""), (True, ""), (False, "not_read")]
+    assert "<tool_use_error>" in results[0].output  # successful output is kept verbatim

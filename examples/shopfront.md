@@ -6,16 +6,16 @@
 
 1. `src/shopfront/api/schema_gen.py`: **Generated file: point agents at its source** This file looks generated (judging by a "code generated" marker), yet agents ran into trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md which source to change and which command regenerates it, and consider denying direct edits to it.
 2. `pytest`: **Tell agents to use `make test`** `pytest` failed 7 times in 4 sessions; 5 times the next successful command was `make test`. Add a line to AGENTS.md such as: "use `make test`, not `pytest`".
-3. `src/shopfront/checkout/service.py`: **Write down the rule the human keeps repeating** A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint." / "Don't call legacy_charge() here, it's deprecated. Use PaymentClient.charge() instead."
+3. `src/shopfront/checkout/service.py`: **Write down the rule the human keeps repeating** A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint."
 4. `src/shopfront`: **Point agents to what they are searching for** Agents searched under src/shopfront/ and found nothing 5 times in 2 sessions. They looked for `RefundPolicy` (2x), `**/*policy*.py`, `DiscountPolicy`. If the concept exists under another name or elsewhere, add a pointer in AGENTS.md (or a comment/alias where agents look). If it does not exist, say so.
-5. `rm`: **State the boundary** A human declined the agent's action once in 1 session. State the boundary explicitly (what must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a permission rule. Reasons given: "never delete existing migrations, add a new revision on top"
+5. `alembic revision`: **State the boundary** A human declined the agent's action once in 1 session. State the boundary explicitly (what must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a permission rule. Reasons given: "never delete existing migrations, add a new revision on top"
 
 ## Files where agents struggle
 
 | # | File | Score | Sessions | Events | Est. time lost | Top signals | Confidence |
 |---:|---|---:|---:|---:|---:|---|---|
-| 1 | `src/shopfront/api/schema_gen.py` | 66.6 | 4 | 12 | 11m | `edit-miss`×6, `user-correction`×3, `read-loop`×1 | high |
-| 2 | `src/shopfront/checkout/service.py` | 44.8 | 3 | 6 | 19m | `user-correction`×3, `edit-revert`×2, `edit-thrash`×1 | high |
+| 1 | `src/shopfront/api/schema_gen.py` | 66.0 | 4 | 12 | 11m | `edit-miss`×6, `user-correction`×3, `read-loop`×1 | high |
+| 2 | `src/shopfront/checkout/service.py` | 42.1 | 3 | 6 | 19m | `user-correction`×3, `edit-revert`×2, `edit-thrash`×1 | high |
 | 3 | `tests/test_refunds.py` | 14.4 | 1 | 2 | 5m | `command-failure`×1, `user-correction`×1 | low |
 | 4 | `src/shopfront/payments/client.py` | 11.5 | 1 | 1 | 5m | `user-correction`×1 | low |
 | 5 | `api/openapi.yaml` | 9.5 | 1 | 1 | 24s | `search-miss`×1 | low |
@@ -26,7 +26,7 @@
 | # | Command | Score | Sessions | Events | Est. time lost | Top signals | Confidence |
 |---:|---|---:|---:|---:|---:|---|---|
 | 1 | `pytest` | 55.6 | 4 | 8 | 6m | `command-failure`×7, `retry-loop`×1 | high |
-| 2 | `rm` | 16.5 | 1 | 1 | 42s | `tool-rejected`×1 | low |
+| 2 | `alembic revision` | 16.5 | 1 | 1 | 42s | `tool-rejected`×1 | low |
 | 3 | `curl` | 14.7 | 1 | 1 | 24s | `command-failure`×1 | low |
 | 4 | `python -m pytest` | 14.7 | 1 | 1 | 30s | `command-failure`×1 | low |
 | 5 | `make test` | 6.6 | 1 | 1 | 0m | `command-failure`×1 | low |
@@ -40,7 +40,7 @@
 ## Evidence
 
 <details>
-<summary><code>src/shopfront/api/schema_gen.py</code> · score 66.6 · 4 sessions</summary>
+<summary><code>src/shopfront/api/schema_gen.py</code> · score 66.0 · 4 sessions</summary>
 
 12 friction events in 4 sessions (6 edit miss, 3 user correction, 1 read loop, 2 more signal types); high confidence because it recurs across sessions with several kinds of evidence.
 
@@ -48,14 +48,14 @@
 
 - **Generated file: point agents at its source** This file looks generated (judging by a "code generated" marker), yet agents ran into trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md which source to change and which command regenerates it, and consider denying direct edits to it.
 - **Large file: split it or add unique anchors** 6 edits failed to locate their target in this 1031-line file (2 matched several places, 4 matched nothing) across 4 session(s). Split it into smaller modules, or give repeated blocks unique nearby text (section comments, distinct names) so an edit can be targeted.
-- **Write down the rule the human keeps repeating** A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "No, stop hand-editing src/shopfront/api/schema_gen.py. It is generated: change api/openapi.yaml and run make codegen." / "That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml." / "Don't call legacy_charge() here, it's deprecated. Use PaymentClient.charge() instead."
+- **Write down the rule the human keeps repeating** A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "No, stop hand-editing src/shopfront/api/schema_gen.py. It is generated: change api/openapi.yaml and run make codegen." / "That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml."
 
 **Evidence**
 
 - `2026-11-03 09:01` session `4132e18c` · Stale edit: Edit on src/shopfront/api/schema_gen.py refused: the file changed on disk after it was read
   > File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.
 - `2026-11-03 09:04` session `4132e18c` · User interrupt: The user interrupted the agent while it was working on src/shopfront/api/schema_gen.py
-- `2026-11-05 16:06` session `aider-20` · User correction: User correction (confidence 1; matched "that's not/wrong", "revert/undo"); names src/shopfront/api/schema_gen.py
+- `2026-11-05 16:06` session `aider-20` · User correction: User correction (confidence 1; matched "that's wrong", "revert/undo"); names src/shopfront/api/schema_gen.py
   > That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml.
 - `2026-11-12 11:00` session `fb4e20bf` · Edit miss: Edit on src/shopfront/api/schema_gen.py failed: the text to replace was not found
   > String to replace not found in file. String: API_VERSION = "2.3"
@@ -64,22 +64,22 @@
 </details>
 
 <details>
-<summary><code>src/shopfront/checkout/service.py</code> · score 44.8 · 3 sessions</summary>
+<summary><code>src/shopfront/checkout/service.py</code> · score 42.1 · 3 sessions</summary>
 
 6 friction events in 3 sessions (3 user correction, 2 edit reverted, 1 edit thrash); high confidence because it recurs across sessions with several kinds of evidence.
 
 **Recommendations**
 
-- **Write down the rule the human keeps repeating** A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint." / "Don't call legacy_charge() here, it's deprecated. Use PaymentClient.charge() instead."
+- **Write down the rule the human keeps repeating** A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint."
 - **Give agents a fast way to check changes to this file** Edits here did not converge: 1 thrash episode(s) and 2 reverted edit(s) in 1 session(s). Document the quickest command that validates this file (a single test, a type check) so agents can verify instead of iterating blind.
 
 **Evidence**
 
-- `2026-10-29 14:11` session `9f6ff626` · User correction: User correction (confidence 1; matched "no, …", "I said/told you"); after edits to src/shopfront/checkout/service.py, tests/test_refunds.py, src/shopfront/payments/client.py
+- `2026-10-29 14:11` session `9f6ff626` · User correction: User correction (confidence 1; matched "no, …", "I told you"); after edits to src/shopfront/checkout/service.py, tests/test_refunds.py, src/shopfront/payments/client.py
   > No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.
 - `2026-11-09 15:02` session `8d986baa` · Edit reverted: Edit on src/shopfront/checkout/service.py undid an earlier edit from the same session
 - `2026-11-09 15:03` session `8d986baa` · Edit thrash: 7 successful edits to src/shopfront/checkout/service.py within one user turn
-- `2026-11-09 15:14` session `8d986baa` · User correction: User correction (confidence 1; matched "still failing", "I said/told you"); names src/shopfront/checkout/service.py
+- `2026-11-09 15:14` session `8d986baa` · User correction: User correction (confidence 1; matched "still failing", "I told you"); names src/shopfront/checkout/service.py
   > It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only.
 - `2026-11-09 15:15` session `8d986baa` · Edit reverted: Edit on src/shopfront/checkout/service.py undid an earlier edit from the same session
 
@@ -94,7 +94,7 @@
 
 - `2026-10-29 14:04` session `9f6ff626` · Command failure: `pytest` failed (exit 1; ordinary failure)
   > $ pytest tests/test_refunds.py -x Exit code 1 tests/conftest.py:11: in engine     return make_engine(os.environ['DATABASE_URL']) E   KeyError: 'DATABASE_URL' ERROR tests/test_checkout.py - KeyError: 'DATABASE_URL'
-- `2026-10-29 14:11` session `9f6ff626` · User correction: User correction (confidence 1; matched "no, …", "I said/told you"); after edits to src/shopfront/checkout/service.py, tests/test_refunds.py, src/shopfront/payments/client.py
+- `2026-10-29 14:11` session `9f6ff626` · User correction: User correction (confidence 1; matched "no, …", "I told you"); after edits to src/shopfront/checkout/service.py, tests/test_refunds.py, src/shopfront/payments/client.py
   > No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.
 
 </details>
@@ -106,7 +106,7 @@
 
 **Evidence**
 
-- `2026-10-29 14:11` session `9f6ff626` · User correction: User correction (confidence 1; matched "no, …", "I said/told you"); after edits to src/shopfront/checkout/service.py, tests/test_refunds.py, src/shopfront/payments/client.py
+- `2026-10-29 14:11` session `9f6ff626` · User correction: User correction (confidence 1; matched "no, …", "I told you"); after edits to src/shopfront/checkout/service.py, tests/test_refunds.py, src/shopfront/payments/client.py
   > No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.
 
 </details>
@@ -160,7 +160,7 @@
 </details>
 
 <details>
-<summary><code>rm</code> · score 16.5 · 1 session</summary>
+<summary><code>alembic revision</code> · score 16.5 · 1 session</summary>
 
 1 friction event in 1 session (1 tool call declined); low confidence because it was seen in a single session so far.
 
@@ -170,7 +170,7 @@
 
 **Evidence**
 
-- `2026-11-03 09:03` session `4132e18c` · Tool call declined: The user declined Bash on `rm` and said why
+- `2026-11-03 09:03` session `4132e18c` · Tool call declined: The user declined Bash on `alembic revision` and said why
   > $ rm -rf migrations/versions && alembic revision --autogenerate -m currency user said: never delete existing migrations, add a new revision on top
 
 </details>
@@ -239,7 +239,7 @@
 
 | Signal | Count | Meaning |
 |---|---:|---|
-| `user-correction` User correction | 5 | A human prompt that follows agent work and reads as a correction ("no, …", "I said …", "revert that", "still failing", "don't …"). |
+| `user-correction` User correction | 5 | A human prompt that follows agent work and opens with an unambiguous correction ("No, …", "I told you …", "revert that", "still failing", "you broke …"), or with two weaker cues together. Single weak cues and friendly follow-ups do not count. |
 | `retry-loop` Retry loop | 1 | The same normalized shell command failed 3 or more times in a row in one session without succeeding in between. |
 | `tool-rejected` Tool call declined | 1 | The human declined a tool call the agent proposed. |
 | `user-interrupt` User interrupt | 1 | The human interrupted the agent mid-turn (not counted when it merely accompanies a declined tool call). |

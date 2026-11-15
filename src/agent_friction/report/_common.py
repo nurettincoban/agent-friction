@@ -37,14 +37,19 @@ def collect_recommendations(
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """Highest-impact recommendations first: (hotspot, recommendation) pairs.
 
-    Hotspots are already sorted by score, so we take the first recommendation of
-    each hotspot in order, skipping exact duplicates of a title we have shown.
+    Items backed by medium or high confidence come first, then by score; each
+    contributes its first (most relevant) recommendation.
     """
     seen: set[str] = set()
     out: list[tuple[dict[str, Any], dict[str, Any]]] = []
     ranked = sorted(
         all_items(result),
-        key=lambda h: (-float(h.get("score", 0)), h.get("kind", ""), h.get("path", "")),
+        key=lambda h: (
+            h.get("confidence") == "low",
+            -float(h.get("score", 0)),
+            h.get("kind", ""),
+            h.get("path", ""),
+        ),
     )
     for hotspot in ranked:
         for rec in hotspot.get("recommendations", [])[:1]:

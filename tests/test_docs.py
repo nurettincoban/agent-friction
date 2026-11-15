@@ -34,6 +34,10 @@ def test_documented_thresholds_match_the_code() -> None:
     assert f"read {signals.READ_LOOP_MIN_READS} or more times" in catalog
     assert f"first {signals.CORRECTION_HEAD_CHARS} characters" in catalog
     assert f"weight {signals.ORDINARY_FAILURE_WEIGHT}" in catalog
+    assert f"correction (confidence {signals.CORRECTION_PROBABLE})" in catalog
+    worth = signals.CORRECTION_PROBABLE * signals.SEVERITY[signals.USER_CORRECTION]
+    assert f"a probable correction is worth {worth:g}" in catalog
+    assert f"or {signals.CORRECTION_PROBABLE}\n  for a" in method
     assert f"({gitsignals.DEFAULT_REWORK_WINDOW_DAYS}\ndays by default)" in catalog
     assert f"exp(-intensity / {scoring.SCORE_SCALE:g})" in method
     assert f"capped at **{signals.TIME_CAP_SECONDS / 60:g} minutes**" in method

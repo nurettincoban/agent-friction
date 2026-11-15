@@ -22,7 +22,7 @@ def test_improved_regressed_new_resolved() -> None:
     s = _statuses(before, after)
     assert s["src/shop/generated/schema.py"] == "improved"
     assert s["src/shop/api/client.py"] == "regressed"
-    assert s["README.md"] == "resolved"
+    assert s["README.md"] == "unchanged"  # 1 event -> 0 is below min_events
     assert s["npm run lint"] == "new"
     assert s["pytest"] == "unchanged"
 
@@ -55,3 +55,12 @@ def test_render_compare_text_and_markdown() -> None:
     assert md.startswith("# Friction comparison") and "## Improved (1)" in md
     same = render_compare(before, before, compare(before, before))
     assert "No meaningful change." in same
+
+
+def test_resolved_needs_enough_events() -> None:
+    before, after = sample_result(), sample_result()
+    after["hotspots"].pop(1)  # client.py had 6 events
+    assert _statuses(before, after)["src/shop/api/client.py"] == "resolved"
+    assert {c.path: c.status for c in compare(before, after, min_events=10)}[
+        "src/shop/api/client.py"
+    ] == "unchanged"

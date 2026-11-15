@@ -336,7 +336,9 @@ def write_story(dest: Path = TRANSCRIPTS) -> list[Path]:
     paths.append(api_version().save(project))
     generic = dest / "other-agents" / "aider-2026-11-05.jsonl"
     generic.parent.mkdir(parents=True, exist_ok=True)
-    generic.write_text("".join(json.dumps(e) + "\n" for e in other_agent()), encoding="utf-8")
+    generic.write_text(
+        "".join(json.dumps(e) + "\n" for e in other_agent()), encoding="utf-8", newline="\n"
+    )
     paths.append(generic)
     return paths
 

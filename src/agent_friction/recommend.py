@@ -160,7 +160,11 @@ class _Rules:
             "before the next attempt."
         )
         if self.quote is not None:
-            ranked = sorted(found, key=lambda f: (-f.weight, f.source, f.line))
+            # Only unambiguous corrections are quoted: a "probable" one may be small talk.
+            ranked = sorted(
+                (f for f in found if f.weight >= signals.CORRECTION_STRONG),
+                key=lambda f: (f.source, f.line),
+            )
             quotes: list[str] = []
             for finding in ranked:
                 text = self.quote(finding.detail.get("quote", ""), QUOTE_CHARS)

@@ -3,8 +3,8 @@ agent-friction · shopfront
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals
-  ██████▋     66.6 src/shopfront/api/schema_gen.py           4     12     11m  ● edit-miss×6, user-correction×3
-  ████▌       44.8 src/shopfront/checkout/service.py         3      6     19m  ● user-correction×3, edit-revert×2
+  ██████▋     66.0 src/shopfront/api/schema_gen.py           4     12     11m  ● edit-miss×6, user-correction×3
+  ████▎       42.1 src/shopfront/checkout/service.py         3      6     19m  ● user-correction×3, edit-revert×2
   █▌          14.4 tests/test_refunds.py                     1      2      5m  ○ command-failure×1, user-correction×1
   █▏          11.5 src/shopfront/payments/client.py          1      1      5m  ○ user-correction×1
   █            9.5 api/openapi.yaml                          1      1     24s  ○ search-miss×1
@@ -13,7 +13,7 @@ Files where agents struggle
 Commands that keep failing
   score            path                                   sess events    lost  top signals
   █████▌      55.6 pytest                                    4      8      6m  ● command-failure×7, retry-loop×1
-  █▋          16.5 rm                                        1      1     42s  ○ tool-rejected×1
+  █▋          16.5 alembic revision                          1      1     42s  ○ tool-rejected×1
   █▌          14.7 curl                                      1      1     24s  ○ command-failure×1
   █▌          14.7 python -m pytest                          1      1     30s  ○ command-failure×1
   ▋            6.6 make test                                 1      1      0m  ○ command-failure×1
@@ -36,14 +36,13 @@ What to fix first
      "It's still failing for me on staging, and you used legacy_charge again in
      src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use
      PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is
-     being deleted next sprint." / "Don't call legacy_charge() here, it's deprecated. Use
-     PaymentClient.charge() instead."
+     being deleted next sprint."
   4. src/shopfront: Point agents to what they are searching for
      Agents searched under src/shopfront/ and found nothing 5 times in 2 sessions. They looked for
      `RefundPolicy` (2x), `**/*policy*.py`, `DiscountPolicy`. If the concept exists under another
      name or elsewhere, add a pointer in AGENTS.md (or a comment/alias where agents look). If it
      does not exist, say so.
-  5. rm: State the boundary
+  5. alembic revision: State the boundary
      A human declined the agent's action once in 1 session. State the boundary explicitly (what
      must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a
      permission rule. Reasons given: "never delete existing migrations, add a new revision on top"
