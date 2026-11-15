@@ -65,6 +65,8 @@ def _event(obj: dict[str, Any], line: int) -> Event | None:
                 event.error = str(declared)
             elif event.exit_code:
                 event.error = model.ERR_EXIT
+            elif common.denial(text) is not None:
+                event.error = model.ERR_DENIED
             else:
                 event.error, event.matches = common.classify_error(text)
         else:
@@ -76,6 +78,8 @@ def _event(obj: dict[str, Any], line: int) -> Event | None:
             elif isinstance(output, str):
                 event.empty = common.is_empty_search(text)
         event.reason = _str(obj.get("reason")) or ""
+        if event.error == model.ERR_DENIED and not event.reason:
+            event.reason = common.denial(text) or "permission"
         event.output = common.clip_output(text)
     elif kind == model.USER_MESSAGE:
         message = obj.get("text")
@@ -106,9 +110,12 @@ def parse_file(path: Path) -> ParsedFile:
             session = obj.get("session")
             if obj.get("kind") == ASSISTANT_MESSAGE and isinstance(session, (str, int)):
                 text = obj.get("text")
-                asking[(str(session), obj.get("subagent") is True)] = isinstance(
-                    text, str
-                ) and text.rstrip().endswith("?")
+                key = (str(session), obj.get("subagent") is True)
+                asking[key] = isinstance(text, str) and text.rstrip().endswith("?")
+                if key in streams:  # the time only: the agent was active
+                    marker = Event(kind=model.AGENT_MESSAGE, line=number)
+                    marker.ts = common.parse_ts(obj.get("ts"))
+                    streams[key].events.append(marker)
                 continue
             if obj.get("kind") not in KINDS:
                 parsed.ignored_lines += 1

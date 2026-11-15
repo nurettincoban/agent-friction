@@ -33,7 +33,14 @@ WRAPPER_PREFIXES = (
 #: Slash commands start a new human turn but are never read as corrections.
 COMMAND_PREFIXES = ("<command-name>", "<command-message>", "<command-args>")
 
-_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+#: Blocks the harness or an IDE extension puts into user turns. They are removed before a
+#: prompt is read, quoted or attributed: none of it was typed by the human.
+_HARNESS_TAGS = (
+    r"system-reminder|ide_opened_file|ide_selection|ide_diagnostics|ide_[a-z_]+"
+    r"|local-command-[a-z]+|user-prompt-submit-hook|command-stdout|command-stderr"
+    r"|bash-input|bash-stdout|bash-stderr|task-notification|user-memory-input|post-tool-use-hook"
+)
+_REMINDER_RE = re.compile(rf"<({_HARNESS_TAGS})\b[^>]*>.*?</\1>", re.S)
 
 _TOOL_OPS = {
     "Read": model.OP_READ,
@@ -143,8 +150,11 @@ def _tool_result(
     clean = common.strip_error_tags(text) if is_error else text.strip()
     info: dict[str, Any] = structured if isinstance(structured, dict) else {}
     reason = common.rejection_reason(text)
+    denied = common.denial(text) if is_error else None
     if reason is not None:
         event.ok, event.error, event.reason = False, model.ERR_REJECTED, reason
+    elif denied is not None:
+        event.ok, event.error, event.reason = False, model.ERR_DENIED, denied
     elif clean.startswith(INTERRUPT_PREFIX) or info.get("interrupted") is True:
         event.ok, event.error = False, model.ERR_INTERRUPTED
     else:
@@ -197,6 +207,9 @@ def _line_events(obj: dict[str, Any], line: int) -> list[Event] | None:
                     call = _tool_call(block, line, base)
                     if call is not None:
                         events.append(call)
+        if not events and isinstance(content, (str, list)):
+            # Prose or thinking: only the fact that the agent was active at this time.
+            events.append(Event(kind=model.AGENT_MESSAGE, line=line, **base))
         return events
     human = not (obj.get("isMeta") is True or obj.get("isCompactSummary") is True)
     if isinstance(content, str):

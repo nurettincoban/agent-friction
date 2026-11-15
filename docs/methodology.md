@@ -11,9 +11,11 @@ constants live next to the code that uses them and are listed here.
    you pass). See [Discovery](#discovery).
 2. **Normalize.** Each transcript becomes a list of events: tool call, tool
    result, human message, interrupt. Thinking blocks and assistant prose are
-   discarded at this step and never reach the output (of the agent's prose
-   only one bit is kept: whether its last message before a human reply ended
-   with a question mark).
+   discarded at this step and never reach the output. Of the agent's prose
+   two things are kept: *when* it was written (a marker that the agent was
+   active, used for time estimates) and whether the last message before a
+   human reply ended with a question mark. Harness and IDE blocks inside user
+   turns (`<system-reminder>`, `<ide_opened_file>`, ...) are stripped.
 3. **Detect.** Deterministic rules turn events into friction events
    ([signal catalog](signals.md)). Git history adds `human-rework`.
 4. **Attribute** each event to a file, a directory or a normalized command.
@@ -235,19 +237,24 @@ Each event may claim a wall-clock interval from transcript timestamps:
 
 | Event | Interval |
 | --- | --- |
-| `edit-miss`, `stale-edit` | from the failed call until the next successful edit of the same file in the same turn; if there is none, until the next transcript event |
-| `command-failure` (setup/invocation) | from the failed call until the end of the command that recovered it (same command succeeding, or another non-inspection command succeeding, within the next 5 shell calls of the turn); otherwise until the next event |
+| `edit-miss`, `stale-edit` | from the failed call until the next successful edit of the same file in the same turn; if there is none, one round trip |
+| `command-failure` (setup/invocation) | from the failed call until the end of the command that recovered it (the same command succeeding, or a replacement doing the same job, within the next 5 shell calls of the turn); otherwise one round trip |
 | `command-failure` (ordinary) | none |
-| `path-miss`, `search-miss`, `tool-rejected` | from the call until the next event (one wasted round trip) |
+| `path-miss`, `search-miss`, `tool-rejected`, `permission-denied` | one round trip |
 | `edit-revert` | from the original edit to the revert |
 | `user-correction`, `user-interrupt` | the agent's working time in the corrected turn (first tool call to last agent activity / the interrupt) |
 | `retry-loop`, `edit-thrash`, `read-loop`, `human-rework` | none (no defensible estimate) |
 
+**One round trip** runs from the call to the agent's *next activity* (its next
+tool call or its next message). If the next thing in the transcript is a
+human message, the agent's turn was over: only the call itself (call to
+result) is claimed, never the time until the human replied. A failure that
+the agent reports and then waits an hour on costs seconds, not an hour.
+
 Every interval is capped at **5 minutes**. `est_minutes_lost` for a hotspot,
 a tree node or the whole report is the length of the **union** of its
 intervals (merged per transcript stream), so overlapping events are never
-counted twice. Human idle time between the agent finishing and the human
-replying is not included.
+counted twice.
 
 This is an estimate of agent wall-clock time that demonstrably went into
 failed calls or redirected work. It is not a measure of human time, and it is
@@ -264,6 +271,12 @@ counting. Events without timestamps claim nothing.
 | `high` | 3 or more distinct sessions **and** 2 or more distinct signal types, not counting hotspots whose only signals are the weak ones (`read-loop`, `edit-thrash`) |
 | `medium` | 2 or more distinct sessions |
 | `low` | a single session |
+
+A signal that is computed from other events is not a second kind of evidence
+next to them: `retry-loop` is derived from `command-failure`, so a command
+with both has one signal type (`DERIVED_SIGNALS`). A command that fails with
+the same setup error in every session is therefore "medium" until something
+independent (a correction, a declined call) is also seen.
 
 Only transcript evidence counts here. Agent commits are not sessions and
 `human-rework` is not a signal type for this purpose: git history can
@@ -295,13 +308,13 @@ the evidence that triggered them.
 | `path-agents-expect` | 2+ `path-miss` |
 | `write-down-the-rule` | corrections whose attributed shares sum to 0.5 or more; quotes up to 3, unambiguous (confidence 1.0) ones only |
 | `state-the-boundary` | 2+ `tool-rejected`, or 1 with a stated reason |
+| `allow-or-document-the-boundary` | 2+ `permission-denied` |
 | `clarify-before-acting` | 2+ `user-interrupt` |
 | `add-a-fast-check` | 2+ `edit-thrash` / `edit-revert` events |
 | `learn-from-rework` | 2+ `human-rework` |
-| `document-how-to-run` | 2+ ordinary command failures naming the file |
 | `add-a-pointer` | 2+ `search-miss` in the file or directory; lists the patterns |
 | `summarize-this-file` | 2+ `read-loop` |
-| `use-the-working-command` | 2+ failures of a command were followed by the same successful command *doing the same job* (same role, or a wrapper of the same tool), in sessions where the failing command never worked afterwards. Never an install, version-control or housekeeping command |
+| `use-the-working-command` | 2+ *setup/invocation* failures of a command were followed by the same successful command *doing the same job* (same role, or a wrapper of the same tool), in sessions where the failing command never worked afterwards. Never an install, version-control or housekeeping command |
 | `document-the-setup-step` | 2+ failures of a command that then worked after the same setup command (`pip install`, `npm ci`, ...) |
 | `document-the-command` | 2+ setup/invocation failures of a command (and neither of the above) |
 | `make-the-failure-actionable` | 1+ `retry-loop` on a command |
@@ -356,11 +369,19 @@ a user name) and appear in `sources[].path` and `evidence[].source`.
 - **Friction is not always the codebase's fault.** Some events reflect the
   agent, the prompt or the harness. The recurrence requirement behind
   "medium" and "high" confidence is the main defence; treat "low" as a lead.
-- **Red tests are normal.** A red run that is followed by an edit and a green
-  run of the same command is not counted. Other ordinary failures are
-  down-weighted, not removed: a session that ends red, or a flaky test, still
-  adds a little score to `make test`. A retry loop needs three failures with
-  no successful edit in between.
+- **Red tests are normal.** A red run that is followed by a change and a green
+  run of the same job is not counted, and ordinary failures never produce a
+  recommendation. Other ordinary failures are down-weighted, not removed: a
+  session that ends red, or a flaky test, still adds a little score. A retry
+  loop needs three identical failing invocations with no change in between.
+- **Changes made by shell commands are recognised by name.** `sed -i`,
+  formatters and `--fix` flags count as edits; a script that rewrites files
+  (`python tools/fix_imports.py`) does not, so a red run it fixes stays on
+  the record.
+- **Time needs agent activity.** One round trip is measured to the agent's
+  next tool call or message. In the generic format, without
+  `assistant_message` events, a failure that ends a turn claims only the
+  duration of the call.
 - **Exposure is per session, not per call.** A file read once and a file
   edited fifty times in a session both count as one exposure. Exposure of a
   command hotspot ignores read-only inspection commands.

@@ -67,6 +67,9 @@ class AnalyzeOptions:
     #: Regexes marking a commit as agent-authored; ``None`` uses the defaults.
     agent_commit_patterns: Sequence[str] | None = None
     git_max_commits: int = gitsignals.DEFAULT_MAX_COMMITS
+    #: With no transcripts at all, analyse git history alone instead of raising (needs
+    #: ``include_git`` and a readable git history).
+    allow_no_transcripts: bool = False
 
 
 def _utc(value: datetime | None) -> datetime | None:
@@ -148,6 +151,15 @@ def _session_at(
     return None
 
 
+def _tilde(path: Path) -> str:
+    """``path`` with this user's own home directory (and only that) shown as ``~``."""
+    text = str(path).replace("\\", "/")
+    home = str(Path.home()).replace("\\", "/").rstrip("/")
+    if home and (text == home or text.startswith(home + "/")):
+        return "~" + text[len(home) :]
+    return text
+
+
 def _is_git(finding: Finding) -> bool:
     return finding.signal == signals.HUMAN_REWORK
 
@@ -225,6 +237,7 @@ class _Analysis:
         self._facts: dict[str, recommend.FileFacts] = {}
         self.outside: dict[Path, set[str]] = {}
         self.exposure: dict[tuple[str, str], set[str]] = {}
+        self.git_used = False
 
     # ---- repository knowledge --------------------------------------------------------
 
@@ -270,7 +283,13 @@ class _Analysis:
 
     def run(self) -> dict[str, Any]:
         options = self.options
-        files = self._transcript_files()
+        missing: NoTranscriptsError | None = None
+        try:
+            files = self._transcript_files()
+        except NoTranscriptsError as exc:
+            if not (options.allow_no_transcripts and options.include_git):
+                raise
+            missing, files = exc, []
         parsed = _load(files, self.since, self.until)
         for item in parsed:
             # Sessions that never worked in this repo are not this repo's sessions.
@@ -347,6 +366,9 @@ class _Analysis:
             else:
                 source["note"] = history.reason
             sources.append(source)
+            self.git_used = history.available
+        if missing is not None and not self.git_used:
+            raise missing  # neither transcripts nor git history: nothing to analyse
 
         findings.sort(key=_finding_order)
         for index, finding in enumerate(findings):
@@ -476,7 +498,13 @@ class _Analysis:
             "schema_version": SCHEMA_VERSION,
             "tool": {"name": TOOL_NAME, "version": __version__},
             "generated_at": _iso(now),
-            "repo": {"root": self.display_path(self.repo), "name": self.repo.name or "repo"},
+            "repo": {"root": _tilde(self.repo), "name": self.repo.name or "repo"},
+            # What kind of scan this is; reports made with different settings do not compare.
+            "settings": {
+                "excerpts": options.include_excerpts,
+                "git": self.git_used,
+                "key_mode": "plain" if options.include_excerpts else "pseudonymized",
+            },
             "window": {
                 "start": _iso(self.since or first),
                 "end": _iso(self.until or last),

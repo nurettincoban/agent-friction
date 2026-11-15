@@ -109,8 +109,12 @@ def test_other_file_rules() -> None:
     assert recs_for(finding(signals.TOOL_REJECTED, reason="never touch this")) == [
         "state-the-boundary"
     ]
+    # ordinary failures of commands naming a file (red tests) call for no advice
     failure = finding(signals.COMMAND_FAILURE, variant="ordinary")
-    assert recs_for(failure, failure) == ["document-how-to-run"]
+    assert recs_for(failure, failure) == []
+    denied = finding(signals.PERMISSION_DENIED, variant="permission")
+    assert recs_for(denied) == []
+    assert recs_for(denied, denied) == ["allow-or-document-the-boundary"]
 
 
 def test_command_rules() -> None:

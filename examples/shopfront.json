@@ -2,9 +2,9 @@
   "commands": [
     {
       "agent_commits": 0,
-      "confidence": "high",
+      "confidence": "medium",
       "est_minutes_lost": 6.8,
-      "events": 8,
+      "events": 7,
       "evidence": [
         {
           "excerpt": "$ pytest tests/test_checkout.py -q\nExit code 4\nImportError while loading conftes … /shopfront/tests/conftest.py'.\ntests/conftest.py:3: in <module>\n    from shopfront.db import make_engine\nE   ModuleNotFoundError: No module named 'shopfront'",
@@ -16,6 +16,15 @@
           "timestamp": "2026-10-26T10:03:31Z"
         },
         {
+          "excerpt": "$ pytest tests/test_refunds.py\nExit code 4\nImportError while loading conftest '~/shopfront/tests/conftest.py'.\ntests/conftest.py:3: in <module>\n    from shopfront.db import make_engine\nE   ModuleNotFoundError: No module named 'shopfront'",
+          "line": 17,
+          "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
+          "signal": "command-failure",
+          "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
+          "summary": "`pytest` failed (exit 4; setup/invocation error)",
+          "timestamp": "2026-10-29T14:03:15Z"
+        },
+        {
           "excerpt": "$ pytest tests/test_refunds.py -x\nExit code 4\nImportError while loading conftest '~/shopfront/tests/conftest.py'.\ntests/conftest.py:3: in <module>\n    from shopfront.db import make_engine\nE   ModuleNotFoundError: No module named 'shopfront'",
           "line": 19,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
@@ -23,15 +32,6 @@
           "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
           "summary": "`pytest` failed (exit 4; setup/invocation error)",
           "timestamp": "2026-10-29T14:03:44Z"
-        },
-        {
-          "excerpt": null,
-          "line": 23,
-          "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
-          "signal": "retry-loop",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
-          "summary": "`pytest` failed 3 times in a row",
-          "timestamp": "2026-10-29T14:04:51Z"
         },
         {
           "excerpt": "$ pytest -q\nImportError while loading conftest '~/shopfront/tests/conftest.py'.\ntests/conftest.py:3: in <module>\n    from shopfront.db import make_engine\nE   ModuleNotFoundError: No module named 'shopfront'",
@@ -58,27 +58,19 @@
       "path": "pytest",
       "recommendations": [
         {
-          "detail": "`pytest` failed 7 times in 4 sessions; 7 times the agent then got the same job done with `make test`, and `pytest` did not work later in those sessions. Add a line to AGENTS.md such as: \"use `make test`, not `pytest`\".",
+          "detail": "`pytest` failed 7 times in 4 sessions; 5 times the agent then got the same job done with `make test`, and `pytest` did not work later in those sessions. Add a line to AGENTS.md such as: \"use `make test`, not `pytest`\".",
           "id": "use-the-working-command",
           "signals": [
             "command-failure"
           ],
           "title": "Tell agents to use `make test`"
-        },
-        {
-          "detail": "Agents re-ran `pytest` up to 3 times in a row without success (1 retry loop in 1 session). The output did not lead them to a fix: note the known cause in AGENTS.md, or make the command fail fast with a message that says what to do.",
-          "id": "make-the-failure-actionable",
-          "signals": [
-            "retry-loop"
-          ],
-          "title": "Make this failure explain itself"
         }
       ],
-      "score": 50.5,
+      "score": 48.6,
       "score_detail": {
         "consistency": 0.88,
-        "intensity": 8.122,
-        "mean_session_points": 2.031,
+        "intensity": 7.503,
+        "mean_session_points": 1.876,
         "recurrence": 0.774,
         "sessions": [
           {
@@ -87,9 +79,9 @@
             "weighted_events": 2.0
           },
           {
-            "points": 3.104,
+            "points": 2.485,
             "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
-            "weighted_events": 7.6
+            "weighted_events": 4.6
           },
           {
             "points": 1.585,
@@ -102,14 +94,13 @@
             "weighted_events": 2.6
           }
         ],
-        "severity": 0.742
+        "severity": 0.714
       },
       "sessions": 4,
       "signals": {
-        "command-failure": 7,
-        "retry-loop": 1
+        "command-failure": 7
       },
-      "why": "8 friction events in all 4 sessions that touched it (7 command failures, 1 retry loop); high confidence because it recurs across sessions with several kinds of evidence."
+      "why": "7 friction events in all 4 sessions that touched it (7 command failures); medium confidence because it recurs across sessions."
     },
     {
       "agent_commits": 0,
@@ -812,6 +803,11 @@
     "root": "tests/fixtures/shopfront"
   },
   "schema_version": 1,
+  "settings": {
+    "excerpts": true,
+    "git": false,
+    "key_mode": "plain"
+  },
   "signals": [
     {
       "attribution": "Files the agent touched in the preceding turn that the message names; otherwise split evenly over the files it edited in that turn (the 5 most recent).",
@@ -824,8 +820,8 @@
     },
     {
       "attribution": "The normalized command.",
-      "count": 1,
-      "description": "The same normalized shell command failed 3 or more times in a row in one session without succeeding in between.",
+      "count": 0,
+      "description": "The same command line failed 3 or more times in a row in one session with identical arguments, no success and no file change in between.",
       "id": "retry-loop",
       "severity": 3.0,
       "title": "Retry loop",
@@ -895,6 +891,15 @@
       "why": "Many small edits to one file in one go usually means trial and error rather than a plan. Weak signal on its own."
     },
     {
+      "attribution": "The file the tool targeted, or the normalized shell command (the step most likely to have been refused).",
+      "count": 0,
+      "description": "A tool call was refused by permission settings, a hook or a safety check before it ran. No human was asked, and the command or edit never happened.",
+      "id": "permission-denied",
+      "severity": 1.5,
+      "title": "Permission denied",
+      "why": "The agent wanted to do something the setup does not allow. Either the allow-list is missing a routine command, or the agent does not know the boundary."
+    },
+    {
       "attribution": "The file being edited.",
       "count": 1,
       "description": "An edit or write was refused because the file had not been read first, or changed on disk after it was read.",
@@ -961,7 +966,7 @@
     "directories_affected": 1,
     "est_minutes_lost": 27.7,
     "files_affected": 6,
-    "friction_events": 35,
+    "friction_events": 34,
     "sessions": 6,
     "tool_calls": 74,
     "unattributed_events": 0

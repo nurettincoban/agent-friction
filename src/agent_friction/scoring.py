@@ -10,7 +10,15 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from agent_friction.model import Finding
-from agent_friction.signals import BY_ID, EDIT_THRASH, HUMAN_REWORK, READ_LOOP, SEVERITY
+from agent_friction.signals import (
+    BY_ID,
+    COMMAND_FAILURE,
+    EDIT_THRASH,
+    HUMAN_REWORK,
+    READ_LOOP,
+    RETRY_LOOP,
+    SEVERITY,
+)
 
 #: Mean session points at which the severity factor reaches 1 - 1/e (about 0.63).
 SEVERITY_SCALE = 1.5
@@ -27,6 +35,9 @@ HIGH_MIN_SESSIONS = 3
 HIGH_MIN_SIGNALS = 2
 #: Signals too weak to justify "high" confidence on their own.
 WEAK_SIGNALS = frozenset({READ_LOOP, EDIT_THRASH})
+#: Signals computed from other findings. Next to their source they are the same evidence
+#: counted again, so they do not add a distinct signal type for confidence.
+DERIVED_SIGNALS = {RETRY_LOOP: COMMAND_FAILURE}
 #: Session ids with this prefix are agent commits (git), not transcript sessions.
 GIT_SESSION_PREFIX = "git:"
 
@@ -117,6 +128,9 @@ def confidence(session_ids: Iterable[str], signal_ids: Iterable[str]) -> str:
     """
     sessions = len({s for s in session_ids if not s.startswith(GIT_SESSION_PREFIX)})
     kinds = set(signal_ids) - {HUMAN_REWORK}
+    for derived, source in DERIVED_SIGNALS.items():
+        if source in kinds:
+            kinds.discard(derived)  # one phenomenon, not two kinds of evidence
     if (
         sessions >= HIGH_MIN_SESSIONS
         and len(kinds) >= HIGH_MIN_SIGNALS
@@ -169,6 +183,7 @@ SIGNAL_NOUNS: dict[str, str] = {
     "command-failure": "command failure",
     "human-rework": "human rework commit",
     "edit-thrash": "edit thrash episode",
+    "permission-denied": "permission denial",
     "stale-edit": "stale edit",
     "path-miss": "path miss",
     "search-miss": "search miss",

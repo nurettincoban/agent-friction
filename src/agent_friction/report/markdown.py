@@ -84,7 +84,13 @@ def _details(h: dict[str, Any], titles: dict[str, str]) -> list[str]:
 
 
 def _html_escape(s: str) -> str:
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    """Escape HTML in prose, leaving `code spans` alone (GitHub shows them literally)."""
+    parts = s.split("`")
+    if len(parts) % 2 == 0:  # unbalanced backticks: escape everything
+        parts = [s]
+    for i in range(0, len(parts), 2):  # even indexes are outside code spans
+        parts[i] = parts[i].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return "`".join(parts)
 
 
 def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:

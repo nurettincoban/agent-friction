@@ -32,7 +32,13 @@ from agent_friction.report.terminal import render_detail, render_dir_detail
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_GATE = 0, 1, 2, 3
 
 _REL = re.compile(r"^(\d+)\s*([hdwm])$")
-_EXT_FORMAT = {".html": "html", ".htm": "html", ".md": "markdown", ".json": "json"}
+_EXT_FORMAT = {
+    ".html": "html",
+    ".htm": "html",
+    ".md": "markdown",
+    ".json": "json",
+    ".txt": "terminal",
+}
 
 
 def parse_when(value: str, *, now: datetime | None = None) -> datetime:
@@ -122,7 +128,8 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
     g.add_argument(
         "--allow-empty",
         action="store_true",
-        help="produce a report even when no session touched the repo (default: exit 1)",
+        help="produce a report even when no session touched the repo, or from git history "
+        "alone when there are no transcripts (default: exit 1)",
     )
     g.add_argument(
         "--max-evidence",
@@ -258,6 +265,7 @@ def _analyze(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
             max_evidence=args.max_evidence,
             repo_aliases=tuple(args.repo_alias),
             rework_window_days=args.rework_days,
+            allow_no_transcripts=args.allow_empty,
         )
     )
     if int(result.get("totals", {}).get("sessions", 0)) == 0 and not args.allow_empty:
@@ -335,7 +343,7 @@ def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         if fmt is None:
             stderr.write(
                 f"agent-friction: can't tell the format from {args.output.name!r}; "
-                "use a .html, .md or .json extension, or pass --format\n"
+                "use a .html, .md, .json or .txt extension, or pass --format\n"
             )
             return EXIT_USAGE
     fmt = fmt or "terminal"
@@ -396,6 +404,13 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
     if not 0 < args.threshold < 10:
         stderr.write("agent-friction: --threshold must be between 0 and 10\n")
         return EXIT_USAGE
+    modes = (before.get("settings", {}).get("key_mode"), after.get("settings", {}).get("key_mode"))
+    if modes[0] != modes[1] and None not in modes:
+        raise AgentFrictionError(
+            f"one scan names commands in {modes[0]!r} mode and the other in {modes[1]!r} mode "
+            "(was only one made with --no-excerpts?), so their command hotspots can't be "
+            "matched. Re-run both scans with the same options."
+        )
     names = (before.get("repo", {}).get("name"), after.get("repo", {}).get("name"))
     if names[0] != names[1] and not args.allow_repo_mismatch:
         raise AgentFrictionError(

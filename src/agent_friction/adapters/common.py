@@ -112,6 +112,32 @@ def rejection_reason(text: str) -> str | None:
     return match.group(1).strip() if match else ""
 
 
+#: Results the harness writes when a tool call was refused before it ran, without a
+#: human declining it: missing permission, a deny rule, a hook, a safety check.
+_DENIED_RE = re.compile(
+    r"\s*(?:Error: )?(?:"
+    r"Claude requested permissions? to [^\n]{1,300}, but you haven't granted it yet"
+    r"|Permission to use \S+(?: with command [^\n]*)? has been (?:auto-)?denied"
+    r"|Permission for this (?:command|tool|action|tool use) (?:was|has been) denied"
+    r"|\S* ?(?:PreToolUse|PermissionRequest):\S* hook (?:error|blocking error|denied)"
+    r"|[^\n]{0,80}\bhook (?:blocking error|returned blocking error|blocked this)"
+    r"|This command requires approval"
+    r"|(?:The )?(?:command|tool use|action) was blocked (?:by|for)\b"
+    r")",
+    re.I,
+)
+_HOOK_RE = re.compile(r"\bhook\b", re.I)
+
+
+def denial(text: str) -> str | None:
+    """``"hook"`` or ``"permission"`` if ``text`` is a policy denial, else ``None``."""
+    stripped = strip_error_tags(text)
+    match = _DENIED_RE.match(stripped)
+    if match is None:
+        return None
+    return "hook" if _HOOK_RE.search(match.group(0)) else "permission"
+
+
 def exit_code(text: str) -> int | None:
     match = _EXIT_RE.match(text)
     return int(match.group(1)) if match else None

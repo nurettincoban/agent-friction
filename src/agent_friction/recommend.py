@@ -55,10 +55,10 @@ RULE_IDS: tuple[str, ...] = (
     "path-agents-expect",
     "write-down-the-rule",
     "state-the-boundary",
+    "allow-or-document-the-boundary",
     "clarify-before-acting",
     "add-a-fast-check",
     "learn-from-rework",
-    "document-how-to-run",
     "add-a-pointer",
     "summarize-this-file",
     "use-the-working-command",
@@ -314,6 +314,7 @@ class _Rules:
 
         self.corrections()
         self.rejections()
+        self.denials("to change this file")
         self.interrupts()
 
         if len(thrash) + len(reverts) >= MIN_EVENTS:
@@ -346,24 +347,6 @@ class _Rules:
                 [signals.HUMAN_REWORK],
             )
 
-        failures = self.get(signals.COMMAND_FAILURE)
-        if len(failures) >= MIN_EVENTS:
-            detail = f"Commands naming this file failed {_in_sessions(failures)}"
-            commands = _top([_command_key(f) for f in failures])
-            if commands:
-                detail += ": " + ", ".join(
-                    f"`{cmd}`" + (f" ({n}x)" if n > 1 else "") for cmd, n in commands
-                )
-            detail += (
-                ". Document how to run or test this file (see the matching entry under commands)."
-            )
-            self.add(
-                "document-how-to-run",
-                "Document how to run or test this file",
-                detail,
-                [signals.COMMAND_FAILURE],
-            )
-
         self.search_misses("this file")
 
         loops = self.get(signals.READ_LOOP)
@@ -377,6 +360,22 @@ class _Rules:
                 "it contains and where the important parts are would save the round trips.",
                 [signals.READ_LOOP],
             )
+
+    def denials(self, what: str) -> None:
+        denied = self.get(signals.PERMISSION_DENIED)
+        if len(denied) < MIN_EVENTS:
+            return
+        hooks = sum(f.detail.get("variant") == "hook" for f in denied)
+        by = "a hook" if hooks * 2 > len(denied) else "permission settings"
+        self.add(
+            "allow-or-document-the-boundary",
+            "Allow it, or tell agents it is off limits",
+            f"Agents tried {what} {_in_sessions(denied)} and were refused by {by} before "
+            "anything ran. If this is routine and safe, add an allow rule so they stop "
+            "stalling on it; if it is meant to be off limits, say so in AGENTS.md together "
+            "with what to do instead.",
+            [signals.PERMISSION_DENIED],
+        )
 
     # ---- command rules ---------------------------------------------------------------
 
@@ -440,6 +439,7 @@ class _Rules:
                 [signals.RETRY_LOOP],
             )
         self.rejections()
+        self.denials(f"`{key}`")
         self.interrupts()
 
 

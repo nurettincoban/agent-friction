@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from agent_friction.report._common import all_items, fmt_minutes
+from agent_friction.report._common import all_items, fmt_minutes, plural
 
 STATUSES = ("regressed", "new", "improved", "resolved", "inactive", "unchanged")
 
@@ -158,8 +158,8 @@ def summary_line(before: dict[str, Any], after: dict[str, Any]) -> str:
     b_per = float(bt.get("est_minutes_lost", 0)) / max(bs, 1)
     a_per = float(at.get("est_minutes_lost", 0)) / max(as_, 1)
     return (
-        f"before: {bs} sessions, ~{fmt_minutes(b_per)} lost per session · "
-        f"after: {as_} sessions, ~{fmt_minutes(a_per)} lost per session"
+        f"before: {plural(bs, 'session')}, ~{fmt_minutes(b_per)} lost per session · "
+        f"after: {plural(as_, 'session')}, ~{fmt_minutes(a_per)} lost per session"
     )
 
 

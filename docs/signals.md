@@ -19,6 +19,7 @@ All thresholds are named constants in `src/agent_friction/signals.py`.
 | `command-failure` | 2.0 | transcript |
 | `human-rework` | 1.5 | git |
 | `edit-thrash` | 1.5 | transcript |
+| `permission-denied` | 1.5 | transcript |
 | `stale-edit` | 1.0 | transcript |
 | `path-miss` | 1.0 | transcript |
 | `search-miss` | 1.0 | transcript |
@@ -86,12 +87,14 @@ read as a complaint about the agent.
 - **What voids a phrase:**
   - *Praise or a dismissal after it* in the same message ("thanks", "great",
     "nailed it", "keep going", "looks good", "that's fine", "... are fine",
-    "never mind", "ignore it", "unrelated", "flaky", ...): "you forgot
+    "never mind", "ignore it", "unrelated", "flaky", ...), the human taking
+    the blame ("... because I hadn't pulled", "my bad") or only asking ("just
+    curious"): "you forgot
     nothing, great job", "I said use tabs in my last project but here spaces
     are fine". Praise *before* the phrase does not void it ("Great effort, but
     you broke the login page").
   - *Moving on* voids a verdict: "next task", "new task", "another issue",
-    "next: ..." ("It doesn't work on Windows yet; next task: add Windows
+    "let's move on", "next: ..." ("It doesn't work on Windows yet; next task: add Windows
     support").
   - *A leading "No" that answers a question:* if the last thing the agent
     wrote before the message ends with a question mark, "No, ..." is read as
@@ -112,7 +115,12 @@ read as a complaint about the agent.
 The confidence multiplies the severity (a probable correction is worth 1.6,
 less than an edit miss). Recommendations quote only unambiguous corrections.
 Slash commands, harness-generated messages, tool results and prompts inside
-subagents are never corrections. The phrase lists are English only; the test
+subagents are never corrections. Blocks that the harness or an IDE extension
+adds to a user turn (`<ide_opened_file>`, `<ide_selection>`,
+`<ide_diagnostics>`, `<system-reminder>`, `<local-command-*>`,
+`<user-prompt-submit-hook>`, ...) are removed before the prompt is read,
+quoted or used for attribution: a file the IDE reports as open is not a file
+the human named. The phrase lists are English only; the test
 suite pins them against a corpus of 50+ corrections and 80+ benign prompts
 (thanks, praise, questions, next-step requests, new tasks that describe bugs,
 feature requests that contain "undo" or "wrong"; `tests/test_signals.py`).
@@ -144,16 +152,29 @@ corrections is a lower bound.
 
 ## `retry-loop` — Retry loop
 
-**What:** the same normalized command fails 3 or more times in a row within a
-session, with **no success of that command and no successful file edit** in
-between. One event per loop; its summary carries the final count.
+**What:** the same command line fails 3 or more times in a row within a
+session, with **identical arguments** (after collapsing whitespace and
+dropping leading `VAR=value` assignments), no success of that command and no
+file change in between. One event per loop; its summary carries the final
+count.
+
+Narrowing a failure down is progress, not a loop: `pytest`, then `pytest
+tests/test_a.py -x -vv`, then `pytest tests/test_a.py::test_total --tb=long`
+are three different invocations and are not counted.
 
 Edit, run the tests, see red, edit again, run again is the normal development
 loop, not a retry loop: every successful edit starts the count again. What is
 counted is re-running a failing command with nothing changed on disk (other
-flags, another working directory, the same thing again). Any successful edit
-counts as a change, whichever file it touches; we do not try to judge whether
-the edit was relevant. Once a loop is recorded it stays, together with its
+working directory, the same thing again). Any successful edit counts as a
+change, whichever file it touches; we do not try to judge whether the edit
+was relevant. So does a shell command that rewrites files: `sed -i`, `perl
+-pi`, a formatter (`ruff format`, `black`, `prettier --write`, `gofmt -w`,
+`cargo fmt`), a `--fix` / `--write` flag, `patch`, `git apply | checkout |
+restore | stash`, and `>` / `tee` / heredoc writes to a file that is not a
+log or under `/tmp`.
+
+A retry loop is *derived from* command failures. For confidence it is not a
+second kind of evidence next to them (see methodology). Once a loop is recorded it stays, together with its
 failures, even if the command goes green after a later edit: the three runs
 with nothing changed already happened.
 
@@ -286,8 +307,10 @@ in a later session.
   reporting problems, `git diff --exit-code`) count at weight 0.3 and claim no
   lost time. A red test during development is the tool working as intended.
 - *Red, fix, green is not counted at all:* an ordinary failure that is
-  followed by a successful file edit and then by a success of the same
-  command is dropped. That is the development loop doing its job. An ordinary
+  followed by a file change (an edit, or a shell command that rewrites files,
+  see `retry-loop`) and then by a success of the same command, **or of
+  another command doing the same job** (`pytest tests/test_a.py` red, edit,
+  `make test` green), is dropped. That is the development loop doing its job. An ordinary
   failure stays on the record when the command goes green with no edit in
   between (flaky, or fixed by something other than code), never goes green
   in the session, or was part of a [retry loop](#retry-loop--retry-loop).
@@ -321,7 +344,9 @@ Ordinary failures are also attributed to repo files named in the arguments
 mention); setup errors are not, because the files are not the cause.
 
 **What happened next** is recorded for recommendations, conservatively:
-`recovered_by` only if a command *doing the same job* then succeeded (same
+`recovered_by` only for a *setup/invocation* failure (a command that ran and
+reported red was not "replaced" by the next green one), and only if a command
+*doing the same job* then succeeded (same
 role: test, build, lint, type-check or format; or a wrapper of the same tool,
 such as `uv run pytest` or `make test` for `pytest`) and the failing command
 did not succeed later in the session; `fixed_by_setup` if the same command
@@ -345,6 +370,28 @@ event per file and turn.
 
 **False positives:** legitimately building a large file step by step. This is
 a weak signal: on its own it never produces "high" confidence.
+
+## `permission-denied` — Permission denied
+
+**What:** a tool call that was refused before it ran, by something other than
+a human saying no: a missing permission ("Claude requested permissions to use
+Bash, but you haven't granted it yet"), a deny rule ("Permission to use Bash
+has been denied"), a hook ("PreToolUse:Bash hook error: ..."), or a safety
+check ("Permission for this command was denied by ..."). The wording must
+open the tool result, as the harness writes it; a program that *ran* and
+printed "permission denied" is a `command-failure`.
+
+**Why:** the command or edit never happened, so this says nothing about the
+command itself. It says the setup and the agent disagree about what is
+allowed: either a routine command is missing from the allow-list (the agent
+stalls on it in every session), or the agent does not know a boundary.
+
+**Attribution:** the file the tool targeted, or the normalized shell command
+(for a chain, the step chosen as for `tool-rejected`).
+
+**False negatives:** harnesses and hooks word their refusals freely; only the
+shapes above are recognised, anything else that is flagged as an error is
+treated as a failed call.
 
 ## `stale-edit` — Stale edit
 

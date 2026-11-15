@@ -24,6 +24,8 @@ from agent_friction.attribution import (
     command_role,
     is_replacement,
     is_setup_command,
+    is_shell_edit,
+    normalize_argv,
     objectionable_step,
     parse_command,
     path_candidates,
@@ -43,6 +45,7 @@ class SignalDef:
 
 EDIT_MISS = "edit-miss"
 STALE_EDIT = "stale-edit"
+PERMISSION_DENIED = "permission-denied"
 PATH_MISS = "path-miss"
 EDIT_THRASH = "edit-thrash"
 EDIT_REVERT = "edit-revert"
@@ -103,8 +106,8 @@ CATALOG: tuple[SignalDef, ...] = (
     SignalDef(
         RETRY_LOOP,
         "Retry loop",
-        f"The same normalized shell command failed {RETRY_LOOP_MIN_FAILURES} or more times "
-        "in a row in one session without succeeding in between.",
+        f"The same command line failed {RETRY_LOOP_MIN_FAILURES} or more times in a row in "
+        "one session with identical arguments, no success and no file change in between.",
         "The failure output did not tell the agent what to do, so it kept guessing.",
         "The normalized command.",
         3.0,
@@ -177,6 +180,17 @@ CATALOG: tuple[SignalDef, ...] = (
         "Many small edits to one file in one go usually means trial and error rather than "
         "a plan. Weak signal on its own.",
         "The file being edited.",
+        1.5,
+    ),
+    SignalDef(
+        PERMISSION_DENIED,
+        "Permission denied",
+        "A tool call was refused by permission settings, a hook or a safety check before it "
+        "ran. No human was asked, and the command or edit never happened.",
+        "The agent wanted to do something the setup does not allow. Either the allow-list is "
+        "missing a routine command, or the agent does not know the boundary.",
+        "The file the tool targeted, or the normalized shell command (the step most likely "
+        "to have been refused).",
         1.5,
     ),
     SignalDef(
@@ -351,14 +365,17 @@ _SOFTENER_RE = re.compile(
     r"\b(?:thanks|thank you|thx|great|good job|nice(?:ly)?|perfect|awesome|excellent|well done"
     r"|love it|like it|nailed it|keep going|looks good|lgtm|all good|amazing|wonderful"
     r"|no worries|never ?mind|ignore (?:it|that|this)|unrelated|not your fault|flaky"
-    r"|(?:that's|it's|that is|it is|is|are) (?:fine|ok|okay))\b",
+    r"|(?:that's|it's|that is|it is|is|are) (?:fine|ok|okay)"
+    # the human takes the blame, or is only asking
+    r"|because (?:i|my|we|our)\b|my (?:bad|fault|mistake)|just (?:curious|wondering|asking)"
+    r"|out of curiosity|no complaints?)\b",
     re.I,
 )
 #: The human is moving on to something else: a description of a bug ("it doesn't work on
 #: Windows yet; next task: ...") is then a task, not a verdict on the agent's work.
 _NEW_TASK_RE = re.compile(
     r"\b(?:next|new|another|separate|different|unrelated) (?:task|topic|thing|issue|ticket|bug)\b"
-    r"|\bnext(?: up)?:|\bmoving on\b|\bnext,? (?:please )?(?:add|fix|implement|do|let's)\b",
+    r"|\bnext(?: up)?:|\bmov(?:e|ing) on\b|\bnext,? (?:please )?(?:add|fix|implement|do|let's)\b",
     re.I,
 )
 #: Interjections that may precede a verdict at the start of a message ("hmm, that's wrong").
@@ -414,7 +431,7 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
             # "No, ..." / "No. ..." / "Nope - ..." / a bare "no"; not "No. 3 ...", "no thanks",
             # "no problem", "no way", "No tests are needed", "Nope, nothing else".
             _ANSWER_LABEL,
-            r"^(?:no|nope|nah)(?:[.!]*$|\s*[,.;:!—-]+\s*(?!\d)"
+            r"^(?:no|nope|nah)(?:[.!]*$|\s*[,.;:!—-]+\s+(?!\d)"
             r"(?!(?:thanks|thank you|problem|worries|rush|need|that's (?:fine|ok|okay|great|all|it)"
             r"|it's (?:fine|ok|okay)|all (?:good|set|done)|go ahead|way|nothing|none"
             r"|not (?:yet|now|really|necessary|needed|today)|i'm (?:good|fine|done)"
@@ -429,8 +446,8 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
         (
             # "wrong. use pnpm" / "stop. use the other client"; not "Stop. Hammer time".
             "wrong. / stop.",
-            r"^(?:wrong|incorrect)(?:[.!]*$|\s*[.,;:!—-]+\s*\S)"
-            r"|^stop(?:[.!]*$|\s*[.,;:!—-]+\s*(?:use|don't|do not|you|that|this|it\b|revert|undo"
+            r"^(?:wrong|incorrect)(?:[.!]*$|\s*[.,;:!—-]+\s+\S)"
+            r"|^stop(?:[.!]*$|\s*[.,;:!—-]+\s+(?:use|don't|do not|you|that|this|it\b|revert|undo"
             r"|wait|i |we |not |wrong|go back|put|leave|keep|read|look|check|ask|please|just)"
             r"|\s+(?:that|it|this|doing|right there|\w+ing)\b)",
             False,
@@ -634,6 +651,7 @@ class _State:
     """Mutable per-stream detector state."""
 
     turn: list[_Action] = field(default_factory=list)
+    agent_seen: float | None = None  # last agent prose in this turn
     prompts: int = 0
     turn_edits: dict[str, int] = field(default_factory=dict)
     thrash: dict[str, Finding] = field(default_factory=dict)
@@ -642,8 +660,9 @@ class _State:
     edit_history: dict[str, dict[tuple[str, str], float | None]] = field(default_factory=dict)
     write_history: dict[str, list[str]] = field(default_factory=dict)
     write_times: dict[tuple[str, str], float | None] = field(default_factory=dict)
-    fail_runs: dict[str, int] = field(default_factory=dict)
-    retry: dict[str, Finding] = field(default_factory=dict)
+    # consecutive failures of one exact command line: (key, normalized argv) -> count
+    fail_runs: dict[tuple[str, str], int] = field(default_factory=dict)
+    retry: dict[tuple[str, str], Finding] = field(default_factory=dict)
     pending: list[tuple[Finding, str, int]] = field(default_factory=list)
     open_edits: dict[str, list[Finding]] = field(default_factory=dict)
     # ordinary failures per command that are still red, and those an edit has followed
@@ -751,13 +770,17 @@ class _Detector:
                     paired.result = event
             else:
                 items.append(event)
+        # Time of the agent's next activity after each call. A human message ends the
+        # agent's turn: whatever follows it is waiting, not work, and is never claimed.
         next_any: float | None = None
         for item in reversed(items):
             if isinstance(item, _Action):
                 item.next_any = next_any
                 next_any = _epoch(item.call) or next_any
-            else:
+            elif item.kind == model.AGENT_MESSAGE:
                 next_any = _epoch(item) or next_any
+            else:
+                next_any = None
         return items
 
     # ---- main loop -------------------------------------------------------------------
@@ -768,6 +791,8 @@ class _Detector:
             if isinstance(item, _Action):
                 self._on_action(item)
                 state.turn.append(item)
+            elif item.kind == model.AGENT_MESSAGE:
+                state.agent_seen = _epoch(item) or state.agent_seen
             elif item.kind == model.INTERRUPT:
                 self._on_interrupt(item)
             elif item.kind == model.USER_MESSAGE:
@@ -776,6 +801,7 @@ class _Detector:
                         self._on_prompt(item)
                     state.prompts += 1
                 state.turn = []
+                state.agent_seen = None
                 state.turn_edits = {}
                 state.thrash = {}
                 state.pending = []
@@ -789,6 +815,8 @@ class _Detector:
         op = action.call.op
         if result.error == model.ERR_REJECTED:
             self._on_rejected(action, result)
+        elif result.error == model.ERR_DENIED:
+            self._on_denied(action, result)
         elif result.error == model.ERR_INTERRUPTED:
             return
         elif op in (model.OP_EDIT, model.OP_WRITE):
@@ -863,16 +891,7 @@ class _Detector:
         call = action.call
         now = _epoch(call)
         targets = [Target(model.FILE, path)]
-        # A change turns the red runs so far into red -> edit -> (maybe) green, unless they
-        # were a retry loop: re-running a failing command three times with nothing changed
-        # is friction whatever happens afterwards.
-        for failed_key, findings in state.red.items():
-            if failed_key not in state.retry:
-                state.red_then_edited.setdefault(failed_key, []).extend(findings)
-        state.red = {}
-        # A change ends every "same command, nothing changed" streak.
-        state.fail_runs.clear()
-        state.retry.clear()
+        self._on_change()
         self._explain_probes(path, call)
         # Any successful change resets read-loop tracking for the file.
         for key in [k for k in state.reads if k[0] == path]:
@@ -913,6 +932,21 @@ class _Detector:
                 targets,
                 interval=_capped_back(reverted_at, now),
             )
+
+    def _on_change(self) -> None:
+        """Files changed (an edit, a write, or a shell command that rewrites files)."""
+        state = self.state
+        # A change turns the red runs so far into red -> edit -> (maybe) green, unless they
+        # were a retry loop: re-running a failing command three times with nothing changed
+        # is friction whatever happens afterwards.
+        looping = {key for key, _ in state.retry}
+        for failed_key, findings in state.red.items():
+            if failed_key not in looping:
+                state.red_then_edited.setdefault(failed_key, []).extend(findings)
+        state.red = {}
+        # A change ends every "same command, nothing changed" streak.
+        state.fail_runs.clear()
+        state.retry.clear()
 
     def _explain_probes(self, path: str, call: Event) -> None:
         """Drop earlier empty searches that only checked a name was free before creating it."""
@@ -995,12 +1029,22 @@ class _Detector:
         key = cmd.key
         shown = self.ctx.command_key
         state.pending = [(f, k, n - 1) for f, k, n in state.pending if n > 1]
+        if result.ok and is_shell_edit(cmd, action.call.command or ""):
+            self._on_change()  # `sed -i`, a formatter, `--fix`: a change like any edit
         if result.ok:
-            state.fail_runs[key] = 0
-            state.retry.pop(key, None)
-            # red -> edit -> green is the development loop working: forget those failures.
-            fixed = {id(f) for f in state.red_then_edited.pop(key, [])}
-            state.red.pop(key, None)
+            state.fail_runs = {k: v for k, v in state.fail_runs.items() if k[0] != key}
+            state.retry = {k: v for k, v in state.retry.items() if k[0] != key}
+            # red -> edit -> green is the development loop working: forget those failures,
+            # also when the green run is another command doing the same job (`make test`
+            # after a red `pytest tests/test_a.py`).
+            fixed: set[int] = set()
+            for failed_key in list(state.red_then_edited):
+                if failed_key == key or is_replacement(failed_key, key):
+                    fixed |= {id(f) for f in state.red_then_edited.pop(failed_key)}
+            # Green with no change in between: those red runs stay on the record for good.
+            for failed_key in list(state.red):
+                if failed_key == key or is_replacement(failed_key, key):
+                    del state.red[failed_key]
             if fixed:
                 self.findings = [f for f in self.findings if id(f) not in fixed]
                 state.pending = [p for p in state.pending if id(p[0]) not in fixed]
@@ -1019,7 +1063,9 @@ class _Detector:
                 elif is_setup_command(key):
                     state.setup_after[id(finding)] = shown(key)
                     waiting.append((finding, failed_key, left))
-                elif is_replacement(failed_key, key):
+                elif is_replacement(failed_key, key) and finding.detail["variant"] != "ordinary":
+                    # Only a command that could not run can be "replaced". A red test
+                    # followed by another green test command is just a test going green.
                     finding.detail["recovered_by"] = shown(key)
                     state.replaced.setdefault(failed_key, []).append(finding)
                     self._recover(finding, action)
@@ -1076,15 +1122,20 @@ class _Detector:
         state.pending.append((finding, key, RECOVERY_LOOKAHEAD))
         if not invocation:
             state.red.setdefault(key, []).append(finding)
-        run = state.fail_runs.get(key, 0) + 1
-        state.fail_runs[key] = run
+        # The same command line again, not a narrowed or otherwise changed invocation.
+        same = (key, normalize_argv(call.command or ""))
+        run = state.fail_runs.get(same, 0) + 1
+        state.fail_runs[same] = run
         if run == RETRY_LOOP_MIN_FAILURES:
-            state.retry[key] = self._emit(
+            state.retry[same] = self._emit(
                 RETRY_LOOP, result, "", [Target(model.COMMAND, shown(key))]
             )
-        if key in state.retry:
-            state.retry[key].summary = f"`{shown(key)}` failed {run} times in a row"
-            state.retry[key].detail["count"] = str(run)
+        if same in state.retry:
+            state.retry[same].summary = (
+                f"`{shown(key)}` was run {run} times in a row with identical arguments "
+                "and failed each time"
+            )
+            state.retry[same].detail["count"] = str(run)
 
     # ---- human signals ---------------------------------------------------------------
 
@@ -1115,6 +1166,32 @@ class _Detector:
             excerpt="\n".join(excerpt_parts),
             interval=self._round_trip(action),
             detail={"reason": result.reason, "command": call.command or ""},
+        )
+
+    def _on_denied(self, action: _Action, result: Event) -> None:
+        """A permission rule, hook or safety check refused the call: it never ran."""
+        call = action.call
+        targets = self._action_targets(action)
+        if call.op in (model.OP_READ, model.OP_EDIT, model.OP_WRITE) and not targets:
+            return  # a file outside the repo
+        if call.op == model.OP_SHELL:
+            if action.cmd is None:
+                return
+            step = objectionable_step(action.cmd, result.output)
+            if step is not None and step.key:
+                targets = [Target(model.COMMAND, self.ctx.command_key(step.key))]
+        by = "a hook" if result.reason == "hook" else "permission settings"
+        what = targets[0].key if targets else call.tool
+        what = f"`{what}`" if targets and targets[0].kind == model.COMMAND else what
+        excerpt = [f"$ {call.command}"] if call.op == model.OP_SHELL and call.command else []
+        self._emit(
+            PERMISSION_DENIED,
+            result,
+            f"{call.tool} on {what} was denied by {by}; it did not run",
+            targets,
+            excerpt="\n".join([*excerpt, result.output]),
+            interval=self._round_trip(action),
+            detail={"variant": result.reason or "permission", "command": call.command or ""},
         )
 
     def _turn_bounds(self) -> tuple[float | None, float | None]:
@@ -1150,6 +1227,8 @@ class _Detector:
 
     def _on_prompt(self, event: Event) -> None:
         _, finished = self._turn_bounds()
+        if self.state.agent_seen is not None:
+            finished = max(finished or 0.0, self.state.agent_seen)
         asked = _epoch(event)
         idle = asked - finished if asked is not None and finished is not None else None
         confidence, labels = correction_confidence(event.text, event.after_question, idle)

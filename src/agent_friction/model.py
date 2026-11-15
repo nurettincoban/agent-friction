@@ -16,6 +16,9 @@ TOOL_CALL = "tool_call"
 TOOL_RESULT = "tool_result"
 USER_MESSAGE = "user_message"
 INTERRUPT = "interrupt"
+#: The agent wrote prose. Only the time is kept (the text never leaves the parser): it
+#: marks agent activity, so that waiting for a human is not mistaken for lost time.
+AGENT_MESSAGE = "agent_message"
 
 # Canonical tool operations
 OP_READ = "read"
@@ -33,6 +36,8 @@ ERR_NOT_READ = "not_read"
 ERR_STALE = "stale"
 ERR_MISSING = "missing"
 ERR_REJECTED = "rejected"
+#: Refused by permission settings, a hook or a safety check: no human was asked.
+ERR_DENIED = "denied"
 ERR_INTERRUPTED = "interrupted"
 ERR_EXIT = "exit"
 ERR_OTHER = "error"
@@ -43,6 +48,7 @@ ERROR_CLASSES = (
     ERR_STALE,
     ERR_MISSING,
     ERR_REJECTED,
+    ERR_DENIED,
     ERR_INTERRUPTED,
     ERR_EXIT,
     ERR_OTHER,

@@ -20,7 +20,7 @@ def keys(finding: object) -> list[tuple[str, str]]:
 
 def test_catalog_is_consistent() -> None:
     ids = [s.id for s in signals.CATALOG]
-    assert len(ids) == len(set(ids)) == 13
+    assert len(ids) == len(set(ids)) == 14
     for definition in signals.CATALOG:
         assert definition.title and definition.description and definition.why
         assert definition.attribution and definition.severity > 0
@@ -281,7 +281,7 @@ def test_linters_and_exit_code_checks_are_ordinary_failures(tmp_path: Path) -> N
     s.bash("pytest -q", "E   FileNotFoundError: No such file or directory: 'x'", exit_code=1)
     s.bash("pytest -q", "assert 'sh: foo: command not found' in captured.err", exit_code=1)
     found = detect(s, tmp_path)
-    assert len(found) == 8 + 1  # eight failures plus the retry loop on pytest
+    assert len(found) == 8 + 1  # eight failures plus the retry loop on `pytest -q`
     for failure in by_signal(found, signals.COMMAND_FAILURE):
         assert failure.detail["variant"] == "ordinary", failure.excerpt
         assert failure.weight == signals.ORDINARY_FAILURE_WEIGHT and failure.interval is None
@@ -450,13 +450,26 @@ def test_an_edit_between_failures_resets_the_retry_loop(tmp_path: Path) -> None:
 
 def test_retry_loop_three_consecutive_failures(tmp_path: Path) -> None:
     s = Session().user("go")
-    for args in ("", " -x", " -x -q", " --lf"):
-        s.bash(f"npm test{args}", "Error: boom", exit_code=1)
+    for prefix in ("", "CI=1 ", "", "CI=1  "):  # env and spacing do not make it another command
+        s.bash(f"{prefix}npm test  -- --runInBand", "Error: boom", exit_code=1)
     found = detect(s, tmp_path)
     (loop,) = by_signal(found, signals.RETRY_LOOP)
-    assert loop.summary == "`npm test` failed 4 times in a row" and loop.detail["count"] == "4"
+    assert loop.summary == (
+        "`npm test` was run 4 times in a row with identical arguments and failed each time"
+    )
+    assert loop.detail["count"] == "4"
     assert keys(loop) == [("command", "npm test")] and loop.interval is None
     assert len(by_signal(found, signals.COMMAND_FAILURE)) == 4
+
+
+def test_narrowing_a_failing_test_is_not_a_retry_loop(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.bash("pytest", "3 failed", exit_code=1)
+    s.bash("pytest tests/test_a.py -x -vv", "1 failed", exit_code=1)
+    s.bash("pytest tests/test_a.py::test_total --tb=long", "1 failed", exit_code=1)
+    s.bash("pytest tests/test_a.py::test_total --tb=long -s", "1 failed", exit_code=1)
+    found = detect(s, tmp_path)
+    assert by_signal(found, signals.RETRY_LOOP) == [] and len(found) == 4
 
 
 def test_retry_loop_is_reset_by_success_and_is_per_command(tmp_path: Path) -> None:
@@ -1084,3 +1097,157 @@ def test_command_keys_can_be_made_public(tmp_path: Path) -> None:
         public_key("uvx internal-tool-acme"),
     ]
     assert found[2].detail["recovered_by"] == "make test"
+
+
+# ---- round 4 --------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("red", "green"),
+    [
+        ("pytest tests/test_a.py", "make test"),
+        ("pytest -k total", "python -m pytest"),
+        ("npm test -- a.test.js", "npm run test:all"),
+    ],
+)
+def test_red_edit_green_with_another_test_command_is_not_friction(
+    tmp_path: Path, red: str, green: str
+) -> None:
+    s = Session().user("fix the total")
+    s.bash(red, "FAILED tests/test_a.py::test_total - assert 1 == 2\n1 failed", exit_code=1)
+    s.edit(A).bash(green, "5 passed")
+    assert detect(s, tmp_path, known=("tests/test_a.py",)) == []
+    # without the edit the red run stays, but nothing "replaced" a command that did run
+    plain = Session().user("go")
+    plain.bash(red, "1 failed", exit_code=1).bash(green, "5 passed")
+    (failure,) = detect(plain, tmp_path)
+    assert failure.detail["variant"] == "ordinary" and "recovered_by" not in failure.detail
+
+
+def test_shell_commands_that_rewrite_files_count_as_edits(tmp_path: Path) -> None:
+    lint = "src/a.py:1:1: F401 unused import\nFound 1 error."
+    s = Session().user("clean up")
+    s.bash("ruff check .", lint, exit_code=1).bash("ruff check --fix .", "Fixed 1 error.")
+    s.bash("ruff check .", "All checks passed!")
+    s.bash("ruff format --check .", "Would reformat: src/a.py", exit_code=1)
+    s.bash("ruff format .", "1 file reformatted").bash("ruff format --check .", "ok")
+    s.bash("npm test", "1 failing", exit_code=1)
+    s.bash("sed -i 's/tru/true/' src/a.js", "").bash("npm test", "3 passing")
+    s.bash("make build", "error", exit_code=2)
+    s.bash("cat > src/gen.py <<'EOF'\nX = 1\nEOF", "").bash("make build", "ok")
+    assert detect(s, tmp_path) == []
+
+    log = Session().user("go")  # writing a log file is not a change to the project
+    log.bash("npm test", "1 failing", exit_code=1)
+    log.bash("echo retry > /tmp/attempts.log", "").bash("npm test", "3 passing")
+    assert len(detect(log, tmp_path)) == 1
+
+
+def test_waiting_for_the_human_is_not_time_lost(tmp_path: Path) -> None:
+    s = Session().user("run the tests")
+    s.bash("pytest", "bash: pytest: command not found", exit_code=127, took=2)
+    s.tick(3).say("pytest is not installed. How do you want to proceed?")
+    s.tick(3600).user("use make test")  # an hour later
+    s.bash("make test", "ok")
+    (failure,) = detect(s, tmp_path)
+    assert failure.interval is not None
+    # 2s run + 3s until the agent spoke: nothing of the hour is claimed
+    assert failure.interval[1] - failure.interval[0] == pytest.approx(5)
+
+    silent = Session().user("run the tests")
+    silent.bash("pytest", "bash: pytest: command not found", exit_code=127, took=2)
+    silent.tick(3600).user("use make test")  # the human is the next thing in the transcript
+    (failure,) = detect(silent, tmp_path)
+    assert failure.interval is not None
+    assert failure.interval[1] - failure.interval[0] == pytest.approx(2)  # the call itself
+
+    miss = Session().user("go")
+    miss.grep("Nothing", "/repo/src").tick(7200).user("ok, next")
+    (search,) = detect(miss, tmp_path)
+    assert search.interval is None or search.interval[1] - search.interval[0] < 10
+
+
+DENIALS = [
+    ("Claude requested permissions to use Bash, but you haven't granted it yet.", "permission"),
+    (
+        "Permission to use Bash has been denied. IMPORTANT: You *may* attempt to accomplish "
+        "this action using other tools.",
+        "permission",
+    ),
+    ("Permission for this command was denied by the safety classifier.", "permission"),
+    ("PreToolUse:Bash hook error: [python3 guard.py]: pushing to main is blocked", "hook"),
+]
+
+
+@pytest.mark.parametrize(("output", "variant"), DENIALS)
+def test_permission_and_hook_denials_are_not_command_failures(
+    tmp_path: Path, output: str, variant: str
+) -> None:
+    s = Session().user("go")
+    s.tool("Bash", {"command": "cd api && git push origin main"}, output, is_error=True)
+    (denied,) = detect(s, tmp_path)
+    assert denied.signal == signals.PERMISSION_DENIED and denied.detail["variant"] == variant
+    assert keys(denied) == [("command", "git push")]
+    by = "a hook" if variant == "hook" else "permission settings"
+    assert denied.summary == f"Bash on `git push` was denied by {by}; it did not run"
+
+
+def test_denied_edits_and_ordinary_output_mentioning_permissions(tmp_path: Path) -> None:
+    s = Session().user("go")
+    refused = (
+        "Claude requested permissions to write to /repo/src/a.py, but you haven't granted it yet."
+    )
+    s.tool("Edit", {"file_path": A, "old_string": "a", "new_string": "b"}, refused, is_error=True)
+    # a program that fails with a permission error did run: still a command failure
+    s.bash("make deploy", "deploy: Permission to use bucket has been denied", exit_code=1)
+    denied, failure = detect(s, tmp_path)
+    assert denied.signal == signals.PERMISSION_DENIED and keys(denied) == [("file", "src/a.py")]
+    assert failure.signal == signals.COMMAND_FAILURE
+
+
+IDE_BLOCK = (
+    "<ide_opened_file>The user opened the file /repo/README.md in the IDE. This may or may "
+    "not be related to the current task. No, that's wrong.</ide_opened_file>"
+)
+
+
+def ide_prompt(session: Session, *texts: str) -> Session:
+    blocks = [{"type": "text", "text": text} for text in texts]
+    session._line("user", {"role": "user", "content": blocks})
+    return session
+
+
+def test_ide_context_blocks_are_not_human_text(tmp_path: Path) -> None:
+    s = Session().user("add the feature")
+    s.read("/repo/README.md").edit(A)
+    ide_prompt(s, IDE_BLOCK, "No, use the Decimal type, I told you.")
+    (fix,) = detect(s, tmp_path, known=("README.md",))
+    assert fix.excerpt == "No, use the Decimal type, I told you."  # the quote is the human's
+    assert keys(fix) == [("file", "src/a.py")]  # README.md is named by the IDE, not the human
+
+    friendly = Session().user("add the feature")
+    friendly.edit(A)
+    ide_prompt(friendly, IDE_BLOCK, "Great, thanks. Now add a docstring.")
+    ide_prompt(friendly.edit(A), "<ide_selection>you broke it, revert that</ide_selection>")
+    ide_prompt(
+        friendly.edit(A),
+        "<ide_diagnostics>[{'message': 'this is wrong'}]</ide_diagnostics>",
+        "<system-reminder>I told you not to</system-reminder>looks good, next: the CLI",
+    )
+    selection = "<ide_selection>The user selected lines 1 to 3:\nwrong wrong</ide_selection>"
+    friendly.edit(A).user(selection + "\nCan you explain this part?")
+    assert detect(friendly, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "wrong.py needs the same treatment",
+        "No. Let's move on to the API layer.",
+        "That didn't work because I hadn't pulled. Try again now.",
+        "It's not working because my VPN was off.",
+        "Why did you use a dataclass here? Just curious",
+    ],
+)
+def test_more_prompts_that_are_not_corrections(text: str) -> None:
+    assert correction_confidence(text) == (0.0, []), text

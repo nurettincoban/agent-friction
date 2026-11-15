@@ -173,6 +173,7 @@ INTERPRETERS = SHELLS | frozenset(
 #: beyond the executable name kept, so arguments of unknown tools never enter a key.
 SUBCOMMAND_TOOLS = frozenset(
     {"git", "npm", "pnpm", "yarn", "bun", "npx", "uv", "uvx", "cargo", "go", "make", "docker"}
+    | {"ruff"}
     | {"podman", "kubectl", "helm", "poetry", "pip", "pip3", "pipx", "pipenv", "pdm", "hatch"}
     | {"rye", "gh", "glab", "dotnet", "gradle", "gradlew", "mvn", "bazel", "rake"}
     | {"bundle", "composer", "terraform", "nx", "turbo", "just", "task", "invoke", "deno"}
@@ -486,6 +487,8 @@ def _raw_key(words: Sequence[str]) -> str:
             return f"{program} -m {rest[1]}"
         if rest and rest[0] in ("-c", "-e", "-lc", "-ic"):
             return f"{program} -c"
+        if rest and rest[0] == "-":
+            return f"{program} <stdin>"  # ``python - <<EOF``: a script on standard input
         if rest and _looks_like_script(rest[0]):
             return f"{program} {_program_name(rest[0])}"
     if base not in SUBCOMMAND_TOOLS or "/" in program:
@@ -713,7 +716,7 @@ _PUBLIC_WORDS = frozenset(
     | {"exec", "run", "run-script", "dlx", "x", "pip", "compose", "buildx", "pr", "issue", "repo"}
     | {"workflow", "mr", "stash", "remote", "worktree", "submodule", "task", "workspace"}
     | {"revision", "downgrade", "history", "current", "makemigrations", "runserver", "head"}
-    | {"-m", "-c", "http.server", "json.tool", "pdb", "timeit", "ensurepip", "django"}
+    | {"-m", "-c", "<stdin>", "http.server", "json.tool", "pdb", "timeit", "ensurepip", "django"}
     | {"twine", "pre_commit", "compileall"}
 )
 #: Well-known executables (beyond the tables above) that may open a key.
@@ -789,3 +792,71 @@ def public_key(key: str) -> str:
             out.append(_placeholder(word, position, previous))
         previous = word
     return " ".join(out)
+
+
+# ---- shell commands that change files ----------------------------------------------------
+
+_WRITE_FLAGS = frozenset({"--fix", "--write", "--fix-only", "--unsafe-fixes", "--in-place"})
+_CHECK_FLAGS = frozenset({"--check", "--diff", "--dry-run", "--list-different", "-l", "-d"})
+#: Formatters that only rewrite files when told to.
+_NEEDS_WRITE_FLAG = frozenset({"prettier", "gofmt", "clang-format", "biome", "eslint"})
+_GIT_REWRITES = frozenset(
+    {"git apply", "git checkout", "git restore", "git reset", "git revert", "git merge"}
+    | {"git rebase", "git cherry-pick", "git pull", "git stash", "git stash pop"}
+    | {"git stash apply", "git switch", "git am"}
+)
+
+
+def is_shell_edit(parsed: ParsedCommand, command: str) -> bool:
+    """True if a shell command line rewrites files in place (as far as its words tell).
+
+    ``sed -i``, ``perl -pi``, formatters (``ruff format``, ``black``,
+    ``prettier --write``, ``gofmt -w``, ``cargo fmt``), ``--fix``/``--write``
+    flags, ``patch``, ``git apply/checkout/restore/stash``, ``tee`` and ``>``
+    redirections to a file. Such a command is a change, like an Edit.
+    """
+    for step in parsed.steps:
+        args = step.args
+        flags = set(args)
+        program = step.program
+        if flags & _WRITE_FLAGS:
+            return True
+        if program in ("sed", "gsed") and any(a == "--in-place" or a[:2] == "-i" for a in args):
+            return True
+        if program == "perl" and any(re.match(r"^-[a-z0-9]*i", a) for a in args):
+            return True
+        if program == "patch" or step.key in _GIT_REWRITES:
+            return True
+        if program == "tee" and any(_is_source_target(a) for a in args if a[:1] != "-"):
+            return True
+        if program in _NEEDS_WRITE_FLAG:
+            if flags & {"-w", "-i", "--write"}:
+                return True
+        elif command_role(step.key) == "format" and not flags & _CHECK_FLAGS:
+            return True
+    tokens = _tokenize(command)
+    for index, token in enumerate(tokens):
+        target = tokens[index + 1] if index + 1 < len(tokens) else ""
+        if token in (">", ">>", ">|") and _is_source_target(target):
+            return True
+    return False
+
+
+_SCRATCH_RE = re.compile(r"\.(?:log|out|txt|tmp|pid|err)$|^&|^/dev/|^/tmp/|^/var/|^\$TMP", re.I)
+
+
+def _is_source_target(target: str) -> bool:
+    """A file a redirection writes that is plausibly part of the project, not a log."""
+    return bool(target) and not _SCRATCH_RE.search(target)
+
+
+_ENV_PREFIX_RE = re.compile(r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|\"[^\"]*\"|\S*)\s+)+")
+
+
+def normalize_argv(command: str) -> str:
+    """A command line with whitespace collapsed and leading ``VAR=value`` dropped.
+
+    Two runs are "the same command again" only if this text is identical.
+    """
+    text = re.sub(r"\s+", " ", command).strip()
+    return _ENV_PREFIX_RE.sub("", text)

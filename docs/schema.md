@@ -2,8 +2,8 @@
 
 1. [Analysis result](#analysis-result) — what `analyze()` returns and
    `--format json` (`-f json`) prints.
-2. [Generic event format](#generic-event-format) — the JSONL input for
-   transcripts from agents other than Claude Code.
+2. [Generic transcript format](#generic-transcript-format) — the JSONL input
+   for transcripts from agents other than Claude Code.
 
 ## Analysis result
 
@@ -34,6 +34,7 @@ fields may be added within a version, never removed or re-typed.
 | `rework_window_days` | `14` | Window for `human-rework`. |
 | `agent_commit_patterns` | `None` | Regexes (case-insensitive, multiline) matched against `author: Name <email>\n<commit message>`; replaces the defaults. |
 | `git_max_commits` | `5000` | Newest commits read from the current branch. |
+| `allow_no_transcripts` | `False` | `True`: if no transcript is found but git history is readable (and `include_git` is on), analyse git history alone (`human-rework` only) instead of raising. |
 
 `analyze` raises `agent_friction.engine.NoTranscriptsError` (a subclass of
 `agent_friction.errors.AgentFrictionError`) when no transcript file is found.
@@ -53,7 +54,8 @@ in the same cases: nothing found; a given path that does not exist; a given
 | `schema_version` | int | `1`. |
 | `tool` | object | `{"name": "agent-friction", "version": str}`. |
 | `generated_at` | str | ISO-8601 UTC (`...Z`). |
-| `repo` | object | `root` (home directory shown as `~`) and `name`. |
+| `repo` | object | `root` (absolute; only the current user's own home directory is shown as `~`) and `name`. |
+| `settings` | object | What kind of scan this is: `excerpts` (bool, `include_excerpts`), `git` (bool: git history was read and used), `key_mode` (`"plain"`, or `"pseudonymized"` when command keys carry hash placeholders, i.e. without excerpts). Reports whose `settings` differ should not be compared: their command keys or evidence base differ. *Addition to the base contract.* |
 | `window` | object | See below. |
 | `sources` | list | One entry per input, see below. |
 | `totals` | object | See below. |
@@ -171,12 +173,13 @@ path; empty for files). A directory's numbers cover every event beneath it,
 each counted once; its `exposure_sessions` counts every session that touched
 anything beneath it. Commands are not in the tree.
 
-## Generic event format
+## Generic transcript format
 
 To analyse sessions from another agent (Codex, Cursor, Aider, your own
 harness), convert its logs to this format: UTF-8 JSONL, one event per line, in
-chronological order. Pass the file with `transcripts=[...]`; it is recognised
-by the presence of `session` and a string `kind`. One file may hold several
+chronological order. Pass the file with `--transcripts FILE` on the command
+line or `transcripts=[...]` in `AnalyzeOptions`; it is recognised by the
+presence of `session` and a string `kind`. One file may hold several
 sessions. There is no dedicated adapter for other agents yet.
 
 Common fields:
@@ -210,7 +213,7 @@ Common fields:
 | `id` | Required. The call's id. |
 | `ok` | `false` marks a failure. If omitted, the call failed when `error` is set or `exit_code` is non-zero. |
 | `exit_code` | Shell exit status. |
-| `error` | Optional class: `edit_not_found`, `edit_ambiguous`, `not_read`, `stale`, `missing`, `rejected`, `interrupted`, `exit`, `error`. If omitted on a failure it is inferred from `output` using Claude Code's error wording. |
+| `error` | Optional class: `edit_not_found`, `edit_ambiguous`, `not_read`, `stale`, `missing`, `rejected` (a human declined), `denied` (permission settings or a hook refused; `reason` may be `"hook"`), `interrupted`, `exit`, `error`. If omitted on a failure it is inferred from `output` using Claude Code's error wording. |
 | `output` | Tool output or error text (used for excerpts and to classify command failures). |
 | `matches` | Number of search results; `0` marks a search miss (alternatively `"empty": true`). |
 | `reason` | What the human said when declining (`error: "rejected"`). |
@@ -218,10 +221,11 @@ Common fields:
 `user_message` needs `text`. `interrupt` needs nothing else.
 
 `assistant_message` (optional) carries the agent's prose in `text`. Nothing
-of it is stored or emitted; it is used for one thing only: if the agent's
-last message before a `user_message` ends with a question mark, a reply that
-opens with "No, ..." is read as an answer rather than a correction. Leave
-these events out and every such reply counts as a correction.
+of it is stored or emitted. It is used for two things: its `ts` marks that
+the agent was active (a failed call is then timed up to the agent's next
+message instead of only its own duration), and if the agent's last message
+before a `user_message` ends with a question mark, a reply that opens with
+"No, ..." is read as an answer rather than a correction.
 
 ```jsonl
 {"session":"s1","ts":"2026-11-05T16:00:00Z","kind":"user_message","text":"Add a sku field"}
@@ -231,5 +235,12 @@ these events out and every such reply counts as a correction.
 {"session":"s1","ts":"2026-11-05T16:01:04Z","kind":"tool_result","id":2,"exit_code":4,"output":"ModuleNotFoundError: No module named 'shop'"}
 {"session":"s1","ts":"2026-11-05T16:06:40Z","kind":"user_message","text":"That's wrong, revert that"}
 ```
+
+Paths in the example are relative to the working directory `/work/shop` given
+in `cwd`. To try it as written against a checkout that lives elsewhere, say
+where the transcript was recorded: `agent-friction scan --transcripts
+example.jsonl --repo-alias /work/shop` (or `repo_aliases=["/work/shop"]`).
+Without `cwd`, relative paths resolve against the repository root and no
+alias is needed.
 
 A working example is `tests/fixtures/transcripts/other-agents/aider-2026-11-05.jsonl`.

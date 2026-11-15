@@ -165,7 +165,10 @@ def test_symlinked_repo_root_matches_both_spellings(tmp_path: Path) -> None:
         # heredoc bodies are data, not commands
         ("cat <<EOF > x.py\nimport y\nEOF\npython x.py", "python x.py"),
         ("cat > t.sh <<-'END'\n\tnpm run nope\n\tEND\nnpm run build", "npm run build"),
-        ("python - <<'PY'\nimport os\nos.system('rm -rf x')\nPY", "python"),
+        ("python - <<'PY'\nimport os\nos.system('rm -rf x')\nPY", "python <stdin>"),
+        ("python3 <<EOF\nprint(1)\nEOF", "python"),
+        ("ruff check --fix .", "ruff check"),
+        ("ruff format --check .", "ruff format"),
         # control flow, subshells and nested shells are looked through
         ("if ! make lint; then exit 1; fi", "make lint"),
         ("if pytest; then echo ok; fi", "pytest"),

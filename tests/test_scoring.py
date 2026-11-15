@@ -199,3 +199,12 @@ def test_explain_sentence() -> None:
     only_git = scoring.explain([(signals.HUMAN_REWORK, 1)], 0, 0, "low", 1)
     assert only_git.startswith("1 friction event in 1 agent commit (1 human rework commit);")
     assert set(scoring.SIGNAL_NOUNS) == set(signals.BY_ID)
+
+
+def test_a_derived_signal_is_not_a_second_kind_of_evidence() -> None:
+    sessions = ["a", "b", "c", "d"]
+    loop_and_failures = [signals.COMMAND_FAILURE, signals.RETRY_LOOP]
+    assert scoring.confidence(sessions, loop_and_failures) == "medium"
+    assert scoring.confidence(sessions, [*loop_and_failures, signals.TOOL_REJECTED]) == "high"
+    # a retry loop next to unrelated evidence is still its own signal
+    assert scoring.confidence(sessions, [signals.RETRY_LOOP, signals.USER_CORRECTION]) == "high"

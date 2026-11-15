@@ -142,13 +142,16 @@ def test_story_deprecated_api_corrections_land_on_the_service(result: dict[str, 
 
 def test_story_pytest_should_be_make_test(result: dict[str, Any]) -> None:
     top = result["commands"][0]
-    assert (top["path"], top["kind"], top["confidence"]) == ("pytest", "command", "high")
-    assert top["signals"] == {"command-failure": 7, "retry-loop": 1} and top["sessions"] == 4
+    # one kind of evidence, however often: medium. (The runs differ in their arguments,
+    # so they are not a retry loop either.)
+    assert (top["path"], top["kind"], top["confidence"]) == ("pytest", "command", "medium")
+    assert top["signals"] == {"command-failure": 7} and top["sessions"] == 4
     first = top["recommendations"][0]
     assert first["id"] == "use-the-working-command"
-    assert "7 times the agent then got the same job done with `make test`" in first["detail"]
-    assert top["why"].startswith("8 friction events in all 4 sessions that touched it (7 command")
-    assert "7 command failures, 1 retry loop)" in top["why"]
+    assert "5 times the agent then got the same job done with `make test`" in first["detail"]
+    assert top["why"].startswith(
+        "7 friction events in all 4 sessions that touched it (7 command failures); medium"
+    )
     assert any("No module named 'shopfront'" in (e["excerpt"] or "") for e in top["evidence"])
     # `make test` failed once on a real test failure that the agent then fixed: that is the
     # normal red/green loop and it is not reported at all
@@ -395,7 +398,7 @@ def test_window_filters_events() -> None:
     early = story(until=datetime(2026, 10, 31))  # naive datetimes are read as UTC
     assert early["totals"]["sessions"] == 2 and early["window"]["until"] == "2026-10-31T00:00:00Z"
     total = story()["totals"]["friction_events"]
-    assert late["totals"]["friction_events"] + early["totals"]["friction_events"] == total == 35
+    assert late["totals"]["friction_events"] + early["totals"]["friction_events"] == total == 34
     nothing = story(since=datetime(2027, 1, 1))
     assert nothing["totals"]["sessions"] == 0 and nothing["hotspots"] == []
     assert nothing["window"]["first_event"] is None and nothing["tree"]["children"] == []
@@ -602,3 +605,99 @@ def test_commits_made_during_a_session_are_not_extra_sessions(tmp_path: Path) ->
     options.include_git = False
     without_git = analyze(options)
     assert hotspot["score"] >= without_git["hotspots"][0]["score"]  # git never dilutes
+
+
+def test_settings_describe_the_scan(result: dict[str, Any]) -> None:
+    assert result["settings"] == {"excerpts": True, "git": False, "key_mode": "plain"}
+    bare = story(include_excerpts=False)
+    assert bare["settings"] == {"excerpts": False, "git": False, "key_mode": "pseudonymized"}
+    assert list(result).index("settings") < list(result).index("window")
+
+
+def test_repo_root_only_abbreviates_the_real_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transcript = Session("a", cwd="/home/someone/x").user("go").edit("/home/someone/x/a.py")
+    path = transcript.save(tmp_path / "t")
+    options = AnalyzeOptions(repo=Path("/home/someone/x"), transcripts=[path], include_git=False)
+    monkeypatch.setenv("HOME", "/root")
+    assert analyze(options)["repo"]["root"] == "/home/someone/x"
+    monkeypatch.setenv("HOME", "/home/someone")
+    assert analyze(options)["repo"]["root"] == "~/x"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_git_only_analysis_when_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True, env=env)
+    for day, message, content in (
+        (1, "feat\n\nCo-Authored-By: Claude <noreply@anthropic.com>", "v1\n"),
+        (2, "fix the agent's change", "v2\n"),
+    ):
+        (repo / "a.py").write_text(content)
+        stamp = f"2026-11-0{day}T12:00:00+00:00"
+        dated = {**env, "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
+        identity = ["-c", "user.name=Dana", "-c", "user.email=dana@corp.test"]
+        for args in (["add", "-A"], ["commit", "-q", "-m", message]):
+            subprocess.run(["git", "-C", str(repo), *identity, *args], check=True, env=dated)
+    with pytest.raises(NoTranscriptsError):
+        analyze(AnalyzeOptions(repo=repo, now=NOW))
+    out = analyze(AnalyzeOptions(repo=repo, now=NOW, allow_no_transcripts=True))
+    assert out["totals"]["sessions"] == 0 and out["settings"]["git"] is True
+    (hotspot,) = out["hotspots"]
+    assert hotspot["signals"] == {"human-rework": 1} and hotspot["confidence"] == "low"
+    assert (hotspot["sessions"], hotspot["agent_commits"]) == (1, 1)
+    assert hotspot["why"].startswith("1 friction event in 1 agent commit (")
+    # nothing at all to analyse is still an error
+    with pytest.raises(NoTranscriptsError):
+        analyze(AnalyzeOptions(repo=tmp_path, now=NOW, allow_no_transcripts=True))
+    with pytest.raises(NoTranscriptsError):
+        analyze(AnalyzeOptions(repo=repo, allow_no_transcripts=True, include_git=False))
+
+
+def test_ordinary_sessions_get_no_advice_about_commands(tmp_path: Path) -> None:
+    """Three sessions of red -> edit -> green, with the green run via `make test`."""
+    out = tmp_path / "t"
+    for n in range(3):
+        s = Session(f"o{n}", cwd="/repo").user("fix the total")
+        s.read("/repo/tests/test_a.py")
+        s.bash(
+            "pytest tests/test_a.py", "FAILED tests/test_a.py::test_total\n1 failed", exit_code=1
+        )
+        s.edit("/repo/src/a.py").bash("make test", "5 passed")
+        s.save(out)
+    result = analyze(AnalyzeOptions(repo=Path("/repo"), transcripts=[out], include_git=False))
+    assert result["totals"]["friction_events"] == 0
+    assert result["hotspots"] == result["commands"] == []
+
+
+def test_idle_humans_do_not_inflate_minutes_lost(tmp_path: Path) -> None:
+    out = tmp_path / "t"
+    for n in range(3):
+        s = Session(f"w{n}", cwd="/repo").user("run the tests")
+        s.bash("pytest", "bash: pytest: command not found", exit_code=127, took=2)
+        s.say("pytest is not installed here.").tick(3600).user("ok, thanks")
+        s.save(out)
+    result = analyze(AnalyzeOptions(repo=Path("/repo"), transcripts=[out], include_git=False))
+    assert result["totals"]["est_minutes_lost"] <= 0.5
+    assert result["commands"][0]["est_minutes_lost"] <= 0.5
+
+
+def test_permission_denials_get_their_own_advice(tmp_path: Path) -> None:
+    out = tmp_path / "t"
+    for n in range(3):
+        s = Session(f"p{n}", cwd="/repo").user("go")
+        s.tool("Bash", {"command": "pytest tests/"}, DENIED, is_error=True)
+        s.save(out)
+    result = analyze(AnalyzeOptions(repo=Path("/repo"), transcripts=[out], include_git=False))
+    (command,) = result["commands"]
+    assert command["signals"] == {"permission-denied": 3} and command["path"] == "pytest"
+    assert [r["id"] for r in command["recommendations"]] == ["allow-or-document-the-boundary"]
+    assert "3 permission denials" in command["why"]
+    assert next(s for s in result["signals"] if s["id"] == "command-failure")["count"] == 0
+
+
+DENIED = "Claude requested permissions to use Bash, but you haven't granted it yet."

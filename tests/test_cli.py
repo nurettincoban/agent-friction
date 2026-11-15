@@ -168,10 +168,13 @@ def test_scan_with_no_sessions_in_window_is_an_error() -> None:
 
 
 def test_unknown_output_extension_is_a_usage_error(tmp_path: Path) -> None:
-    code, _, err = run("scan", *INPUT, "-o", str(tmp_path / "report.txt"))
+    code, _, err = run("scan", *INPUT, "-o", str(tmp_path / "report.xyz"))
     assert code == EXIT_USAGE and "--format" in err
-    code, _, _ = run("scan", *INPUT, "-o", str(tmp_path / "report.txt"), "-f", "markdown")
+    code, _, _ = run("scan", *INPUT, "-o", str(tmp_path / "report.xyz"), "-f", "markdown")
     assert code == EXIT_OK
+    code, _, _ = run("scan", *INPUT, "-o", str(tmp_path / "report.txt"))
+    assert code == EXIT_OK
+    assert "\033[" not in (tmp_path / "report.txt").read_text(encoding="utf-8")
 
 
 def test_compare_low_sample_does_not_trip_gate(tmp_path: Path) -> None:
@@ -245,3 +248,29 @@ def test_sources_rejects_non_transcript_file(tmp_path: Path) -> None:
     bogus.write_text("# just markdown\n", encoding="utf-8")
     code, _, err = run("sources", str(tmp_path), "-t", str(bogus))
     assert code == EXIT_ERROR and "not a JSONL transcript" in err
+
+
+def test_git_only_scan_with_allow_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+    import subprocess
+
+    if shutil.which("git") is None:
+        pytest.skip("git not installed")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "no-config"))
+
+    def git(*a: str) -> None:
+        subprocess.run(["git", *a], cwd=repo, check=True, capture_output=True)
+
+    git("init", "-q")
+    git("config", "user.name", "Dev")
+    git("config", "user.email", "dev@example.com")
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-q", "-m", "add a\n\nCo-Authored-By: Claude <noreply@anthropic.com>")
+    code, _, err = run("scan", str(repo))
+    assert code == EXIT_ERROR and "No Claude Code transcripts" in err
+    code, out, err = run("scan", str(repo), "--allow-empty", "-f", "json")
+    assert code == EXIT_OK, err
+    assert json.loads(out)["settings"]["git"] is True

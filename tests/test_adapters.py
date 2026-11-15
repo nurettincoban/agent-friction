@@ -54,7 +54,10 @@ def test_claude_basic_events(tmp_path: Path) -> None:
     assert parsed.kind == "claude-code" and parsed.skipped_lines == 0
     (stream,) = parsed.streams
     assert stream.session_id == "s1" and not stream.sidechain
-    events = stream.events
+    # agent prose and thinking leave a time marker and nothing else
+    markers = [e for e in stream.events if e.kind == "agent_message"]
+    assert markers and all(not (m.text or m.output or m.new_text) for m in markers)
+    events = [e for e in stream.events if e.kind != "agent_message"]
     assert [e.kind for e in events] == ["user_message"] + ["tool_call", "tool_result"] * 4
     read, read_result, edit, edit_result, bash, bash_result, grep, grep_result = events[1:]
     assert (read.op, read.path, read.read_range, read.cwd) == (
@@ -148,7 +151,7 @@ def test_claude_malformed_and_unknown_lines_never_crash(tmp_path: Path) -> None:
     parsed = parse_transcript(s.save(tmp_path))
     assert parsed.skipped_lines == 5  # 3 non-object lines + 2 user lines with unusable message
     assert parsed.ignored_lines == 5
-    events = parsed.streams[0].events
+    events = [e for e in parsed.streams[0].events if e.kind != "agent_message"]
     assert [(e.kind, e.tool, e.text) for e in events] == [
         ("tool_call", "X", ""),
         ("user_message", "", "still parsed"),
