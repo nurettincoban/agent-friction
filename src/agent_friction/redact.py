@@ -58,6 +58,7 @@ _RULES: tuple[_Rule, ...] = (
         ),
         "[REDACTED:api-key]",
     ),
+    ("sendgrid-key", re.compile(r"\bSG\.[\w-]{16,}\.[\w-]{16,}"), "[REDACTED:api-key]"),
     (
         "jwt",
         re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}"),
@@ -96,6 +97,28 @@ _RULES: tuple[_Rule, ...] = (
         re.compile(
             rf"(?i)\b([\w-]*(?:{_SECRET_KEY_WORDS})[\"']?\s*[:=]\s*[\"']?)"
             r"(?!\[REDACTED)([^\s\"',;&]{4,})"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
+        "cookie",
+        re.compile(r"(?i)\b((?:set-)?cookie[\"']?\s*[:=]\s*[\"']?)[^\n\"']+"),
+        r"\1[REDACTED:cookie]",
+    ),
+    (
+        "connection-string",
+        re.compile(
+            r"(?i)\b(AccountKey|SharedAccessKey|SharedAccessSignature|sig|signature|key|code"
+            r"|access_token|id_token|refresh_token|session|sessionid|sid)=(?!\[REDACTED)"
+            r"([^;&\s\"']{6,})"
+        ),
+        r"\1=[REDACTED]",
+    ),
+    (
+        "db-password-flag",
+        re.compile(
+            r"(\b(?:mysql\w*|mariadb\w*|sshpass|redis-cli|mongo\w*)\b[^\n|;&]*?\s-[pa])"
+            r"(?!assword)(\s*[^\s-]\S*)"
         ),
         r"\1[REDACTED]",
     ),

@@ -1,26 +1,25 @@
 agent-friction · shopfront
-6 sessions · 74 tool calls · 36 friction events · ~28m lost · 5 human corrections · 2026-10-26 → 2026-11-12
+6 sessions · 74 tool calls · 35 friction events · ~28m lost · 5 human corrections · 2026-10-26 → 2026-11-12
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals
-  ██████▋     66.0 src/shopfront/api/schema_gen.py           4     12     11m  ● edit-miss×6, user-correction×3
-  ████▎       42.1 src/shopfront/checkout/service.py         3      6     19m  ● user-correction×3, edit-revert×2
-  █▌          14.4 tests/test_refunds.py                     1      2      5m  ○ command-failure×1, user-correction×1
-  █▏          11.5 src/shopfront/payments/client.py          1      1      5m  ○ user-correction×1
-  █            9.5 api/openapi.yaml                          1      1     24s  ○ search-miss×1
-  █            9.5 src/shopfront/payments/refunds.py         1      1     18s  ○ path-miss×1
+  █████▋      56.8 src/shopfront/api/schema_gen.py           4     12     11m  ● edit-miss×6, user-correction×3
+  ████        39.8 src/shopfront/checkout/service.py         3      6     19m  ● user-correction×3, edit-revert×2
+  █▌          15.0 tests/test_refunds.py                     1      2      5m  ○ command-failure×1, user-correction×1
+  █▏          11.4 src/shopfront/payments/refunds.py         1      1     18s  ○ path-miss×1
+  █▏          11.1 src/shopfront/payments/client.py          1      1      5m  ○ user-correction×1
+  █            9.7 api/openapi.yaml                          1      1     24s  ○ search-miss×1
 
 Commands that keep failing
   score            path                                   sess events    lost  top signals
-  █████▌      55.6 pytest                                    4      8      6m  ● command-failure×7, retry-loop×1
-  █▋          16.5 alembic revision                          1      1     42s  ○ tool-rejected×1
-  █▌          14.7 curl                                      1      1     24s  ○ command-failure×1
-  █▌          14.7 python -m pytest                          1      1     30s  ○ command-failure×1
-  ▋            6.6 make test                                 1      1      0m  ○ command-failure×1
+  █████       50.5 pytest                                    4      8      6m  ● command-failure×7, retry-loop×1
+  █▋          16.3 rm                                        1      1     42s  ○ tool-rejected×1
+  █▌          15.2 curl                                      1      1     24s  ○ command-failure×1
+  █▌          15.2 python -m pytest                          1      1     30s  ○ command-failure×1
 
 Directories where agents search in vain
   score            path                                   sess events    lost  top signals
-  ███         30.1 src/shopfront                             2      5      1m  ◐ search-miss×5
+  ███         29.5 src/shopfront                             2      5      1m  ◐ search-miss×5
 
 What to fix first
   1. src/shopfront/api/schema_gen.py: Generated file: point agents at its source
@@ -42,7 +41,7 @@ What to fix first
      `RefundPolicy` (2x), `**/*policy*.py`, `DiscountPolicy`. If the concept exists under another
      name or elsewhere, add a pointer in AGENTS.md (or a comment/alias where agents look). If it
      does not exist, say so.
-  5. alembic revision: State the boundary
+  5. rm: State the boundary
      A human declined the agent's action once in 1 session. State the boundary explicitly (what
      must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a
      permission rule. Reasons given: "never delete existing migrations, add a new revision on top"

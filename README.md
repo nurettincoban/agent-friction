@@ -1,7 +1,7 @@
 # agent-friction
 
 [![CI](https://github.com/nurettincoban/agent-friction/actions/workflows/ci.yml/badge.svg)](https://github.com/nurettincoban/agent-friction/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/nurettincoban/agent-friction/blob/main/LICENSE)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
 
@@ -15,20 +15,20 @@ Each one is small. Together they are where your agent time goes, and nobody writ
 recurring failures, pins them to files, directories, and commands, and tells you what to change,
 with the evidence quoted so you can check it yourself.
 
-![Interactive friction map of the example repository](docs/assets/friction-map.png)
+![Interactive friction map of the example repository](https://raw.githubusercontent.com/nurettincoban/agent-friction/main/docs/assets/friction-map.png)
 
 ```console
 $ agent-friction scan
 agent-friction · shopfront
-6 sessions · 74 tool calls · 36 friction events · ~28m lost · 5 human corrections
+6 sessions · 74 tool calls · 35 friction events · ~28m lost · 5 human corrections
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals
-  ██████▋     66.0 src/shopfront/api/schema_gen.py           4     12     11m  ● edit-miss×6, user-correction×3
-  ████▎       42.1 src/shopfront/checkout/service.py         3      6     19m  ● user-correction×3, edit-revert×2
+  █████▋      56.8 src/shopfront/api/schema_gen.py           4     12     11m  ● edit-miss×6, user-correction×3
+  ████        39.8 src/shopfront/checkout/service.py         3      6     19m  ● user-correction×3, edit-revert×2
 
 Commands that keep failing
-  █████▌      55.6 pytest                                    4      8      6m  ● command-failure×7, retry-loop×1
+  █████       50.5 pytest                                    4      8      6m  ● command-failure×7, retry-loop×1
 
 What to fix first
   1. src/shopfront/api/schema_gen.py: Generated file: point agents at its source
@@ -40,9 +40,9 @@ What to fix first
      ...In their words: "No, I said use PaymentClient, not the legacy module. [...]"
 ```
 
-That output is real: it comes from the synthetic sessions in [`tests/fixtures`](tests/fixtures).
-See the full example as [Markdown](examples/shopfront.md), [JSON](examples/shopfront.json),
-or [interactive HTML](examples/shopfront.html) (download it and open it in a browser).
+That output is real: it comes from the synthetic sessions in [`tests/fixtures`](https://github.com/nurettincoban/agent-friction/tree/main/tests/fixtures).
+See the full example as [Markdown](https://github.com/nurettincoban/agent-friction/blob/main/examples/shopfront.md), [JSON](https://github.com/nurettincoban/agent-friction/blob/main/examples/shopfront.json),
+or [interactive HTML](https://github.com/nurettincoban/agent-friction/blob/main/examples/shopfront.html) (download it and open it in a browser).
 
 ## Why this exists
 
@@ -97,15 +97,17 @@ agent-friction scan --since 2026-11-01 -f json -o after.json
 agent-friction compare before.json after.json
 ```
 
-`compare` normalizes by session count (events per 10 sessions) and ignores changes too small to
-mean anything, then lists what regressed, what is new, what improved, and what disappeared.
+`compare` measures each file and command against the sessions that actually touched it (events per
+10 exposed sessions), so a file nobody worked on afterwards shows up as "no activity", not as
+"resolved". It ignores changes too small to mean anything, warns when either side has too few
+sessions, and refuses to compare scans of different repositories.
 
 ### In CI
 
 Both gates exit with code 3, so they can fail a job:
 
 ```sh
-agent-friction scan --fail-on 70                          # any hotspot scoring 70 or more
+agent-friction scan --since 30d --fail-on 45              # any hotspot scoring 45 or more
 agent-friction compare before.json after.json --fail-on-regression
 ```
 
@@ -115,7 +117,7 @@ tripped.
 ## What it detects
 
 Each signal is a deterministic rule over the transcript, documented with its exact definition,
-attribution rule, and known false positives in [docs/signals.md](docs/signals.md).
+attribution rule, and known false positives in [docs/signals.md](https://github.com/nurettincoban/agent-friction/blob/main/docs/signals.md).
 
 | Signal | What happened |
 |---|---|
@@ -123,7 +125,7 @@ attribution rule, and known false positives in [docs/signals.md](docs/signals.md
 | `retry-loop` | The same failing command was re-run without a change in between |
 | `tool-rejected` | The human declined a tool call (and often said why) |
 | `user-interrupt` | The human stopped the agent mid-action |
-| `human-rework` | A human changed a file soon after an agent-authored commit (git) |
+| `human-rework` | A human rewrote lines an agent commit had just written, or committed a fix/revert of it (git) |
 | `edit-miss` | An edit could not find its target text, or found it more than once |
 | `edit-revert` | An edit undid an earlier edit in the same session |
 | `command-failure` | A command failed because of setup or invocation, not just a red test |
@@ -133,10 +135,14 @@ attribution rule, and known false positives in [docs/signals.md](docs/signals.md
 | `search-miss` | A search in a file or directory came back empty |
 | `read-loop` | The same file re-read many times without being edited |
 
-Scores are 0-100, explainable, and reproducible by hand: per-session friction gets diminishing
-returns, sessions add up, so **recurrence beats one bad afternoon**. Time lost is a conservative
-estimate from timestamps. Confidence (low / medium / high) depends on how many sessions and how
-many kinds of evidence back a hotspot. All of it is in [docs/methodology.md](docs/methodology.md).
+Scores are 0-100, explainable, and reproducible by hand from three factors: how severe the
+friction is, how often it **recurs** across sessions (one bad afternoon is not a pattern), and how
+**consistently** it happens in the sessions that touch that file or command at all (so a busy
+file is not penalized just for being busy). Roughly: under 20 is an incident, 20-45 a pattern,
+above 45 a reliable struggle. Red-then-green test runs with a fix in between are normal work and
+are not counted. Time lost is a conservative estimate from timestamps. Confidence (low / medium /
+high) depends on how many sessions and how many kinds of evidence back a hotspot. All of it is in
+[docs/methodology.md](https://github.com/nurettincoban/agent-friction/blob/main/docs/methodology.md).
 
 ## Privacy
 
@@ -148,26 +154,29 @@ Transcripts contain your code and sometimes your secrets, so:
   password forms, credentials in URLs and `curl -u`, emails, high-entropy strings, your home
   directory) and truncated. Thinking blocks and assistant prose are never included.
 - `--no-excerpts` removes all transcript text: prompts, quoted corrections, search patterns,
-  command lines, and output. What remains is paths, normalized command names (like `pytest`),
-  counts, and timestamps.
+  command lines, and output. What remains is paths, counts, timestamps, and normalized command
+  names: the executable, plus a subcommand only for a fixed list of well-known tools (`git commit`,
+  `npm run build`, `make test`, `python -m pytest`). Free-form arguments never survive.
 
-Redaction is pattern-based, so skim a report before you share it outside your team.
-See [SECURITY.md](SECURITY.md).
+Redaction is pattern-based: it catches secrets that look like secrets, not an opaque password
+typed as a bare argument. Skim a report before you share it outside your team, or use
+`--no-excerpts`.
+See [SECURITY.md](https://github.com/nurettincoban/agent-friction/blob/main/SECURITY.md).
 
 ## Supported agents
 
 | Agent | Support |
 |---|---|
 | Claude Code | Native, auto-discovered, including subagents and resumed sessions |
-| Anything else | Convert to the [generic JSONL format](docs/schema.md#generic-transcript-format): one event per line, a few fields |
+| Anything else | Convert to the [generic JSONL format](https://github.com/nurettincoban/agent-friction/blob/main/docs/schema.md#generic-transcript-format): one event per line, a few fields |
 | Git history | Any agent that marks its commits (`Co-Authored-By: Claude`, Codex, Copilot, Cursor, Aider, …) |
 
-Native adapters for other agents are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
+Native adapters for other agents are welcome; see [CONTRIBUTING.md](https://github.com/nurettincoban/agent-friction/blob/main/CONTRIBUTING.md).
 
 ## Output contract
 
 `scan -f json` produces a versioned document (`schema_version: 1`) described field by field in
-[docs/schema.md](docs/schema.md). Build dashboards or bots on it; fields are only ever added
+[docs/schema.md](https://github.com/nurettincoban/agent-friction/blob/main/docs/schema.md). Build dashboards or bots on it; fields are only ever added
 within a schema version.
 
 ## Limitations
@@ -175,7 +184,8 @@ within a schema version.
 - Heuristics, not ground truth. A red test that the agent then fixes is normal work, not
   friction, and the rules try hard not to count it; they will sometimes be wrong both ways.
   `show` exists so you can check.
-- Correction detection is English-only phrase matching.
+- Correction detection is English-only and deliberately conservative: it misses indirect or
+  softened corrections rather than mislabel ordinary follow-ups, so treat the count as a floor.
 - Time lost is a floor, not a measurement of human time.
 
 Reports of wrong or missed hotspots are the most valuable contribution you can make:
@@ -183,9 +193,9 @@ Reports of wrong or missed hotspots are the most valuable contribution you can m
 
 ## Contributing
 
-`make install && make check`. See [CONTRIBUTING.md](CONTRIBUTING.md) for the ground rules (zero
+`make install && make check`. See [CONTRIBUTING.md](https://github.com/nurettincoban/agent-friction/blob/main/CONTRIBUTING.md) for the ground rules (zero
 dependencies, every heuristic documented and tested in both directions, deterministic output).
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/nurettincoban/agent-friction/blob/main/LICENSE)

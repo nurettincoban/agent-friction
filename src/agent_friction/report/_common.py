@@ -84,6 +84,13 @@ def find_target(result: dict[str, Any], target: str) -> dict[str, Any] | None:
     suffix = [h for h in pool if str(h.get("path", "")).endswith("/" + norm)]
     if len(suffix) == 1:
         return suffix[0]
+    # Last resort: the user typed a raw command line ("PYTEST -x", "npm test -- foo").
+    from agent_friction.attribution import normalize_command
+
+    key = normalize_command(target.strip().lower()) if target.strip() else ""
+    for h in pool:
+        if h.get("kind") == "command" and h.get("path") == key:
+            return h
     return None
 
 

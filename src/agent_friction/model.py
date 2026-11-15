@@ -83,6 +83,7 @@ class Event:
     # user_message
     text: str = ""
     synthetic: bool = False  # slash command etc.: a turn boundary, never a correction
+    after_question: bool = False  # the agent's last words before this message were a question
 
 
 @dataclass

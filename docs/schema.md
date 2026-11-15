@@ -56,6 +56,7 @@ auto-discovery would use.
 | `commands` | list | Command hotspots, same shape, `kind: "command"`, `path` is the normalized command. |
 | `directories` | list | Directories that events were attributed to directly (searches scoped to a directory), same shape, `kind: "dir"`, `path` without trailing slash, `"."` for the repo root. *Addition to the base contract.* |
 | `tree` | object | Directory roll-up of all file and directory events. |
+| `exposure` | object | How many sessions touched each target, friction or not. See below. *Addition to the base contract.* |
 
 ### `window`
 
@@ -92,6 +93,29 @@ auto-discovery would use.
 | `commands_affected`, `directories_affected` | Likewise. |
 | `unattributed_events` | Events that could not be tied to a path or command. |
 
+### `exposure`
+
+```json
+{
+  "file": {"src/app.py": 7, "src/util.py": 2},
+  "command": {"make test": 6, "pytest": 4},
+  "dir": {"src": 3}
+}
+```
+
+For every target the agent touched in the window, the number of distinct
+sessions that touched it (methodology, [Exposure](methodology.md#exposure)),
+whether or not any friction was recorded there. Keys within each object are
+sorted. The list is not truncated by `max_hotspots`. Every hotspot's
+`exposure_sessions` equals the entry for its `path` here. `file` keys are
+repo-relative paths; `command` keys are normalized command keys (the same
+strings as `commands[].path`, and the only thing derived from command lines
+that is present with `include_excerpts=False`); `dir` keys are directories
+that were the scope of a search. Agent commits from git count for files.
+
+Use it to compare two reports: a hotspot that is missing from the later one
+was fixed only if its target still has exposure there.
+
 ### `signals[]`
 
 `id`, `title`, `description`, `count`, plus `severity` (score weight), `why`
@@ -105,14 +129,16 @@ auto-discovery would use.
 | `kind` | str | `"file"`, `"command"` or `"dir"`. |
 | `score` | float | 0-100, one decimal. See methodology. |
 | `sessions` | int | Distinct sessions (and agent commits) with an event here. |
+| `exposure_sessions` | int | Distinct sessions (and agent commits) in which the agent touched this target at all; never less than `sessions`. |
+| `friction_rate` | float | `sessions / exposure_sessions`, two decimals, 0-1. |
 | `events` | int | Friction events attributed here. |
 | `est_minutes_lost` | float | Union of these events' intervals. |
 | `signals` | object | `{signal_id: count}`, most frequent first. |
 | `confidence` | str | `"low"`, `"medium"` or `"high"`. |
-| `why` | str | One sentence: counts, sessions, top signals, reason for the confidence. |
+| `why` | str | One sentence: counts, friction sessions out of exposure sessions, top signals, reason for the confidence. |
 | `recommendations` | list | `{id, title, detail, signals}`; `signals` lists the signal ids the rule is based on. May be empty. |
 | `evidence` | list | Up to `max_evidence` items, chronological. |
-| `score_detail` | object | `intensity` and, per session, `session_id`, `weighted_events`, `points`. |
+| `score_detail` | object | The score's factors, each 0-1: `severity`, `recurrence`, `consistency` (`score` is 100 x their product, up to rounding); `mean_session_points`; `intensity` (sum of session points); and `sessions`: per session `session_id`, `weighted_events`, `points`. |
 | `file` | object | File hotspots only: `exists`, `lines` (`null` if missing or over 5 MB), `generated`. |
 
 ### `evidence[]`
@@ -130,9 +156,11 @@ auto-discovery would use.
 ### `tree`
 
 Recursive nodes: `name`, `path` (`""` for the root), `kind` (`"dir"` or
-`"file"`), `score`, `events`, `sessions`, `est_minutes_lost`, `children`
-(sorted by score desc, then path; empty for files). A directory's numbers
-cover every event beneath it, each counted once. Commands are not in the tree.
+`"file"`), `score`, `events`, `sessions`, `exposure_sessions`,
+`friction_rate`, `est_minutes_lost`, `children` (sorted by score desc, then
+path; empty for files). A directory's numbers cover every event beneath it,
+each counted once; its `exposure_sessions` counts every session that touched
+anything beneath it. Commands are not in the tree.
 
 ## Generic event format
 
@@ -147,7 +175,7 @@ Common fields:
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `session` | yes | Session id (string or number). |
-| `kind` | yes | `"tool_call"`, `"tool_result"`, `"user_message"` or `"interrupt"`. Other kinds are ignored. |
+| `kind` | yes | `"tool_call"`, `"tool_result"`, `"user_message"`, `"interrupt"` or (optional) `"assistant_message"`. Other kinds are ignored. |
 | `ts` | no | ISO-8601 timestamp or epoch seconds. Without it no time is estimated. |
 | `cwd` | no | Working directory; relative paths resolve against it. Unknown means the repo root. |
 | `subagent` | no | `true` for events of a sub-agent: its `user_message`s are not treated as human. |
@@ -179,6 +207,12 @@ Common fields:
 | `reason` | What the human said when declining (`error: "rejected"`). |
 
 `user_message` needs `text`. `interrupt` needs nothing else.
+
+`assistant_message` (optional) carries the agent's prose in `text`. Nothing
+of it is stored or emitted; it is used for one thing only: if the agent's
+last message before a `user_message` ends with a question mark, a reply that
+opens with "No, ..." is read as an answer rather than a correction. Leave
+these events out and every such reply counts as a correction.
 
 ```jsonl
 {"session":"s1","ts":"2026-11-05T16:00:00Z","kind":"user_message","text":"Add a sku field"}

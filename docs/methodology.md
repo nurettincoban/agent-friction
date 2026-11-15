@@ -11,7 +11,9 @@ constants live next to the code that uses them and are listed here.
    you pass). See [Discovery](#discovery).
 2. **Normalize.** Each transcript becomes a list of events: tool call, tool
    result, human message, interrupt. Thinking blocks and assistant prose are
-   discarded at this step and never reach the output.
+   discarded at this step and never reach the output (of the agent's prose
+   only one bit is kept: whether its last message before a human reply ended
+   with a question mark).
 3. **Detect.** Deterministic rules turn events into friction events
    ([signal catalog](signals.md)). Git history adds `human-rework`.
 4. **Attribute** each event to a file, a directory or a normalized command.
@@ -44,7 +46,8 @@ directory) if set, otherwise `~/.claude` and `~/.config/claude`.
   no path that resolves into it) is left out and reported as
   `sessions_outside_repo`.
 - For `human-rework`, each agent commit acts as a session (`git:<sha>`). These
-  count towards a hotspot's `sessions` but not towards `totals.sessions`.
+  count towards a hotspot's `sessions` and `exposure_sessions`, but not
+  towards `totals.sessions` and not towards confidence.
 
 ## Attribution
 
@@ -55,28 +58,79 @@ repo and inside `.git` are dropped. Symlinks in the target path are not
 followed, and files need not exist any more.
 
 **Commands.** A command line is reduced to a short key so that variants group
-together:
+together, and so that the key can be shown even when excerpts are off:
 
-1. Heredoc bodies are cut off; the last `;`/newline-separated statement is
-   used, because its exit status is the one the shell reports.
-2. In that statement, pipeline tails (`| tail -20`), redirections, leading
-   `VAR=value` assignments and wrappers (`sudo`, `env`, `time`, `timeout N`,
-   ...) are stripped. Of a `&&`/`||` chain, the **last significant** command
-   names it: setup (`cd`, `export`, `source`, `echo`, ...), housekeeping
-   (`mkdir`, `touch`, `rm`, `cp`, `mv`, ...) and read-only inspection steps
-   are passed over, so `mkdir -p out && pytest tests/x.py` is `pytest`. If
-   nothing significant is left, the last command is used.
-3. Executables under `bin/`, `.venv/`, `node_modules/` or given by absolute
-   path become their basename; `python3`, `python3.12` become `python`.
-4. Interpreters keep `-m module` or the script path (`python -m pytest`,
-   `python scripts/gen.py`). Common single-purpose tools (`pytest`, `ls`,
-   `rm`, ...) keep no arguments. Otherwise one lower-case subcommand word is
-   kept (`git commit`, `make test`, `cargo test`), and a second one after
-   `run`, `exec`, `compose`, `pr`, ... (`npm run build`, `uv run pytest`).
+1. **Split into simple commands.** Heredoc bodies are dropped (they are data).
+   The line is split at `;`, newlines, `&&`, `||`, `|` and `&`; subshell
+   parentheses and shell keywords (`if`, `then`, `!`, `for ... do`, `while`,
+   `done`, `fi`, ...) are looked through, and `bash -c '<script>'` is replaced
+   by the commands of its script. Redirections, leading `VAR=value`
+   assignments and wrappers (`sudo`, `env`, `time`, `timeout N`, `nohup`,
+   `xargs`, ...) are stripped from each command.
+2. **Pick the command that names the line:** the **last significant** one.
+   Setup (`cd`, `export`, `source`, `echo`, ...), housekeeping (`mkdir`,
+   `touch`, `rm`, `cp`, `mv`, ...) and read-only inspection (`cat`, `tail`,
+   `grep`, ...) are passed over, so `mkdir -p out && pytest tests/x.py | tail
+   -5` is `pytest` and `echo hi | python -m json.tool` is `python -m
+   json.tool`. If nothing significant is left, the line is named after what
+   was inspected (`grep -rn x src | head` is `grep`).
+3. **Name the executable.** Executables under `bin/`, `.venv/`,
+   `node_modules/` or given by absolute path become their basename;
+   `python3`, `python3.12` become `python`; `./scripts/build.sh` becomes
+   `scripts/build.sh`.
+4. **Keep arguments only where they are known to be names, not data:**
+   - interpreters keep `-m module` or the script path (`python -m pytest`,
+     `python scripts/gen.py`);
+   - tools on a fixed allowlist of multi-command tools (`SUBCOMMAND_TOOLS`:
+     `git`, `npm`, `pnpm`, `yarn`, `uv`, `cargo`, `go`, `make`, `docker`,
+     `kubectl`, `gh`, `terraform`, `aws`, ...) keep **one** lower-case
+     subcommand word. Options in front of it are skipped, together with their
+     value where the tool defines one (`make -j4 test` -> `make test`, `git -C
+     /repo commit` -> `git commit`, `pnpm --filter web test` -> `pnpm test`,
+     `kubectl -n prod get pods` -> `kubectl get`);
+   - one further word is kept only after a script runner or command group of
+     that tool (`CONTINUING_SUBCOMMANDS`: `npm run build`, `uv run pytest`,
+     `poetry run python -m pytest`, `docker compose up`, `gh pr create`);
+   - **every other program is its executable name alone**: `./run s3cret` is
+     `run`, `mytool acme-codename --x` is `mytool`, `ssh host cmd` is `ssh`,
+     `docker run <image>` is `docker run`.
 
-Examples: `CI=1 npm test -- foo` -> `npm test`;
-`cd api && pytest tests/x.py -x 2>&1 | tail` -> `pytest`;
+A key therefore consists of an executable name plus, at most, a subcommand of
+an allowlisted tool, a `make`/`npm run`-style target or script name, or an
+interpreter's script path or module. Free-form arguments, option values, host
+names, URLs and environment assignments are never part of a key.
+
+More examples: `CI=1 npm test -- foo` -> `npm test`;
+`cat <<EOF > x.py ... EOF` + `python x.py` -> `python x.py`;
+`if ! make lint; then exit 1; fi` -> `make lint`;
+`for t in a b; do pytest $t || exit 1; done` -> `pytest`;
 `touch x && uv pip install -e . && python -m pytest | tail -5` -> `python -m pytest`.
+
+Files are attributed from a command line only if they are arguments of the
+command that names the line. When a human declines a chain of commands, the
+event is keyed by the step they most plausibly objected to (see
+[`tool-rejected`](signals.md)).
+
+## Exposure
+
+Friction only means something relative to how often the agent goes somewhere.
+For every target the engine records its **exposure**: the set of sessions in
+which the agent touched it at all, with or without friction.
+
+- **file:** a read, edit or write of the file, a search scoped to it, a
+  failed command or correction attributed to it, or an agent commit that
+  changed it (git);
+- **command:** the command ran (read-only inspection such as `ls`, `cat`,
+  `git status` is not tracked);
+- **directory:** a search scoped to the directory. Tree nodes use every
+  session that touched anything beneath the directory.
+
+`exposure_sessions` is the size of that set and
+`friction_rate = sessions with friction / exposure_sessions`. The report's
+top-level `exposure` object lists the count for every target touched in the
+window, including the ones with no friction, so that two reports can be
+compared fairly (a hotspot that vanished because nobody went there is not a
+hotspot that got fixed).
 
 ## Score (0-100)
 
@@ -85,28 +139,58 @@ For one hotspot (file, directory or command):
 ```
 event value      = severity(signal) x weight x share
 session points   = log2(1 + sum of event values in that session)
-intensity        = sum of session points over all sessions
-score            = 100 x (1 - exp(-intensity / 10))
+mean points      = mean of session points over the sessions with friction
+
+severity    = 1 - exp(-mean points / 1.5)                      how bad, when it happens
+recurrence  = min(1, log2(1 + friction sessions) / 3)          how often it has happened
+consistency = 0.4 + 0.6 x friction sessions / (exposure sessions + 1)
+                                                               how reliably it happens
+score       = 100 x severity x recurrence x consistency
 ```
 
-- **severity** is the per-signal constant from the [catalog](signals.md).
+- **severity(signal)** is the per-signal constant from the [catalog](signals.md).
 - **weight** is 1 except: `user-correction` uses its confidence (1.0, or 0.4
   for a "probable" correction), and an ordinary `command-failure` uses 0.3.
 - **share** is 1 except when one correction is split over several files.
 - **log2 per session** gives diminishing returns: a session contributes one
   more point each time its friction doubles, so one pathological session
-  cannot dominate. **Summing over sessions** is linear, so recurrence is what
-  moves the score: four sessions with one edit miss each (4 x log2(3) = 6.3)
-  outrank one session with twelve (log2(25) = 4.6).
-- The scale constant 10 means intensity 10 maps to a score of 63. The score is
-  absolute, not relative to other hotspots, so it is comparable across runs.
+  cannot dominate.
+- **severity** depends on the *mean* over sessions, not the sum, so it does
+  not grow with the amount of transcript history. One edit miss per session
+  (1.58 points) gives 0.65; a correction plus two edit misses (3.17 points)
+  gives 0.88.
+- **recurrence** is logarithmic and reaches 1 at 7 friction sessions: 1
+  session = 0.33, 2 = 0.53, 3 = 0.67, 5 = 0.86. A single session can never
+  score above 33 x consistency, however bad it was.
+- **consistency** is where exposure enters. It runs from 0.4 (friction in a
+  vanishing fraction of the sessions that went there) to just under 1
+  (every time). The `+ 1` is one imaginary clean session, so that "1 of 1" is
+  not treated as "always". The floor of 0.4 keeps a file that hurts in 10
+  sessions out of 200 on the list, but below one that hurts in 5 out of 5:
 
-The output includes `score_detail` (intensity and the per-session values) so
-the arithmetic can be checked. Directory nodes in the tree are scored with the
-same formula over all events beneath them, each event counted once.
+  | Friction (one edit miss each) | Score |
+  | --- | --- |
+  | 5 of 5 sessions | 50.6 |
+  | 10 of 200 sessions | 28.0 |
+  | 1 of 1 session | 15.2 |
+  | 1 of 20 sessions | 9.3 |
 
-Rough reading: below 15 is a single incident; 30-60 is a pattern worth a line
-in AGENTS.md; above 60 is a place where agents reliably struggle.
+- The score is absolute, not relative to other hotspots, and it does not
+  saturate: with thousands of sessions a place where every session has one
+  read loop scores about 32, and it approaches 100 only as *every* visit goes
+  *badly*. It is comparable across runs and across repositories of different
+  size.
+
+The output includes `exposure_sessions`, `friction_rate` and `score_detail`
+(the three factors, the mean and the per-session values) so the arithmetic can
+be checked: `score = 100 x severity x recurrence x consistency` up to
+rounding. Directory nodes in the tree are scored with the same formula over
+all events beneath them, each event counted once, against all sessions that
+touched anything beneath them.
+
+Rough reading: below 20 is a single incident or a rare one; 20-45 is a
+pattern worth a line in AGENTS.md; above 45 is a place where agents reliably
+struggle. Read the score together with `friction_rate` and the confidence.
 
 ## Estimated time lost
 
@@ -143,6 +227,11 @@ counting. Events without timestamps claim nothing.
 | `high` | 3 or more distinct sessions **and** 2 or more distinct signal types, not counting hotspots whose only signals are the weak ones (`read-loop`, `edit-thrash`) |
 | `medium` | 2 or more distinct sessions |
 | `low` | a single session |
+
+Only transcript evidence counts here. Agent commits are not sessions and
+`human-rework` is not a signal type for this purpose: git history can
+corroborate a hotspot (it adds to the score), but it can never lift one to
+"medium" or "high" on its own.
 
 Confidence says how sure we are that the hotspot is a recurring property of
 the codebase rather than one bad day. It is independent of the score.
@@ -189,9 +278,14 @@ Transcripts contain secrets. The engine therefore:
   commit subjects) in exactly two places: `excerpt` and the quotes inside
   recommendation details. Both disappear with `include_excerpts=False`.
   What remains then is structural: tool names, repo-relative paths, counts,
-  commit hashes and **normalized command names** such as `pytest` or
-  `npm run build` (the identity of a command hotspot; arguments are never
-  part of it);
+  commit hashes and **command keys** such as `pytest` or `npm run build`. A
+  key is an executable name plus, at most, a subcommand of an allowlisted
+  tool, a script or target name after a runner (`make <target>`, `npm run
+  <script>`) or an interpreter's script path or module (see
+  [Attribution](#attribution)). No other word of a command line survives: the
+  arguments of a tool that is not on the allowlist are never part of a key
+  (`./run s3cret` is `run`). The same holds for the keys of the top-level
+  `exposure` object;
 - redacts **before** truncating (default 240 characters), so a secret cannot
   be cut in half and slip through;
 - applies these rules, in order: private-key blocks; AWS access keys; vendor
@@ -199,14 +293,19 @@ Transcripts contain secrets. The engine therefore:
   Stripe, npm, Hugging Face); JWTs; `Authorization:` header values;
   `Bearer`/`Basic` credentials; credentials in URLs (`scheme://user:pass@`);
   `-u user:pass` / `--user`; `--password x` style flags; `password=`,
-  `token:`, `api_key=`, `secret=` ... assignments; prose such as "the
-  password is x"; e-mail addresses; hex strings of 32+ characters;
-  mixed-case alphanumeric strings of 24+ characters with Shannon entropy of
-  at least 4.0 bits per character; home directories (`/home/x`, `/Users/x`,
-  `C:\Users\x`, the real home) become `~`.
+  `token:`, `api_key=`, `secret=` ... assignments, including URL query
+  parameters (`?token=`, `&sig=`); `Cookie:` / `Set-Cookie:` header values;
+  connection-string fields (`AccountKey=`, `SharedAccessKey=`, `Password=`);
+  `mysql -pSECRET` / `sshpass -p SECRET`; SendGrid keys (`SG.x.y`); prose
+  such as "the password is x"; e-mail addresses;
+  hex strings of 32+ characters; mixed-case alphanumeric
+  strings of 24+ characters with Shannon entropy of at least 4.0 bits per
+  character; home directories (`/home/x`, `/Users/x`, `C:\Users\x`, the real
+  home) become `~`.
 
 Redaction is pattern matching and will miss secrets that look like ordinary
-words. Review a report before publishing it, or use `include_excerpts=False`.
+words (a short password passed as a bare argument, an internal code name).
+Review a report before publishing it, or use `include_excerpts=False`.
 Claude Code's project directory names embed the working directory (including
 a user name) and appear in `sources[].path` and `evidence[].source`.
 
@@ -218,15 +317,28 @@ a user name) and appear in `sources[].path` and `evidence[].source`.
 - **Friction is not always the codebase's fault.** Some events reflect the
   agent, the prompt or the harness. The recurrence requirement behind
   "medium" and "high" confidence is the main defence; treat "low" as a lead.
-- **Red tests are normal.** Ordinary command failures are down-weighted, not
-  removed; a test-heavy session still adds a little score to `make test`.
+- **Red tests are normal.** A red run that is followed by an edit and a green
+  run of the same command is not counted. Other ordinary failures are
+  down-weighted, not removed: a session that ends red, or a flaky test, still
+  adds a little score to `make test`. A retry loop needs three failures with
+  no successful edit in between.
+- **Exposure is per session, not per call.** A file read once and a file
+  edited fifty times in a session both count as one exposure. Exposure of a
+  command hotspot ignores read-only inspection commands.
+- **Git rework is circumstantial.** Overlapping line ranges show that a human
+  changed what the agent wrote, not why. It weighs little and never raises
+  confidence.
 - **Corrections are English-only.** Correction phrases are matched in
   English; corrections in other languages are missed (never misread).
 - **Corrections are attributed by proximity.** If the human corrects
   something unrelated to the files just edited, the attribution is wrong.
 - **Command grouping is coarse.** `pytest tests/a.py` and `pytest tests/b.py`
-  are one hotspot; `pytest` and `python -m pytest` are two. When `a && b`
-  fails we cannot tell which step failed and name the last significant one.
+  are one hotspot; `pytest` and `python -m pytest` are two; every use of a
+  tool that is not on the subcommand allowlist is one hotspot (`mytool build`
+  and `mytool deploy` are both `mytool`). When `a && b` fails we cannot tell
+  which step failed and name the last significant one. The shell is tokenized,
+  not interpreted: aliases, functions, `eval` and command substitution are not
+  followed.
 - **Corrections are under-counted on purpose.** Only unambiguous phrasing, or
   two weaker cues together, counts; polite, indirect and non-English
   corrections are missed.

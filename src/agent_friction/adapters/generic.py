@@ -16,6 +16,8 @@ from agent_friction.model import Event, ParsedFile, Stream
 
 KIND = "generic"
 
+#: Optional: only whether the text ends in a question is used (never the text itself).
+ASSISTANT_MESSAGE = "assistant_message"
 KINDS = (model.TOOL_CALL, model.TOOL_RESULT, model.USER_MESSAGE, model.INTERRUPT)
 
 
@@ -86,6 +88,7 @@ def parse_file(path: Path) -> ParsedFile:
     """Parse one generic-format ``.jsonl`` file (it may hold several sessions)."""
     streams: dict[tuple[str, bool], Stream] = {}
     parsed = ParsedFile(path=path, kind=KIND, streams=[])
+    asking: dict[tuple[str, bool], bool] = {}
     with path.open(encoding="utf-8", errors="replace") as handle:
         for number, raw in enumerate(handle, 1):
             raw = raw.strip()
@@ -99,10 +102,16 @@ def parse_file(path: Path) -> ParsedFile:
             if not isinstance(obj, dict):
                 parsed.skipped_lines += 1
                 continue
+            session = obj.get("session")
+            if obj.get("kind") == ASSISTANT_MESSAGE and isinstance(session, (str, int)):
+                text = obj.get("text")
+                asking[(str(session), obj.get("subagent") is True)] = isinstance(
+                    text, str
+                ) and text.rstrip().endswith("?")
+                continue
             if obj.get("kind") not in KINDS:
                 parsed.ignored_lines += 1
                 continue
-            session = obj.get("session")
             event = _event(obj, number)
             if event is None or not isinstance(session, (str, int)) or session == "":
                 parsed.skipped_lines += 1
@@ -110,6 +119,10 @@ def parse_file(path: Path) -> ParsedFile:
             key = (str(session), obj.get("subagent") is True)
             if key not in streams:
                 streams[key] = Stream(session_id=key[0], source=path, kind=KIND, sidechain=key[1])
+            if event.kind == model.USER_MESSAGE:
+                event.after_question = asking.pop(key, False)
+            elif event.kind == model.TOOL_CALL:
+                asking.pop(key, None)
             streams[key].events.append(event)
     parsed.streams = list(streams.values())
     return parsed

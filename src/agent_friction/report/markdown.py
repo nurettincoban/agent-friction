@@ -52,13 +52,17 @@ def _details(h: dict[str, Any], titles: dict[str, str]) -> list[str]:
     ]
     why = str(h.get("why", "")).strip()
     if why:
-        out += [why, ""]
+        out += [_html_escape(why), ""]
     recs = h.get("recommendations", [])
     if recs:
         out.append("**Recommendations**")
         out.append("")
         for rec in recs:
-            out.append(f"- **{rec.get('title', '')}** {rec.get('detail', '')}".rstrip())
+            title, detail = (
+                _html_escape(str(rec.get("title", ""))),
+                _html_escape(str(rec.get("detail", ""))),
+            )
+            out.append(f"- **{title}** {detail}".rstrip())
         out.append("")
     ev = h.get("evidence", [])
     if ev:
@@ -69,10 +73,10 @@ def _details(h: dict[str, Any], titles: dict[str, str]) -> list[str]:
             sid = str(e.get("signal", ""))
             out.append(
                 f"- `{ts}` session `{str(e.get('session_id', ''))[:8]}` · "
-                f"{titles.get(sid, sid)}: {e.get('summary', '')}"
+                f"{titles.get(sid, sid)}: {_html_escape(str(e.get('summary', '')))}"
             )
             if e.get("excerpt"):
-                quoted = str(e["excerpt"]).replace("\n", " ")
+                quoted = _html_escape(str(e["excerpt"]).replace("\n", " "))
                 out.append(f"  > {quoted}")
         out.append("")
     out += ["</details>", ""]
@@ -107,9 +111,9 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
     if recs:
         out += ["## What to fix first", ""]
         for i, (h, rec) in enumerate(recs, 1):
-            out.append(
-                f"{i}. {_code(h.get('path'))}: **{rec.get('title', '')}** {rec.get('detail', '')}"
-            )
+            title = _html_escape(str(rec.get("title", "")))
+            detail = _html_escape(str(rec.get("detail", "")))
+            out.append(f"{i}. {_code(h.get('path'))}: **{title}** {detail}")
         out.append("")
 
     if hotspots:

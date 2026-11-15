@@ -252,7 +252,7 @@ def test_generic_format(tmp_path: Path) -> None:
         },
         {"session": "s1", "kind": "interrupt"},
         {"session": "s2", "kind": "user_message", "text": "sub", "subagent": True},
-        {"session": "s1", "kind": "assistant_message", "text": "ignored kind"},
+        {"session": "s1", "kind": "telemetry", "text": "ignored kind"},
         {"session": "s1", "kind": "tool_call"},  # no id: skipped
         {"kind": "user_message", "text": "no session"},  # skipped
         {"session": "s1", "kind": "user_message", "text": "   "},  # skipped

@@ -1,6 +1,6 @@
 # Agent friction map: shopfront
 
-6 agent sessions analysed · 36 friction events · ~28m lost · 5 human corrections · 6 files affected
+6 agent sessions analysed · 35 friction events · ~28m lost · 5 human corrections · 6 files affected
 
 ## What to fix first
 
@@ -8,41 +8,40 @@
 2. `pytest`: **Tell agents to use `make test`** `pytest` failed 7 times in 4 sessions; 5 times the next successful command was `make test`. Add a line to AGENTS.md such as: "use `make test`, not `pytest`".
 3. `src/shopfront/checkout/service.py`: **Write down the rule the human keeps repeating** A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint."
 4. `src/shopfront`: **Point agents to what they are searching for** Agents searched under src/shopfront/ and found nothing 5 times in 2 sessions. They looked for `RefundPolicy` (2x), `**/*policy*.py`, `DiscountPolicy`. If the concept exists under another name or elsewhere, add a pointer in AGENTS.md (or a comment/alias where agents look). If it does not exist, say so.
-5. `alembic revision`: **State the boundary** A human declined the agent's action once in 1 session. State the boundary explicitly (what must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a permission rule. Reasons given: "never delete existing migrations, add a new revision on top"
+5. `rm`: **State the boundary** A human declined the agent's action once in 1 session. State the boundary explicitly (what must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a permission rule. Reasons given: "never delete existing migrations, add a new revision on top"
 
 ## Files where agents struggle
 
 | # | File | Score | Sessions | Events | Est. time lost | Top signals | Confidence |
 |---:|---|---:|---:|---:|---:|---|---|
-| 1 | `src/shopfront/api/schema_gen.py` | 66.0 | 4 | 12 | 11m | `edit-miss`×6, `user-correction`×3, `read-loop`×1 | high |
-| 2 | `src/shopfront/checkout/service.py` | 42.1 | 3 | 6 | 19m | `user-correction`×3, `edit-revert`×2, `edit-thrash`×1 | high |
-| 3 | `tests/test_refunds.py` | 14.4 | 1 | 2 | 5m | `command-failure`×1, `user-correction`×1 | low |
-| 4 | `src/shopfront/payments/client.py` | 11.5 | 1 | 1 | 5m | `user-correction`×1 | low |
-| 5 | `api/openapi.yaml` | 9.5 | 1 | 1 | 24s | `search-miss`×1 | low |
-| 6 | `src/shopfront/payments/refunds.py` | 9.5 | 1 | 1 | 18s | `path-miss`×1 | low |
+| 1 | `src/shopfront/api/schema_gen.py` | 56.8 | 4 | 12 | 11m | `edit-miss`×6, `user-correction`×3, `read-loop`×1 | high |
+| 2 | `src/shopfront/checkout/service.py` | 39.8 | 3 | 6 | 19m | `user-correction`×3, `edit-revert`×2, `edit-thrash`×1 | high |
+| 3 | `tests/test_refunds.py` | 15.0 | 1 | 2 | 5m | `command-failure`×1, `user-correction`×1 | low |
+| 4 | `src/shopfront/payments/refunds.py` | 11.4 | 1 | 1 | 18s | `path-miss`×1 | low |
+| 5 | `src/shopfront/payments/client.py` | 11.1 | 1 | 1 | 5m | `user-correction`×1 | low |
+| 6 | `api/openapi.yaml` | 9.7 | 1 | 1 | 24s | `search-miss`×1 | low |
 
 ## Commands that keep failing
 
 | # | Command | Score | Sessions | Events | Est. time lost | Top signals | Confidence |
 |---:|---|---:|---:|---:|---:|---|---|
-| 1 | `pytest` | 55.6 | 4 | 8 | 6m | `command-failure`×7, `retry-loop`×1 | high |
-| 2 | `alembic revision` | 16.5 | 1 | 1 | 42s | `tool-rejected`×1 | low |
-| 3 | `curl` | 14.7 | 1 | 1 | 24s | `command-failure`×1 | low |
-| 4 | `python -m pytest` | 14.7 | 1 | 1 | 30s | `command-failure`×1 | low |
-| 5 | `make test` | 6.6 | 1 | 1 | 0m | `command-failure`×1 | low |
+| 1 | `pytest` | 50.5 | 4 | 8 | 6m | `command-failure`×7, `retry-loop`×1 | high |
+| 2 | `rm` | 16.3 | 1 | 1 | 42s | `tool-rejected`×1 | low |
+| 3 | `curl` | 15.2 | 1 | 1 | 24s | `command-failure`×1 | low |
+| 4 | `python -m pytest` | 15.2 | 1 | 1 | 30s | `command-failure`×1 | low |
 
 ## Directories where agents search in vain
 
 | # | Directory | Score | Sessions | Events | Est. time lost | Top signals | Confidence |
 |---:|---|---:|---:|---:|---:|---|---|
-| 1 | `src/shopfront` | 30.1 | 2 | 5 | 1m | `search-miss`×5 | medium |
+| 1 | `src/shopfront` | 29.5 | 2 | 5 | 1m | `search-miss`×5 | medium |
 
 ## Evidence
 
 <details>
-<summary><code>src/shopfront/api/schema_gen.py</code> · score 66.0 · 4 sessions</summary>
+<summary><code>src/shopfront/api/schema_gen.py</code> · score 56.8 · 4 sessions</summary>
 
-12 friction events in 4 sessions (6 edit miss, 3 user correction, 1 read loop, 2 more signal types); high confidence because it recurs across sessions with several kinds of evidence.
+12 friction events in all 4 sessions that touched it (6 edit miss, 3 user correction, 1 read loop, 2 more signal types); high confidence because it recurs across sessions with several kinds of evidence.
 
 **Recommendations**
 
@@ -64,9 +63,9 @@
 </details>
 
 <details>
-<summary><code>src/shopfront/checkout/service.py</code> · score 42.1 · 3 sessions</summary>
+<summary><code>src/shopfront/checkout/service.py</code> · score 39.8 · 3 sessions</summary>
 
-6 friction events in 3 sessions (3 user correction, 2 edit reverted, 1 edit thrash); high confidence because it recurs across sessions with several kinds of evidence.
+6 friction events in all 3 sessions that touched it (3 user correction, 2 edit reverted, 1 edit thrash); high confidence because it recurs across sessions with several kinds of evidence.
 
 **Recommendations**
 
@@ -86,9 +85,9 @@
 </details>
 
 <details>
-<summary><code>tests/test_refunds.py</code> · score 14.4 · 1 session</summary>
+<summary><code>tests/test_refunds.py</code> · score 15.0 · 1 session</summary>
 
-2 friction events in 1 session (1 command failure, 1 user correction); low confidence because it was seen in a single session so far.
+2 friction events in the only session that touched it (1 command failure, 1 user correction); low confidence because there is too little independent evidence so far.
 
 **Evidence**
 
@@ -100,33 +99,9 @@
 </details>
 
 <details>
-<summary><code>src/shopfront/payments/client.py</code> · score 11.5 · 1 session</summary>
+<summary><code>src/shopfront/payments/refunds.py</code> · score 11.4 · 1 session</summary>
 
-1 friction event in 1 session (1 user correction); low confidence because it was seen in a single session so far.
-
-**Evidence**
-
-- `2026-10-29 14:11` session `9f6ff626` · User correction: User correction (confidence 1; matched "no, …", "I told you"); after edits to src/shopfront/checkout/service.py, tests/test_refunds.py, src/shopfront/payments/client.py
-  > No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.
-
-</details>
-
-<details>
-<summary><code>api/openapi.yaml</code> · score 9.5 · 1 session</summary>
-
-1 friction event in 1 session (1 search miss); low confidence because it was seen in a single session so far.
-
-**Evidence**
-
-- `2026-11-12 11:01` session `fb4e20bf` · Search miss: Grep search in api/openapi.yaml returned nothing
-  > pattern: API_VERSION
-
-</details>
-
-<details>
-<summary><code>src/shopfront/payments/refunds.py</code> · score 9.5 · 1 session</summary>
-
-1 friction event in 1 session (1 path miss); low confidence because it was seen in a single session so far.
+1 friction event in the only session that touched it (1 path miss); low confidence because there is too little independent evidence so far.
 
 **Evidence**
 
@@ -136,9 +111,33 @@
 </details>
 
 <details>
-<summary><code>pytest</code> · score 55.6 · 4 sessions</summary>
+<summary><code>src/shopfront/payments/client.py</code> · score 11.1 · 1 session</summary>
 
-8 friction events in 4 sessions (7 command failure, 1 retry loop); high confidence because it recurs across sessions with several kinds of evidence.
+1 friction event in 1 of the 2 sessions that touched it (1 user correction); low confidence because there is too little independent evidence so far.
+
+**Evidence**
+
+- `2026-10-29 14:11` session `9f6ff626` · User correction: User correction (confidence 1; matched "no, …", "I told you"); after edits to src/shopfront/checkout/service.py, tests/test_refunds.py, src/shopfront/payments/client.py
+  > No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.
+
+</details>
+
+<details>
+<summary><code>api/openapi.yaml</code> · score 9.7 · 1 session</summary>
+
+1 friction event in 1 of the 2 sessions that touched it (1 search miss); low confidence because there is too little independent evidence so far.
+
+**Evidence**
+
+- `2026-11-12 11:01` session `fb4e20bf` · Search miss: Grep search in api/openapi.yaml returned nothing
+  > pattern: API_VERSION
+
+</details>
+
+<details>
+<summary><code>pytest</code> · score 50.5 · 4 sessions</summary>
+
+8 friction events in all 4 sessions that touched it (7 command failure, 1 retry loop); high confidence because it recurs across sessions with several kinds of evidence.
 
 **Recommendations**
 
@@ -148,21 +147,21 @@
 **Evidence**
 
 - `2026-10-26 10:03` session `e65615b3` · Command failure: `pytest` failed (exit 4; setup/invocation error)
-  > $ pytest tests/test_checkout.py -q Exit code 4 ImportError while loading conftes … /shopfront/tests/conftest.py'. tests/conftest.py:3: in <module>     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
+  > $ pytest tests/test_checkout.py -q Exit code 4 ImportError while loading conftes … /shopfront/tests/conftest.py'. tests/conftest.py:3: in &lt;module&gt;     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
 - `2026-10-29 14:03` session `9f6ff626` · Command failure: `pytest` failed (exit 4; setup/invocation error)
-  > $ pytest tests/test_refunds.py -x Exit code 4 ImportError while loading conftest '~/shopfront/tests/conftest.py'. tests/conftest.py:3: in <module>     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
+  > $ pytest tests/test_refunds.py -x Exit code 4 ImportError while loading conftest '~/shopfront/tests/conftest.py'. tests/conftest.py:3: in &lt;module&gt;     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
 - `2026-10-29 14:04` session `9f6ff626` · Retry loop: `pytest` failed 3 times in a row
 - `2026-11-05 16:01` session `aider-20` · Command failure: `pytest` failed (exit 4; setup/invocation error)
-  > $ pytest -q ImportError while loading conftest '~/shopfront/tests/conftest.py'. tests/conftest.py:3: in <module>     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
+  > $ pytest -q ImportError while loading conftest '~/shopfront/tests/conftest.py'. tests/conftest.py:3: in &lt;module&gt;     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
 - `2026-11-09 15:01` session `8d986baa` · Command failure: `pytest` failed (exit 4; setup/invocation error)
-  > $ pytest tests/test_checkout.py Exit code 4 ImportError while loading conftest '~/shopfront/tests/conftest.py'. tests/conftest.py:3: in <module>     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
+  > $ pytest tests/test_checkout.py Exit code 4 ImportError while loading conftest '~/shopfront/tests/conftest.py'. tests/conftest.py:3: in &lt;module&gt;     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
 
 </details>
 
 <details>
-<summary><code>alembic revision</code> · score 16.5 · 1 session</summary>
+<summary><code>rm</code> · score 16.3 · 1 session</summary>
 
-1 friction event in 1 session (1 tool call declined); low confidence because it was seen in a single session so far.
+1 friction event in the only session that touched it (1 tool call declined); low confidence because there is too little independent evidence so far.
 
 **Recommendations**
 
@@ -170,15 +169,15 @@
 
 **Evidence**
 
-- `2026-11-03 09:03` session `4132e18c` · Tool call declined: The user declined Bash on `alembic revision` and said why
-  > $ rm -rf migrations/versions && alembic revision --autogenerate -m currency user said: never delete existing migrations, add a new revision on top
+- `2026-11-03 09:03` session `4132e18c` · Tool call declined: The user declined Bash on `rm` and said why
+  > $ rm -rf migrations/versions &amp;&amp; alembic revision --autogenerate -m currency user said: never delete existing migrations, add a new revision on top
 
 </details>
 
 <details>
-<summary><code>curl</code> · score 14.7 · 1 session</summary>
+<summary><code>curl</code> · score 15.2 · 1 session</summary>
 
-1 friction event in 1 session (1 command failure); low confidence because it was seen in a single session so far.
+1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far.
 
 **Evidence**
 
@@ -188,33 +187,21 @@
 </details>
 
 <details>
-<summary><code>python -m pytest</code> · score 14.7 · 1 session</summary>
+<summary><code>python -m pytest</code> · score 15.2 · 1 session</summary>
 
-1 friction event in 1 session (1 command failure); low confidence because it was seen in a single session so far.
+1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far.
 
 **Evidence**
 
 - `2026-11-12 11:02` session `fb4e20bf` · Command failure: `python -m pytest` failed (exit 4; setup/invocation error)
-  > $ python -m pytest -q Exit code 4 ImportError while loading conftest '~/shopfront/tests/conftest.py'. tests/conftest.py:3: in <module>     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
+  > $ python -m pytest -q Exit code 4 ImportError while loading conftest '~/shopfront/tests/conftest.py'. tests/conftest.py:3: in &lt;module&gt;     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
 
 </details>
 
 <details>
-<summary><code>make test</code> · score 6.6 · 1 session</summary>
+<summary><code>src/shopfront</code> · score 29.5 · 2 sessions</summary>
 
-1 friction event in 1 session (1 command failure); low confidence because it was seen in a single session so far.
-
-**Evidence**
-
-- `2026-11-09 15:02` session `8d986baa` · Command failure: `make test` failed (exit 2; ordinary failure)
-  > $ make test Exit code 2 FAILED tests/test_checkout.py::test_rounding - assert Decimal('9.99') == 9.99 1 failed, 42 passed
-
-</details>
-
-<details>
-<summary><code>src/shopfront</code> · score 30.1 · 2 sessions</summary>
-
-5 friction events in 2 sessions (5 search miss); medium confidence because it recurs across sessions.
+5 friction events in all 2 sessions that touched it (5 search miss); medium confidence because it recurs across sessions.
 
 **Recommendations**
 
@@ -245,7 +232,7 @@
 | `user-interrupt` User interrupt | 1 | The human interrupted the agent mid-turn (not counted when it merely accompanies a declined tool call). |
 | `edit-miss` Edit miss | 6 | An edit failed because the text to replace was not found in the file, or matched several places. |
 | `edit-revert` Edit reverted | 2 | An edit exactly undid an earlier successful edit to the same file in the same session (or a write restored an earlier version of the file). |
-| `command-failure` Command failure | 10 | A shell command exited non-zero. Failures that look like setup or invocation problems (command not found, missing module, bad arguments, …) count fully; other failures, such as a test that legitimately fails, count at 0.3. Read-only inspection commands (ls, grep, …) are ignored. |
+| `command-failure` Command failure | 9 | A shell command exited non-zero. Failures that look like setup or invocation problems (command not found, missing module, bad arguments, …) count fully; other failures, such as a test that legitimately fails, count at 0.3. Read-only inspection commands (ls, grep, …) are ignored. |
 | `edit-thrash` Edit thrash | 1 | One file received 6 or more successful edits within a single user turn. |
 | `stale-edit` Stale edit | 1 | An edit or write was refused because the file had not been read first, or changed on disk after it was read. |
 | `path-miss` Path miss | 1 | The agent tried to read or edit a path that does not exist. |

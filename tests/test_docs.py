@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 
@@ -39,7 +40,18 @@ def test_documented_thresholds_match_the_code() -> None:
     assert f"a probable correction is worth {worth:g}" in catalog
     assert f"or {signals.CORRECTION_PROBABLE}\n  for a" in method
     assert f"({gitsignals.DEFAULT_REWORK_WINDOW_DAYS}\ndays by default)" in catalog
-    assert f"exp(-intensity / {scoring.SCORE_SCALE:g})" in method
+    assert f"exp(-mean points / {scoring.SEVERITY_SCALE:g})" in method
+    bits = math.log2(1 + scoring.RECURRENCE_FULL_SESSIONS)
+    assert f"log2(1 + friction sessions) / {bits:g})" in method
+    assert f"reaches 1 at {scoring.RECURRENCE_FULL_SESSIONS} friction sessions" in method
+    floor, prior = scoring.CONSISTENCY_FLOOR, scoring.EXPOSURE_PRIOR_SESSIONS
+    assert (
+        f"consistency = {floor:g} + {1 - floor:g} x friction sessions / "
+        f"(exposure sessions + {prior})"
+    ) in method
+    assert f"only the newest {gitsignals.MAX_PATCH_COMMITS} candidate commits" in catalog
+    rework, miss = signals.SEVERITY[signals.HUMAN_REWORK], signals.SEVERITY[signals.EDIT_MISS]
+    assert rework < miss and f"weighs less than an edit miss ({rework:g})" in catalog
     assert f"capped at **{signals.TIME_CAP_SECONDS / 60:g} minutes**" in method
     assert f"next {signals.RECOVERY_LOOKAHEAD} shell calls" in method
     assert f"has {recommend.LARGE_FILE_LINES}+ lines" in method
@@ -65,3 +77,35 @@ def test_generic_format_example_in_the_docs_parses(tmp_path: Path) -> None:
     assert parsed.skipped_lines == 0 and len(parsed.streams[0].events) == 6
     found = detect(path, tmp_path, repo="/work/shop")
     assert [f.signal for f in found] == ["edit-miss", "command-failure", "user-correction"]
+
+
+def test_score_table_in_the_methodology_is_computed_by_the_code() -> None:
+    from datetime import datetime, timezone
+
+    from agent_friction.model import Finding
+
+    def score(friction: int, exposure: int) -> float:
+        when = datetime(2026, 11, 2, tzinfo=timezone.utc)
+        items = [
+            (Finding(signals.EDIT_MISS, f"s{i}", "x.jsonl", 1, when, ""), 1.0)
+            for i in range(friction)
+        ]
+        return scoring.score_items(items, exposure).score
+
+    rows = re.findall(
+        r"^  \| (\d+) of (\d+) sessions? \| ([\d.]+) \|$", read("methodology.md"), re.M
+    )
+    assert len(rows) == 4
+    for friction, exposure, documented in rows:
+        assert score(int(friction), int(exposure)) == float(documented)
+
+
+def test_documented_command_examples_match_the_code() -> None:
+    from agent_friction.attribution import normalize_command
+
+    method = re.sub(r"\s+", " ", read("methodology.md"))
+    examples = re.findall(r"`([^`]+)` -> `([^`]+)`", method)
+    assert len(examples) >= 8
+    for command, key in examples:
+        if "..." not in command:
+            assert normalize_command(command) == key, command

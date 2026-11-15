@@ -64,3 +64,26 @@ def test_resolved_needs_enough_events() -> None:
     assert {c.path: c.status for c in compare(before, after, min_events=10)}[
         "src/shop/api/client.py"
     ] == "unchanged"
+
+
+def test_exposure_separates_resolved_from_inactive() -> None:
+    before, after = sample_result(), sample_result()
+    after["hotspots"] = [h for h in after["hotspots"] if "client.py" not in h["path"]]
+    after["hotspots"] = [h for h in after["hotspots"] if "schema.py" not in h["path"]]
+    after["exposure"] = {"file": {"src/shop/api/client.py": 5}, "command": {}, "dir": {}}
+    s = _statuses(before, after)
+    assert s["src/shop/api/client.py"] == "resolved"  # touched 5 times, no friction
+    assert s["src/shop/generated/schema.py"] == "inactive"  # never touched afterwards
+
+
+def test_rates_use_exposure_not_window_size() -> None:
+    before, after = sample_result(), sample_result()
+    # Same events, but the file was touched in 10x more sessions afterwards.
+    before["hotspots"][0]["exposure_sessions"] = 5
+    after["hotspots"][0]["exposure_sessions"] = 50
+    after["totals"]["sessions"] = 6
+    changes = {c.path: c for c in compare(before, after)}
+    c = changes["src/shop/generated/schema.py"]
+    assert c.status == "improved"
+    assert c.before_rate == 28.0 and c.after_rate == 2.8
+    assert c.to_dict()["after_exposure_sessions"] == 50

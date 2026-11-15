@@ -130,43 +130,84 @@ class PathResolver:
 # Shell command normalization
 # --------------------------------------------------------------------------------------
 
-#: Segments that only prepare the environment; skipped when picking the primary command.
+#: Commands that only prepare the environment; never what a command line is "about".
 SETUP_PROGRAMS = frozenset(
     {"cd", "export", "source", ".", "set", "pushd", "popd", "unset", "true", ":", "echo"}
+    | {"exit", "return", "break", "continue", "shift", "local", "read", "printf", "wait"}
 )
 #: Prefixes stripped in front of the real program.
-WRAPPER_PROGRAMS = frozenset({"sudo", "time", "env", "nohup", "command", "exec", "nice"})
+WRAPPER_PROGRAMS = frozenset(
+    {"sudo", "time", "env", "nohup", "command", "exec", "nice", "xargs", "watch", "stdbuf"}
+)
+#: Shell keywords that may precede a command; stripped (``if ! make lint`` is ``make lint``).
+_KEYWORD_PREFIXES = frozenset({"if", "elif", "then", "else", "do", "while", "until", "!", "{"})
+#: Shell keywords that head a segment with no command in it (``for x in a b``, ``done``).
+_KEYWORD_ONLY = frozenset({"for", "select", "case", "function", "done", "fi", "esac", "}", "in"})
+#: Shells: ``bash -c '<script>'`` is named after the script it runs.
+SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 #: Interpreters: the script (or ``-m module``) is part of the command identity.
-INTERPRETERS = frozenset(
-    {"python", "python3", "node", "bash", "sh", "zsh", "ruby", "perl", "php", "deno", "bun"}
-    | {"tsx", "ts-node", "pwsh"}
+INTERPRETERS = SHELLS | frozenset(
+    {"python", "node", "ruby", "perl", "php", "deno", "bun", "tsx", "ts-node", "pwsh"}
 )
-#: Programs whose first argument is never a subcommand.
-NO_SUBCOMMAND = frozenset(
-    {"ls", "cat", "rm", "mkdir", "grep", "egrep", "fgrep", "rg", "find", "sed", "awk", "head"}
-    | {"tail", "cp", "mv", "touch", "chmod", "chown", "curl", "wget", "pytest", "ruff", "mypy"}
-    | {"eslint", "tsc", "jest", "vitest", "prettier", "black", "flake8", "pylint", "wc", "diff"}
-    | {"sort", "uniq", "xargs", "tee", "which", "stat", "file", "test", "[", "cmp", "kill"}
-    | {"sleep", "open", "code", "jq", "tar", "unzip", "zip", "ln", "du", "df", "ps", "type"}
+#: Tools whose first word after the options is a subcommand. Only for these is anything
+#: beyond the executable name kept, so arguments of unknown tools never enter a key.
+SUBCOMMAND_TOOLS = frozenset(
+    {"git", "npm", "pnpm", "yarn", "bun", "npx", "uv", "uvx", "cargo", "go", "make", "docker"}
+    | {"podman", "kubectl", "helm", "poetry", "pip", "pip3", "pipx", "pipenv", "pdm", "hatch"}
+    | {"rye", "gh", "glab", "dotnet", "gradle", "gradlew", "mvn", "bazel", "rake"}
+    | {"bundle", "composer", "terraform", "nx", "turbo", "just", "task", "invoke", "deno"}
+    | {"brew", "apt", "apt-get", "conda", "mamba", "rustup", "swift", "flutter", "dart", "mix"}
+    | {"lerna", "alembic", "flask", "rails", "django-admin", "wrangler", "vercel", "supabase"}
+    | {"firebase", "aws", "gcloud", "az", "systemctl", "pre-commit", "cmake", "ninja", "zig"}
 )
-#: After one of these subcommands the next word still identifies what runs.
-CONTINUING_SUBCOMMANDS = frozenset(
-    {
-        "run",
-        "exec",
-        "compose",
-        "pr",
-        "issue",
-        "repo",
-        "x",
-        "dlx",
-        "tool",
-        "task",
-        "workspace",
-        "pip",
-    }
-    | {"run-script", "buildx", "api"}
-)
+#: Per tool, the subcommands after which one more word still names what runs: a script
+#: runner (``npm run build``, ``uv run pytest``) or a command group (``gh pr create``).
+#: Anything else that follows a subcommand is an argument and never part of the key
+#: (``docker run <image>``, ``kubectl exec <pod>``, ``yarn workspace <name>``).
+_RUNNERS = frozenset({"run", "exec"})
+CONTINUING_SUBCOMMANDS: dict[str, frozenset[str]] = {
+    "npm": _RUNNERS | {"run-script"},
+    "pnpm": _RUNNERS | {"dlx"},
+    "yarn": _RUNNERS | {"dlx"},
+    "bun": frozenset({"run", "x"}),
+    "uv": frozenset({"run", "pip", "tool"}),
+    "poetry": frozenset({"run"}),
+    "pipenv": frozenset({"run"}),
+    "pdm": frozenset({"run"}),
+    "hatch": frozenset({"run"}),
+    "rye": frozenset({"run"}),
+    "bundle": frozenset({"exec"}),
+    "nx": frozenset({"run"}),
+    "turbo": frozenset({"run"}),
+    "deno": frozenset({"run", "task"}),
+    "docker": frozenset({"compose", "buildx"}),
+    "podman": frozenset({"compose"}),
+    "gh": frozenset({"pr", "issue", "repo", "run", "release", "workflow"}),
+    "glab": frozenset({"mr", "issue", "repo", "ci"}),
+    "git": frozenset({"stash", "remote", "worktree", "submodule"}),
+}
+#: Options of subcommand tools that take a value, skipped together with it
+#: (``git -C /repo commit`` is ``git commit``). ``*`` applies to every tool.
+VALUE_OPTIONS: dict[str, frozenset[str]] = {
+    "*": frozenset({"-C", "--directory", "--cwd", "--prefix", "--project", "--config", "-f"}),
+    "git": frozenset({"-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}),
+    "make": frozenset({"-I", "-o", "-W", "--file", "--makefile", "-j", "--jobs", "-l"}),
+    "npm": frozenset({"--workspace", "-w", "--userconfig"}),
+    "pnpm": frozenset({"--filter", "-F", "--dir", "--workspace-dir"}),
+    "yarn": frozenset({"--cwd"}),
+    "kubectl": frozenset({"-n", "--namespace", "--context", "--kubeconfig", "--cluster", "-s"}),
+    "helm": frozenset({"-n", "--namespace", "--kube-context", "--kubeconfig"}),
+    "docker": frozenset({"--context", "-H", "--host", "-c", "-l", "--log-level"}),
+    "podman": frozenset({"--connection", "--root", "--log-level"}),
+    "cargo": frozenset({"--manifest-path", "--color", "-Z"}),
+    "uv": frozenset({"--python", "-p", "--cache-dir", "--color"}),
+    "poetry": frozenset({"-P"}),
+    "gh": frozenset({"-R", "--repo"}),
+    "aws": frozenset({"--profile", "--region", "--output", "--endpoint-url"}),
+    "gcloud": frozenset({"--project", "--account", "--configuration"}),
+    "terraform": frozenset({"-chdir"}),
+    "go": frozenset(),
+}
 #: Read-only inspection commands. Their failures are routine probing, not friction.
 INSPECTION_PROGRAMS = frozenset(
     {"ls", "cat", "head", "tail", "wc", "stat", "file", "find", "cd", "pwd", "echo", "which"}
@@ -183,19 +224,47 @@ INSPECTION_KEYS = frozenset(
 _NOT_INSPECTION_FLAGS = ("-i", "--in-place", "--exit-code", "--quiet")
 #: Filters whose exit status 1 means "nothing matched / differs", not "failed".
 MATCH_FILTERS = frozenset({"grep", "egrep", "fgrep", "rg", "diff", "cmp", "test", "["})
+#: Programs that only trim or count another command's output at the end of a pipeline.
+OUTPUT_TRIMMERS = frozenset(
+    {"head", "tail", "wc", "sort", "uniq", "less", "more", "cut", "tr", "column", "nl"}
+)
 #: Filesystem housekeeping: rarely the reason a chain of commands failed.
 HOUSEKEEPING_PROGRAMS = frozenset(
-    {"mkdir", "touch", "rm", "cp", "mv", "chmod", "chown", "ln", "tee", "xargs", "wait"}
+    {"mkdir", "touch", "rm", "rmdir", "cp", "mv", "chmod", "chown", "ln", "tee"}
+)
+#: Steps a human is most likely objecting to when declining a command line.
+DESTRUCTIVE_PROGRAMS = frozenset(
+    {"rm", "rmdir", "mv", "dd", "truncate", "shred", "chmod", "chown", "kill", "pkill", "mkfs"}
+)
+DESTRUCTIVE_KEYS = frozenset(
+    {"git push", "git reset", "git clean", "git checkout", "git restore", "git rebase"}
+    | {"git stash", "git branch", "git tag", "git merge", "git commit", "npm publish"}
+    | {"pnpm publish", "yarn publish", "cargo publish", "docker rm", "docker rmi"}
+    | {"docker system", "docker volume", "kubectl delete", "kubectl apply", "helm uninstall"}
+    | {"helm upgrade", "terraform destroy", "terraform apply", "gh release", "uv publish"}
+    | {"poetry publish", "alembic downgrade"}
 )
 
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _SUBCOMMAND_RE = re.compile(r"^[a-z][a-z0-9:_-]*$")
 _PYTHON_RE = re.compile(r"^(python|pypy)[\d.]*$")
 _SEPARATORS = frozenset({";", "&&", "||", "&", "|", "|&", "(", ")", ";;"})
-_PIPE = frozenset({"|", "|&"})
-_STATEMENT_END = frozenset({";", "&", ";;"})
 _VENDOR_DIRS = frozenset({"bin", "node_modules", "venv", ".venv", "Scripts", ".bin"})
 _SCRIPT_RE = re.compile(r"\.[A-Za-z0-9]{1,5}$")
+_HEREDOC_RE = re.compile(r"<<-?\s*(?:'([^']+)'|\"([^\"]+)\"|\\?([A-Za-z_][A-Za-z0-9_]*))")
+#: Nested ``bash -c`` scripts are followed this deep.
+_MAX_NESTING = 2
+
+
+@dataclass(frozen=True)
+class Step:
+    """One simple command of a command line."""
+
+    key: str
+    program: str
+    args: tuple[str, ...]
+    inspection: bool
+    significant: bool
 
 
 @dataclass(frozen=True)
@@ -203,15 +272,34 @@ class ParsedCommand:
     """Result of :func:`parse_command`."""
 
     key: str  # normalized command, "" if nothing recognisable
-    program: str  # program of the primary segment (basename)
-    last_program: str  # final program of the last pipeline (its status is reported)
-    tokens: tuple[str, ...]  # arguments of the last statement, for path extraction
+    program: str  # program of the primary step (basename)
+    last_program: str  # final program of the command line (its status is reported)
+    tokens: tuple[str, ...]  # arguments of the primary step, for path extraction
     inspection: bool = False  # read-only probing: a failure is not friction
+    steps: tuple[Step, ...] = ()  # every simple command, in order
+
+
+def _strip_heredocs(command: str) -> str:
+    """Remove heredoc bodies (they are data) but keep the commands around them."""
+    if "<<" not in command:
+        return command
+    out: list[str] = []
+    terminators: list[str] = []
+    for line in command.split("\n"):
+        if terminators:
+            if line.strip() == terminators[0]:
+                terminators.pop(0)
+            continue
+        found = [a or b or c for a, b, c in _HEREDOC_RE.findall(line)]
+        if found:
+            terminators = found
+            line = _HEREDOC_RE.sub(" ", line)
+        out.append(line)
+    return "\n".join(out)
 
 
 def _tokenize(command: str) -> list[str]:
-    text = command.split("<<", 1)[0]  # heredoc bodies are data, not commands
-    text = text.replace("\\\n", " ").replace("\n", " ; ")
+    text = _strip_heredocs(command).replace("\\\n", " ").replace("\n", " ; ")
     lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     lexer.commenters = ""
@@ -221,26 +309,24 @@ def _tokenize(command: str) -> list[str]:
         return text.split()
 
 
-def _statements(tokens: Sequence[str]) -> list[list[tuple[list[str], bool]]]:
-    """Split tokens into statements (``;``/newline) of simple commands.
-
-    Each simple command carries a flag that is True for a pipeline tail.
-    """
-    statements: list[list[tuple[list[str], bool]]] = [[]]
+def _segments(tokens: Sequence[str]) -> list[list[str]]:
+    """Split tokens into simple commands, dropping redirections and comments."""
+    segments: list[list[str]] = []
     current: list[str] = []
-    piped = False
     skip_next = False
+    comment = False
     for token in tokens:
-        if skip_next:
-            skip_next = False
-            continue
         if token in _SEPARATORS:
             if current:
-                statements[-1].append((current, piped))
+                segments.append(current)
             current = []
-            piped = token in _PIPE
-            if token in _STATEMENT_END:
-                statements.append([])
+            comment = comment and token not in (";", ";;")
+            skip_next = False
+            continue
+        if comment:
+            continue
+        if skip_next:
+            skip_next = False
             continue
         if token[0] in "<>":  # redirection: drop it, its target and a leading fd number
             skip_next = token.strip("<>&") == ""
@@ -248,21 +334,32 @@ def _statements(tokens: Sequence[str]) -> list[list[tuple[list[str], bool]]]:
                 current.pop()
             continue
         if token.startswith("#") and not current:
-            break
+            comment = True
+            continue
         current.append(token)
     if current:
-        statements[-1].append((current, piped))
-    return [statement for statement in statements if statement]
+        segments.append(current)
+    return segments
 
 
 def _strip_prefixes(words: Sequence[str]) -> list[str]:
+    """Drop shell keywords, ``VAR=value`` assignments and wrappers in front of a command."""
     out = list(words)
     while out:
         head = out[0]
-        if _ENV_ASSIGN_RE.match(head) or head in WRAPPER_PROGRAMS:
+        if head in _KEYWORD_ONLY:
+            return []
+        if head in _KEYWORD_PREFIXES or _ENV_ASSIGN_RE.match(head):
             out.pop(0)
+        elif head in WRAPPER_PROGRAMS:
+            out.pop(0)
+            while out and out[0].startswith("-"):  # the wrapper's own flags
+                out.pop(0)
         elif head == "timeout" and len(out) > 2:
-            out = out[2:]
+            out = out[1:]
+            while out and out[0].startswith("-"):
+                out.pop(0)
+            out = out[1:]
         else:
             break
     return out
@@ -285,90 +382,147 @@ def _looks_like_script(word: str) -> bool:
     return not word.startswith("-") and ("/" in word or bool(_SCRIPT_RE.search(word)))
 
 
+def _skip_options(tool: str, rest: Sequence[str]) -> list[str]:
+    """Drop the options a subcommand tool takes before its subcommand."""
+    takes_value = VALUE_OPTIONS["*"] | VALUE_OPTIONS.get(tool, frozenset())
+    out = list(rest)
+    while out and (out[0].startswith("-") or out[0].startswith("+")):
+        option = out.pop(0)
+        if option == "--":
+            break
+        if option in takes_value and out and not out[0].startswith("-"):
+            # ``-j`` and friends take an optional value: only swallow what looks like one
+            if option in ("-j", "--jobs", "-l") and not out[0].isdigit():
+                continue
+            out.pop(0)
+    return out
+
+
 def _key(words: Sequence[str]) -> str:
+    """Normalized identity of one simple command (documented in docs/methodology.md)."""
     if not words:
         return ""
     program = _program_name(words[0])
     if _PYTHON_RE.match(program):
         program = "python"  # python3, python3.12, pypy3 ... are one command
     rest = list(words[1:])
-    parts = [program]
     base = program.rsplit("/", 1)[-1]
-    if base in INTERPRETERS or _PYTHON_RE.match(base):
+    if base in INTERPRETERS:
         if rest and rest[0] == "-m" and len(rest) > 1:
-            parts += ["-m", rest[1]]
-            return " ".join(parts)
-        if rest and rest[0] in ("-c", "-e"):
-            parts.append(rest[0])
-            return " ".join(parts)
+            return f"{program} -m {rest[1]}"
+        if rest and rest[0] in ("-c", "-e", "-lc", "-ic"):
+            return f"{program} -c"
         if rest and _looks_like_script(rest[0]):
-            parts.append(_program_name(rest[0]))
-            return " ".join(parts)
-    if base in NO_SUBCOMMAND or "/" in program:
-        return program
+            return f"{program} {_program_name(rest[0])}"
+    if base not in SUBCOMMAND_TOOLS or "/" in program:
+        return program  # unknown tool or repo script: the executable alone, never its arguments
+    rest = _skip_options(base, rest)
+    parts = [program]
     if rest and _SUBCOMMAND_RE.match(rest[0]):
         parts.append(rest[0])
-        if rest[0] in CONTINUING_SUBCOMMANDS and len(rest) > 1 and _SUBCOMMAND_RE.match(rest[1]):
-            parts.append(rest[1])
+        if rest[0] in CONTINUING_SUBCOMMANDS.get(base, ()):
+            tail = _skip_options(base, rest[1:])
+            if tail and _SUBCOMMAND_RE.match(tail[0]):
+                runs = "python" if _PYTHON_RE.match(tail[0]) else tail[0]
+                parts.append(runs)
+                if runs == "python" and len(tail) > 2 and tail[1] == "-m":
+                    parts += ["-m", tail[2]]  # ``poetry run python -m pytest``
     return " ".join(parts)
 
 
-def _is_inspection(words: Sequence[str]) -> bool:
+def _is_inspection(words: Sequence[str], key: str) -> bool:
     program = _program_name(words[0]).rsplit("/", 1)[-1]
-    if program not in INSPECTION_PROGRAMS and _key(words) not in INSPECTION_KEYS:
+    if program not in INSPECTION_PROGRAMS and key not in INSPECTION_KEYS:
         return False
     return not any(
         w == f or w.startswith(f + "=") for w in words[1:] for f in _NOT_INSPECTION_FLAGS
     )
 
 
-def _is_significant(words: Sequence[str]) -> bool:
-    program = _program_name(words[0]).rsplit("/", 1)[-1]
-    return (
-        program not in SETUP_PROGRAMS
-        and program not in HOUSEKEEPING_PROGRAMS
-        and not _is_inspection(words)
-    )
+def _steps(command: str, depth: int = 0) -> list[Step]:
+    steps: list[Step] = []
+    for segment in _segments(_tokenize(command)):
+        words = _strip_prefixes(segment)
+        if not words:
+            continue
+        program = _program_name(words[0]).rsplit("/", 1)[-1]
+        if (
+            program in SHELLS
+            and depth < _MAX_NESTING
+            and len(words) > 2
+            and words[1] in ("-c", "-lc", "-ic")
+        ):
+            nested = _steps(words[2], depth + 1)
+            if nested:
+                steps.extend(nested)
+                continue
+        key = _key(words)
+        inspection = _is_inspection(words, key)
+        significant = not (
+            inspection or program in SETUP_PROGRAMS or program in HOUSEKEEPING_PROGRAMS
+        )
+        steps.append(Step(key, program, tuple(words[1:]), inspection, significant))
+    return steps
 
 
 def parse_command(command: str) -> ParsedCommand:
     """Normalize a shell command line. Rules are documented in docs/methodology.md.
 
-    The shell reports the exit status of the *last* statement, so that is the
-    one we name: in ``npm run build; npm test`` a failure is ``npm test``'s.
-    Within it, a ``&&`` chain is named after its last significant command
-    (``mkdir -p out && pytest`` is ``pytest``): setup, housekeeping and
-    read-only inspection steps are passed over, as are pipeline tails.
+    The line is split into simple commands (across ``;``, ``&&``, ``||``, pipes,
+    subshells, ``if``/``for`` bodies and ``bash -c`` scripts; heredoc bodies are
+    dropped). It is named after its **last significant** command: setup
+    (``cd``, ``export``, ``echo``), housekeeping (``mkdir``, ``touch``, ``rm``)
+    and read-only inspection (``cat``, ``tail``, ``grep``) are passed over, so
+    ``mkdir -p out && pytest | tail -5`` is ``pytest``.
     """
-    statements = [
-        [(words, piped) for words, piped in ((_strip_prefixes(w), p) for w, p in st) if words]
-        for st in _statements(_tokenize(command))
-    ]
-    statements = [st for st in statements if st]
-    if not statements:
+    steps = _steps(command)
+    if not steps:
         return ParsedCommand("", "", "", ())
-    segments = statements[-1]
-    heads = [words for words, piped in segments if not piped] or [segments[0][0]]
     primary = next(
-        (w for w in reversed(heads) if _is_significant(w)),
-        next(
-            (w for w in reversed(heads) if _program_name(w[0]) not in SETUP_PROGRAMS),
-            heads[0],
-        ),
+        (s for s in reversed(steps) if s.significant),
+        None,
     )
-    last = segments[-1][0]
+    if primary is None:  # nothing but inspection and setup: name it after what was inspected
+        for passed_over in (
+            SETUP_PROGRAMS | OUTPUT_TRIMMERS | MATCH_FILTERS,
+            SETUP_PROGRAMS | OUTPUT_TRIMMERS,
+            SETUP_PROGRAMS,
+            frozenset[str](),
+        ):
+            primary = next((s for s in reversed(steps) if s.program not in passed_over), None)
+            if primary is not None:
+                break
+        assert primary is not None
     return ParsedCommand(
-        key=_key(primary),
-        program=_program_name(primary[0]).rsplit("/", 1)[-1],
-        last_program=_program_name(last[0]).rsplit("/", 1)[-1],
-        tokens=tuple(
-            word
-            for words, _ in segments
-            if _program_name(words[0]) not in SETUP_PROGRAMS
-            for word in words[1:]
-        ),
-        inspection=_is_inspection(primary),
+        key=primary.key,
+        program=primary.program,
+        last_program=steps[-1].program,
+        tokens=primary.args,
+        inspection=primary.inspection,
+        steps=tuple(steps),
     )
+
+
+def objectionable_step(parsed: ParsedCommand, reason: str = "") -> Step | None:
+    """The step of a declined command line the human most plausibly objected to.
+
+    In order: a step whose program the stated reason names; the first
+    destructive step (``rm``, ``git push``, ...); the first step that is
+    neither setup nor inspection; the primary step.
+    """
+    if not parsed.steps:
+        return None
+    words = set(re.findall(r"[\w.+-]+", reason.lower()))
+    for step in parsed.steps:
+        if step.program.lower() in words and step.program not in SETUP_PROGRAMS:
+            return step
+    for step in parsed.steps:
+        if step.program in DESTRUCTIVE_PROGRAMS or step.key in DESTRUCTIVE_KEYS:
+            return step
+    for step in parsed.steps:
+        if not step.inspection and step.program not in SETUP_PROGRAMS:
+            return step
+    return next((s for s in parsed.steps if s.key == parsed.key), parsed.steps[-1])
 
 
 def normalize_command(command: str) -> str:

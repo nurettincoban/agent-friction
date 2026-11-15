@@ -195,3 +195,22 @@ def test_compare_rejects_hollow_result(tmp_path: Path) -> None:
     hollow.write_text('{"schema_version": 1}', encoding="utf-8")
     code, _, err = run("compare", str(hollow), str(hollow))
     assert code == EXIT_ERROR and "not an agent-friction result" in err
+
+
+def test_compare_refuses_different_repos(tmp_path: Path) -> None:
+    before = tmp_path / "before.json"
+    run("scan", *INPUT, "-o", str(before))
+    data = json.loads(before.read_text(encoding="utf-8"))
+    data["repo"]["name"] = "something-else"
+    other = tmp_path / "other.json"
+    other.write_text(json.dumps(data), encoding="utf-8")
+    code, _, err = run("compare", str(before), str(other))
+    assert code == EXIT_ERROR and "different repositories" in err
+    assert run("compare", str(before), str(other), "--allow-repo-mismatch")[0] == EXIT_OK
+
+
+def test_show_accepts_a_raw_command_line(tmp_path: Path) -> None:
+    saved = tmp_path / "r.json"
+    run("scan", *INPUT, "-o", str(saved))
+    code, out, _ = run("show", "PYTEST -x tests/test_refunds.py", "--from", str(saved))
+    assert code == EXIT_OK and "command: pytest" in out

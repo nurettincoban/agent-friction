@@ -219,6 +219,26 @@ def _line_events(obj: dict[str, Any], line: int) -> list[Event] | None:
     return events
 
 
+def _asks_question(content: object) -> bool | None:
+    """Whether an assistant message ends on a question (``None``: it says nothing either way).
+
+    Only this one bit is kept from assistant prose; the text itself is discarded.
+    """
+    if isinstance(content, str):
+        return content.rstrip().endswith("?")
+    if not isinstance(content, list):
+        return None
+    verdict: bool | None = None
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text" and isinstance(block.get("text"), str):
+            verdict = block["text"].rstrip().endswith("?")
+        elif block.get("type") == "tool_use":
+            verdict = False  # it went on working: whatever it asked was rhetorical
+    return verdict
+
+
 def parse_file(path: Path, seen_uuids: set[str] | None = None) -> ParsedFile:
     """Parse one Claude Code ``.jsonl`` transcript.
 
@@ -231,6 +251,7 @@ def parse_file(path: Path, seen_uuids: set[str] | None = None) -> ParsedFile:
     main = Stream(session_id=session, source=path, kind=KIND, sidechain=False)
     side = Stream(session_id=session, source=path, kind=KIND, sidechain=True)
     parsed = ParsedFile(path=path, kind=KIND, streams=[])
+    asking = {False: False, True: False}  # per stream: did the agent just ask something?
     with path.open(encoding="utf-8", errors="replace") as handle:
         for number, raw in enumerate(handle, 1):
             raw = raw.strip()
@@ -257,6 +278,15 @@ def parse_file(path: Path, seen_uuids: set[str] | None = None) -> ParsedFile:
                 parsed.skipped_lines += 1
                 continue
             target = side if in_subagent_dir or obj.get("isSidechain") is True else main
+            if obj["type"] == "assistant":
+                asked = _asks_question(obj["message"].get("content"))
+                if asked is not None:
+                    asking[target.sidechain] = asked
+            else:
+                for event in events:
+                    if event.kind == model.USER_MESSAGE:
+                        event.after_question = asking[target.sidechain]
+                        asking[target.sidechain] = False
             target.events.extend(events)
     parsed.streams = [s for s in (main, side) if s.events]
     return parsed

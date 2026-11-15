@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -52,6 +52,11 @@ class Commit:
     @property
     def subject(self) -> str:
         return self.message.strip().split("\n", 1)[0]
+
+    @property
+    def session_id(self) -> str:
+        """Agent commits stand in for sessions in git-based evidence."""
+        return f"git:{self.sha[:12]}"
 
 
 @dataclass
@@ -149,43 +154,173 @@ def read_history(
     return GitHistory(True, "", parse_log(proc.stdout, compile_agent_patterns(agent_patterns)))
 
 
+Range = tuple[int, int]  # half-open line range [start, end)
+
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+#: Subjects that say the commit repairs something. Checked only on a human commit that
+#: directly follows an agent commit on the same file.
+FIX_SUBJECT_RE = re.compile(
+    r"^(?:revert|fix(?:up)?!?|hotfix|bugfix|undo|rollback|roll back|repair|correct)\b"
+    r"|\b(?:reverts?|reverted|fix(?:es|ed)?|undo|regression|broke|broken|oops|mistake)\b",
+    re.I,
+)
+#: Commits whose patches are read to compare line ranges, at most (newest first).
+MAX_PATCH_COMMITS = 400
+
+
+def parse_hunks(patch: str) -> dict[str, tuple[list[Range], list[Range]]]:
+    """Per file: the old-side and new-side line ranges of every hunk of a ``-U0`` patch.
+
+    A pure insertion has an empty old range ``(n, n)`` placed *after* line n; a
+    pure deletion has an empty new range.
+    """
+    files: dict[str, tuple[list[Range], list[Range]]] = {}
+    current: tuple[list[Range], list[Range]] | None = None
+    old_name = ""
+    for line in patch.splitlines():
+        if line.startswith("--- "):
+            old_name = line[4:].strip()
+        elif line.startswith("+++ "):
+            name = line[4:].strip()
+            name = old_name if name == "/dev/null" else name
+            name = name[2:] if name[:2] in ("a/", "b/") else name
+            current = files.setdefault(name, ([], []))
+        elif current is not None and line.startswith("@@"):
+            match = _HUNK_RE.match(line)
+            if match:
+                old_start, new_start = int(match.group(1)), int(match.group(3))
+                old_len = int(match.group(2)) if match.group(2) is not None else 1
+                new_len = int(match.group(4)) if match.group(4) is not None else 1
+                current[0].append((old_start, old_start + old_len))
+                current[1].append((new_start, new_start + new_len))
+        elif line.startswith("diff --git "):
+            current = None
+    return files
+
+
+class HunkReader:
+    """Reads and caches the changed line ranges of single commits (``git show -U0``)."""
+
+    def __init__(self, repo: Path) -> None:
+        self.repo = repo
+        self.calls = 0
+        self._cache: dict[str, dict[str, tuple[list[Range], list[Range]]]] = {}
+
+    def __call__(self, sha: str) -> dict[str, tuple[list[Range], list[Range]]]:
+        if sha not in self._cache:
+            self._cache[sha] = self._read(sha) if self.calls < MAX_PATCH_COMMITS else {}
+        return self._cache[sha]
+
+    def _read(self, sha: str) -> dict[str, tuple[list[Range], list[Range]]]:
+        self.calls += 1
+        command = ["git", "-C", str(self.repo), "-c", "core.quotePath=false", "show"]
+        command += ["--unified=0", "--no-renames", "--relative", "--format=", "--no-color"]
+        command += ["--no-ext-diff", sha]
+        try:
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=GIT_TIMEOUT_SECONDS,
+                check=False,
+                env={**os.environ, "LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0"},
+            )
+        except (OSError, subprocess.SubprocessError):
+            return {}
+        return parse_hunks(proc.stdout) if proc.returncode == 0 else {}
+
+
+Hunks = Callable[[str], dict[str, tuple[list[Range], list[Range]]]]
+
+
+def reworked_lines(agent_new: Sequence[Range], human_old: Sequence[Range]) -> int:
+    """How many human hunks changed, deleted or split lines the agent commit had written.
+
+    Valid because the human commit is the next one to touch the file: its
+    "old" side is exactly the agent's "new" side. Appending after the agent's
+    last line, or editing elsewhere in the file, does not count.
+    """
+    hits = 0
+    for old_start, old_end in human_old:
+        for new_start, new_end in agent_new:
+            if new_end <= new_start:
+                continue  # the agent only deleted here
+            if old_end > old_start:  # human changed/deleted lines
+                overlap = old_start < new_end and new_start < old_end
+            else:  # human inserted after line old_start: inside the agent's block?
+                overlap = new_start <= old_start < new_end - 1
+            if overlap:
+                hits += 1
+                break
+    return hits
+
+
 def find_rework(
-    commits: Sequence[Commit], window_days: int = DEFAULT_REWORK_WINDOW_DAYS
+    commits: Sequence[Commit],
+    window_days: int = DEFAULT_REWORK_WINDOW_DAYS,
+    hunks: Hunks | None = None,
 ) -> list[Finding]:
-    """Emit one ``human-rework`` finding per (human commit, file) that follows an agent commit."""
+    """Emit ``human-rework`` findings.
+
+    A candidate is a human commit that is the next commit to touch a file after
+    an agent commit, within the window. It counts only if it (a) changes lines
+    the agent commit wrote (needs ``hunks``), or (b) says in its subject that
+    it fixes or reverts something. A human simply continuing work elsewhere in
+    the file is not rework.
+    """
     window = timedelta(days=window_days)
     last_touch: dict[str, Commit] = {}
-    findings: list[Finding] = []
+    candidates: list[tuple[Commit, Commit, str]] = []
     for commit in commits:
-        for path, (added, deleted) in sorted(commit.files.items()):
+        for path in sorted(commit.files):
             previous = last_touch.get(path)
             last_touch[path] = commit
             if previous is None or not previous.is_agent or commit.is_agent:
                 continue
-            gap = commit.date - previous.date
-            if gap < timedelta(0) or gap > window:
-                continue
-            hours = gap.total_seconds() / 3600
-            after = f"{hours:.0f} h" if hours < 48 else f"{gap.days} days"
-            findings.append(
-                Finding(
-                    signal=HUMAN_REWORK,
-                    session_id=f"git:{previous.sha[:12]}",
-                    source="git",
-                    line=0,
-                    ts=commit.date,
-                    summary=(
-                        f"Agent commit {previous.sha[:8]} changed {path}; human commit "
-                        f"{commit.sha[:8]} changed it again {after} later (+{added}/-{deleted})"
-                    ),
-                    excerpt=commit.subject,
-                    targets=[Target(model.FILE, path)],
-                    stream="git",
-                    detail={
-                        "agent_commit": previous.sha[:8],
-                        "human_commit": commit.sha[:8],
-                        "subject": commit.subject,
-                    },
-                )
+            if timedelta(0) <= commit.date - previous.date <= window:
+                candidates.append((previous, commit, path))
+    findings: list[Finding] = []
+    for previous, commit, path in reversed(candidates):  # newest first: they get the patch budget
+        overlap = 0
+        if hunks is not None:
+            agent_new = hunks(previous.sha).get(path, ([], []))[1]
+            human_old = hunks(commit.sha).get(path, ([], []))[0]
+            overlap = reworked_lines(agent_new, human_old)
+        by_subject = bool(FIX_SUBJECT_RE.search(commit.subject))
+        if not overlap and not by_subject:
+            continue
+        added, deleted = commit.files[path]
+        gap = commit.date - previous.date
+        hours = gap.total_seconds() / 3600
+        after = f"{hours:.0f} h" if hours < 48 else f"{gap.days} days"
+        how = (
+            f"rewrote lines that commit had written ({overlap} hunk{'s' if overlap != 1 else ''})"
+            if overlap
+            else "is described as a fix or revert"
+        )
+        findings.append(
+            Finding(
+                signal=HUMAN_REWORK,
+                session_id=previous.session_id,
+                source="git",
+                line=0,
+                ts=commit.date,
+                summary=(
+                    f"Agent commit {previous.sha[:8]} changed {path}; {after} later human "
+                    f"commit {commit.sha[:8]} {how} (+{added}/-{deleted})"
+                ),
+                excerpt=commit.subject,
+                targets=[Target(model.FILE, path)],
+                stream="git",
+                detail={
+                    "agent_commit": previous.sha[:8],
+                    "human_commit": commit.sha[:8],
+                    "subject": commit.subject,
+                    "variant": "overlap" if overlap else "subject",
+                },
             )
+        )
+    findings.reverse()
     return findings

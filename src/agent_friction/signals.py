@@ -17,6 +17,7 @@ from agent_friction.attribution import (
     MATCH_FILTERS,
     ParsedCommand,
     PathResolver,
+    objectionable_step,
     parse_command,
     path_candidates,
 )
@@ -116,15 +117,6 @@ CATALOG: tuple[SignalDef, ...] = (
         2.5,
     ),
     SignalDef(
-        HUMAN_REWORK,
-        "Human rework (git)",
-        "A commit attributed to an agent changed a file and the next commit touching that "
-        "file, within the rework window, was made by a human.",
-        "Agent output on this file needed a human follow-up soon after it landed.",
-        "The file, from git history.",
-        2.5,
-    ),
-    SignalDef(
         EDIT_MISS,
         "Edit miss",
         "An edit failed because the text to replace was not found in the file, or matched "
@@ -155,6 +147,17 @@ CATALOG: tuple[SignalDef, ...] = (
         "The normalized command. Ordinary failures are also attributed to repo files named "
         "on the command line; setup/invocation errors are not (the files are not the cause).",
         2.0,
+    ),
+    SignalDef(
+        HUMAN_REWORK,
+        "Human rework (git)",
+        "A commit attributed to an agent changed a file, and the next commit touching that "
+        "file, made by a human within the rework window, rewrote lines the agent commit had "
+        "written or is described as a fix or revert. A human continuing work elsewhere in "
+        "the file does not count.",
+        "Agent output on this file needed a human follow-up soon after it landed.",
+        "The file, from git history. Never raises confidence on its own.",
+        1.5,
     ),
     SignalDef(
         EDIT_THRASH,
@@ -241,8 +244,7 @@ INVOCATION_ERROR_RE = re.compile(
     r"|(?:ERROR|error): (?:Could not find a version|No matching distribution|"
     r"externally-managed-environment).*"
     r"|go: (?:cannot find main module|go\.mod file not found).*"
-    # the harness or the network gave up before the program could do its job
-    r"|Command timed out after .*"
+    # the network was not there
     r"|curl: \(\d+\) .*"
     r")$",
     re.M,
@@ -251,58 +253,101 @@ INVOCATION_ERROR_RE = re.compile(
 INVOCATION_EXIT_CODES = frozenset({126, 127})
 
 
+#: The harness's own timeout notice. It opens the tool result; the same words printed
+#: by a test runner further down are ordinary output.
+HARNESS_TIMEOUT_RE = re.compile(r"\s*(?:Exit code \d+\s*\n\s*)?Command timed out after \d")
+
+
 def is_invocation_error(output: str, exit_code: int | None) -> bool:
     """True when a failed command never got to do its job (setup or usage problem)."""
-    return exit_code in INVOCATION_EXIT_CODES or bool(INVOCATION_ERROR_RE.search(output))
+    return (
+        exit_code in INVOCATION_EXIT_CODES
+        or bool(HARNESS_TIMEOUT_RE.match(output))
+        or bool(INVOCATION_ERROR_RE.search(output))
+    )
 
 
-#: Friendly openers. A message that starts like this is not a correction unless it
-#: also contains an unambiguous phrase.
-_POSITIVE_OPENING_RE = re.compile(
-    r"^(?:thanks|thank you|thx|great|nice|perfect|awesome|excellent|cool|good|well done"
-    r"|looks good|lgtm|love it|amazing|wonderful|yes|yep|yeah|sure|ok|okay|sounds good)\b",
+#: Praise, thanks and dismissals. A correction phrase *followed* by one of these is not a
+#: correction ("you forgot nothing, great job", "still failing but that's unrelated, ignore
+#: it"), and a message containing one is never a "probable" correction.
+_SOFTENER_RE = re.compile(
+    r"\b(?:thanks|thank you|thx|great|good job|nice(?:ly)?|perfect|awesome|excellent|well done"
+    r"|love it|like it|nailed it|keep going|looks good|lgtm|all good|amazing|wonderful"
+    r"|no worries|never ?mind|ignore (?:it|that|this)|unrelated|not your fault|flaky"
+    r"|(?:that's|it's|that is|it is) (?:fine|ok|okay))\b",
     re.I,
 )
+_YOU_DID = (
+    r"\byou (?:broke|removed|deleted|forgot|missed|ignored|misunderstood|overwrote)\b"
+    r"(?! (?:nothing|anything)\b)"
+    r"|\byou (?:didn't|did not) (?:\w+ )?(?:run|read|follow|do|use|update|fix|check|add|listen"
+    r"|test|change|remove|answer)\b"
+    r"|\byou (?:shouldn't|should not) have\b|\byou (?:weren't|were not) supposed\b"
+)
+_THING = (
+    r"file|branch|directory|dir|folder|function|module|place|repo|path|approach|way|one|test"
+    r"|package|version|line|class|method|command"
+)
+_UNDO = r"(?:revert|undo|roll ?back)"
+_UNDO_OBJECT = (
+    r"(?:that|this|it|your|those|these|all|everything|what you"
+    r"|the (?:last|previous|change|changes|edit|edits|commit|commits))\b"
+)
+
+#: Label of the one pattern that is void when the agent had just asked a question.
+_ANSWER_LABEL = "no, …"
 
 _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     (label, re.compile(pattern, re.I))
     for label, pattern in (
         (
-            # "No, ..." / "No. ..." / "Nope - ..." but not "no thanks", "no problem", "no way".
-            "no, …",
-            r"^(?:no|nope|nah)\s*[,.;:!—-]+\s*"
+            # "No, ..." / "No. ..." / "Nope - ..." / a bare "no"; not "No. 3 ...", "no thanks",
+            # "no problem", "no way", "No tests are needed".
+            _ANSWER_LABEL,
+            r"^(?:no|nope|nah)(?:[.!]*$|\s*[,.;:!—-]+\s*(?!\d)"
             r"(?!(?:thanks|thank you|problem|worries|rush|need|that's (?:fine|ok|okay|great|all)"
-            r"|it's (?:fine|ok|okay)|all good|go ahead|way)\b)\S",
+            r"|it's (?:fine|ok|okay)|all good|go ahead|way)\b)\S)",
         ),
+        ("wrong. / stop.", r"^(?:wrong|incorrect|stop)(?:[.!]*$|\s*[.,;:!—-]+\s*\S)"),
         (
             "that's wrong",
-            r"\b(?:that|this|it)(?:'s| is| was) (?:wrong|incorrect|broken|not (?:what|right"
-            r"|correct|how|working|the right|true))\b",
+            r"\b(?:that|this|it)(?:'s| is| was) (?:"
+            r"(?:still |just |simply |completely |totally |plain )?(?:wrong|incorrect|broken)"
+            r"(?: again)?(?=\s*(?:[.,;:!?—-]|$|and\b|but\b))"
+            r"|not (?:right|correct|working|true|how)\b"
+            r"|not what (?:i|we)\b)",
         ),
         (
-            "you broke/forgot/…",
-            r"\byou (?:broke|removed|deleted|forgot|missed|ignored|misunderstood|overwrote"
-            r"|(?:didn't|did not) (?:\w+ )?(?:run|read|follow|do|use|update|fix|check|add|listen"
-            r"|test|change|remove|answer)"
-            r"|(?:shouldn't|should not) have|(?:weren't|were not) supposed)\b",
+            "that didn't work",
+            r"\b(?:that|this|it) (?:didn't|doesn't|does not|did not) (?:work|help)\b",
         ),
         (
+            "the wrong file",
+            r"\b(?:you(?:'re| are| were)?|that's|that is|this is|it's|it is) (?:\w+ ){0,3}"
+            rf"the wrong (?:{_THING})\b",
+        ),
+        ("you broke/forgot/…", _YOU_DID),
+        (
+            # An imperative addressed to the agent, not "Undo support is the next feature".
             "revert/undo",
-            r"(?:^(?:please )?(?:revert|undo)\b"
-            r"|\b(?:revert|undo|roll ?back) (?:that|this|it|your|those|these|all of|the "
-            r"(?:last|previous|change|changes|edit|edits|commit))\b)",
+            rf"^(?:(?:please|pls|just|now|ok|okay|so)[, ]+)*{_UNDO}(?:[.!,]|$|\s+{_UNDO_OBJECT}"
+            rf"|\s+(?:the|my)\b)"
+            rf"|(?:[.,;:!?]|\b(?:please|just|and|then|so))\s+{_UNDO}\s+{_UNDO_OBJECT}",
         ),
         (
             "still failing",
             r"\bstill (?:failing|fails|broken|not working|not fixed|doesn't work|does not work"
-            r"|wrong|the same (?:error|problem|issue|bug)|crash(?:es|ing)?)\b",
+            r"|wrong|the same (?:error|problem|issue|bug)|crash(?:es|ing)?)\b"
+            r"|\b(?:failing|fails|broken|crashing|crashes) again\b",
         ),
         (
+            # Said *to the agent*: "I told you", "I asked you to", "I said use X".
             "I told you",
             r"\bi (?:told you|already (?:said|told|asked)|specifically (?:said|asked)"
-            r"|(?:didn't|did not|never) ask(?:ed)?"
-            r"|(?:said|asked)(?: you)? (?:not )?to\b"
-            r"|said (?:use|don't|do not|no\b|not\b|only))",
+            r"|(?:didn't|did not|never) ask(?:ed)?\b"
+            r"|asked you (?:not )?to\b"
+            r"|said (?:not to\b|to (?:use|keep|leave|run|stop|add|remove|put)\b|use\b|don't"
+            r"|do not|no\b|not\b|only\b))",
         ),
         ("not what I asked", r"\bnot what i (?:asked|wanted|meant|said)\b"),
         (
@@ -317,8 +362,10 @@ _WEAK_CORRECTION: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     for label, pattern in (
         ("actually", r"^actually\b"),
         (
+            # not "don't forget ...", "don't worry", "don't commit yet"
             "don't",
-            r"\b(?:don't|do not) (?!forget|worry|bother|need|hesitate|mind|have to|think)\w+",
+            r"\b(?:don't|do not) (?!forget|worry|bother|need|hesitate|mind|have to|think)\w+\b"
+            r"(?!(?: \w+){0,2},? yet\b)",
         ),
         ("stop", r"\bstop (?:\w+ing|that|it|doing)\b"),
         ("instead", r"\binstead\b"),
@@ -330,19 +377,31 @@ _WEAK_CORRECTION: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 )
 
 
-def correction_confidence(text: str) -> tuple[float, list[str]]:
+def correction_confidence(text: str, after_question: bool = False) -> tuple[float, list[str]]:
     """Confidence in [0, 1] that ``text`` is a correction, and the matched phrase labels.
 
-    An unambiguous phrase gives 1.0. Otherwise two or more distinct weaker
-    cues give 0.4, unless the message opens with thanks or praise. A single
-    weaker cue ("don't forget ...", "actually, can you also ...") is ordinary
-    conversation and gives 0.
+    * An unambiguous phrase gives 1.0, unless praise or a dismissal follows it,
+      or it is a leading "No, ..." answering a question the agent just asked
+      (``after_question``).
+    * Otherwise two or more distinct weaker cues give 0.4, unless the message
+      contains thanks, praise or a dismissal.
+    * A single weaker cue ("don't forget ...", "actually, can you also ...")
+      is ordinary conversation and gives 0.
     """
     head = text.strip()[:CORRECTION_HEAD_CHARS].replace("’", "'")
-    strong = [label for label, pattern in _STRONG_CORRECTION if pattern.search(head)]
+    softeners = [m.start() for m in _SOFTENER_RE.finditer(head)]
+    last_softener = max(softeners) if softeners else -1
+    strong: list[str] = []
+    for label, pattern in _STRONG_CORRECTION:
+        match = pattern.search(head)
+        if match is None or match.start() < last_softener:
+            continue
+        if label == _ANSWER_LABEL and after_question:
+            continue
+        strong.append(label)
     if strong:
         return CORRECTION_STRONG, strong
-    if _POSITIVE_OPENING_RE.match(head):
+    if softeners:
         return 0.0, []
     weak = [label for label, pattern in _WEAK_CORRECTION if pattern.search(head)]
     if len(weak) >= CORRECTION_MIN_CUES:
@@ -424,6 +483,9 @@ class _State:
     retry: dict[str, Finding] = field(default_factory=dict)
     pending: list[tuple[Finding, str, int]] = field(default_factory=list)
     open_edits: dict[str, list[Finding]] = field(default_factory=dict)
+    # ordinary failures per command that are still red, and those an edit has followed
+    red: dict[str, list[Finding]] = field(default_factory=dict)
+    red_then_edited: dict[str, list[Finding]] = field(default_factory=dict)
 
 
 class _Detector:
@@ -431,6 +493,7 @@ class _Detector:
         self.stream = stream
         self.ctx = ctx
         self.findings: list[Finding] = []
+        self.exposed: set[tuple[str, str]] = set()  # every target the agent went near
         self.state = _State()
 
     # ---- helpers ---------------------------------------------------------------------
@@ -462,6 +525,7 @@ class _Detector:
             detail=detail or {},
         )
         self.findings.append(finding)
+        self.exposed.update((t.kind, t.key) for t in targets)
         return finding
 
     def _action_targets(self, action: _Action) -> list[Target]:
@@ -497,10 +561,19 @@ class _Detector:
                 if event.op in (model.OP_READ, model.OP_EDIT, model.OP_WRITE):
                     rel = resolver.resolve(event.path, event.cwd)
                     action.file = rel or None
+                    if action.file:
+                        self.exposed.add((model.FILE, action.file))
                 elif event.op == model.OP_SHELL and event.command and resolver.contains(event.cwd):
                     parsed = parse_command(event.command)
                     if parsed.key:
                         action.cmd = parsed
+                        if not parsed.inspection:
+                            self.exposed.add((model.COMMAND, parsed.key))
+                elif event.op == model.OP_SEARCH:
+                    scope = _scope(event, self.ctx)
+                    if scope is not None:
+                        is_file = bool(scope) and self.ctx.is_file(scope)
+                        self.exposed.add((model.FILE if is_file else model.DIR, scope or "."))
                 by_id[event.call_id] = action
                 items.append(action)
             elif event.kind == model.TOOL_RESULT:
@@ -621,6 +694,13 @@ class _Detector:
         call = action.call
         now = _epoch(call)
         targets = [Target(model.FILE, path)]
+        # A change ends every "same command, nothing changed" streak ...
+        state.fail_runs.clear()
+        state.retry.clear()
+        # ... and turns the red runs so far into red -> edit -> (maybe) green.
+        for failed_key, findings in state.red.items():
+            state.red_then_edited.setdefault(failed_key, []).extend(findings)
+        state.red = {}
         # Any successful change resets read-loop tracking for the file.
         for key in [k for k in state.reads if k[0] == path]:
             del state.reads[key]
@@ -725,6 +805,12 @@ class _Detector:
         if result.ok:
             state.fail_runs[key] = 0
             state.retry.pop(key, None)
+            # red -> edit -> green is the development loop working: forget those failures.
+            fixed = {id(f) for f in state.red_then_edited.pop(key, [])}
+            state.red.pop(key, None)
+            if fixed:
+                self.findings = [f for f in self.findings if id(f) not in fixed]
+                state.pending = [p for p in state.pending if id(p[0]) not in fixed]
             if not cmd.inspection:
                 for finding, failed_key, _ in state.pending:
                     if failed_key != key:
@@ -764,6 +850,8 @@ class _Detector:
             },
         )
         state.pending.append((finding, key, RECOVERY_LOOKAHEAD))
+        if not invocation:
+            state.red.setdefault(key, []).append(finding)
         run = state.fail_runs.get(key, 0) + 1
         state.fail_runs[key] = run
         if run == RETRY_LOOP_MIN_FAILURES:
@@ -779,8 +867,13 @@ class _Detector:
         targets = self._action_targets(action)
         if call.op in (model.OP_READ, model.OP_EDIT, model.OP_WRITE) and not targets:
             return  # a file outside the repo
-        if call.op == model.OP_SHELL and not targets:
-            return
+        if call.op == model.OP_SHELL:
+            if action.cmd is None:
+                return
+            # Name the step the human objected to (`rm`, `git push`), not the last one.
+            step = objectionable_step(action.cmd, result.reason)
+            if step is not None and step.key:
+                targets = [Target(model.COMMAND, step.key)]
         what = targets[0].key if targets else call.tool
         what = f"`{what}`" if targets and targets[0].kind == model.COMMAND else what
         excerpt_parts = []
@@ -830,7 +923,7 @@ class _Detector:
         )
 
     def _on_prompt(self, event: Event) -> None:
-        confidence, labels = correction_confidence(event.text)
+        confidence, labels = correction_confidence(event.text, event.after_question)
         if confidence <= 0:
             return
         touched: list[str] = []  # most recent first
@@ -875,6 +968,15 @@ class _Detector:
         )
 
 
+def detect_with_exposure(
+    stream: Stream, ctx: DetectContext
+) -> tuple[list[Finding], set[tuple[str, str]]]:
+    """Findings plus every ``(kind, key)`` target the agent touched, friction or not."""
+    detector = _Detector(stream, ctx)
+    findings = detector.run()
+    return findings, detector.exposed
+
+
 def detect(stream: Stream, ctx: DetectContext) -> list[Finding]:
     """Run every transcript detector over one stream."""
-    return _Detector(stream, ctx).run()
+    return detect_with_exposure(stream, ctx)[0]

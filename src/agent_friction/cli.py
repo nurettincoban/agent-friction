@@ -214,6 +214,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="below N sessions on either side, report but never trip the gate (default 3)",
     )
     cmp_.add_argument(
+        "--allow-repo-mismatch",
+        action="store_true",
+        help="compare scans whose repository names differ (e.g. after a rename)",
+    )
+    cmp_.add_argument(
         "--fail-on-regression", action="store_true", help="exit 3 if anything regressed or is new"
     )
 
@@ -330,12 +335,17 @@ def _cmd_show(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         result = _analyze(args, args.repo)
     color = _use_color(args.color, stdout)
     item = find_target(result, args.target)
-    if item is not None:
+    node = find_dir(result, args.target)
+    if item is not None and item.get("kind") != "dir":
         stdout.write(render_detail(result, item, color=color))
         return EXIT_OK
-    node = find_dir(result, args.target)
-    if node is not None:
-        stdout.write(render_dir_detail(result, node, color=color))
+    if node is not None or item is not None:
+        # A directory: its rolled-up subtree first, then friction attributed to the
+        # directory itself (for example searches that came back empty there).
+        if node is not None:
+            stdout.write(render_dir_detail(result, node, color=color))
+        if item is not None:
+            stdout.write("\n" + render_detail(result, item, color=color))
         return EXIT_OK
     stderr.write(
         f"agent-friction: no friction recorded for {args.target!r}. "
@@ -349,6 +359,12 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
     if not 0 < args.threshold < 10:
         stderr.write("agent-friction: --threshold must be between 0 and 10\n")
         return EXIT_USAGE
+    names = (before.get("repo", {}).get("name"), after.get("repo", {}).get("name"))
+    if names[0] != names[1] and not args.allow_repo_mismatch:
+        raise AgentFrictionError(
+            f"these scans are of different repositories ({names[0]!r} vs {names[1]!r}). "
+            "Pass --allow-repo-mismatch if the repository was renamed."
+        )
     changes = compare(before, after, threshold=args.threshold, min_events=args.min_events)
     sessions = (int(before["totals"]["sessions"]), int(after["totals"]["sessions"]))
     low_sample = min(sessions) < args.min_sessions
@@ -360,18 +376,7 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
             + "\n"
         )
     if args.format == "json":
-        payload = [
-            {
-                "kind": c.kind,
-                "path": c.path,
-                "status": c.status,
-                "before_events_per_10_sessions": c.before_rate,
-                "after_events_per_10_sessions": c.after_rate,
-                "before_score": c.before_score,
-                "after_score": c.after_score,
-            }
-            for c in changes
-        ]
+        payload = [c.to_dict() for c in changes]
         stdout.write(json.dumps({"changes": payload}, indent=2, sort_keys=True) + "\n")
     else:
         stdout.write(render_compare(before, after, changes, markdown=args.format == "markdown"))

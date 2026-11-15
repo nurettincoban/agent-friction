@@ -139,6 +139,7 @@ class _Analysis:
         self._is_file_cache: dict[str, bool | None] = {}
         self._facts: dict[str, recommend.FileFacts] = {}
         self.outside: dict[Path, set[str]] = {}
+        self.exposure: dict[tuple[str, str], set[str]] = {}
 
     # ---- repository knowledge --------------------------------------------------------
 
@@ -207,8 +208,12 @@ class _Analysis:
 
         ctx = signals.DetectContext(self.resolver, self.is_file, self.is_known_file)
         findings: list[Finding] = []
+        exposure: dict[tuple[str, str], set[str]] = {}
         for stream in streams:
-            findings.extend(signals.detect(stream, ctx))
+            found, exposed = signals.detect_with_exposure(stream, ctx)
+            findings.extend(found)
+            for kind, key in exposed:
+                self._expose(exposure, kind, key, stream.session_id)
 
         sources = self._sources(parsed)
         if options.include_git:
@@ -226,10 +231,18 @@ class _Analysis:
             if history.available:
                 rework = [
                     f
-                    for f in gitsignals.find_rework(history.commits, options.rework_window_days)
+                    for f in gitsignals.find_rework(
+                        history.commits,
+                        options.rework_window_days,
+                        gitsignals.HunkReader(self.repo),
+                    )
                     if _in_window(f.ts, self.since, self.until)
                 ]
                 findings.extend(rework)
+                for commit in history.commits:
+                    if commit.is_agent and _in_window(commit.date, self.since, self.until):
+                        for path in commit.files:
+                            self._expose(exposure, model.FILE, path, commit.session_id)
                 source["sessions"] = sum(
                     1
                     for c in history.commits
@@ -242,7 +255,18 @@ class _Analysis:
         findings.sort(key=_finding_order)
         for index, finding in enumerate(findings):
             finding.fid = index
+        for finding in findings:  # friction implies exposure, whatever the detector saw
+            for target in finding.targets:
+                self._expose(exposure, target.kind, target.key, finding.session_id)
+        self.exposure = exposure
         return self._emit(streams, findings, sources)
+
+    def _expose(
+        self, exposure: dict[tuple[str, str], set[str]], kind: str, key: str, session: str
+    ) -> None:
+        if kind == model.COMMAND:
+            key = self.clean(key)
+        exposure.setdefault((kind, key), set()).add(session)
 
     def _in_repo(self, stream: Stream) -> bool:
         resolver = self.resolver
@@ -383,32 +407,51 @@ class _Analysis:
             "hotspots": shown[model.FILE],
             "commands": shown[model.COMMAND],
             "directories": shown[model.DIR],
+            "exposure": {
+                name: {
+                    key: len(sessions)
+                    for (kind, key), sessions in sorted(self.exposure.items())
+                    if kind == wanted
+                }
+                for name, wanted in (
+                    ("file", model.FILE),
+                    ("command", model.COMMAND),
+                    ("dir", model.DIR),
+                )
+            },
             "tree": self._tree(groups),
         }
 
     def _entry(self, kind: str, key: str, items: Sequence[Item]) -> dict[str, Any]:
         """The cheap part of a hotspot (everything needed for ranking)."""
         found = [f for f, _ in items]
-        result = scoring.score_items(items)
+        exposed = self.exposure.get((kind, key), set()) | {f.session_id for f in found}
+        result = scoring.score_items(items, len(exposed))
         signal_counts: dict[str, int] = {}
         for finding in found:
             signal_counts[finding.signal] = signal_counts.get(finding.signal, 0) + 1
         ranked = sorted(signal_counts.items(), key=lambda kv: (-kv[1], kv[0]))
         sessions = len(result.sessions)
-        level = scoring.confidence(sessions, signal_counts)
+        level = scoring.confidence((s.session_id for s in result.sessions), signal_counts)
         return {
             "path": key,
             "kind": kind,
             "score": result.score,
             "sessions": sessions,
+            "exposure_sessions": result.exposure_sessions,
+            "friction_rate": result.friction_rate,
             "events": len(found),
             "est_minutes_lost": scoring.lost_minutes(found),
             "signals": dict(ranked),
             "confidence": level,
-            "why": scoring.explain(ranked, sessions, level),
+            "why": scoring.explain(ranked, sessions, result.exposure_sessions, level),
             "recommendations": [],
             "evidence": [],
             "score_detail": {
+                "severity": result.severity,
+                "recurrence": result.recurrence,
+                "consistency": result.consistency,
+                "mean_session_points": result.mean_session_points,
                 "intensity": result.intensity,
                 "sessions": [
                     {
@@ -464,6 +507,17 @@ class _Analysis:
                 direct.setdefault(parent, [])
                 path = parent
         dir_keys = {("" if k == "." else k) for (kind, k) in groups if kind == model.DIR}
+        # Sessions that went anywhere beneath each directory, friction or not.
+        beneath: dict[str, set[str]] = {}
+        for (kind, key), sessions in self.exposure.items():
+            if kind == model.COMMAND:
+                continue
+            path = "" if key == "." else key
+            while True:
+                beneath.setdefault(path, set()).update(sessions)
+                if not path:
+                    break
+                path = path.rsplit("/", 1)[0] if "/" in path else ""
 
         def build(path: str) -> tuple[dict[str, Any], dict[int, Item]]:
             merged: dict[int, Item] = {}
@@ -483,13 +537,17 @@ class _Analysis:
             nodes.sort(key=lambda n: (-n["score"], n["path"]))
             found = [f for f, _ in merged.values()]
             is_dir = bool(nodes) or path in dir_keys or path == ""
+            exposed = beneath.get(path, set()) | {f.session_id for f in found}
+            result = scoring.score_items(merged.values(), len(exposed))
             node = {
                 "name": path.rsplit("/", 1)[-1] if path else (self.repo.name or "repo"),
                 "path": path,
                 "kind": model.DIR if is_dir else model.FILE,
-                "score": scoring.score_items(merged.values()).score,
+                "score": result.score,
                 "events": len(found),
-                "sessions": len({f.session_id for f in found}),
+                "sessions": result.friction_sessions,
+                "exposure_sessions": result.exposure_sessions,
+                "friction_rate": result.friction_rate,
                 "est_minutes_lost": scoring.lost_minutes(found),
                 "children": nodes,
             }

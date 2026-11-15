@@ -46,6 +46,26 @@ FAKE = "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
         ("mail jane.doe+x@example.co.uk now", "jane.doe", "[REDACTED:email]"),
         ("sha " + "0123456789abcdef" * 2 + " end", "0123456789abcdef", "[REDACTED:hex]"),
         ("blob " + FAKE + " end", FAKE, "[REDACTED:high-entropy]"),
+        ("mysql -uroot -phunter2 shop", "hunter2", "-p[REDACTED]"),
+        ("sshpass -p hunter2 ssh host", "hunter2", "[REDACTED]"),
+        ("curl -H 'Cookie: sessionid=abc123def; csrf=xyz987'", "abc123def", "[REDACTED:cookie]"),
+        ("Cookie: a=1; csrf=xyz987", "xyz987", "Cookie: [REDACTED:cookie]"),
+        ("< Set-Cookie: sid=s3cr3tvalue; Path=/; HttpOnly", "s3cr3tvalue", "[REDACTED:cookie]"),
+        (
+            "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=abcd1234efgh==;Endpoint=x",
+            "abcd1234efgh",
+            "AccountKey=[REDACTED]",
+        ),
+        ("Endpoint=sb://x.test/;SharedAccessKey=abcd1234efgh=", "abcd1234efgh", "[REDACTED]"),
+        (
+            "SG." + "abcdefghijklmnopqrstuv." + FAKE + "abcdefg",
+            "abcdefghijklmnopqrstuv",
+            "api-key]",
+        ),
+        ("https://api.x.test/cb?token=abc123tok&x=1", "abc123tok", "token=[REDACTED]&x=1"),
+        ("https://x.test/a?b=2&secret=shh-123", "shh-123", "secret=[REDACTED]"),
+        ("https://x.blob.test/c/f?sv=2020&sig=abcDEF123%3D", "abcDEF123", "sig=[REDACTED]"),
+        ("curl 'https://x.test?api_key=k123456'", "k123456", "api_key=[REDACTED]"),
     ],
 )
 def test_secret_patterns_are_masked(text: str, leak: str, marker: str) -> None:
@@ -70,6 +90,12 @@ def test_private_key_block_is_masked_even_when_unterminated() -> None:
         "getUserAccountSettingsHandlerFactory",
         "The author: Jane wrote this; tokens are counted per request",
         "pytest tests/test_checkout.py::test_rounding -q",
+        "git log -p",
+        "ls -p src && mkdir -p out/dir",
+        "ssh -p 2222 host",
+        "GET /items?page=2&sort=name&key_order=asc",
+        "sorted(items, key=name)",
+        "the cookie banner is too tall",
     ],
 )
 def test_ordinary_text_is_left_alone(text: str) -> None:

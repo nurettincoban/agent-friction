@@ -8,6 +8,7 @@ import pytest
 from agent_friction.attribution import (
     PathResolver,
     normalize_command,
+    objectionable_step,
     parse_command,
     path_candidates,
 )
@@ -148,6 +149,57 @@ def test_symlinked_repo_root_matches_both_spellings(tmp_path: Path) -> None:
         ("", ""),
         ("FOO=1", ""),
         ("echo 'unbalanced", "echo"),
+        # options before the subcommand, with and without a value
+        ("make -j4 test", "make test"),
+        ("FOO=1 make -j 4 -f build/Makefile test", "make test"),
+        ("git -C /repo -c user.name=x commit -m 'x'", "git commit"),
+        ("pnpm --filter web test", "pnpm test"),
+        ("kubectl -n prod get pods", "kubectl get"),
+        ("terraform -chdir=infra plan", "terraform plan"),
+        ("cargo +nightly test", "cargo test"),
+        ("mvn -q test", "mvn test"),
+        # heredoc bodies are data, not commands
+        ("cat <<EOF > x.py\nimport y\nEOF\npython x.py", "python x.py"),
+        ("cat > t.sh <<-'END'\n\tnpm run nope\n\tEND\nnpm run build", "npm run build"),
+        ("python - <<'PY'\nimport os\nos.system('rm -rf x')\nPY", "python"),
+        # control flow, subshells and nested shells are looked through
+        ("if ! make lint; then exit 1; fi", "make lint"),
+        ("if pytest; then echo ok; fi", "pytest"),
+        ("for f in a b; do pytest $f; done", "pytest"),
+        ("while ! nc -z localhost 5432; do sleep 1; done; make migrate", "make migrate"),
+        ("(cd api && pytest)", "pytest"),
+        ("bash -c 'pytest'", "pytest"),
+        ('sh -c "cd api && cargo test --all"', "cargo test"),
+        ("xargs pytest", "pytest"),
+        ("time make test", "make test"),
+        ("nohup npm start &", "npm start"),
+        # pipelines and lists are named after the significant program, not the last word
+        ("echo hi | python -m json.tool", "python -m json.tool"),
+        ("pytest || true", "pytest"),
+        ("pytest; echo done", "pytest"),
+        ("timeout 60 pytest -k foo 2>&1 | tail -5", "pytest"),
+        ("grep -rn foo src | head", "grep"),
+        ("ls | wc -l", "ls"),
+        # only allowlisted tools keep a subcommand; one more word only after a runner/group
+        ("poetry run python -m pytest", "poetry run python -m pytest"),
+        ("bundle exec rspec spec/a_spec.rb", "bundle exec rspec"),
+        ("gh pr create --title x", "gh pr create"),
+        ("git stash pop", "git stash pop"),
+        ("docker compose run web pytest", "docker compose run"),
+        ("docker run --rm -it registry.corp/img pytest", "docker run"),
+        ("kubectl exec pod-1 -- ls", "kubectl exec"),
+        ("yarn workspace web test", "yarn workspace"),
+        ("aws s3 cp secret-bucket/x .", "aws s3"),
+        ("tox -e py312", "tox"),
+        # anything else is the executable alone: arguments are never part of a key
+        ("./run hunter2pass", "run"),
+        ("mytool acmecorp-merger-codename --flag", "mytool"),
+        ("deploy prod-eu-1", "deploy"),
+        ("ssh prod-host-17 uptime", "ssh"),
+        ("psql -h db.internal -U admin shop", "psql"),
+        ("mysql -uroot -phunter2 shop", "mysql"),
+        ("curl -H 'Cookie: sid=abc' https://x.test", "curl"),
+        ("scripts/release.sh v1.2.3-internal", "scripts/release.sh"),
     ],
 )
 def test_normalize_command(command: str, key: str) -> None:
@@ -157,8 +209,15 @@ def test_normalize_command(command: str, key: str) -> None:
 def test_parse_command_reports_programs_and_tokens() -> None:
     parsed = parse_command("cat notes/x.md; cd sub && git diff --stat src/a.py | grep foo")
     assert (parsed.key, parsed.program, parsed.last_program) == ("git diff", "git", "grep")
-    # only arguments of the last statement's real commands: no notes/x.md, no "sub"
-    assert parsed.tokens == ("diff", "--stat", "src/a.py", "foo")
+    # only the arguments of the command the line is named after: no notes/x.md, "sub" or "foo"
+    assert parsed.tokens == ("diff", "--stat", "src/a.py")
+    assert [(s.key, s.significant) for s in parsed.steps] == [
+        ("cat", False),
+        ("cd", False),
+        ("git diff", False),
+        ("grep", False),
+    ]
+    assert parsed.inspection
 
 
 def test_path_candidates() -> None:
@@ -169,3 +228,26 @@ def test_path_candidates() -> None:
         "src/a.py",
         "b.py",
     ]
+
+
+def test_keys_of_unknown_tools_never_contain_arguments() -> None:
+    for tool in ("mytool", "./run", "tools/deploy", "frobnicate", "acme-cli"):
+        for args in ("hunter2pass", "sub command", "--token abc login", "prod eu-1 --force"):
+            key = normalize_command(f"{tool} {args}")
+            assert key == tool.removeprefix("./"), (tool, args, key)
+
+
+def test_objectionable_step() -> None:
+    def pick(command: str, reason: str = "") -> str:
+        step = objectionable_step(parse_command(command), reason)
+        return step.key if step else ""
+
+    chain = "rm -rf migrations/versions && alembic revision --autogenerate"
+    assert parse_command(chain).key == "alembic revision"
+    assert pick(chain) == "rm"  # the destructive step
+    assert pick(chain, "don't run alembic by hand") == "alembic revision"  # named in the reason
+    assert pick("cd api && git add -A && git push --force") == "git push"
+    assert pick("cat Makefile && npm run build && npm test") == "npm run build"  # first to act
+    assert pick("ls && cat x") == "cat"  # nothing but inspection: the line's own key
+    assert pick("cd api && make test", "wrong directory, cd elsewhere") == "make test"
+    assert pick("") == ""

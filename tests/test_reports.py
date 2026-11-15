@@ -112,3 +112,10 @@ def test_html_is_self_contained_and_safe() -> None:
     assert "innerHTML" not in html
     embedded = json.loads(data)
     assert embedded["hotspots"][0]["evidence"][0]["excerpt"].startswith("<script>")
+
+
+def test_markdown_escapes_html_in_free_text() -> None:
+    r = sample_result()
+    r["hotspots"][1]["recommendations"][0]["detail"] = 'The human said: "<img src=x onerror=1>"'
+    md = render_markdown(r)
+    assert "<img" not in md and "&lt;img" in md

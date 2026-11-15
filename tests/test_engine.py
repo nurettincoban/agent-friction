@@ -116,8 +116,14 @@ def test_story_generated_schema_is_the_top_file(result: dict[str, Any]) -> None:
     recs = {r["id"]: r["detail"] for r in top["recommendations"]}
     assert list(recs)[:2] == ["edit-the-source-not-the-output", "split-or-anchor-large-file"]
     assert "stop hand-editing src/shopfront/api/schema_gen.py" in recs["write-down-the-rule"]
-    assert top["why"].startswith("12 friction events in 4 sessions (6 edit miss, 3 user correction")
-    assert top["score_detail"]["sessions"][0].keys() == {"session_id", "weighted_events", "points"}
+    assert top["why"].startswith(
+        "12 friction events in all 4 sessions that touched it (6 edit miss, 3 user correction"
+    )
+    assert (top["exposure_sessions"], top["friction_rate"]) == (4, 1.0)
+    detail = top["score_detail"]
+    assert detail["sessions"][0].keys() == {"session_id", "weighted_events", "points"}
+    product = 100 * detail["severity"] * detail["recurrence"] * detail["consistency"]
+    assert top["score"] == pytest.approx(product, abs=0.2)
 
 
 def test_story_deprecated_api_corrections_land_on_the_service(result: dict[str, Any]) -> None:
@@ -140,8 +146,28 @@ def test_story_pytest_should_be_make_test(result: dict[str, Any]) -> None:
     assert first["id"] == "use-the-working-command"
     assert "5 times the next successful command was `make test`" in first["detail"]
     assert any("No module named 'shopfront'" in (e["excerpt"] or "") for e in top["evidence"])
-    make = entry(result["commands"], "make test")
-    assert make["score"] < top["score"] / 4  # one legitimate test failure barely registers
+    # `make test` failed once on a real test failure that the agent then fixed: that is the
+    # normal red/green loop and it is not reported at all
+    assert "make test" not in [c["path"] for c in result["commands"]]
+    assert result["exposure"]["command"]["make test"] == 6
+
+
+def test_exposure_covers_everything_the_agent_touched(result: dict[str, Any]) -> None:
+    exposure = result["exposure"]
+    assert list(exposure) == ["file", "command", "dir"]
+    for values in exposure.values():
+        assert list(values) == sorted(values) and all(n >= 1 for n in values.values())
+    for kind, section in (("file", "hotspots"), ("command", "commands"), ("dir", "directories")):
+        for item in result[section]:
+            assert exposure[kind][item["path"]] == item["exposure_sessions"] >= item["sessions"]
+            assert item["friction_rate"] == round(item["sessions"] / item["exposure_sessions"], 2)
+    # targets the agent used without any friction are listed too
+    assert exposure["command"]["make codegen"] == 2
+    assert "make codegen" not in [c["path"] for c in result["commands"]]
+    # read-only inspection (cat, ls, git status) is not exposure
+    assert not {"cat", "ls", "git status", "grep"} & set(exposure["command"])
+    client = entry(result["hotspots"], "src/shopfront/payments/client.py")
+    assert (client["sessions"], client["exposure_sessions"], client["friction_rate"]) == (1, 2, 0.5)
 
 
 def test_story_search_misses_roll_up_to_the_directory(result: dict[str, Any]) -> None:
@@ -173,6 +199,14 @@ def test_tree_rolls_files_up_into_directories(result: dict[str, Any]) -> None:
         ordered = [(-c["score"], c["path"]) for c in node["children"]]
         assert ordered == sorted(ordered)
         assert node["est_minutes_lost"] <= tree["est_minutes_lost"]
+        assert node["exposure_sessions"] >= node["sessions"] >= 1
+        assert node["friction_rate"] == round(node["sessions"] / node["exposure_sessions"], 2)
+    for hotspot in result["hotspots"]:
+        leaf = nodes[hotspot["path"]]
+        assert leaf["exposure_sessions"] == hotspot["exposure_sessions"]
+    payments = nodes["src/shopfront/payments"]
+    assert (payments["sessions"], payments["exposure_sessions"]) == (1, 2)
+    assert tree["exposure_sessions"] == result["totals"]["sessions"]
     # a correction split over two files counts once in their common parent
     assert tree["events"] <= result["totals"]["friction_events"]
 
@@ -218,6 +252,70 @@ def test_no_excerpts_removes_all_verbatim_text() -> None:
     assert bare["hotspots"][0]["recommendations"]  # advice is still given, without quotes
     assert bare["commands"][0]["recommendations"][0]["id"] == "use-the-working-command"
     assert bare["totals"] == story()["totals"]  # only the wording changes, never the numbers
+
+
+def test_no_excerpts_keeps_no_argument_of_an_unknown_tool(tmp_path: Path) -> None:
+    """Command keys are the one thing derived from a command line that survives."""
+    secrets = ("hunter2pass", "acmecorp-merger-codename", "prod-eu-9", "bob", "v9.9.9-internal")
+    out = tmp_path / "t"
+    for n in range(3):
+        s = Session(f"s{n}", cwd="/repo").user("go")
+        s.bash("./run hunter2pass", "run: bad credentials", exit_code=1)
+        s.bash("mytool acmecorp-merger-codename --region prod-eu-9", "boom", exit_code=1)
+        s.bash("FOO=hunter2pass deployctl --user bob push prod-eu-9", "denied", exit_code=1)
+        s.bash("docker run registry.corp/acmecorp-merger-codename", "no such image", exit_code=125)
+        s.bash("scripts/release.sh v9.9.9-internal", "tag exists", exit_code=1)
+        s.reject("Bash", {"command": "ssh prod-eu-9 'rm -rf /srv/acmecorp-merger-codename'"})
+        s.reject("Bash", {"command": "mytool hunter2pass"}, "never pass hunter2pass on argv")
+        s.save(out)
+    bare = analyze(
+        AnalyzeOptions(
+            repo=Path("/repo"),
+            transcripts=[out],
+            include_git=False,
+            now=NOW,
+            include_excerpts=False,
+        )
+    )
+    keys = {c["path"] for c in bare["commands"]}
+    assert keys == {"run", "mytool", "deployctl", "docker run", "scripts/release.sh", "ssh"}
+    assert set(bare["exposure"]["command"]) >= keys
+    text = json.dumps(bare)
+    for secret in secrets:
+        assert secret not in text, secret
+    full = json.dumps(analyze(AnalyzeOptions(repo=Path("/repo"), transcripts=[out], now=NOW)))
+    assert "acmecorp-merger-codename" in full  # with excerpts the command line is evidence
+    assert "hunter2pass" in full  # (an opaque argument is not something redaction can spot)
+
+
+def test_healthy_tdd_sessions_produce_no_hotspots(tmp_path: Path) -> None:
+    """Five sessions of edit / run tests / red / edit / green are not friction."""
+    out = tmp_path / "t"
+    for n in range(5):
+        s = Session(f"h{n}", cwd="/repo").user(f"implement feature {n} with tests")
+        s.grep("old_helper", "/repo/src", found=True)
+        for step in range(4):
+            s.edit("/repo/src/feat.py", f"a{step}", f"b{step}")
+            s.bash("pytest tests/test_feat.py -x", "FAILED test_x\n1 failed", exit_code=1)
+        s.edit("/repo/src/feat.py", "z", "y")
+        s.bash("pytest tests/test_feat.py -x", "1 passed")
+        s.user("Great. No. 2 on the list next: add docs to src/feat.py")
+        s.edit("/repo/src/feat.py", "q", "r")
+        s.user("Undo support is the next feature, please add it")
+        s.edit("/repo/src/feat.py", "q2", "r2")
+        s.user("thanks!")
+        s.save(out)
+    result = analyze(
+        AnalyzeOptions(repo=Path("/repo"), transcripts=[out], include_git=False, now=NOW)
+    )
+    assert result["totals"]["sessions"] == 5
+    assert result["totals"]["friction_events"] == result["totals"]["corrections"] == 0
+    assert result["hotspots"] == result["commands"] == result["directories"] == []
+    assert result["exposure"] == {
+        "file": {"src/feat.py": 5},
+        "command": {"pytest": 5},
+        "dir": {"src": 5},
+    }
 
 
 def test_only_unambiguous_corrections_are_quoted(result: dict[str, Any]) -> None:
@@ -277,7 +375,8 @@ def test_window_filters_events() -> None:
     assert late["window"]["first_event"] == "2026-11-03T09:00:00Z"
     early = story(until=datetime(2026, 10, 31))  # naive datetimes are read as UTC
     assert early["totals"]["sessions"] == 2 and early["window"]["until"] == "2026-10-31T00:00:00Z"
-    assert late["totals"]["friction_events"] + early["totals"]["friction_events"] == 36
+    total = story()["totals"]["friction_events"]
+    assert late["totals"]["friction_events"] + early["totals"]["friction_events"] == total == 35
     nothing = story(since=datetime(2027, 1, 1))
     assert nothing["totals"]["sessions"] == 0 and nothing["hotspots"] == []
     assert nothing["window"]["first_event"] is None and nothing["tree"]["children"] == []
@@ -354,7 +453,10 @@ def test_git_rework_is_merged_into_file_hotspots(tmp_path: Path) -> None:
     out = analyze(options)
     (hotspot,) = out["hotspots"]
     assert hotspot["signals"] == {"human-rework": 2, "edit-miss": 1}
-    assert hotspot["sessions"] == 3 and hotspot["confidence"] == "high"
+    # the two agent commits count as places the agent went, but git evidence alone never
+    # raises confidence: one transcript session is still "low"
+    assert hotspot["sessions"] == hotspot["exposure_sessions"] == 3
+    assert hotspot["confidence"] == "low"
     assert "learn-from-rework" in [r["id"] for r in hotspot["recommendations"]]
     rework = next(e for e in hotspot["evidence"] if e["signal"] == "human-rework")
     assert (rework["source"], rework["line"], rework["excerpt"]) == ("git", 0, "human fix-up")
