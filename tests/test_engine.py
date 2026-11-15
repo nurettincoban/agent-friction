@@ -1006,7 +1006,8 @@ def _make_build_score(tmp_path: Path, cwd: str, command: str) -> list[tuple[str,
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
     cwd = cwd.replace("PARENT", str(tmp_path)).replace("REPO", str(repo))
-    command = command.replace("REPO", str(repo))
+    # A shell takes the path as typed; on Windows agents write it with forward slashes.
+    command = command.replace("REPO", repo.as_posix())
     s = Session("b1", cwd=cwd).user("build it")
     s.bash(command, "make: *** No rule to make target 'build'.  Stop.", exit_code=2)
     out = _scan(tmp_path, [s])
