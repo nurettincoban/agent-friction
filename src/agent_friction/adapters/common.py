@@ -1,0 +1,117 @@
+"""Helpers shared by transcript adapters."""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from datetime import datetime, timezone
+
+from agent_friction import model
+
+#: Stored tool output is clipped to this many characters (head and tail are kept).
+MAX_OUTPUT_CHARS = 4000
+
+_TS_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d+))?\s*(Z|[+-]\d{2}:?\d{2})?$"
+)
+
+
+def parse_ts(value: object) -> datetime | None:
+    """Parse an ISO-8601 timestamp (or epoch seconds). Naive values are taken as UTC."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            # Heuristic: values this large are epoch milliseconds.
+            seconds = value / 1000 if value > 1e11 else value
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if not isinstance(value, str):
+        return None
+    match = _TS_RE.match(value.strip())
+    if not match:
+        return None
+    date, clock, fraction, zone = match.groups()
+    micro = (fraction or "0")[:6].ljust(6, "0")
+    if zone in (None, "Z"):
+        zone = "+00:00"
+    elif ":" not in zone:
+        zone = f"{zone[:3]}:{zone[3:]}"
+    try:
+        return datetime.fromisoformat(f"{date}T{clock}.{micro}{zone}")
+    except ValueError:
+        return None
+
+
+def digest(text: str) -> str:
+    """Short stable fingerprint used to compare edit strings without storing them."""
+    return hashlib.sha1(text.encode("utf-8", "replace"), usedforsecurity=False).hexdigest()[:16]
+
+
+def clip_output(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    head = limit // 4
+    return text[:head] + "\n…\n" + text[-(limit - head) :]
+
+
+_AMBIGUOUS_RE = re.compile(r"Found (\d+) matches of the string to replace", re.I)
+_EXIT_RE = re.compile(r"^\s*(?:<tool_use_error>)?\s*(?:Error: )?Exit code (\d+)", re.I)
+_REJECTED_PREFIXES = (
+    "The user doesn't want to proceed with this tool use",
+    "The user doesn't want to take this action right now",
+)
+_REASON_RE = re.compile(r"the user said:\s*(.+)", re.I | re.S)
+_TAG_RE = re.compile(r"</?tool_use_error>")
+
+
+def strip_error_tags(text: str) -> str:
+    return _TAG_RE.sub("", text).strip()
+
+
+def classify_error(text: str) -> tuple[str, int | None]:
+    """Map a failed tool result's text to an error class and the "N matches" count.
+
+    The strings are the ones Claude Code's built-in tools emit. Other agents can
+    either reuse them or set ``error`` explicitly in the generic format.
+    """
+    lowered = text.lower()
+    if "string to replace not found" in lowered or "string not found in file" in lowered:
+        return model.ERR_EDIT_NOT_FOUND, None
+    ambiguous = _AMBIGUOUS_RE.search(text)
+    if ambiguous:
+        return model.ERR_EDIT_AMBIGUOUS, int(ambiguous.group(1))
+    if "has not been read yet" in lowered:
+        return model.ERR_NOT_READ, None
+    if "modified since read" in lowered or "unexpectedly modified" in lowered:
+        return model.ERR_STALE, None
+    if (
+        "file does not exist" in lowered
+        or "no such file or directory" in lowered
+        or "enoent" in lowered
+    ):
+        return model.ERR_MISSING, None
+    return model.ERR_OTHER, None
+
+
+def rejection_reason(text: str) -> str | None:
+    """The user's reason if ``text`` is a declined-tool result, ``""`` if none given."""
+    stripped = strip_error_tags(text)
+    if not stripped.startswith(_REJECTED_PREFIXES):
+        return None
+    match = _REASON_RE.search(stripped)
+    return match.group(1).strip() if match else ""
+
+
+def exit_code(text: str) -> int | None:
+    match = _EXIT_RE.match(text)
+    return int(match.group(1)) if match else None
+
+
+_EMPTY_SEARCH_PREFIXES = ("no matches found", "no files found")
+
+
+def is_empty_search(text: str) -> bool:
+    stripped = text.strip().lower()
+    return stripped == "" or stripped.startswith(_EMPTY_SEARCH_PREFIXES)

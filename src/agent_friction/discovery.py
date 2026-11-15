@@ -1,0 +1,226 @@
+"""Locate Claude Code transcripts for a repository.
+
+Claude Code stores one directory per working directory under
+``<config>/projects/``, named after the cwd with every non-alphanumeric
+character replaced by ``-``. We look for the repo itself, its subdirectories
+and its git worktrees.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import re
+import subprocess
+from collections.abc import Iterable, Mapping, Sequence
+from itertools import islice
+from pathlib import Path
+
+from agent_friction.attribution import PathResolver
+
+_ENCODE_RE = re.compile(r"[^A-Za-z0-9]")
+#: Lines read from a transcript when checking which cwd a project dir belongs to.
+CWD_PROBE_LINES = 50
+GIT_TIMEOUT_SECONDS = 10
+
+
+def encode_cwd(path: Path | str) -> str:
+    """Claude Code's project directory name for a working directory."""
+    return _ENCODE_RE.sub("-", str(path))
+
+
+def claude_config_dirs(
+    env: Mapping[str, str] | None = None, home: Path | None = None
+) -> list[Path]:
+    """Claude Code config directories, most specific first.
+
+    ``$CLAUDE_CONFIG_DIR`` (one directory) wins when set. Otherwise ``~/.claude``
+    and the XDG location ``~/.config/claude`` are both checked.
+    """
+    environ = os.environ if env is None else env
+    configured = environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if configured:
+        return [Path(configured).expanduser()]
+    base = home if home is not None else Path.home()
+    xdg = environ.get("XDG_CONFIG_HOME", "").strip()
+    return [base / ".claude", (Path(xdg) if xdg else base / ".config") / "claude"]
+
+
+def git_worktrees(repo: Path) -> list[Path]:
+    """Roots of all git worktrees of ``repo`` (empty when git is unavailable)."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [
+        Path(line[len("worktree ") :])
+        for line in proc.stdout.splitlines()
+        if line.startswith("worktree ") and line[len("worktree ") :].strip()
+    ]
+
+
+def repo_roots(repo: Path, include_worktrees: bool = True) -> list[Path]:
+    """Absolute directories that count as the repo: itself, its realpath, its worktrees."""
+    roots: list[Path] = []
+    candidates = [repo.absolute()]
+    with contextlib.suppress(OSError):
+        candidates.append(repo.resolve())
+    if include_worktrees:
+        candidates.extend(git_worktrees(repo))
+    for candidate in candidates:
+        if candidate not in roots:
+            roots.append(candidate)
+    return roots
+
+
+def _file_cwd(path: Path) -> str | None:
+    """First ``cwd`` recorded near the top of a transcript, if any."""
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for raw in islice(handle, CWD_PROBE_LINES):
+                try:
+                    obj = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(obj, dict) and isinstance(obj.get("cwd"), str) and obj["cwd"]:
+                    return str(obj["cwd"])
+    except OSError:
+        pass
+    return None
+
+
+def _session_files(project_dir: Path) -> list[Path]:
+    try:
+        return sorted(p for p in project_dir.glob("*.jsonl") if p.is_file())
+    except OSError:
+        return []
+
+
+def _ancestors(roots: Sequence[Path]) -> list[Path]:
+    seen: list[Path] = []
+    for root in roots:
+        for parent in root.parents:
+            if parent not in seen and parent not in roots:
+                seen.append(parent)
+    return seen
+
+
+def discover_project_dirs(
+    repo: Path,
+    config_dirs: Sequence[Path] | None = None,
+    roots: Sequence[Path] | None = None,
+    include_ancestors: bool = True,
+) -> list[Path]:
+    """Claude Code project directories that may hold sessions about ``repo``.
+
+    A directory matches when its name is the encoding of a repo root (exact) or
+    starts with it followed by ``-`` (a subdirectory). The encoding is lossy
+    (``/a/b-c`` and ``/a/b/c`` collide), so a candidate is kept only if at least
+    one of its transcripts records a ``cwd`` inside the repo. If no cwd can be
+    read at all, only exact name matches are kept.
+
+    With ``include_ancestors`` the directories of the repo's parent directories
+    are returned as well: starting the agent in ``~`` or a monorepo root and
+    working in the repo from there is common. Which of *their* sessions are
+    relevant is decided per file by :func:`discover_repo_transcripts`.
+    """
+    all_roots = list(roots) if roots is not None else repo_roots(repo)
+    resolver = PathResolver(repo, all_roots[1:] if all_roots else ())
+    encoded = [encode_cwd(root) for root in all_roots]
+    above = {encode_cwd(parent) for parent in _ancestors(all_roots)} if include_ancestors else set()
+    found: list[Path] = []
+    for config in config_dirs if config_dirs is not None else claude_config_dirs():
+        projects = config / "projects"
+        if not projects.is_dir():
+            continue
+        for entry in sorted(projects.iterdir()):
+            if not entry.is_dir() or entry in found:
+                continue
+            if entry.name in above:
+                found.append(entry)
+                continue
+            exact = entry.name in encoded
+            if not exact and not any(entry.name.startswith(e + "-") for e in encoded):
+                continue
+            cwds = [c for c in map(_file_cwd, _session_files(entry)) if c is not None]
+            if any(resolver.contains(c) for c in cwds) if cwds else exact:
+                found.append(entry)
+    return found
+
+
+def expand_transcript_paths(paths: Iterable[Path]) -> list[Path]:
+    """Expand files and directories into a sorted, de-duplicated list of ``.jsonl`` files."""
+    files: set[Path] = set()
+    for path in paths:
+        path = Path(path).expanduser()
+        if path.is_dir():
+            files.update(p for p in path.rglob("*.jsonl") if p.is_file())
+        elif path.is_file():
+            files.add(path)
+    return sorted(files)
+
+
+def _mentions(path: Path, needles: Sequence[bytes]) -> bool:
+    """True if the file contains any of the byte strings (a cheap relevance pre-filter)."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return False
+    return any(needle in data for needle in needles)
+
+
+def _needles(roots: Sequence[Path]) -> list[bytes]:
+    """Repo roots as they appear inside JSON transcripts (plain and backslash-escaped)."""
+    needles: list[bytes] = []
+    for root in roots:
+        for text in (str(root), json.dumps(str(root))[1:-1]):
+            encoded = text.encode("utf-8", "replace")
+            if encoded not in needles:
+                needles.append(encoded)
+    return needles
+
+
+def discover_repo_transcripts(repo: Path, roots: Sequence[Path] | None = None) -> list[Path]:
+    """Transcripts for ``repo`` from the Claude Code config directories.
+
+    Each session is judged by the ``cwd`` recorded at its top:
+
+    * inside the repo (or a worktree): included;
+    * a parent directory of the repo: included only if the session, or one of
+      its subagents, mentions the repo's path somewhere (the engine then keeps
+      just the events that resolve into the repo);
+    * anywhere else (possible when two paths encode to the same directory
+      name): left out together with its subagent transcripts.
+    """
+    all_roots = list(roots) if roots is not None else repo_roots(repo)
+    resolver = PathResolver(repo, all_roots[1:] if all_roots else ())
+    above = PathResolver.posix_set(_ancestors(all_roots))
+    needles = _needles(all_roots)
+    files: list[Path] = []
+    for directory in discover_project_dirs(repo, roots=all_roots):
+        for session in _session_files(directory):
+            group = [session, *expand_transcript_paths([directory / session.stem])]
+            cwd = _file_cwd(session)
+            inside = cwd is None or resolver.contains(cwd)
+            if inside or (
+                PathResolver.normalize(cwd or "") in above
+                and any(_mentions(f, needles) for f in group)
+            ):
+                files.extend(group)
+    return sorted(set(files))
+
+
+def discover_transcripts(repo: Path) -> list[Path]:
+    """All Claude Code transcript files (sessions and subagents) for ``repo``, sorted."""
+    return discover_repo_transcripts(repo)
