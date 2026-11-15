@@ -116,7 +116,12 @@ def parse_file(path: Path, seen: dict[str, str] | None = None) -> ParsedFile:
             if not isinstance(obj, dict):
                 parsed.skipped_lines += 1
                 continue
-            fingerprint = "generic:" + common.digest(json.dumps(obj, sort_keys=True))
+            try:
+                canonical = json.dumps(obj, sort_keys=True)
+            except RecursionError:  # parsable but absurdly nested (Python 3.14+ parses deeper)
+                parsed.skipped_lines += 1
+                continue
+            fingerprint = "generic:" + common.digest(canonical)
             if earlier.get(fingerprint, str(path)) != str(path):
                 continue  # the same event, already read from another file
             mine.add(fingerprint)
