@@ -648,7 +648,9 @@ def test_repo_root_only_abbreviates_the_real_home(
     for var in ("HOME", "USERPROFILE"):  # Path.home() reads USERPROFILE on Windows
         monkeypatch.setenv(var, str(other))
     root = analyze(options)["repo"]["root"]
-    assert not root.startswith("~") and root.endswith("someone/x")
+    # Not abbreviated relative to the fake home. (On Windows the temp dir itself lives
+    # under C:\Users\<runner>, which is masked as a home-like path, so only check the tail.)
+    assert root != "~/x" and root.endswith("someone/x")
     for var in ("HOME", "USERPROFILE"):
         monkeypatch.setenv(var, str(home))
     assert analyze(options)["repo"]["root"] == "~/x"

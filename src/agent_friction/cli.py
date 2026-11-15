@@ -286,6 +286,8 @@ def _analyze(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
 
 
 def _load_json(path: Path) -> dict[str, Any]:
+    if path.is_dir():  # Windows reports reading a directory as "Permission denied"
+        raise AgentFrictionError(f"{path}: is a directory, expected a `scan -f json` file")
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
