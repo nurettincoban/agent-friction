@@ -69,7 +69,7 @@ jobs:
           /tmp/smoke/bin/agent-friction --version
           /tmp/smoke/bin/agent-friction scan tests/fixtures/shopfront --transcripts tests/fixtures/transcripts --repo-alias /home/dev/shopfront --no-git -o /tmp/smoke.html
           grep -q "schema_gen.py" /tmp/smoke.html
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
