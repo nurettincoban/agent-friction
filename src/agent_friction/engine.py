@@ -231,7 +231,7 @@ def _looks_like_jsonl(path: Path) -> bool:
                 try:
                     if isinstance(json.loads(line), dict):
                         return True
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
     except OSError:
         return False
@@ -733,6 +733,10 @@ class _Analysis:
             "excerpt": text,
             "source": self.cited_source(finding),
             "line": finding.line,
+            # what this event alone claims; a hotspot's minutes are the union, not the sum
+            "est_seconds_lost": (
+                round(finding.interval[1] - finding.interval[0], 1) if finding.interval else 0.0
+            ),
         }
 
     def _tree(self, groups: dict[tuple[str, str], list[Item]]) -> dict[str, Any]:

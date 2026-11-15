@@ -382,7 +382,7 @@ def test_shell_structure_does_not_hide_the_failing_command(tmp_path: Path) -> No
         [("command", "make lint")],
         [("command", "pytest")],
         [("command", "make lint")],
-        [("command", "cargo test")],
+        [("command", "cargo test (api/)")],
     ]
     assert all(f.detail["variant"] == "invocation" for f in found)
 
@@ -1814,8 +1814,9 @@ def test_commands_run_outside_the_repo_are_not_its_friction(tmp_path: Path, comm
 @pytest.mark.parametrize(
     ("command", "key"),
     [
-        ("cd src && pytest", "pytest"),
-        ("cd /repo/web && npm test", "npm test"),
+        ("cd src && pytest", "pytest (src/)"),
+        ("cd /repo/web && npm test", "npm test (web/)"),
+        ("cd /repo/web && git push", "git push"),
         ("cd $WORK && make lint", "make lint"),  # cannot be followed: keep what we knew
         ("git -C /repo push", "git push"),
         ("rm build/out.html", "rm"),
@@ -2036,4 +2037,182 @@ def test_round_eight_correction_openers(text: str) -> None:
     ],
 )
 def test_round_eight_not_corrections(text: str) -> None:
+    assert signals.correction_confidence(text)[0] == 0.0
+
+
+# ---- round 9: exit statuses that are not the command's own ----------------------------------
+
+NOT_FOUND = "bash: pytest: command not found"
+NO_PYTEST = "/usr/bin/python: No module named pytest"
+
+
+def test_a_failure_behind_a_pipe_is_judged_from_its_output(tmp_path: Path) -> None:
+    s = Session().user("run the tests")
+    s.bash("pytest -q 2>&1 | tail -5", NOT_FOUND)  # exit 0: the status of `tail`
+    s.bash("python -m pytest -q 2>&1 | tail -5", NO_PYTEST)
+    s.bash("make test 2>&1 | tail -5", "5 passed in 0.31s")
+    first, second = detect(s, tmp_path)
+    assert keys(first) == [("command", "pytest")] and first.detail["variant"] == "invocation"
+    assert first.detail["status"] == "hidden" and "judged from its output" in first.summary
+    assert first.detail["recovered_by"] == "make test"
+    assert keys(second) == [("command", "python -m pytest")]
+    assert second.detail["recovered_by"] == "make test"  # never the piped run that printed an error
+
+    plain = Session().user("run the tests").bash("pytest -q", NOT_FOUND, exit_code=127)
+    plain.bash("make test", "5 passed in 0.31s")
+    (same,) = detect(plain, tmp_path)
+    assert same.detail["recovered_by"] == "make test" and "status" not in same.detail
+
+
+@pytest.mark.parametrize(
+    ("command", "output"),
+    [
+        ("pytest 2>&1 | tail -3", "===== 1 failed, 4 passed in 0.52s ====="),
+        ("pytest -q | tail -1", "1 failed, 4 passed in 0.52s"),
+        ("npm test 2>&1 | tail -6", "Tests:       2 failed, 9 passed, 11 total"),
+        ("npx vitest run | tail", " Test Files  1 failed | 3 passed (4)"),
+        ("go test ./... 2>&1 | tail -3", "--- FAIL: TestRefund (0.00s)\nFAIL\tshop/pay\t0.012s"),
+        ("cargo test 2>&1 | tail -2", "test result: FAILED. 3 passed; 1 failed; 0 ignored"),
+        ("make build 2>&1 | tail -3", "make: *** [Makefile:12: build] Error 1"),
+        ("ruff check . | head -20", "Found 3 errors."),
+        ("npx tsc --noEmit | head", "src/a.ts(3,1): error TS2304: Cannot find name 'x'."),
+        (
+            "python scripts/gen.py 2>&1 | tail -4",
+            "Traceback (most recent call last):\n  ...\nKeyError: 'sku'",
+        ),
+        ("pytest; echo done", "1 failed in 0.1s\ndone"),
+        ("pytest || true", "1 failed in 0.1s"),
+        ("pytest -q 2>&1 | tee out.log", "1 failed in 0.1s"),
+    ],
+)
+def test_red_output_with_a_hidden_status_is_a_failure(
+    tmp_path: Path, command: str, output: str
+) -> None:
+    s = Session().user("go").bash(command, output)
+    (found,) = detect(s, tmp_path, files=("scripts/gen.py",))
+    assert found.signal == signals.COMMAND_FAILURE and found.detail["status"] == "hidden"
+
+
+@pytest.mark.parametrize(
+    ("command", "output"),
+    [
+        ("pytest 2>&1 | tail -3", "===== 5 passed in 0.52s ====="),
+        ("pytest 2>&1 | tail -3", ""),  # no evidence either way
+        ("make build 2>&1 | tail -3", "gcc -o app main.c"),
+        ("ruff check . | head -20", "All checks passed!"),
+        ("pytest && echo ok", "1 failed in 0.1s"),  # exit 0 here really is pytest's
+        ("grep -rn 'FAILED tests' logs | tail", "FAILED tests/a.py::test_x"),  # reading a log
+    ],
+)
+def test_other_output_with_a_hidden_status_is_not_a_failure(
+    tmp_path: Path, command: str, output: str
+) -> None:
+    assert detect(Session().user("go").bash(command, output), tmp_path) == []
+
+
+def test_an_unknown_outcome_closes_nothing(tmp_path: Path) -> None:
+    # red, edit, then a piped run that shows nothing: not red -> fix -> green
+    s = Session().user("go").bash("pytest", "1 failed in 0.1s", exit_code=1)
+    s.edit(A).bash("pytest 2>&1 | tail -1", "")
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.COMMAND_FAILURE]
+    shown = Session().user("go").bash("pytest", "1 failed in 0.1s", exit_code=1)
+    shown.edit(A).bash("pytest 2>&1 | tail -1", "5 passed in 0.2s")
+    assert detect(shown, tmp_path) == []  # the output says green: the loop closed
+    # a setup error is not "recovered by" a run nobody saw succeed
+    blind = Session().user("go").bash("pytest", NOT_FOUND, exit_code=127)
+    blind.bash("make test 2>&1 | tail -2", "")
+    assert "recovered_by" not in detect(blind, tmp_path)[0].detail
+    # ... and rounds that stay unknown do not end a stretch that never went green
+    stuck_then_blind = stuck(5).edit(A, "x", "y").bash("pytest tests/test_app.py | tail -1", "")
+    assert by_signal(detect(stuck_then_blind, tmp_path), signals.NO_CONVERGENCE)
+    # polling: `gh pr checks | tail` showing nothing is not the green that ends the wait
+    poll = Session().user("go")
+    for _ in range(3):
+        poll.bash("make deploy-check", "not ready", exit_code=1)
+    poll.bash("make deploy-check | tail -1", "")
+    assert signals.RETRY_LOOP in {f.signal for f in detect(poll, tmp_path)}
+
+
+def test_piped_edit_and_run_rounds_do_not_converge_either(tmp_path: Path) -> None:
+    s = Session().user("make the test pass")
+    for i in range(5):
+        s.edit(A, f"a{i}", f"b{i}")
+        s.bash("pytest tests/test_app.py 2>&1 | tail -3", "1 failed in 0.4s", took=30)
+    (found,) = by_signal(detect(s, tmp_path), signals.NO_CONVERGENCE)
+    assert found.detail["count"] == "5"
+
+
+def test_a_correction_claims_the_rework_not_the_turn_it_corrects(tmp_path: Path) -> None:
+    s = Session().user("build the feature")
+    for i in range(20):
+        s.edit(A, f"a{i}", f"b{i}").tick(10)
+    s.bash("pytest", "20 passed").say("Done.")
+    s.user("Not quite - rename the helper in src/a.py")
+    s.read(A).edit(
+        A,
+        "helper",
+        "format_price",
+    ).bash("pytest", "20 passed")
+    (found,) = by_signal(detect(s, tmp_path), signals.USER_CORRECTION)
+    assert found.interval is not None
+    assert 0 < found.interval[1] - found.interval[0] < 30  # the follow-up, not 20 edits
+
+    alone = Session().user("build it").edit(A).say("Done.")
+    alone.user("No, you broke src/a.py")  # names the file; the session ends there
+    (last,) = by_signal(detect(alone, tmp_path), signals.USER_CORRECTION)
+    assert last.interval is None
+    other = Session().user("build it").edit(A).say("Done.")
+    other.user("No, you broke src/a.py").read(B)  # no follow-up on the file: one round trip
+    (one,) = by_signal(detect(other, tmp_path), signals.USER_CORRECTION)
+    assert one.interval is not None and one.interval[1] - one.interval[0] < 30
+
+
+def test_an_interrupt_claims_the_call_it_cut_short(tmp_path: Path) -> None:
+    s = Session().user("go")
+    for i in range(10):
+        s.edit(A, f"a{i}", f"b{i}").tick(20)
+    s.edit(B).interrupt()
+    (found,) = by_signal(detect(s, tmp_path), signals.USER_INTERRUPT)
+    assert found.interval is not None and found.interval[1] - found.interval[0] < 30
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["python3 /tmp/x/r7c.py", "node ~/scratch/probe.js", "bash ../other/run.sh"],
+)
+def test_a_script_outside_the_repo_is_not_its_command(tmp_path: Path, command: str) -> None:
+    s = Session().user("go").bash(command, "Traceback\nKeyError: 1", exit_code=1)
+    assert detect(s, tmp_path) == []
+    inside = Session().user("go").bash("python3 scripts/r7c.py", "KeyError: 1", exit_code=1)
+    assert keys(detect(inside, tmp_path)[0])[0] == ("command", "python scripts/r7c.py")
+
+
+def test_the_same_command_in_two_packages_is_two_commands(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.bash("cd web && npm test", "sh: 1: jest: not found", exit_code=127)
+    s.bash("cd api && npm test", "sh: 1: jest: not found", exit_code=127)
+    s.bash("npm test", "sh: 1: jest: not found", exit_code=127)
+    s.bash("cd web && git push", "fatal: unable to access", exit_code=128)
+    sub = Session("s2", cwd="/repo/web").user("go")
+    sub.bash("npm test", "sh: 1: jest: not found", exit_code=127)
+    found = [keys(f)[0][1] for f in detect(s, tmp_path) + detect(sub, tmp_path)]
+    assert found == [
+        "npm test (web/)",
+        "npm test (api/)",
+        "npm test",
+        "git push",
+        "npm test (web/)",
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Still failing in CI on main before your change too - can you look at app/main.py?",
+        "That's broken, but it was already broken on main",
+        "Still failing - not caused by you, the runner is down",
+        "still failing, not your fault",
+    ],
+)
+def test_a_problem_that_predates_the_agent_is_not_a_correction(text: str) -> None:
     assert signals.correction_confidence(text)[0] == 0.0

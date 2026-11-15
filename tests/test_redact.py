@@ -183,3 +183,33 @@ def test_private_addresses_and_internal_hosts_are_masked() -> None:
         "threading.local() self.internal example.com"
     )
     assert redact.redact(kept) == kept
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "redis://:hunter2pass@cache:6379/0",
+        "echo hunter2pass | docker login --password-stdin -u bob registry.example.com",
+        "log in with password hunter2pass and retry",
+        "using password hunter2pass",
+        "pw hunter2pass",
+        "the pw is hunter2pass",
+        "password: hunter2pass",
+    ],
+)
+def test_more_shapes_of_a_password(text: str) -> None:
+    assert "hunter2pass" not in redact.redact(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "with password authentication enabled",
+        "use the password field of the form",
+        "http://example.com:8080/path",
+        "postgres://db.example.com:5432/shop",
+        "echo done | tail -1",
+    ],
+)
+def test_password_rules_leave_ordinary_text_alone(text: str) -> None:
+    assert redact.redact(text) == text

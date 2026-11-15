@@ -344,3 +344,17 @@ def test_implausible_timestamps_are_missing() -> None:
     assert parse_ts("1970-01-01T00:00:05Z") is None and parse_ts(12) is None
     assert parse_ts("1999-12-31T23:59:59Z") is None and parse_ts("not a time") is None
     assert parse_ts("2000-01-01T00:00:00Z") == datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+
+def test_absurdly_nested_json_is_a_skipped_line(tmp_path: Path) -> None:
+    deep = '{"a":' * 100_000 + "1" + "}" * 100_000
+    s = Session().user("go").bash("make", "nope", exit_code=2)
+    path = tmp_path / "deep.jsonl"
+    path.write_text(s.text() + deep + "\n")
+    parsed = parse_transcript(path)
+    assert parsed.skipped_lines == 1 and sum(len(st.events) for st in parsed.streams) == 3
+    generic_file = tmp_path / "g.jsonl"
+    generic_file.write_text(
+        json.dumps({"session": "s", "kind": "user_message", "text": "go"}) + "\n" + deep + "\n"
+    )
+    assert generic.parse_file(generic_file).skipped_lines == 1

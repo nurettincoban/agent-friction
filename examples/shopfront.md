@@ -1,6 +1,6 @@
 # Agent friction map: shopfront
 
-6 agent sessions analysed · 34 friction events · ~23m lost · 4 human corrections · 5 files affected
+6 agent sessions analysed · 34 friction events · ~11m lost · 4 human corrections · 5 files affected
 
 ## What to fix first
 
@@ -14,8 +14,8 @@
 
 | # | File | Score | Sessions | Events | Est. time lost | Top signals | Confidence |
 |---:|---|---:|---:|---:|---:|---|---|
-| 1 | `src/shopfront/api/schema_gen.py` | 56.8 | 4 | 12 | 11m | `edit-miss`×6, `user-correction`×2, `probable-correction`×1 | high |
-| 2 | `src/shopfront/checkout/service.py` | 43.4 | 3 | 6 | 14m | `edit-revert`×2, `user-correction`×2, `edit-thrash`×1 | high |
+| 1 | `src/shopfront/api/schema_gen.py` | 56.8 | 4 | 12 | 4m | `edit-miss`×6, `user-correction`×2, `probable-correction`×1 | high |
+| 2 | `src/shopfront/checkout/service.py` | 43.4 | 3 | 6 | 2m | `edit-revert`×2, `user-correction`×2, `edit-thrash`×1 | high |
 | 3 | `src/shopfront/payments/refunds.py` | 11.4 | 1 | 1 | 18s | `path-miss`×1 | low |
 | 4 | `api/openapi.yaml` | 9.7 | 1 | 1 | 24s | `search-miss`×1 | low |
 | 5 | `tests/test_refunds.py` | 8.5 | 1 | 1 | 0s | `command-failure`×1 | low |
@@ -138,8 +138,8 @@
   > $ pytest tests/test_refunds.py -x Exit code 4 ImportError while loading conftest '~/shopfront/tests/conftest.py'. tests/conftest.py:3: in &lt;module&gt;     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
 - `2026-11-05 16:01` session `aider-20` · Command failure: `pytest` failed (exit 4; setup/invocation error)
   > $ pytest -q ImportError while loading conftest '~/shopfront/tests/conftest.py'. tests/conftest.py:3: in &lt;module&gt;     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
-- `2026-11-09 15:01` session `8d986baa` · Command failure: `pytest` failed (exit 4; setup/invocation error)
-  > $ pytest tests/test_checkout.py Exit code 4 ImportError while loading conftest '~/shopfront/tests/conftest.py'. tests/conftest.py:3: in &lt;module&gt;     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
+- `2026-11-09 15:01` session `8d986baa` · Command failure: `pytest` failed (judged from its output: the exit status was that of a pipe or a later step; setup/invocation error)
+  > $ pytest tests/test_checkout.py 2&gt;&amp;1 | tail -20 ImportError while loading confte … /shopfront/tests/conftest.py'. tests/conftest.py:3: in &lt;module&gt;     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
 
 </details>
 

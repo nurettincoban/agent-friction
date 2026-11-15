@@ -87,6 +87,7 @@ def test_contract_shape(result: dict[str, Any]) -> None:
         "confidence", "why", "recommendations", "evidence",
     }  # fmt: skip
     evidence_keys = {"signal", "session_id", "timestamp", "summary", "excerpt", "source", "line"}
+    evidence_keys.add("est_seconds_lost")
     for section, kind in (("hotspots", "file"), ("commands", "command"), ("directories", "dir")):
         assert result[section], section
         scores = [(-h["score"], -h["events"], h["path"]) for h in result[section]]
@@ -1109,3 +1110,56 @@ def test_events_before_the_window_are_context_not_counts(tmp_path: Path) -> None
     assert [h["path"] for h in late["hotspots"]] == ["src/app.py"]
     assert late["hotspots"][0]["signals"] == {"user-correction": 1}  # ... the miss is not counted
     assert late["totals"]["tool_calls"] == 1
+
+
+# ---- round 9 --------------------------------------------------------------------------------
+
+
+def test_the_headline_case_survives_a_pipe_to_tail(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "Makefile").write_text("test:\n\tpytest\n")
+    sessions = []
+    for i in range(4):
+        s = Session(f"pipe{i}", cwd=str(repo)).user("run the tests")
+        s.bash("pytest -q 2>&1 | tail -5", "bash: pytest: command not found")
+        s.bash("python -m pytest -q 2>&1 | tail -5", "/usr/bin/python: No module named pytest")
+        s.bash("make test 2>&1 | tail -5", "5 passed in 0.3s")
+        sessions.append(s)
+    out = _scan(tmp_path, sessions)
+    assert out["totals"]["friction_events"] == 8
+    for path in ("pytest", "python -m pytest"):
+        row = entry(out["commands"], path)
+        assert row["signals"] == {"command-failure": 4} and row["score"] > 19
+        (rec,) = row["recommendations"]
+        assert rec["id"] == "use-the-working-command" and "`make test`" in rec["title"]
+    assert "use `python -m pytest`" not in json.dumps(out)
+
+
+def test_evidence_says_how_many_seconds_it_claims(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    s = Session("sec", cwd=str(repo)).user("go")
+    s.bash("pytest", "bash: pytest: command not found", exit_code=127, took=7)
+    s.bash("pytest", "1 failed in 0.1s", exit_code=1)
+    out = _scan(tmp_path, [s])
+    (row,) = out["commands"]
+    seconds = [e["est_seconds_lost"] for e in row["evidence"]]
+    assert sorted(seconds) == [0.0, pytest.approx(11.0)]  # 7s to run + 4s until the next call
+    assert row["est_minutes_lost"] == pytest.approx(sum(seconds) / 60, abs=0.06)
+
+
+def test_packages_of_a_monorepo_get_their_own_command_rows(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sessions = []
+    for i in range(3):
+        s = Session(f"m{i}", cwd=str(repo)).user("test it")
+        s.bash("cd web && npm test", "sh: 1: jest: not found", exit_code=127)
+        s.bash("cd api && npm test", "8 passing")
+        sessions.append(s)
+    out = _scan(tmp_path, sessions)
+    assert [c["path"] for c in out["commands"]] == ["npm test (web/)"]
+    assert out["exposure"]["command"]["npm test (api/)"] == 3
+    hidden = _scan(tmp_path, sessions, include_excerpts=False)
+    assert [c["path"] for c in hidden["commands"]] == ["npm test (web/)"]

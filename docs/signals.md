@@ -145,7 +145,12 @@ corroborated: ...").
     "never mind", "ignore it", "unrelated", "flaky", ...), the human taking
     the blame or naming their own action as the cause ("... because I hadn't
     pulled", "tests failing again after I merged main", "my bad") or only
-    asking ("just curious", "just checking"): "you forgot
+    asking ("just curious", "just checking", "not complaining"), an
+    acknowledgement ("you removed the flag as asked, now ..."), or saying
+    that the problem predates the agent ("before your change", "already
+    broken", "pre-existing", "not caused by you", "not your fault": "Still
+    failing in CI on main before your change too - can you look at
+    app/main.py?" is a new request): "you forgot
     nothing, great job", "I said use tabs in my last project but here spaces
     are fine". Praise *before* the phrase does not void it ("Great effort, but
     you broke the login page").
@@ -376,8 +381,8 @@ commit, file). A human commit that follows another human commit is not rework.
 Agent commits are recognised by `Co-Authored-By` trailers naming Claude,
 Anthropic, Copilot, Codex, Cursor, Aider, Devin, OpenHands, Gemini, Jules or
 Windsurf; "Generated with Claude Code"; an `aider: ` subject prefix; an
-"(aider)" author; or a bot author with one of those names. Override with
-`agent_commit_patterns`.
+"(aider)" author; or a bot author with one of those names. Add patterns with
+`--agent-commit REGEX` (or replace them with `agent_commit_patterns`).
 
 **Automation is not a human.** Commits by other bots are ignored on the human
 side, as if they were not in the history: an author name containing `[bot]`
@@ -385,7 +390,7 @@ or starting with `dependabot`, `renovate`, `pre-commit-ci`, `github-actions`
 and similar, or a known bot e-mail address (`DEFAULT_BOT_PATTERNS`). A CI
 auto-formatter that rewrites the agent's lines is not rework, and the human
 commit after it is still compared with the agent commit. Add your own with
-`bot_commit_patterns` (regexes matched against `author: Name <email>`).
+`--bot-author REGEX` (`bot_commit_patterns`; matched against `Name <email>`).
 
 **Why:** agent output here needed a human follow-up soon after it landed.
 
@@ -490,6 +495,31 @@ successfully once before being removed (read as debugging).
 - *"command not found" names its program:* if the shell says which program
   it could not find and that program is a step or pipeline stage of the line
   (`cat x | jqq . | sort`), the event is keyed to that stage.
+- *An exit status that is not the command's own is no verdict.* In `pytest
+  2>&1 | tail -5` the shell reports the status of `tail`; in `make test; echo
+  done` that of `echo`; `pytest || true` always succeeds. When the command a
+  line is named after is piped into something, or followed by `;` or `||`
+  (and `set -o pipefail` is not in the line), an exit code of 0 is treated as
+  **unknown** and the output decides (`output_verdict`):
+  - **red** if it shows a setup/invocation error (the shapes above) or a
+    failed check: a pytest/unittest summary with failures or errors, `FAILED
+    path::test`, jest/vitest `Tests: N failed` / `Test Files N failed` / `FAIL
+    file`, mocha `N failing`, rspec `N examples, M failures`, `--- FAIL` /
+    `FAIL pkg` (go), `test result: FAILED` / `error[E...]:` / `could not
+    compile` (cargo), `make: *** `, `Found N errors` (N > 0), `error TSnnnn`,
+    `N problems (M errors`, `npm ERR!`, or a Python traceback whose last line
+    is the exception (`RED_OUTPUT_RE`). The event is recorded like any other
+    command failure, with "judged from its output" in the summary;
+  - **green** if it shows a passing summary (`N passed`, `Tests: N passed`,
+    `ok pkg 0.1s`, `test result: ok`, `All checks passed`, `Success: no
+    issues`, `Found 0 errors`, `N passing`, `N examples, 0 failures`;
+    `GREEN_OUTPUT_RE`);
+  - **unknown** otherwise. An unknown run is not a failure, and it is never
+    used as proof of success either: it does not close a red, fix, green
+    loop, is never the `recovered_by` of an earlier failure, does not end a
+    wait or a retry loop, and does not clear a `no-convergence` stretch.
+
+  `a && b` is not such a case: there the exit status is real.
 - *Ordinary failures* (anything else: a red test, a linter or type checker
   reporting problems, a script that raises) count at weight 0.3 and claim no
   lost time. A red test during development is the tool working as intended.
@@ -549,7 +579,8 @@ successfully once before being removed (read as debugging).
   `make -C`, `npm --prefix`, `uv --directory` and their like. If the step
   that failed ran outside the repo, the event is dropped (`cd /tmp/scratch &&
   python repro.py`, `cd .. && make lint`). So is a file command (`rm`, `cp`,
-  `mv`, ...) whose path arguments all lie outside the repo. A `cd` that
+  `mv`, ...) whose path arguments all lie outside the repo, and an interpreter
+  run on a script outside it (`python3 /tmp/x/repro.py`). A `cd` that
   cannot be followed (`cd -`, `cd "$DIR"`) changes nothing. The same applies
   to declined and denied commands.
 - *... and commands that go into the repository are:* the same rule in the
@@ -562,7 +593,9 @@ successfully once before being removed (read as debugging).
 **Why:** agents guess how to build, test and run things; a wrong guess costs a
 round trip in every session until the right command is written down.
 
-**Attribution:** the normalized command (see methodology). In a chain such as
+**Attribution:** the normalized command (see methodology), followed by the
+directory it ran in when that is a subdirectory of the repo and the tool is
+one that works on the directory it is in: `npm test (web/)`. In a chain such as
 `mkdir -p out && pytest tests/x.py | tail -5` that is the last significant
 command (`pytest`), not the setup in front of it or the filter behind it;
 heredoc bodies are skipped and `if`/`for`/`bash -c` are looked through.

@@ -89,11 +89,15 @@ def find_target(result: dict[str, Any], target: str) -> dict[str, Any] | None:
     if len(suffix) == 1:
         return suffix[0]
     # Last resort: the user typed a raw command line ("PYTEST -x", "npm test -- foo").
-    from agent_friction.attribution import normalize_command
+    from agent_friction.attribution import normalize_command, public_key
 
-    key = normalize_command(target.strip().lower()) if target.strip() else ""
+    raw = target.strip()
+    # Try the line as typed and lower-cased ("PYTEST -x"); a --no-excerpts scan stores
+    # pseudonymized keys, so also try those and let the owner type the real name.
+    keys = {k for line in {raw, raw.lower()} if line for k in (normalize_command(line),) if k}
+    keys |= {public_key(k) for k in keys}
     for h in pool:
-        if h.get("kind") == "command" and h.get("path") == key:
+        if h.get("kind") == "command" and h.get("path") in keys:
             return h
     return None
 

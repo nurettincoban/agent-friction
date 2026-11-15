@@ -324,6 +324,9 @@ DESTRUCTIVE_KEYS = frozenset(
 
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _SUBCOMMAND_RE = re.compile(r"^[a-z][a-z0-9:_-]*$")
+#: Tools whose first argument is a target the project defines, and how such a name looks.
+TARGET_TOOLS = frozenset({"make", "gmake", "just", "task", "rake", "nox", "tox", "invoke"})
+_TARGET_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9:_.-]*$")
 _NUMERIC_RE = re.compile(r"^[-+]?[\d.,:]+[a-z%]{0,2}$", re.I)
 _PYTHON_RE = re.compile(r"^(python|pypy)[\d.]*$")
 _SEPARATORS = frozenset({";", "&&", "||", "&", "|", "|&", "(", ")", ";;"})
@@ -358,6 +361,9 @@ class ParsedCommand:
     tokens: tuple[str, ...]  # arguments of the primary step, for path extraction
     inspection: bool = False  # read-only probing: a failure is not friction
     steps: tuple[Step, ...] = ()  # every simple command, in order
+    #: The line's exit status is not the primary step's: it is piped into a filter, or
+    #: followed by ``; ...`` or ``|| ...``. An exit code of 0 then proves nothing.
+    masked: bool = False
 
 
 def _strip_heredocs(command: str) -> str:
@@ -554,7 +560,7 @@ _SUBCOMMAND_SCRIPTS = frozenset({"manage.py", "artisan"})
 
 def is_inline_code(key: str) -> bool:
     """A key that stands for ad-hoc code (``python <inline>``), not a repeatable command."""
-    return key.endswith((INLINE, STDIN))
+    return INLINE in key or STDIN in key
 
 
 def _key(words: Sequence[str]) -> str:
@@ -610,7 +616,9 @@ def _raw_key(words: Sequence[str]) -> str:
         return program  # unknown tool or repo script: the executable alone, never its arguments
     rest = _skip_options(base, rest)
     parts = [program]
-    if rest and _SUBCOMMAND_RE.match(rest[0]):
+    if rest and base in TARGET_TOOLS and _TARGET_RE.match(rest[0]):
+        parts.append(rest[0])  # ``make deploy-ZebraCustomer``: targets are names in any case
+    elif rest and _SUBCOMMAND_RE.match(rest[0]):
         parts.append(rest[0])
         if base == "yarn" and rest[0] == "workspace" and len(rest) > 2:
             # ``yarn workspace <name> <script>``: which package, and what is run in it
@@ -619,7 +627,9 @@ def _raw_key(words: Sequence[str]) -> str:
                 parts.append(rest[2])
         elif rest[0] in CONTINUING_SUBCOMMANDS.get(base, ()):
             tail = _skip_options(base, rest[1:])
-            if tail and _SUBCOMMAND_RE.match(tail[0]):
+            named = rest[0] in ("run", "run-script") and base in ("npm", "pnpm", "yarn", "bun")
+            word_re = _TARGET_RE if named else _SUBCOMMAND_RE  # scripts are project names
+            if tail and word_re.match(tail[0]):
                 runs = "python" if _PYTHON_RE.match(tail[0]) else tail[0]
                 parts.append(runs)
                 if runs == "python" and len(tail) > 2 and tail[1] == "-m":
@@ -706,6 +716,65 @@ def _steps(command: str, depth: int = 0, moves: tuple[str, ...] = ()) -> list[St
     return steps
 
 
+def _masked(command: str, program: str) -> bool:
+    try:
+        return _status_masked(command, program)
+    except (IndexError, ValueError, RecursionError):
+        return False
+
+
+_MASKING = frozenset({"|", "|&", "||", "&"})
+
+
+def _status_masked(command: str, program: str, depth: int = 0) -> bool:
+    """Is the exit status of the last ``program`` step hidden by what follows it?
+
+    ``pytest | tail -5``, ``pytest; echo done`` and ``pytest || true`` report the
+    status of ``tail``, ``echo`` and (at worst) ``true``. ``pytest && echo ok``
+    does not hide a failure, and ``set -o pipefail`` restores a pipeline's.
+    """
+    tokens = _tokenize(command)
+    pieces: list[tuple[list[str], str]] = []  # (words of a simple command, operator after it)
+    current: list[str] = []
+    for token in tokens:
+        if token in _SEPARATORS:
+            if current and token not in ("(", ")"):
+                pieces.append((current, token))
+                current = []
+            elif pieces and not current and token not in ("(", ")") and pieces[-1][1] == "":
+                pieces[-1] = (pieces[-1][0], token)
+            continue
+        current.append(token)
+    if current:
+        pieces.append((current, ""))
+    index = -1
+    for position, (words, _) in enumerate(pieces):
+        stripped = _strip_prefixes(_segments(words)[0] if _segments(words) else [])
+        if not stripped:
+            continue
+        name = _program_name(stripped[0]).rsplit("/", 1)[-1]
+        if name == program or (stripped and _key(stripped).split(" ")[0] == program):
+            index = position
+        elif (
+            name in SHELLS
+            and depth < _MAX_NESTING
+            and len(stripped) > 2
+            and stripped[1] in ("-c", "-lc", "-ic")
+            and _status_masked(stripped[2], program, depth + 1)
+        ):
+            return True
+    if index < 0:
+        return False
+    after = [operator for _, operator in pieces[index:]]
+    following = [words for words, _ in pieces[index + 1 :]]
+    real = [w for w in following if _strip_prefixes(_segments(w)[0] if _segments(w) else [])]
+    if not real:
+        return False  # nothing runs after it (`pytest;`, `...; then pytest; fi`)
+    if after[0] in ("|", "|&") and "pipefail" in command:
+        return False
+    return after[0] in _MASKING or any(op in (";", "||") for op in after[:-1])
+
+
 def parse_command(command: str) -> ParsedCommand:
     """Normalize a shell command line. Rules are documented in docs/methodology.md.
 
@@ -744,6 +813,7 @@ def parse_command(command: str) -> ParsedCommand:
         tokens=primary.args,
         inspection=primary.inspection,
         steps=tuple(steps),
+        masked=_masked(command, primary.program),
     )
 
 

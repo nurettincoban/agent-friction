@@ -171,6 +171,15 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
         help="human edits within N days of an agent commit count as rework (default 14)",
     )
     g.add_argument(
+        "--agent-commit",
+        action="append",
+        default=[],
+        type=_regex,
+        metavar="REGEX",
+        help="also treat commits whose author line or message matches REGEX as written by "
+        "an agent (added to the built-in trailers); repeatable",
+    )
+    g.add_argument(
         "--bot-author",
         action="append",
         default=[],
@@ -320,6 +329,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _analyze(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
     from agent_friction.engine import AnalyzeOptions, analyze
+    from agent_friction.gitsignals import DEFAULT_AGENT_PATTERNS
 
     if not repo.is_dir():
         raise AgentFrictionError(f"{repo}: not a directory (pass the repository root)")
@@ -334,6 +344,9 @@ def _analyze(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
             max_evidence=args.max_evidence,
             repo_aliases=tuple(args.repo_alias),
             rework_window_days=args.rework_days,
+            agent_commit_patterns=(
+                [*DEFAULT_AGENT_PATTERNS, *args.agent_commit] if args.agent_commit else None
+            ),
             bot_commit_patterns=[f"^author: .*(?:{p})" for p in args.bot_author],
             allow_no_transcripts=args.allow_empty,
         )

@@ -320,3 +320,22 @@ def test_show_accepts_repo_positionally() -> None:
     code, out, _ = run("show", "pytest", *INPUT)
     assert code == EXIT_OK and "pytest" in out
     assert run("show", "pytest", *INPUT, "--repo", INPUT[0])[0] == EXIT_USAGE
+
+
+def test_show_finds_a_pseudonymized_command_by_its_real_name(tmp_path: Path) -> None:
+    from agent_friction.attribution import public_key
+
+    saved = tmp_path / "private.json"
+    assert run("scan", *INPUT, "--no-excerpts", "-o", str(saved))[0] == EXIT_OK
+    data = json.loads(saved.read_text(encoding="utf-8"))
+    hashed = public_key("make deploy-acme")
+    assert hashed != "make deploy-acme"
+    data["commands"].append({**data["commands"][0], "path": hashed})
+    saved.write_text(json.dumps(data), encoding="utf-8")
+    code, out, _ = run("show", "make deploy-acme", "--from", str(saved))
+    assert code == EXIT_OK and hashed in out
+
+
+def test_agent_commit_flag_validates_regex() -> None:
+    assert run("scan", *INPUT, "--agent-commit", "[")[0] == EXIT_USAGE
+    assert run("scan", *INPUT, "--agent-commit", "Generated-by: mybot")[0] == EXIT_OK

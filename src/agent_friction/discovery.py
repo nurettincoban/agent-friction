@@ -91,7 +91,7 @@ def _file_cwd(path: Path) -> str | None:
             for raw in islice(handle, CWD_PROBE_LINES):
                 try:
                     obj = json.loads(raw)
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
                 if isinstance(obj, dict) and isinstance(obj.get("cwd"), str) and obj["cwd"]:
                     return str(obj["cwd"])

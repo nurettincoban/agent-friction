@@ -1,23 +1,23 @@
 agent-friction · shopfront
-6 sessions · 74 tool calls · 34 friction events · ~23m lost · 4 human corrections · 2026-10-26 → 2026-11-12
+6 sessions · 74 tool calls · 34 friction events · ~11m lost · 4 human corrections · 2026-10-26 → 2026-11-12
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals
-  █████▋      56.8 src/shopfront/api/schema_gen.py           4     12     11m  ● edit-miss×6, user-correction×2
-  ████▍       43.4 src/shopfront/checkout/service.py         3      6     14m  ● edit-revert×2, user-correction×2
+  █████▋      56.8 src/shopfront/api/schema_gen.py           4     12      4m  ● edit-miss×6, user-correction×2
+  ████▍       43.4 src/shopfront/checkout/service.py         3      6      2m  ● edit-revert×2, user-correction×2
   █▏          11.4 src/shopfront/payments/refunds.py         1      1     18s  ○ path-miss×1
   █            9.7 api/openapi.yaml                          1      1     24s  ○ search-miss×1
   ▉            8.5 tests/test_refunds.py                     1      1      0s  ○ command-failure×1
 
 Commands that keep failing
-  score            path                                   sess events    lost  top signals
+  score            command                                sess events    lost  top signals
   ████▉       48.6 pytest                                    4      7      3m  ◐ command-failure×7
   █▋          16.3 rm                                        1      1     42s  ○ tool-rejected×1
   █▌          15.2 curl                                      1      1     12s  ○ command-failure×1
   █▌          15.2 python -m pytest                          1      1     30s  ○ command-failure×1
 
 Directories where agents search in vain
-  score            path                                   sess events    lost  top signals
+  score            directory                              sess events    lost  top signals
   ███         29.5 src/shopfront                             2      5      1m  ◐ search-miss×5
 
 What to fix first

@@ -20,12 +20,12 @@ with the evidence quoted so you can check it yourself.
 ```console
 $ agent-friction scan
 agent-friction · shopfront
-6 sessions · 74 tool calls · 34 friction events · ~23m lost · 4 human corrections
+6 sessions · 74 tool calls · 34 friction events · ~11m lost · 4 human corrections
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals
-  █████▋      56.8 src/shopfront/api/schema_gen.py           4     12     11m  ● edit-miss×6, user-correction×2
-  ████▍       43.4 src/shopfront/checkout/service.py         3      6     14m  ● edit-revert×2, user-correction×2
+  █████▋      56.8 src/shopfront/api/schema_gen.py           4     12      4m  ● edit-miss×6, user-correction×2
+  ████▍       43.4 src/shopfront/checkout/service.py         3      6      2m  ● edit-revert×2, user-correction×2
 
 Commands that keep failing
   ████▉       48.6 pytest                                    4      7      3m  ◐ command-failure×7
@@ -101,7 +101,8 @@ agent-friction compare before.json after.json
 `compare` measures each file and command against the sessions that actually touched it (events per
 10 exposed sessions), so a file nobody worked on afterwards shows up as "no activity", not as
 "resolved". It ignores changes too small to mean anything, warns when either side has too few
-sessions, and refuses to compare scans of different repositories.
+sessions, and refuses to compare scans of different repositories. Both scans must use the
+same privacy mode: compare two `--no-excerpts` scans, or two scans without it.
 
 ### In CI
 
@@ -146,7 +147,7 @@ friction is, how often it **recurs** across sessions (one bad afternoon is not a
 file is not penalized just for being busy). Roughly: under 20 is an incident, 20-45 a pattern,
 above 45 a reliable struggle. Red-then-green test runs with a fix in between are normal work and
 are not counted, and weak signals on their own (re-reads, many edits, an empty search) never
-rise above the incident band. Time lost is a conservative estimate of agent time from timestamps; waiting for
+rise above the incident band. Time lost is a floor estimate of agent time from timestamps (a correction claims only the rework it caused); waiting for
 a human is never counted. Confidence (low / medium /
 high) depends on how many sessions back a hotspot and whether an independent second kind of
 evidence agrees. All of it is in
@@ -202,6 +203,8 @@ within a schema version.
   never quoted, and excluded from the headline count. It is English-only and still a heuristic,
   so treat the count as a floor.
 - Time lost is a floor, not a measurement of human time.
+- When a command's exit status is hidden (`pytest | tail`, `cmd; echo done`), the verdict comes
+  from its output. If the filter cut the summary line away, the run counts as neither red nor green.
 - Agents that edit mostly through shell commands (heredocs, scripts) leave fewer traces of
   edit friction, so edit signals undercount for them.
 

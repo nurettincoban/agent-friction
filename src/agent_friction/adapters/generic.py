@@ -110,7 +110,7 @@ def parse_file(path: Path, seen: dict[str, str] | None = None) -> ParsedFile:
                 continue
             try:
                 obj = json.loads(raw)
-            except ValueError:
+            except (ValueError, RecursionError):
                 parsed.skipped_lines += 1
                 continue
             if not isinstance(obj, dict):

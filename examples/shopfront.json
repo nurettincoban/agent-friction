@@ -7,6 +7,7 @@
       "events": 7,
       "evidence": [
         {
+          "est_seconds_lost": 24.0,
           "excerpt": "$ pytest tests/test_checkout.py -q\nExit code 4\nImportError while loading conftes … /shopfront/tests/conftest.py'.\ntests/conftest.py:3: in <module>\n    from shopfront.db import make_engine\nE   ModuleNotFoundError: No module named 'shopfront'",
           "line": 20,
           "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
@@ -16,6 +17,7 @@
           "timestamp": "2026-10-26T10:03:31Z"
         },
         {
+          "est_seconds_lost": 29.0,
           "excerpt": "$ pytest tests/test_refunds.py\nExit code 4\nImportError while loading conftest '~/shopfront/tests/conftest.py'.\ntests/conftest.py:3: in <module>\n    from shopfront.db import make_engine\nE   ModuleNotFoundError: No module named 'shopfront'",
           "line": 17,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
@@ -25,6 +27,7 @@
           "timestamp": "2026-10-29T14:03:15Z"
         },
         {
+          "est_seconds_lost": 39.0,
           "excerpt": "$ pytest tests/test_refunds.py -x\nExit code 4\nImportError while loading conftest '~/shopfront/tests/conftest.py'.\ntests/conftest.py:3: in <module>\n    from shopfront.db import make_engine\nE   ModuleNotFoundError: No module named 'shopfront'",
           "line": 19,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
@@ -34,6 +37,7 @@
           "timestamp": "2026-10-29T14:03:44Z"
         },
         {
+          "est_seconds_lost": 39.0,
           "excerpt": "$ pytest -q\nImportError while loading conftest '~/shopfront/tests/conftest.py'.\ntests/conftest.py:3: in <module>\n    from shopfront.db import make_engine\nE   ModuleNotFoundError: No module named 'shopfront'",
           "line": 7,
           "session_id": "aider-2026-11-05",
@@ -43,12 +47,13 @@
           "timestamp": "2026-11-05T16:01:04Z"
         },
         {
-          "excerpt": "$ pytest tests/test_checkout.py\nExit code 4\nImportError while loading conftest '~/shopfront/tests/conftest.py'.\ntests/conftest.py:3: in <module>\n    from shopfront.db import make_engine\nE   ModuleNotFoundError: No module named 'shopfront'",
+          "est_seconds_lost": 19.0,
+          "excerpt": "$ pytest tests/test_checkout.py 2>&1 | tail -20\nImportError while loading confte … /shopfront/tests/conftest.py'.\ntests/conftest.py:3: in <module>\n    from shopfront.db import make_engine\nE   ModuleNotFoundError: No module named 'shopfront'",
           "line": 13,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
           "signal": "command-failure",
           "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
-          "summary": "`pytest` failed (exit 4; setup/invocation error)",
+          "summary": "`pytest` failed (judged from its output: the exit status was that of a pipe or a later step; setup/invocation error)",
           "timestamp": "2026-11-09T15:01:53Z"
         }
       ],
@@ -110,6 +115,7 @@
       "events": 1,
       "evidence": [
         {
+          "est_seconds_lost": 39.0,
           "excerpt": "$ rm -rf migrations/versions && alembic revision --autogenerate -m currency\nuser said: never delete existing migrations, add a new revision on top",
           "line": 19,
           "session_id": "4132e18c-d843-510d-aee7-82374ae93389",
@@ -162,6 +168,7 @@
       "events": 1,
       "evidence": [
         {
+          "est_seconds_lost": 14.0,
           "excerpt": "$ curl -s -H 'Authorization: Bearer [REDACTED:token]' https://staging.shopfront.example/api/health\nExit code 7\ncurl: (7) Failed to connect to staging.shopfront.example port 443: Connection refused",
           "line": 33,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
@@ -205,6 +212,7 @@
       "events": 1,
       "evidence": [
         {
+          "est_seconds_lost": 28.0,
           "excerpt": "$ python -m pytest -q\nExit code 4\nImportError while loading conftest '~/shopfront/tests/conftest.py'.\ntests/conftest.py:3: in <module>\n    from shopfront.db import make_engine\nE   ModuleNotFoundError: No module named 'shopfront'",
           "line": 19,
           "session_id": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
@@ -250,6 +258,7 @@
       "events": 5,
       "evidence": [
         {
+          "est_seconds_lost": 16.0,
           "excerpt": "pattern: RefundPolicy",
           "line": 5,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
@@ -259,6 +268,7 @@
           "timestamp": "2026-10-29T14:00:06Z"
         },
         {
+          "est_seconds_lost": 16.0,
           "excerpt": "pattern: src/shopfront/**/refund*.py",
           "line": 7,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
@@ -268,6 +278,7 @@
           "timestamp": "2026-10-29T14:00:22Z"
         },
         {
+          "est_seconds_lost": 14.0,
           "excerpt": "pattern: DiscountPolicy",
           "line": 3,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
@@ -277,6 +288,7 @@
           "timestamp": "2026-11-09T15:00:06Z"
         },
         {
+          "est_seconds_lost": 14.0,
           "excerpt": "pattern: RefundPolicy",
           "line": 5,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
@@ -286,6 +298,7 @@
           "timestamp": "2026-11-09T15:00:20Z"
         },
         {
+          "est_seconds_lost": 14.0,
           "excerpt": "pattern: **/*policy*.py",
           "line": 7,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
@@ -366,10 +379,11 @@
     {
       "agent_commits": 0,
       "confidence": "high",
-      "est_minutes_lost": 10.7,
+      "est_minutes_lost": 3.6,
       "events": 12,
       "evidence": [
         {
+          "est_seconds_lost": 0.0,
           "excerpt": null,
           "line": 28,
           "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
@@ -379,6 +393,7 @@
           "timestamp": "2026-10-26T10:08:42Z"
         },
         {
+          "est_seconds_lost": 16.0,
           "excerpt": "File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.",
           "line": 13,
           "session_id": "4132e18c-d843-510d-aee7-82374ae93389",
@@ -388,6 +403,7 @@
           "timestamp": "2026-11-03T09:01:39Z"
         },
         {
+          "est_seconds_lost": 3.0,
           "excerpt": null,
           "line": 24,
           "session_id": "4132e18c-d843-510d-aee7-82374ae93389",
@@ -397,6 +413,7 @@
           "timestamp": "2026-11-03T09:04:16Z"
         },
         {
+          "est_seconds_lost": 0.0,
           "excerpt": "That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml.",
           "line": 10,
           "session_id": "aider-2026-11-05",
@@ -406,6 +423,7 @@
           "timestamp": "2026-11-05T16:06:40Z"
         },
         {
+          "est_seconds_lost": 21.0,
           "excerpt": "String to replace not found in file.\nString: API_VERSION = \"2.3\"",
           "line": 9,
           "session_id": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
@@ -496,10 +514,11 @@
     {
       "agent_commits": 0,
       "confidence": "high",
-      "est_minutes_lost": 14.2,
+      "est_minutes_lost": 1.9,
       "events": 6,
       "evidence": [
         {
+          "est_seconds_lost": 0.0,
           "excerpt": null,
           "line": 28,
           "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
@@ -509,6 +528,7 @@
           "timestamp": "2026-10-26T10:08:42Z"
         },
         {
+          "est_seconds_lost": 2.0,
           "excerpt": "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.",
           "line": 29,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
@@ -518,6 +538,7 @@
           "timestamp": "2026-10-29T14:11:05Z"
         },
         {
+          "est_seconds_lost": 0.0,
           "excerpt": null,
           "line": 21,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
@@ -527,6 +548,7 @@
           "timestamp": "2026-11-09T15:03:39Z"
         },
         {
+          "est_seconds_lost": 28.0,
           "excerpt": "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only.",
           "line": 27,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
@@ -536,6 +558,7 @@
           "timestamp": "2026-11-09T15:14:23Z"
         },
         {
+          "est_seconds_lost": 16.0,
           "excerpt": null,
           "line": 31,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
@@ -614,6 +637,7 @@
       "events": 1,
       "evidence": [
         {
+          "est_seconds_lost": 21.0,
           "excerpt": "File does not exist.",
           "line": 9,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
@@ -662,6 +686,7 @@
       "events": 1,
       "evidence": [
         {
+          "est_seconds_lost": 26.0,
           "excerpt": "pattern: API_VERSION",
           "line": 13,
           "session_id": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
@@ -710,6 +735,7 @@
       "events": 1,
       "evidence": [
         {
+          "est_seconds_lost": 0.0,
           "excerpt": "$ pytest tests/test_refunds.py -x\nExit code 1\ntests/conftest.py:11: in engine\n    return make_engine(os.environ['DATABASE_URL'])\nE   KeyError: 'DATABASE_URL'\nERROR tests/test_checkout.py - KeyError: 'DATABASE_URL'",
           "line": 23,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
@@ -947,7 +973,7 @@
     "commands_affected": 4,
     "corrections": 4,
     "directories_affected": 1,
-    "est_minutes_lost": 23.0,
+    "est_minutes_lost": 11.0,
     "files_affected": 5,
     "friction_events": 34,
     "probable_corrections": 1,
@@ -965,7 +991,7 @@
                 "children": [
                   {
                     "children": [],
-                    "est_minutes_lost": 10.7,
+                    "est_minutes_lost": 3.6,
                     "events": 12,
                     "exposure_sessions": 4,
                     "friction_rate": 1.0,
@@ -976,7 +1002,7 @@
                     "sessions": 4
                   }
                 ],
-                "est_minutes_lost": 10.7,
+                "est_minutes_lost": 3.6,
                 "events": 12,
                 "exposure_sessions": 4,
                 "friction_rate": 1.0,
@@ -990,7 +1016,7 @@
                 "children": [
                   {
                     "children": [],
-                    "est_minutes_lost": 14.2,
+                    "est_minutes_lost": 1.9,
                     "events": 6,
                     "exposure_sessions": 3,
                     "friction_rate": 1.0,
@@ -1001,7 +1027,7 @@
                     "sessions": 3
                   }
                 ],
-                "est_minutes_lost": 14.2,
+                "est_minutes_lost": 1.9,
                 "events": 6,
                 "exposure_sessions": 3,
                 "friction_rate": 1.0,
@@ -1037,7 +1063,7 @@
                 "sessions": 1
               }
             ],
-            "est_minutes_lost": 21.8,
+            "est_minutes_lost": 7.1,
             "events": 23,
             "exposure_sessions": 6,
             "friction_rate": 1.0,
@@ -1048,7 +1074,7 @@
             "sessions": 6
           }
         ],
-        "est_minutes_lost": 21.8,
+        "est_minutes_lost": 7.1,
         "events": 23,
         "exposure_sessions": 6,
         "friction_rate": 1.0,
@@ -1109,7 +1135,7 @@
         "sessions": 1
       }
     ],
-    "est_minutes_lost": 22.3,
+    "est_minutes_lost": 7.5,
     "events": 25,
     "exposure_sessions": 6,
     "friction_rate": 1.0,

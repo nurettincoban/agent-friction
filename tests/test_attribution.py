@@ -476,3 +476,41 @@ def test_drive_letter_roots_ignore_case() -> None:
     ):
         assert resolver.resolve(raw) == "src/a.py"
     assert resolver.resolve("C:\\Users\\Dev\\Shopping\\a.py") is None
+
+
+@pytest.mark.parametrize(
+    ("command", "masked"),
+    [
+        ("pytest -q 2>&1 | tail -5", True),
+        ("make test 2>&1 | grep -E 'passed|failed'", True),
+        ("pytest; echo $?", True),
+        ("pytest || true", True),
+        ("cd web && npm test 2>&1 | tee out.log", True),
+        ("bash -c 'pytest | tail'", True),
+        ("timeout 60 pytest | head", True),
+        ("pytest", False),
+        ("pytest;", False),
+        ("pytest && echo ok", False),
+        ("mkdir -p out && pytest", False),
+        ("set -o pipefail; pytest | tee log", False),
+        ("if [ -f x ]; then pytest; fi", False),
+    ],
+)
+def test_whose_exit_status_a_command_line_reports(command: str, masked: bool) -> None:
+    assert parse_command(command).masked is masked
+
+
+@pytest.mark.parametrize(
+    ("command", "key", "public"),
+    [
+        ("make deploy-ZebraCustomer", "make deploy-ZebraCustomer", "make <target:"),
+        ("npm run ZebraCustomer:build", "npm run ZebraCustomer:build", "npm run <"),
+        ("make -j4 Test", "make Test", "make <target:"),
+        ("npm run build", "npm run build", "npm run build"),
+        ("git commit Message", "git commit", "git commit"),
+    ],
+)
+def test_targets_keep_their_name_in_any_case(command: str, key: str, public: str) -> None:
+    assert normalize_command(command) == key
+    hidden = public_key(key)
+    assert hidden.startswith(public) and "Zebra" not in hidden

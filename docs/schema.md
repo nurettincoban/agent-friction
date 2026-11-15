@@ -19,6 +19,15 @@ fields may be added within a version, never removed or re-typed.
 
 ### `AnalyzeOptions`
 
+`analyze` and `AnalyzeOptions` are the Python entry point the CLI is built on. They are
+typed and covered by tests, but until 1.0 only the JSON output carries a stability
+promise. Every option has a CLI flag: `transcripts` is `-t`, `since`/`until` are
+`--since`/`--until`, `include_git=False` is `--no-git`, `include_excerpts=False` is
+`--no-excerpts`, `max_evidence` is `--max-evidence`, `repo_aliases` is `--repo-alias`,
+`rework_window_days` is `--rework-days`, `agent_commit_patterns` is `--agent-commit`
+(added to the defaults), `bot_commit_patterns` is `--bot-author`, and
+`allow_no_transcripts` is `--allow-empty`.
+
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `repo` | required | Repository root. |
@@ -86,7 +95,7 @@ by repository or time window, so `0` marks an empty, binary or foreign file.
 | Field | Meaning |
 | --- | --- |
 | `kind` | `"claude-code"`, `"generic"` or `"git"`. |
-| `path` | `claude-code:<repo name>` for Claude Code transcripts (the project directory encodes an absolute path and is never shown), the file for generic transcripts (home as `~`; only `generic:<file name>` with `include_excerpts=False`), or the repo root for git. |
+| `path` | `claude-code:<repo name>` for Claude Code transcripts (the project directory encodes an absolute path and is never shown), the file for generic transcripts (home as `~`; only `generic:<file name>` with `--no-excerpts`), or the repo root for git. |
 | `sessions` | Distinct sessions with activity in the repo (for git: agent commits in the window). |
 | `skipped_lines` | Lines that were not valid JSON objects or lacked required structure. |
 | `skipped_events` | Events on which a detector raised an unexpected error. They are skipped; anything above 0 is a bug worth reporting. |
@@ -126,7 +135,7 @@ sorted. The list is not truncated by `max_hotspots`. Every hotspot's
 `exposure_sessions` equals the entry for its `path` here. `file` keys are
 repo-relative paths; `command` keys are normalized command keys (the same
 strings as `commands[].path`, and the only thing derived from command lines
-that is present with `include_excerpts=False`); `dir` keys are directories
+that is present with `--no-excerpts`); `dir` keys are directories
 that were the scope of a search. Agent commits from git do not add exposure
 (only a commit with rework outside every analysed session counts, for the
 file it reworked).
@@ -168,9 +177,10 @@ was fixed only if its target still has exposure there.
 | `session_id` | Transcript session, or `git:<sha>` of the agent commit when no analysed session made it. |
 | `timestamp` | ISO-8601 UTC; `null` only for generic events without `ts`. |
 | `summary` | What happened, built from structure only: tool name, repo-relative path, normalized command name, counts, commit hashes. Never contains prompts, search patterns, command arguments or output. |
-| `excerpt` | Redacted, truncated transcript text (error output, the command, the human's words, the search pattern), or `null`. Always `null` with `include_excerpts=False`, and always `null` for `probable-correction` (a guess never quotes the human). May contain newlines. |
-| `source` | Where to look the event up: `claude-code:<repo name>/<session file>.jsonl` (never the project directory), a generic transcript file (home as `~`), or `"git"`. `null` for transcript evidence with `include_excerpts=False`. |
+| `excerpt` | Redacted, truncated transcript text (error output, the command, the human's words, the search pattern), or `null`. Always `null` with `--no-excerpts`, and always `null` for `probable-correction` (a guess never quotes the human). May contain newlines. |
+| `source` | Where to look the event up: `claude-code:<repo name>/<session file>.jsonl` (never the project directory), a generic transcript file (home as `~`), or `"git"`. `null` for transcript evidence with `--no-excerpts`. |
 | `line` | 1-based line number in `source`; `0` for git. |
+| `est_seconds_lost` | float. Seconds of agent time this event alone claims (the length of its interval, one decimal); `0.0` if it claims none. A hotspot's `est_minutes_lost` is the union of its events' intervals, so it equals the sum of these only when they do not overlap. *Addition within schema version 1.* |
 
 ### `tree`
 

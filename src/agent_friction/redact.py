@@ -79,7 +79,8 @@ _RULES: tuple[_Rule, ...] = (
     ),
     (
         "url-credentials",
-        re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/:@]+:[^\s/@]+@"),
+        # also password-only: ``redis://:hunter2@host``
+        re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/:@]*:[^\s/@]+@"),
         r"\1[REDACTED:credentials]@",
     ),
     (
@@ -131,10 +132,33 @@ _RULES: tuple[_Rule, ...] = (
     (
         "prose-secret",
         re.compile(
-            r"(?i)\b((?:password|passwd|passphrase|pwd|secret|token|api[ _-]?key|access[ _-]?key)"
+            r"(?i)\b((?:password|passwd|passphrase|pwd|pw|secret|token|api[ _-]?key"
+            r"|access[ _-]?key)"
             r"\s+(?:is|was)\s+[\"'`]?)(?!\[REDACTED)([^\s\"'`,;]{4,})"
         ),
         r"\1[REDACTED]",
+    ),
+    (
+        # "log in with password hunter2", "using pw hunter2", "pw: hunter2"
+        "prose-password",
+        re.compile(
+            r"(?i)\b((?:(?:with|using|use|via|and|the)\s+(?:(?:the|a|my|our)\s+)?"
+            r"(?:password|passwd|passphrase|pwd|pw)|pw)(?:\s*[:=]\s*|\s+)[\"'`]?)"
+            r"(?!\[REDACTED)(?!(?:is|was|for|from|in|to|of|on|the|and|or|that|if|when|auth\w*"
+            r"|protect\w*|reset\w*|field|prompt|manager|file|hash\w*|based|change\w*|polic\w+"
+            r"|check\w*|valid\w*|input|form|flow|login|stdin|env\w*|variable|store\w*)\b)"
+            r"([^\s\"'`,;]{4,})"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
+        # ``echo hunter2 | docker login --password-stdin``
+        "password-stdin",
+        re.compile(
+            r"(?i)\b((?:echo|printf)\s+(?:-\w+\s+)*[\"']?)(?!\[REDACTED)([^\s|\"']+)"
+            r"([\"']?\s*\|[^\n;&]*--password-stdin)"
+        ),
+        r"\1[REDACTED]\3",
     ),
     (
         "email",

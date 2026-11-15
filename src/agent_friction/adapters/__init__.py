@@ -26,7 +26,7 @@ def detect_format(path: Path) -> str:
             for raw in islice(handle, SNIFF_LINES):
                 try:
                     obj = json.loads(raw)
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
                 if not isinstance(obj, dict):
                     continue

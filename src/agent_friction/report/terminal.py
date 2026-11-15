@@ -64,13 +64,15 @@ def _truncate(text: str, width: int) -> str:
 
 
 def _hotspot_rows(
-    items: list[dict[str, Any]], st: Style, titles: dict[str, str], width: int
+    items: list[dict[str, Any]],
+    st: Style,
+    titles: dict[str, str],
+    width: int,
+    label: str = "path",
 ) -> list[str]:
     lines: list[str] = []
     path_w = max(24, min(48, width - 62))
-    header = (
-        f"  {'score':<16} {'path':<{path_w}} {'sess':>4} {'events':>6} {'lost':>7}  top signals"
-    )
+    header = f"  {'score':<16} {label:<{path_w}} {'sess':>4} {'events':>6} {'lost':>7}  top signals"
     lines.append(st.dim(header))
     for h in items:
         score = float(h.get("score", 0))
@@ -131,12 +133,12 @@ def render_terminal(
         out.append("")
     if commands:
         out.append(st.bold("Commands that keep failing"))
-        out.extend(_hotspot_rows(commands, st, titles, width))
+        out.extend(_hotspot_rows(commands, st, titles, width, "command"))
         out.append("")
     directories = list(result.get("directories", []))[:top]
     if directories:
         out.append(st.bold("Directories where agents search in vain"))
-        out.extend(_hotspot_rows(directories, st, titles, width))
+        out.extend(_hotspot_rows(directories, st, titles, width, "directory"))
         out.append("")
 
     recs = collect_recommendations(result, limit=5)

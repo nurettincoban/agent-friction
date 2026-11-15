@@ -114,6 +114,10 @@ together, and so that the key can be shown even when excerpts are off:
    - **every other program is its executable name alone**: `./run s3cret` is
      `run`, `mytool acme-codename --x` is `mytool`, `ssh host cmd` is `ssh`,
      `docker run <image>` is `docker run`;
+   - make-style targets and package scripts are names the project chose, so
+     they are kept in any case: `make deploy-ZebraCustomer`, `just Deploy`,
+     `npm run ZebraCustomer:build` (`TARGET_TOOLS`; without excerpts they
+     become placeholders like every project-specific word);
    - **a command run inside a container is keyed as the command itself:**
      `docker compose exec web pytest -q`, `docker compose run --rm api
      pytest`, `docker exec -it shop_web_1 pytest` and `kubectl exec deploy/web
@@ -126,6 +130,18 @@ together, and so that the key can be shown even when excerpts are off:
    redactor would change (`make 2` is `make`; a key that would start with
    such a word is discarded). Every key passes through the redactor.
 
+6. **Say where, for tools that work on the directory they are in.** For
+   build, test, lint and package tools (`DIRECTORY_TOOLS`: `npm`, `pnpm`,
+   `yarn`, `make`, `cargo`, `go`, `uv`, `pytest`, `tox`, ..., and any key
+   with a role), the key shown is followed by the repo-relative directory the
+   step ran in when that is not the repo root: `cd web && npm test`, and `npm
+   test` in a session started in `web/`, are both `npm test (web/)`. `git
+   push`, `curl` or `docker ps` are the same thing wherever they run and get
+   no suffix. The directory is a repo path, so it stays readable without
+   excerpts. In a repo where agents `cd tests && pytest` in some sessions and
+   run `pytest tests` from the root in others, this splits one command into
+   two rows; that is the price of not merging the packages of a monorepo.
+
 A key therefore consists of an executable name plus, at most, a subcommand of
 an allowlisted tool, a `make`/`npm run`-style target or script name, or an
 interpreter's script path or module. Free-form arguments, option values, host
@@ -133,7 +149,7 @@ names, URLs and environment assignments are never part of a key.
 
 **Keys without excerpts.** Executable, script, target and module names are
 still chosen by the project (`python deploy_acme_customer.py`, `make
-deploy-customer-acme`). With `include_excerpts=False` every word of a key
+deploy-customer-acme`). With `--no-excerpts` every word of a key
 that is not in a fixed public vocabulary (well-known programs, their common
 subcommands, and generic target names such as `test`, `build`, `lint`;
 `PUBLIC_VOCABULARY` in `attribution.py`) is replaced by a placeholder with
@@ -269,7 +285,8 @@ Each event may claim a wall-clock interval from transcript timestamps:
 | `command-failure` (ordinary) | none |
 | `path-miss`, `search-miss`, `file-too-large`, `tool-rejected`, `permission-denied` | one round trip |
 | `edit-revert` | from the original edit to the revert if both are in the same turn; otherwise one round trip |
-| `user-correction`, `user-interrupt` | the agent's working time in the corrected turn (first tool call to last agent activity / the interrupt) |
+| `user-correction` | the rework only: from the agent's first tool call after the correction to its last change to the files the correction was about, in that turn; one round trip (that first call) if it does not return to those files; nothing if the session ends there. A `probable-correction` claims nothing |
+| `user-interrupt` | the call that was cut short: from its start to the interrupt |
 | `no-convergence` | from the first red run of the stretch to the end of the last, at most 15 minutes |
 | `retry-loop`, `edit-thrash`, `read-loop`, `human-rework` | none (no defensible estimate) |
 
@@ -291,12 +308,22 @@ intervals (merged per transcript stream), so overlapping events are never
 counted twice.
 
 This is an estimate of agent wall-clock time that demonstrably went into
-failed calls or redirected work. It is not a measure of human time, and it is
-conservative for failures (one round trip unless a recovery is visible) and
-generous for corrections (the whole turn, up to the cap, is treated as
-redirected). Because intervals are not divided by share, minutes of different
+failed calls or into redoing work. It is not a measure of human time, and it
+is a **floor** throughout: a failure costs one round trip unless an unbroken
+recovery is visible, and a correction costs the follow-up it caused, never
+the turn it corrects (twenty clean edits and a green test run followed by
+"not quite, rename the helper" cost the rename, not the twenty edits). The
+human's own time, the agent's reading and thinking before a failed call, and
+everything that went wrong without leaving one of these traces are not in it.
+Because intervals are not divided by share, minutes of different
 hotspots can overlap; only `totals.est_minutes_lost` is free of double
 counting. Events without timestamps claim nothing.
+
+Every evidence item carries `est_seconds_lost`, the length of its own
+interval (0 if it claims none), so a hotspot's minutes can be checked by
+hand: they are the union of its events' intervals, which is the sum of those
+seconds unless intervals overlap (and more than the listed items add up to
+when `max_evidence` hides some events).
 
 ## Confidence
 
@@ -365,7 +392,7 @@ Transcripts contain secrets. The engine therefore:
 - keeps everything a human typed, searched for or saw printed (prompts,
   search patterns, command lines, command output, reasons for declining,
   commit subjects) in exactly two places: `excerpt` and the quotes inside
-  recommendation details. Both disappear with `include_excerpts=False`.
+  recommendation details. Both disappear with `--no-excerpts`.
   What remains then is structural: tool names, repo-relative paths, counts,
   commit hashes and **command keys**. Without excerpts a key contains only
   words from a fixed public vocabulary (`pytest`, `npm run build`, `git
@@ -425,6 +452,19 @@ follow one rule: anything that looks like a home directory becomes `~`.
 - **Heuristics, not understanding.** A correction is recognised by its
   wording plus what the agent does next; a setup error by its output. Both directions of error exist and are
   listed per signal in the catalog.
+- **Exit statuses that are not the command's own.** `pytest | tail -5`,
+  `make test; echo done` and `pytest || true` exit 0 whatever happened. Such
+  a run is judged from its output (see `command-failure` in the catalog). What
+  remains: a failure whose telling lines were cut off by the filter (`| tail
+  -1` on a tool that prints its verdict earlier, `| grep -c`), or printed in
+  a shape that is not on the list, is "unknown" and counts as neither red nor
+  green, so that failure is missed; output redirected to a file and read
+  back with a separate `cat` is not connected to the command; `; echo $?`
+  is not parsed; and a script that prints "3 failed" as ordinary content
+  behind a pipe is read as red.
+- **One command key per directory, by name.** `npm test (web/)` is told apart
+  from `npm test (api/)` only in what is shown and scored. A green run in one
+  package still closes a red-fix-green loop that was opened in another.
 - **Where a command runs is followed lexically.** `cd`, `pushd` and
   directory options (`git -C`, `make -C`, `npm --prefix`, `uv --directory`)
   are resolved from the text of the command line. A `cd` through a variable,

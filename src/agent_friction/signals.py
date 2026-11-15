@@ -18,6 +18,7 @@ from agent_friction.adapters.common import QUESTION_TOOL_RE
 from agent_friction.attribution import (
     DESTRUCTIVE_PROGRAMS,
     HOUSEKEEPING_PROGRAMS,
+    INTERPRETERS,
     MATCH_FILTERS,
     SETUP_PROGRAMS,
     ParsedCommand,
@@ -108,6 +109,15 @@ NO_CONVERGENCE_MIN_CYCLES = 4
 NO_CONVERGENCE_CAP_SECONDS = 900.0
 #: Files edited during the cycles that share the event, at most (the most edited first).
 NO_CONVERGENCE_MAX_FILES = 3
+
+#: Tools that act on the project in the directory they are run in. Their commands are
+#: named with that directory when it is not the repo root (`npm test (web/)`).
+DIRECTORY_TOOLS = frozenset(
+    {"npm", "pnpm", "yarn", "bun", "npx", "make", "gmake", "just", "task", "cargo", "go", "uv"}
+    | {"poetry", "pip", "pytest", "tox", "nox", "gradle", "gradlew", "mvn", "dotnet", "bundle"}
+    | {"composer", "mix", "rake", "tsc", "vite", "jest", "vitest", "ruff", "mypy", "eslint"}
+    | {"python", "node", "deno", "cmake", "ctest", "bazel", "pre-commit", "terraform"}
+)
 
 #: Files that agents look for as a matter of routine, whether or not a project has them:
 #: instructions, environment files, READMEs and the usual tool configuration.
@@ -387,6 +397,55 @@ STEP_SIGNATURES: dict[str, re.Pattern[str]] = {
 }
 
 
+#: Output of a check that failed, whatever the exit status says. Used only when the status
+#: is not the command's own (``pytest | tail -5``, ``make test; echo done``).
+RED_OUTPUT_RE = re.compile(
+    # pytest / unittest
+    r"^(?:=+ )?(?:\d+ \w+, )*\d+ (?:failed|errors?)\b.* in [\d.]+s"
+    r"|^(?:FAILED|ERROR) \S+::|^FAILED \((?:failures|errors)="
+    # jest / vitest / mocha / rspec
+    r"|^Tests?:\s+.*\b\d+ failed|^Test (?:Suites|Files):?\s+.*\b\d+ failed|^\s*FAIL\s+\S+"
+    r"|^\s*[1-9]\d* failing\b|\b\d+ examples?, [1-9]\d* failures?"
+    # go / cargo
+    r"|^--- FAIL|^FAIL(?:\s+\S+\s+[\d.]+s)?$|^test result: FAILED|^error(?:\[E\d+\])?: "
+    r"|could not compile"
+    # make, linters, type checkers
+    r"|^make(?:\[\d+\])?: \*\*\* |^Found [1-9]\d* errors?\b|error TS\d+"
+    r"|[1-9]\d* problems? \([1-9]\d* errors?|^npm (?:ERR!|error) "
+    r"|^\s*[1-9]\d* (?:failed|failures?)\b",
+    re.M,
+)
+#: The last line of an uncaught Python exception.
+_TRACEBACK_END_RE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt)(?::|$)")
+#: Output of a check that passed.
+GREEN_OUTPUT_RE = re.compile(
+    r"^(?:=+ )?\d+ passed\b(?!.*\b(?:failed|error))"
+    r"|^Tests?:\s+(?!.*failed)\d+ passed|^Test (?:Suites|Files):?\s+(?!.*failed)\d+ passed"
+    r"|^ok\s+\S+\s+[\d.]+s|^PASS\b|^test result: ok|^All checks passed|^Success: no issues"
+    r"|^Found 0 errors|^OK(?: \(|$)|^\s*\d+ passing\b|\b\d+ examples?, 0 failures"
+    r"|^\d+ files? (?:already formatted|left unchanged)|^Finished .*(?:dev|release|test)",
+    re.M,
+)
+
+
+def output_verdict(output: str, first_party: Callable[[str], bool] | None = None) -> str | None:
+    """``"red"``, ``"green"`` or ``None`` (cannot tell) for a command judged by its output.
+
+    For command lines whose exit status belongs to something else (a trailing
+    ``| tail``, ``; echo done``, ``|| true``): there an exit code of 0 says
+    nothing about the command that matters.
+    """
+    lines = [line for line in output.splitlines() if line.strip()]
+    if is_invocation_error(output, None, first_party) or RED_OUTPUT_RE.search(output):
+        return "red"
+    traceback = bool(lines) and "Traceback (most recent call last)" in output
+    if traceback and _TRACEBACK_END_RE.match(lines[-1].strip()):
+        return "red"
+    if GREEN_OUTPUT_RE.search(output):
+        return "green"
+    return None
+
+
 def _step_signature(step: Step) -> list[re.Pattern[str]]:
     if is_setup_command(step.key):
         return [INSTALL_FAILURE_RE]
@@ -545,7 +604,10 @@ _SOFTENER_RE = re.compile(
     r"|just (?:curious|wondering|asking|checking|confirming|making sure)"
     r"|out of curiosity|no complaints?|not complaining|curious|genuine(?:ly)? (?:question|asking)"
     # an acknowledgement: "you removed the flag as asked, now ..."
-    r"|as (?:asked|requested|expected|planned|discussed|agreed|i (?:asked|wanted|said)))\b",
+    r"|as (?:asked|requested|expected|planned|discussed|agreed|i (?:asked|wanted|said))"
+    # the problem predates the agent's work
+    r"|before your (?:change|changes|edit|edits|commit|commits|fix|pr)|not caused by you(?:r \w+)?"
+    r"|already (?:broken|failing|red|there)|pre-?existing|not (?:related to|because of) your)\b",
     re.I,
 )
 #: The human is moving on to something else: a description of a bug ("it doesn't work on
@@ -889,8 +951,21 @@ class _Unconfirmed:
 
 
 @dataclass
+class _Rework:
+    """What a correction cost: the agent's follow-up on the files it was about."""
+
+    finding: Finding
+    files: frozenset[str]
+    start: float | None = None  # the agent's first call after the correction
+    first: tuple[float, float] | None = None  # that call's round trip
+    end: float | None = None  # its last change to one of ``files`` in that turn
+
+
+@dataclass
 class _State:
     """Mutable per-stream detector state."""
+
+    rework: _Rework | None = None
 
     turn: list[_Action] = field(default_factory=list)
     agent_seen: float | None = None  # last agent prose in this turn
@@ -961,6 +1036,7 @@ class _Cycle:
     last: float | None = None
     result: Event | None = None
     command: str = ""
+    label: str = ""
     files: dict[str, int] = field(default_factory=dict)
 
 
@@ -1016,11 +1092,29 @@ class _Detector:
             self.state.turn_trouble = True
         return finding
 
+    def _label(self, key: str, step: Step | None, cwd: str | None) -> str:
+        """How a command is named in the result: its key, and where in the repo it ran.
+
+        ``npm test`` in ``web/`` and in ``api/`` of a monorepo are different commands:
+        ``npm test (web/)``. At the repo root the key stands alone.
+        """
+        name = self.ctx.command_key(key)
+        if key.split(" ", 1)[0] not in DIRECTORY_TOOLS and command_role(key) is None:
+            return name  # `git push`, `curl`, `docker ps`: the same thing wherever it runs
+        here = self._where(step, cwd)
+        rel = self.ctx.resolver.resolve(here, None) if here else None
+        return name + (f" ({rel}/)" if rel else "")
+
+    def _primary(self, action: _Action) -> Step | None:
+        cmd = action.cmd
+        return next((s for s in cmd.steps if s.key == cmd.key), None) if cmd else None
+
     def _action_targets(self, action: _Action) -> list[Target]:
         if action.file is not None:
             return [Target(model.FILE, action.file)]
         if action.cmd is not None and action.cmd.key:
-            return [Target(model.COMMAND, self.ctx.command_key(action.cmd.key))]
+            label = self._label(action.cmd.key, self._primary(action), action.call.cwd)
+            return [Target(model.COMMAND, label)]
         return []
 
     def _round_trip(self, action: _Action) -> tuple[float, float] | None:
@@ -1077,6 +1171,11 @@ class _Detector:
             if there is not None and not resolver.contains(there):
                 return True
             cwd = there or cwd
+        if (step.program in INTERPRETERS or step.key.startswith("python ")) and step.args:
+            script = step.args[0]
+            # `python3 /tmp/scratch/repro.py`: a script that lives outside the repo
+            if not script.startswith("-") and "/" in script and resolver.outside(script, cwd):
+                return True
         if step.program in HOUSEKEEPING_PROGRAMS | DESTRUCTIVE_PROGRAMS:
             paths = [a for a in step.args if not a.startswith("-")]
             return bool(paths) and all(resolver.outside(path, cwd) for path in paths)
@@ -1100,7 +1199,8 @@ class _Detector:
             if inside and parsed.key and not self._elsewhere(primary, event.cwd):
                 action.cmd = parsed
                 if not parsed.inspection:
-                    self.exposed.add((model.COMMAND, self.ctx.command_key(parsed.key)))
+                    label = self._label(parsed.key, primary, event.cwd)
+                    self.exposed.add((model.COMMAND, label))
         elif event.op == model.OP_SEARCH:
             scope = _scope(event, self.ctx)
             if scope is not None:
@@ -1181,7 +1281,7 @@ class _Detector:
         assert cycle.result is not None
         ranked = sorted(cycle.files.items(), key=lambda kv: (-kv[1], kv[0]))
         files = [path for path, _ in ranked[:NO_CONVERGENCE_MAX_FILES]]
-        targets = [Target(model.COMMAND, self.ctx.command_key(key))]
+        targets = [Target(model.COMMAND, cycle.label)]
         targets += [Target(model.FILE, path, 1.0 / len(files)) for path in files]
         interval = None
         if cycle.first is not None and cycle.last is not None and cycle.last > cycle.first:
@@ -1190,7 +1290,7 @@ class _Detector:
         self._emit(
             NO_CONVERGENCE,
             cycle.result,
-            f"`{self.ctx.command_key(key)}` was still failing after {cycle.count} rounds of "
+            f"`{cycle.label}` was still failing after {cycle.count} rounds of "
             f"edit and re-run{where}; the turn ended red",
             targets,
             excerpt=f"$ {cycle.command}\n{cycle.result.output}",
@@ -1210,6 +1310,9 @@ class _Detector:
     def _step(self, item: _Action | Event) -> None:
         state = self.state
         if isinstance(item, _Action):
+            if state.rework is not None and state.rework.first is None:
+                state.rework.start = _epoch(item.call)
+                state.rework.first = self._round_trip(item)
             try:
                 self._on_action(item)
             finally:
@@ -1326,6 +1429,7 @@ class _Detector:
             del state.removed[:-REMOVED_TEXTS_KEPT]
         self._explain_probes(path, call)
         self._confirm_correction({path}, f"the agent then changed {path} again")
+        self._note_rework({path}, action)
         if call.op == model.OP_WRITE:
             # Reading a file to see whether it exists, then creating it, is not a miss.
             self._drop({id(f) for f in state.missing_reads.pop(path, [])})
@@ -1526,16 +1630,31 @@ class _Detector:
             return
         state = self.state
         key = cmd.key
-        shown = self.ctx.command_key
+        located: Step | None = self._primary(action)
+
+        def shown(name: str) -> str:
+            return self._label(name, located, action.call.cwd)
+
         state.pending = [(f, k, n - 1) for f, k, n in state.pending if n > 1]
         if result.ok and is_shell_edit(cmd, action.call.command or ""):
             self._on_change()  # `sed -i`, a formatter, `--fix`: a change like any edit
-        if not cmd.inspection and result.error != model.ERR_INTERRUPTED:
-            state.turn_shell_ok = result.ok
-        if result.ok:
+        # `pytest | tail -5` exits with the status of `tail`. Exit 0 is then no verdict:
+        # the output decides, and where it does not, the run is neither red nor green.
+        ok = result.ok
+        verdict: str | None = None
+        hidden = result.ok and cmd.masked and not cmd.inspection
+        if hidden:
+            verdict = output_verdict(result.output, self.ctx.first_party)
+            ok = verdict != "red"
+        unknown = hidden and verdict is None
+        if not cmd.inspection and result.error != model.ERR_INTERRUPTED and not unknown:
+            state.turn_shell_ok = ok
+        if ok:
             if not cmd.inspection:
                 state.ok_commands += 1
                 self._shell_undo(action)
+            if unknown:
+                return  # unknown outcome: it closes nothing and recovers nothing
             # The very same command line failed repeatedly and now passes, and nothing was
             # changed or installed in between: the agent was waiting for something (CI, a
             # server starting), which is not friction.
@@ -1592,7 +1711,7 @@ class _Detector:
                     waiting.append((finding, failed_key, left))
             state.pending = waiting
             return
-        code = result.exit_code
+        code = None if hidden else result.exit_code
         if cmd.inspection:
             return  # probing (ls, cat, git status, ...) is not friction
         if code == 1 and cmd.last_program in MATCH_FILTERS and cmd.last_program != cmd.program:
@@ -1615,6 +1734,7 @@ class _Detector:
             return  # the step that failed ran, or only touched things, outside the repo
         if step is not None and step.key:
             key = step.key
+            located = step
         inline = is_inline_code(key)
         if inline and code not in INVOCATION_EXIT_CODES:
             # Ad-hoc code failing says something about that code, not about how to run
@@ -1640,6 +1760,8 @@ class _Detector:
             if len(targets) > COMMAND_MAX_FILES:
                 break
         status = f"exit {code}" if code is not None else "error"
+        if hidden:
+            status = "judged from its output: the exit status was that of a pipe or a later step"
         kind = "setup/invocation error" if invocation else "ordinary failure"
         summary = f"`{shown(key)}` failed ({status}; {kind})"
         if not certain:
@@ -1653,6 +1775,8 @@ class _Detector:
         }
         if not certain:
             detail["ambiguous_step"] = "1"
+        if hidden:
+            detail["status"] = "hidden"
         if inline:
             detail["inline"] = "1"
         if timed_out:
@@ -1680,7 +1804,7 @@ class _Detector:
         elif not invocation:
             state.red.setdefault(key, []).append(finding)
             if not inline:
-                self._red_run(key, action, result)
+                self._red_run(key, shown(key), action, result)
         else:
             missing = missing_name(result.output)
             if missing is not None:
@@ -1701,7 +1825,7 @@ class _Detector:
             )
             state.retry[same].detail["count"] = str(run)
 
-    def _red_run(self, key: str, action: _Action, result: Event) -> None:
+    def _red_run(self, key: str, label: str, action: _Action, result: Event) -> None:
         """Count a red run that followed a change: one more round that did not converge."""
         state = self.state
         cycle = state.cycles.get(key)
@@ -1720,6 +1844,7 @@ class _Detector:
         cycle.last = end if end is not None else cycle.last
         cycle.result = result
         cycle.command = action.call.command or ""
+        cycle.label = label
 
     def _shell_undo(self, action: _Action) -> None:
         """A successful shell command that changes or restores files a correction was about."""
@@ -1749,6 +1874,7 @@ class _Detector:
                 hit or pending.files,
                 f"the agent then ran `{self.ctx.command_key(cmd.key)}` on {what}",
             )
+            self._note_rework(hit or pending.files, action)
 
     # ---- human signals ---------------------------------------------------------------
 
@@ -1756,6 +1882,12 @@ class _Detector:
     def _correction_summary(confidence: float, matched: str, note: str, how: str) -> str:
         what = "User correction" if confidence >= CORRECTION_STRONG else "Probable correction"
         return f"{what} (confidence {confidence:g}; matched {matched}; {note}); {how}"
+
+    def _note_rework(self, paths: set[str] | frozenset[str], action: _Action) -> None:
+        """The agent changed files again that the last correction was about."""
+        rework = self.state.rework
+        if rework is not None and rework.files & paths:
+            rework.end = _epoch(action.result) or _epoch(action.call) or rework.end
 
     def _confirm_correction(self, paths: set[str] | frozenset[str], note: str) -> None:
         """The agent acted on files a strongly worded correction was about."""
@@ -1769,6 +1901,16 @@ class _Detector:
 
     def _settle_correction(self) -> None:
         """The turn after a strongly worded correction is over: did the agent act on it?"""
+        rework, self.state.rework = self.state.rework, None
+        self._settle_wording()
+        if rework is not None and rework.finding.signal == USER_CORRECTION:
+            # A correction costs the rework it caused: from the agent's first call after
+            # it to its last change to the files in question. The turn that was corrected
+            # may have been mostly fine, so none of it is claimed.
+            again = _capped(rework.start, rework.end) if rework.end is not None else None
+            rework.finding.interval = again or rework.first
+
+    def _settle_wording(self) -> None:
         pending = self.state.unconfirmed
         if pending is None:
             return
@@ -1813,7 +1955,7 @@ class _Detector:
             if self._elsewhere(step, call.cwd):
                 return
             if step is not None and step.key:
-                targets = [Target(model.COMMAND, self.ctx.command_key(step.key))]
+                targets = [Target(model.COMMAND, self._label(step.key, step, call.cwd))]
         what = targets[0].key if targets else call.tool
         what = f"`{what}`" if targets and targets[0].kind == model.COMMAND else what
         excerpt_parts = []
@@ -1847,7 +1989,7 @@ class _Detector:
             if self._elsewhere(step, call.cwd):
                 return
             if step is not None and step.key:
-                targets = [Target(model.COMMAND, self.ctx.command_key(step.key))]
+                targets = [Target(model.COMMAND, self._label(step.key, step, call.cwd))]
         by = {"hook": "a hook", "blocked": "the harness"}.get(result.reason, "permission settings")
         what = targets[0].key if targets else call.tool
         what = f"`{what}`" if targets and targets[0].kind == model.COMMAND else what
@@ -1895,13 +2037,13 @@ class _Detector:
                 what += " after edits to " + ", ".join(edited)
         else:
             what = f"working on {targets[0].key}"
-        start, _ = self._turn_bounds()
+        # Only the call that was cut short is claimed: the turn up to it may have been fine.
         self._emit(
             USER_INTERRUPT,
             event,
             f"The user interrupted the agent while it was {what}",
             targets,
-            interval=_capped_back(start, _epoch(event)),
+            interval=_capped(_epoch(turn[-1].call), _epoch(event)),
         )
 
     def _on_prompt(self, event: Event) -> None:
@@ -1942,7 +2084,6 @@ class _Detector:
         else:
             targets = []
             how = "no file edited in the preceding turn, so not attributed to a path"
-        start, end = self._turn_bounds()
         matched = ", ".join(f'"{label}"' for label in labels)
         # Wording alone never makes a certain correction: either the human names a file
         # the agent had just changed, or the agent goes back to one of those files next.
@@ -1967,13 +2108,14 @@ class _Detector:
             targets,
             # a guess is never put in anyone's mouth: only a correction keeps the words
             excerpt=event.text if certain else "",
-            interval=_capped_back(start, end),
             detail={"confidence": f"{confidence:g}", **({"quote": event.text} if certain else {})},
         )
         if corroborated:
             finding.detail["corroborated"] = corroborated
+            self.state.rework = _Rework(finding, frozenset(named_changed))
         elif strong and changed:
             self.state.unconfirmed = _Unconfirmed(finding, changed, matched, how)
+            self.state.rework = _Rework(finding, changed)
 
 
 @dataclass
