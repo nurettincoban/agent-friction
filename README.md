@@ -20,12 +20,12 @@ with the evidence quoted so you can check it yourself.
 ```console
 $ agent-friction scan
 agent-friction · shopfront
-6 sessions · 74 tool calls · 34 friction events · ~28m lost · 5 human corrections
+6 sessions · 74 tool calls · 34 friction events · ~28m lost · 4 human corrections
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals
   █████▋      56.8 src/shopfront/api/schema_gen.py           4     12     11m  ● edit-miss×6, user-correction×3
-  ████        39.8 src/shopfront/checkout/service.py         3      6     19m  ● user-correction×3, edit-revert×2
+  ████▍       43.5 src/shopfront/checkout/service.py         3      6     19m  ● user-correction×3, edit-revert×2
 
 Commands that keep failing
   ████▉       48.6 pytest                                    4      7      7m  ◐ command-failure×7
@@ -122,7 +122,7 @@ attribution rule, and known false positives in [docs/signals.md](https://github.
 
 | Signal | What happened |
 |---|---|
-| `user-correction` | The human corrected the agent ("no, use X", "I said…", "you broke…") |
+| `user-correction` | The human corrected the agent ("no, use X", "I said…", "you broke…") and the agent went back to the work it had just done |
 | `retry-loop` | The same command line, with identical arguments, failed 3+ times with no change in between |
 | `tool-rejected` | The human declined a tool call (and often said why) |
 | `permission-denied` | A permission rule, hook, or safety check refused a tool call before it ran |
@@ -190,8 +190,11 @@ within a schema version.
 - Heuristics, not ground truth. A red test that the agent then fixes is normal work, not
   friction, and the rules try hard not to count it; they will sometimes be wrong both ways.
   `show` exists so you can check.
-- Correction detection is English-only and deliberately conservative: it misses indirect or
-  softened corrections rather than mislabel ordinary follow-ups, so treat the count as a floor.
+- A correction is counted only when the human's words address the agent's work and behaviour
+  backs it up: they name a file the agent just changed, or the agent goes back to one. Anything
+  else that merely sounds like a correction is "probable": shown as evidence, weighted lower,
+  never quoted, and excluded from the headline count. It is English-only and still a heuristic,
+  so treat the count as a floor.
 - Time lost is a floor, not a measurement of human time.
 
 Reports of wrong or missed hotspots are the most valuable contribution you can make:

@@ -9,7 +9,9 @@ A hotspot counts as improved or regressed only when that rate moves by at least
 ``threshold`` (relative) and the after event count differs by at least
 ``min_events`` from what the before rate predicts for the after exposure.
 Hotspots with fewer than ``min_events`` events on both sides are always
-"unchanged", which keeps small-sample noise out of the verdict.
+"unchanged", and a verdict about a target touched in fewer than ``min_exposure``
+sessions on either side becomes "too-little-data", which keeps small-sample
+noise out of the verdict.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from typing import Any
 
 from agent_friction.report._common import all_items, fmt_minutes, plural
 
-STATUSES = ("regressed", "new", "improved", "resolved", "inactive", "unchanged")
+STATUSES = ("regressed", "new", "improved", "resolved", "inactive", "too-little-data", "unchanged")
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,7 @@ def compare(
     *,
     threshold: float = 0.25,
     min_events: int = 2,
+    min_exposure: int = 1,
 ) -> list[Change]:
     """Classify every hotspot, command, and directory that appears in either analysis."""
 
@@ -134,6 +137,10 @@ def compare(
             status = "improved" if ar < br else "regressed"
         else:
             status = "unchanged"
+        if status in ("regressed", "new", "improved", "resolved"):
+            needed = (a_exp,) if status == "new" else (b_exp, a_exp)
+            if min(needed) < min_exposure:
+                status = "too-little-data"
         changes.append(
             Change(
                 kind=kind,
@@ -177,6 +184,7 @@ def render_compare(
         ("improved", "Improved"),
         ("resolved", "Resolved (touched afterwards, no friction)"),
         ("inactive", "No activity afterwards (no evidence either way)"),
+        ("too-little-data", "Too few sessions touched it to tell"),
     ]
     out: list[str] = ["# Friction comparison" if markdown else "agent-friction compare", ""]
     out += [summary_line(before, after), ""]

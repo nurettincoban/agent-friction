@@ -139,3 +139,31 @@ def test_entropy_helper() -> None:
     assert redact.shannon_entropy("") == 0.0
     assert redact.shannon_entropy("aaaa") == 0.0
     assert redact.shannon_entropy("abcd") == pytest.approx(2.0)
+
+
+def test_more_secret_shapes() -> None:
+    aws_secret = "wJalrXUtnFEMI/K7MDENG/" + "bPxRfiCYEXAMPLEKEY"
+    assert aws_secret not in redact.redact(f"aws_secret is {aws_secret} ok")
+    assert redact.redact("docker login -u bob -p S3cr3tPass registry.example") == (
+        "docker login -u bob -p [REDACTED] registry.example"
+    )
+    django = "SECRET_KEY = 'django-insecure-" + "x9!k2@pq7$' # settings"
+    assert "django-insecure" not in redact.redact(django)
+    assert redact.redact("The author: Jane") == "The author: Jane"
+
+
+def test_commit_ids_and_ip_hosts_are_kept() -> None:
+    sha = "3f2a9c1b7d4e5f60718293a4b5c6d7e8f9012345"
+    assert len(sha) == redact.GIT_SHA_LENGTH
+    assert redact.redact(f"git revert {sha}") == f"git revert {sha}"
+    assert sha + "ab" not in redact.redact(f"token {sha}ab")  # longer hex is still masked
+    assert redact.redact("ssh root@10.0.0.1 uptime") == "ssh root@10.0.0.1 uptime"
+    assert "jane@example.com" not in redact.redact("mail jane@example.com")
+
+
+def test_control_and_bidi_characters_never_survive() -> None:
+    raw = "a\x1b[2Jb\x1b]0;title\x07c‮d\te\nf\x00\x9b⁦g"
+    assert redact.strip_controls(raw) == "abcd\te\nfg"
+    assert redact.excerpt(raw, 240) == "abcd\te\nfg"
+    assert redact.one_line(raw, 240) == "abcd e fg"
+    assert redact.strip_controls("plain text") == "plain text"

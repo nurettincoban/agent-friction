@@ -64,6 +64,8 @@ def test_documented_thresholds_match_the_code() -> None:
     assert f"default {redact.DEFAULT_EXCERPT_CHARS} characters" in method
     assert f"strings of {redact.ENTROPY_MIN_LENGTH}+ characters" in method
     assert f"hex strings of {redact.HEX_MIN_LENGTH}+ characters" in method
+    assert f"strings of exactly {redact.GIT_SHA_LENGTH} lower-case" in method
+    assert f"command line fails {signals.POLL_MIN_FAILURES} or more" in catalog
     assert f"{scoring.HIGH_MIN_SESSIONS} or more distinct sessions **and**" in method
 
 

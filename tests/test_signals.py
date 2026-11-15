@@ -857,14 +857,23 @@ def test_correction_splits_over_edited_files(tmp_path: Path) -> None:
     s = Session().user("add the feature")
     s.read("/repo/src/c.py").edit(A).edit(B).edit(A)
     s.tick(100).user("No, that is not how we do it here")
+    s.edit(B, "new", "newer")  # the agent goes back to one of the files: corroborated
     (fix,) = detect(s, tmp_path)
     assert fix.signal == signals.USER_CORRECTION and fix.weight == 1.0
-    assert [(t.key, t.share) for t in fix.targets] == [("src/a.py", 0.5), ("src/b.py", 0.5)]
+    assert fix.detail["corroborated"] == "followed" and "then changed src/b.py" in fix.summary
+    # ... and that file, not everything edited before, is what the correction was about
+    assert [(t.key, t.share) for t in fix.targets] == [("src/b.py", 1.0)]
     assert fix.excerpt == "No, that is not how we do it here"
     assert "not how we do it" not in fix.summary and 'matched "no, …"' in fix.summary
     assert fix.interval is not None
     # the interval ends at the agent's last activity, not at the (slow) human reply
     assert fix.interval[1] - fix.interval[0] < 60
+
+    unanswered = Session().user("add the feature")
+    unanswered.edit(A).edit(B).user("No, that is not how we do it here")
+    (fix,) = detect(unanswered, tmp_path)  # probable: spread over what had been edited
+    assert [(t.key, t.share) for t in fix.targets] == [("src/b.py", 0.5), ("src/a.py", 0.5)]
+    assert fix.weight == signals.CORRECTION_PROBABLE
 
 
 def test_correction_prefers_files_named_in_the_message(tmp_path: Path) -> None:
@@ -1251,3 +1260,303 @@ def test_ide_context_blocks_are_not_human_text(tmp_path: Path) -> None:
 )
 def test_more_prompts_that_are_not_corrections(text: str) -> None:
     assert correction_confidence(text) == (0.0, []), text
+
+
+# ---- round 5: robustness, corroborated corrections, ordinary workflows -------------------
+
+
+def test_an_exception_in_a_detector_skips_the_event_not_the_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = Session().user("go")
+    s.bash("pytest -q", "bash: pytest: command not found", exit_code=127)
+    s.edit(A, error=builders.EDIT_NOT_FOUND)
+    path = s.save(tmp_path)
+
+    def boom(self: object, action: object, result: object) -> None:
+        raise IndexError("string index out of range")
+
+    monkeypatch.setattr(signals._Detector, "_on_shell", boom)
+    from agent_friction.adapters import parse_transcript
+    from agent_friction.attribution import PathResolver
+
+    ctx = signals.DetectContext(PathResolver(Path("/repo")), lambda rel: True, lambda rel: True)
+    (stream,) = parse_transcript(path).streams
+    found = signals.detect_stream(stream, ctx)
+    assert found.skipped_events == 1
+    assert [f.signal for f in found.findings] == [signals.EDIT_MISS]
+
+    monkeypatch.undo()
+    monkeypatch.setattr(signals, "parse_command", lambda command: 1 / 0)
+    found = signals.detect_stream(stream, ctx)
+    assert found.skipped_events == 1  # classification failed; the call is kept, unattributed
+    assert [f.signal for f in found.findings] == [signals.EDIT_MISS]
+
+
+WORDING_FALSE_POSITIVES = [
+    "Not quite sure how auth works here. Explain it to me",
+    "I didn't ask before, but can you also add a changelog entry?",
+    "You are still running the server right?",
+    "you didn't do anything wrong, I'm just checking",
+    "Tests failing again after I merged main. Can you rebase and fix?",
+    "It doesn't work in Safari, can you add a polyfill?",
+    "Almost, but one more feature: export to CSV",
+    "No, go with option B",
+    "No, option 2 please",
+    "stop. I need to go to lunch, we'll continue later",
+    "Close, but can we also support YAML?",
+    "It broke after we upgraded node, since I bumped the version",
+]
+
+
+@pytest.mark.parametrize("text", WORDING_FALSE_POSITIVES)
+def test_wording_that_only_resembles_a_correction(text: str) -> None:
+    assert correction_confidence(text)[0] < signals.CORRECTION_STRONG, text
+
+
+FORMERLY_MISSED = [
+    "doesn't work",
+    "Doesn't work.",
+    "that broke the build",
+    "you've broken the tests",
+    "can you undo that",
+    "Could you please revert your change?",
+    "I didn't want that",
+    "Still getting the error",
+    "I'm still getting the same error",
+    "hmm, it broke the login page",
+]
+
+
+@pytest.mark.parametrize("text", FORMERLY_MISSED)
+def test_plain_complaints_are_strong_wording(text: str) -> None:
+    assert correction_confidence(text)[0] == signals.CORRECTION_STRONG, text
+
+
+def _corrected(reply: str, question: str = "Done.") -> Session:
+    s = Session().user("add the feature")
+    s.edit(A).edit(B).say(question)
+    return s.tick(20).user(reply)
+
+
+def test_wording_alone_is_only_a_probable_correction(tmp_path: Path) -> None:
+    # the agent goes on to something else: nothing shows the human meant its changes
+    moved_on = _corrected("that broke the build").read("/repo/src/c.py").bash("make build")
+    (fix,) = detect(moved_on, tmp_path)
+    assert fix.weight == signals.CORRECTION_PROBABLE and fix.detail["corroborated"] == "no"
+    assert "confidence 0.4" in fix.summary and "not corroborated" in fix.summary
+
+    # settled by the next human message, not by what happens after it
+    late = _corrected("that broke the build").read("/repo/src/c.py").user("ok, thanks").edit(A)
+    (fix,) = detect(late, tmp_path)
+    assert fix.weight == signals.CORRECTION_PROBABLE
+
+    # nothing had been changed in the turn the human reacts to
+    s = Session().user("look around")
+    s.read(A).bash("make build").say("Built.").user("No, that's the wrong branch")
+    s.edit(A)
+    (fix,) = detect(s, tmp_path)
+    assert fix.weight == signals.CORRECTION_PROBABLE and fix.targets == []
+    assert "no file was changed in the preceding turn" in fix.summary
+
+
+def test_a_correction_is_certain_when_the_agent_returns_to_the_files(tmp_path: Path) -> None:
+    edited = _corrected("that broke the build").edit(B, "new", "newer")
+    (fix,) = detect(edited, tmp_path)
+    assert fix.weight == signals.CORRECTION_STRONG and fix.detail["corroborated"] == "followed"
+
+    for command in ("git checkout -- src/a.py", "git restore src/b.py", "git stash", "rm src/a.py"):
+        undone = _corrected("can you undo that").bash(command)
+        (fix,) = detect(undone, tmp_path)
+        assert fix.weight == signals.CORRECTION_STRONG, command
+        assert "the agent then ran `" in fix.summary, command
+
+    for command in ("git checkout main", "pytest src/a.py", "git status", "rm other.txt"):
+        other = _corrected("can you undo that").bash(command)
+        (fix,) = detect(other, tmp_path)
+        assert fix.weight == signals.CORRECTION_PROBABLE, command
+
+
+def test_a_correction_is_certain_when_the_human_names_a_changed_file(tmp_path: Path) -> None:
+    named = _corrected("you broke b.py")  # the session ends here
+    (fix,) = detect(named, tmp_path)
+    assert fix.weight == signals.CORRECTION_STRONG and fix.detail["corroborated"] == "named"
+    assert keys(fix) == [("file", "src/b.py")]
+
+    # naming a file the agent only read proves nothing about its changes
+    s = Session().user("add it")
+    s.read("/repo/src/c.py").edit(A).say("Done.").user("No, c.py is the wrong place to look")
+    (fix,) = detect(s, tmp_path)
+    assert fix.weight == signals.CORRECTION_PROBABLE and keys(fix) == [("file", "src/c.py")]
+
+
+def test_a_question_anywhere_in_the_final_paragraph_makes_no_an_answer(tmp_path: Path) -> None:
+    question = "I fixed the bug.\n\nWant me to refactor util.py? It would take a few minutes."
+    for reply in ("No, leave util.py alone. Just commit.", "Stop. Just commit.", "Not quite yet"):
+        asked = _corrected(reply, question).edit(A, "new", "newer")
+        assert detect(asked, tmp_path) == [], reply
+    # a question in an earlier paragraph was not what the agent ended on
+    earlier = "Why was this failing? A typo.\n\nI fixed it in src/a.py."
+    told = _corrected("No, that's the wrong fix", earlier).edit(A, "new", "newer")
+    (fix,) = detect(told, tmp_path)
+    assert fix.weight == signals.CORRECTION_STRONG
+
+
+def test_a_question_tool_makes_the_reply_an_answer(tmp_path: Path) -> None:
+    s = Session().user("add the feature")
+    s.edit(A).tool("AskUserQuestion", {"questions": [{"question": "Which one?"}]}, "shown")
+    s.user("No, the second one").edit(A, "new", "newer")
+    assert detect(s, tmp_path) == []
+
+    rows = [
+        {"session": "g", "kind": "user_message", "text": "add it", "cwd": "/repo"},
+        {"session": "g", "kind": "tool_call", "id": 1, "op": "edit", "path": "src/a.py"},
+        {"session": "g", "kind": "tool_result", "id": 1, "ok": True},
+        {"session": "g", "kind": "tool_call", "id": 2, "op": "other", "tool": "ask_user"},
+        {"session": "g", "kind": "tool_result", "id": 2, "ok": True},
+        {"session": "g", "kind": "user_message", "text": "No, the other module"},
+    ]
+    path = tmp_path / "g.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    assert detect(path, tmp_path) == []
+
+
+def test_polling_until_something_is_ready_is_not_friction(tmp_path: Path) -> None:
+    s = Session().user("wait for CI then merge")
+    for _ in range(4):
+        s.bash("gh pr checks 12", "build  pending", exit_code=8).bash("sleep 30")
+    s.bash("gh pr checks 12", "build  pass")
+    s.bash("curl -sf localhost:8000/health", "", exit_code=7)
+    s.bash("curl -sf localhost:8000/health", "", exit_code=7)
+    s.bash("curl -sf localhost:8000/health", "ok")
+    assert detect(s, tmp_path) == []
+
+
+def test_a_loop_that_never_passes_or_needed_a_fix_is_still_friction(tmp_path: Path) -> None:
+    stuck = Session().user("go")
+    for _ in range(3):
+        stuck.bash("gh pr checks 12", "build  fail", exit_code=8)
+    assert len(by_signal(detect(stuck, tmp_path), signals.RETRY_LOOP)) == 1
+
+    installed = Session().user("go")
+    for _ in range(3):
+        installed.bash("npm test", "sh: 1: jest: not found", exit_code=127)
+    installed.bash("npm ci").bash("npm test", "ok")
+    found = detect(installed, tmp_path)
+    assert len(by_signal(found, signals.RETRY_LOOP)) == 1
+    assert len(by_signal(found, signals.COMMAND_FAILURE)) == 3
+
+    flaky = Session().user("go")  # one red run, then green with nothing changed: on record
+    flaky.bash("pytest -q", "1 failed", exit_code=1).bash("pytest -q", "1 passed")
+    assert [f.signal for f in detect(flaky, tmp_path)] == [signals.COMMAND_FAILURE]
+
+
+def test_test_first_missing_module_is_red_then_green(tmp_path: Path) -> None:
+    missing = "E   ModuleNotFoundError: No module named 'app.newfeat'"
+    s = Session().user("add newfeat, test first")
+    s.write("/repo/tests/test_newfeat.py", "from app.newfeat import f\n")
+    s.bash("pytest tests/test_newfeat.py", missing, exit_code=2)
+    s.write("/repo/app/newfeat.py", "def f(): ...\n")
+    s.bash("pytest tests/test_newfeat.py", "1 passed")
+    assert detect(s, tmp_path) == []
+
+    # a missing dependency is not created in the repo: that stays a setup error
+    dep = Session().user("go")
+    dep.bash("pytest -q", "E   ModuleNotFoundError: No module named 'yaml'", exit_code=2)
+    dep.write("/repo/app/newfeat.py", "x = 1\n").bash("pip install pyyaml").bash("pytest -q", "ok")
+    (failure,) = detect(dep, tmp_path)
+    assert failure.detail["variant"] == "invocation" and failure.weight == 1.0
+
+    # created, but the command never went green
+    red = Session().user("go")
+    red.bash("pytest -q", missing, exit_code=2).write("/repo/app/newfeat.py", "x = 1\n")
+    assert len(detect(red, tmp_path)) == 1
+
+
+@pytest.mark.parametrize(
+    ("kind", "name", "path", "expected"),
+    [
+        ("module", "app.newfeat", "app/newfeat.py", True),
+        ("module", "app.newfeat", "src/app/newfeat/__init__.py", True),
+        ("module", "newfeat", "app/newfeat_test.py", False),
+        ("module", "yaml", "app/newfeat.py", False),
+        ("file", "tests/test_x.py", "tests/test_x.py", True),
+        ("file", "/repo/scripts/run.py", "scripts/run.py", True),
+        ("file", "./lib/util", "src/lib/util.js", True),
+        ("file", "run.py", "scripts/other.py", False),
+    ],
+)
+def test_provides(kind: str, name: str, path: str, expected: bool) -> None:
+    assert signals.provides(path, kind, name) is expected
+
+
+def test_a_temporary_debug_print_is_not_an_edit_revert(tmp_path: Path) -> None:
+    code, debug = "    total = add(a, b)", "    total = add(a, b)\n    print('DEBUG', total)"
+    s = Session().user("why is the total off?")
+    s.edit(A, code, debug).bash("python -m app.report", "DEBUG 41").edit(A, debug, code)
+    assert detect(s, tmp_path) == []
+
+    unused = Session().user("go")  # added and removed without ever being run
+    unused.edit(A, code, debug).edit(A, debug, code)
+    assert [f.signal for f in detect(unused, tmp_path)] == [signals.EDIT_REVERT]
+
+    replaced = Session().user("go")  # a real change tried, run, and taken back
+    replaced.edit(A, "x = 1", "x = 2").bash("python -m app.report", "ok").edit(A, "x = 2", "x = 1")
+    assert [f.signal for f in detect(replaced, tmp_path)] == [signals.EDIT_REVERT]
+
+
+def test_a_denied_chain_is_keyed_to_its_destructive_step(tmp_path: Path) -> None:
+    command = "ls build; rm -f build/out.bin"
+    s = Session().user("go")
+    s.tool(
+        "Bash",
+        {"command": command},
+        f"Permission to use Bash with command {command} has been denied.",
+        is_error=True,
+    )
+    (denied,) = detect(s, tmp_path)
+    assert denied.signal == signals.PERMISSION_DENIED and keys(denied) == [("command", "rm")]
+
+
+def test_reading_a_file_before_creating_it_is_not_a_path_miss(tmp_path: Path) -> None:
+    s = Session().user("add a changelog")
+    s.read("/repo/CHANGELOG.md", missing=True).write("/repo/CHANGELOG.md", "# Changelog\n")
+    assert detect(s, tmp_path) == []
+    never = Session().user("go")
+    never.read("/repo/CHANGELOG.md", missing=True).write("/repo/NEWS.md", "# News\n")
+    assert [f.signal for f in detect(never, tmp_path)] == [signals.PATH_MISS]
+
+
+def test_git_commit_no_ops_and_hook_auto_fixes_are_not_friction(tmp_path: Path) -> None:
+    s = Session().user("commit it")
+    s.bash(
+        "git commit -m 'wip'",
+        "On branch main\nnothing to commit, working tree clean",
+        exit_code=1,
+    )
+    hook = "ruff-format....Failed\n- hook id: ruff-format\n- files were modified by this hook"
+    s.bash("git add -A && git commit -m 'feat: x'", hook, exit_code=1)
+    s.bash("git add -A && git commit -m 'feat: x'", "[main 1a2b3c4] feat: x")
+    assert detect(s, tmp_path) == []
+
+    rejected = Session().user("commit it")  # a hook that just says no stays on the record
+    rejected.bash("git commit -m 'x'", "mypy....Failed\n- hook id: mypy\nerror: x", exit_code=1)
+    rejected.bash("git commit -m 'x'", "[main 1a2b3c4] x")
+    assert [f.signal for f in detect(rejected, tmp_path)] == [signals.COMMAND_FAILURE]
+
+
+def test_inspection_steps_never_win_a_denied_or_declined_chain(tmp_path: Path) -> None:
+    command = (
+        "ls -la /repo/out/ 2>&1; rm -f /repo/out/x.html && rmdir /repo/out 2>&1; ls /repo 2>&1"
+    )
+    said = (
+        "Permission to use Bash has been denied. This Bash command contains multiple "
+        "operations. The following part requires approval: "
+    )
+    s = Session().user("go")
+    # the harness re-renders the command, so its quotation is not byte-identical
+    s.tool("Bash", {"command": command}, said + command.replace(" 2>&1", ""), is_error=True)
+    s.reject("Bash", {"command": command}, "do not ls and rm in one go")
+    denied, declined = detect(s, tmp_path)
+    assert denied.signal == signals.PERMISSION_DENIED and keys(denied) == [("command", "rm")]
+    assert declined.signal == signals.TOOL_REJECTED and keys(declined) == [("command", "rm")]

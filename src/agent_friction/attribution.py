@@ -369,7 +369,7 @@ def _segments(tokens: Sequence[str]) -> list[list[str]]:
         if skip_next:
             skip_next = False
             continue
-        if token[0] in "<>":  # redirection: drop it, its target and a leading fd number
+        if token[:1] in ("<", ">"):  # redirection: drop it, its target and a leading fd number
             skip_next = token.strip("<>&") == ""
             if current and current[-1].isdigit():
                 current.pop()
@@ -552,7 +552,10 @@ def parse_command(command: str) -> ParsedCommand:
     and read-only inspection (``cat``, ``tail``, ``grep``) are passed over, so
     ``mkdir -p out && pytest | tail -5`` is ``pytest``.
     """
-    steps = _steps(command)
+    try:
+        steps = _steps(command)
+    except (IndexError, ValueError, RecursionError):  # never let one odd line stop a scan
+        steps = []
     if not steps:
         return ParsedCommand("", "", "", ())
     primary = next(
@@ -583,7 +586,8 @@ def parse_command(command: str) -> ParsedCommand:
 def objectionable_step(parsed: ParsedCommand, reason: str = "") -> Step | None:
     """The step of a declined command line the human most plausibly objected to.
 
-    In order: a step whose program the stated reason names; the first
+    In order: a step that does something (not read-only inspection) whose
+    program the stated reason names; the first
     destructive step (``rm``, ``git push``, ...); the first step that is
     neither setup nor inspection; the primary step.
     """
@@ -591,7 +595,9 @@ def objectionable_step(parsed: ParsedCommand, reason: str = "") -> Step | None:
         return None
     words = set(re.findall(r"[\w.+-]+", reason.lower()))
     for step in parsed.steps:
-        if step.program.lower() in words and step.program not in SETUP_PROGRAMS:
+        named = step.program.lower() in words and step.program not in SETUP_PROGRAMS
+        # Looking is never what was objected to while the line also changes something.
+        if named and not step.inspection:
             return step
     for step in parsed.steps:
         if step.program in DESTRUCTIVE_PROGRAMS or step.key in DESTRUCTIVE_KEYS:

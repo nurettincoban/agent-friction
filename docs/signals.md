@@ -44,38 +44,69 @@ first 280 characters are inspected, so a pasted log that happens to contain
 *describes a bug* ("fix the bug where the app crashes again") must not be
 read as a complaint about the agent.
 
-- **Addressed to the agent (confidence 1.0, anywhere in those 280
+**Wording is never enough for a certain correction.** A phrase from the lists
+below makes a message a *candidate*. It becomes a correction with confidence
+1.0 only if behaviour corroborates it:
+
+1. the agent had changed files (Edit/Write) in the turn the human reacts to,
+   **and**
+2. either the human names one of those files, **or** in the turn that
+   follows the agent changes one of those same files again (an edit, a
+   write, or a shell command that rewrites, removes or restores it: `sed -i`,
+   `rm`, `git checkout -- <file>`, `git restore`, `git revert`, `git reset`,
+   `git stash`).
+
+A candidate without corroboration (nothing was changed before it, the agent
+went on to other things, or the session ends there) is a *probable*
+correction (confidence 0.4): it is listed as evidence, never quoted in a
+recommendation, and not counted in `totals.corrections` (it is counted in
+`totals.probable_corrections`). The decision is made when the next human
+message arrives or the session ends; the evidence summary says which of the
+two it was ("the user names ...", "the agent then changed ... again", "not
+corroborated: ...").
+
+- **Addressed to the agent (strong wording, anywhere in those 280
   characters):**
-  - "you broke / removed / deleted / forgot / missed / ignored / overwrote"
-    (not "you forgot nothing"), "you didn't run | read | follow | use | fix |
-    check ...", "you shouldn't have", "you weren't supposed", "you keep
-    <doing>", "you're still <doing>";
+  - "you broke / removed / deleted / forgot / missed / ignored / overwrote",
+    "you've broken / removed / forgotten ..." (not "you forgot nothing"),
+    "you didn't run | read | follow | use | fix | check ..." (not "you didn't
+    do anything wrong"), "you shouldn't have", "you weren't supposed", "you
+    keep <doing>";
   - "you're editing the wrong file | branch | directory | function ...";
   - "I told you", "I already said", "I asked you to", "I said use / don't /
-    not / only / to use", "I never asked", "I didn't ask";
+    not / only / to use", "I never asked for / you to", "I didn't ask for /
+    you to" (not "I didn't ask before, but ..."), "I didn't want that";
   - "not what I asked | wanted | meant | said";
   - "why did you delete | remove | change | add | use | skip | ignore ...";
   - an undo of the agent's own change: "revert" / "undo" / "roll back" at the
     start of the message or of a clause, followed by "that | this | it | your
-    ... | the last edit | the change", or alone ("Revert."); and "put it |
-    that | them back". Not "revert the design doc to draft", "Undo support is
+    ... | the last edit | the change", or alone ("Revert."); "can / could you
+    undo that"; and "put it | that | them back". Not "revert the design doc to draft", "Undo support is
     the next feature", "roll back the last migration when the check fails".
-- **Verdicts on the work just done (confidence 1.0, only when they open the
+- **Verdicts on the work just done (strong wording, only when they open the
   message,** optionally after an interjection such as "hmm", "ugh", "ok",
   "no"**):**
   - a leading "No," / "No." / "Nope -" followed by more text, or a bare "no"
     (not "No. 3 on the list", "No tests are needed", "no thanks", "no
     problem", "no need", "no, that's fine", "nope, all good", "nope, nothing
-    else", "no, not yet");
-  - "Not quite", "not exactly", "not like that", "close, but";
+    else", "no, not yet", and not a choice between options: "No, go with
+    option B", "No, the second one");
+  - "Not quite", "not exactly", "not like that" (not "Not quite sure how auth
+    works"; "almost, but ..." and "close, but ..." are not cues: they usually
+    introduce one more request);
   - "wrong." / "incorrect." followed by more text; "stop" followed by an
     instruction or by what to stop ("stop. use the other client", "stop
-    editing the generated file"; not "Stop. Hammer time", "stop the server");
+    editing the generated file"; not "Stop. Hammer time", "stop the server",
+    "stop. I need to go to lunch");
   - "that's / this is / it was wrong | incorrect | broken" as a complete
     statement, or "... not right | not correct | not working | not how";
-  - "that / this / it didn't | doesn't work | help";
+  - "that / this / it didn't | doesn't work | help", or a bare "doesn't
+    work" (not followed by where: "It doesn't work in Safari, can you add a
+    polyfill?" describes a missing feature);
+  - "that / this / it / your change broke ...";
   - "still failing | broken | not working | not fixed | wrong | crashing",
-    "still the same error", "failing | broken again", with no subject or with
+    "still the same error", "still getting | seeing the error", "failing |
+    broken again", with no subject or with
     "it", "that", "the tests", "the build", "CI" and the like as the subject
     (`_RESULT_NOUN`).
 
@@ -88,17 +119,21 @@ read as a complaint about the agent.
   - *Praise or a dismissal after it* in the same message ("thanks", "great",
     "nailed it", "keep going", "looks good", "that's fine", "... are fine",
     "never mind", "ignore it", "unrelated", "flaky", ...), the human taking
-    the blame ("... because I hadn't pulled", "my bad") or only asking ("just
-    curious"): "you forgot
+    the blame or naming their own action as the cause ("... because I hadn't
+    pulled", "tests failing again after I merged main", "my bad") or only
+    asking ("just curious", "just checking"): "you forgot
     nothing, great job", "I said use tabs in my last project but here spaces
     are fine". Praise *before* the phrase does not void it ("Great effort, but
     you broke the login page").
   - *Moving on* voids a verdict: "next task", "new task", "another issue",
     "let's move on", "next: ..." ("It doesn't work on Windows yet; next task: add Windows
     support").
-  - *A leading "No" that answers a question:* if the last thing the agent
-    wrote before the message ends with a question mark, "No, ..." is read as
-    an answer, not an objection.
+  - *An opener that answers a question:* if the final paragraph of the last
+    thing the agent wrote contains a question mark ("Want me to refactor
+    util.py? It would take a few minutes."), or the agent's last action was a
+    question/choice tool (`AskUserQuestion`, `ExitPlanMode`, `ask_user`, ...),
+    then a leading "No, ...", "Not quite", "Wrong." or "Stop." is read as an
+    answer, not an objection. Phrases addressed to the agent still count.
   - *A long pause:* a verdict typed more than 5 minutes after the agent's last
     activity, with nothing addressed to the agent, is only a *probable*
     correction (confidence 0.4, never quoted): by then the human has often
@@ -113,7 +148,7 @@ read as a complaint about the agent.
   a dismissal is never a probable correction.
 
 The confidence multiplies the severity (a probable correction is worth 1.6,
-less than an edit miss). Recommendations quote only unambiguous corrections.
+less than an edit miss). Recommendations quote only corroborated corrections.
 Slash commands, harness-generated messages, tool results and prompts inside
 subagents are never corrections. Blocks that the harness or an IDE extension
 adds to a user turn (`<ide_opened_file>`, `<ide_selection>`,
@@ -129,24 +164,33 @@ feature requests that contain "undo" or "wrong"; `tests/test_signals.py`).
 
 **Attribution:** files the agent touched in the preceding turn that the
 message names (by path, or by bare file name if unambiguous). If it names
-none, the correction is split evenly over the files edited in that turn (the
-5 most recent). If nothing was edited it stays unattributed (counted in
-`totals`, shown on no hotspot). A file the human mentions but the agent never
+none and the agent then went back to some of the files it had changed, the
+correction belongs to exactly those files. A probable correction is split
+evenly over the files edited in the preceding turn (the 5 most recent). If
+nothing was edited it stays unattributed (shown on no hotspot). A file the human mentions but the agent never
 touched is not blamed.
 
-**False positives (known):** a "No, ..." that answers a question the agent
-asked several messages earlier or without a question mark; a message that
-opens with a verdict about something other than the agent's work ("It doesn't
-work on Safari either, can you check the polyfill?"); second-person phrases
-about the past ("you forgot the migration last week, and I fixed it");
-rhetorical "why did you ...". A correction is attributed to the files of the
-preceding turn even if the human meant something else.
+**False positives (known):** corroboration is circumstantial. A message that
+only *sounds* like a correction and is followed by more work on the same file
+counts: "No, I'd also like a dark mode" after the agent asked nothing, then
+another edit to the stylesheet it had just changed; "Still failing in CI"
+about a failure the agent did not cause, which it then fixes in a file it had
+touched. Naming a changed file corroborates even when the complaint is about
+something else in the same sentence. A "No, ..." that answers a question the
+agent asked several messages earlier, or one phrased without a question mark,
+is read as a verdict. Second-person phrases about the past ("you forgot the
+migration last week, and I fixed it") and rhetorical "why did you ..." are
+strong wording.
 
-**False negatives (many, by design):** corrections that do not open the
+**False negatives (many, by design):** a real correction after which the
+agent fixes a *different* file, runs only commands, or the session ends (it
+is kept as probable); a correction of something the agent did with a command
+rather than an edit ("No, I told you not to push"); a real "Stop." or "No,
+..." right after the agent asked something; corrections that do not open the
 message ("I ran it. It's still failing."); a verdict with a long subject ("the
 checkout page is still broken"); polite or indirect corrections ("hmm, could
 we use X?"); single-cue corrections ("use pnpm instead", "use PaymentClient,
-not legacy"); a real "No, ..." right after the agent asked something;
+not legacy");
 corrections softened with praise; corrections in other languages. The count of
 corrections is a lower bound.
 
@@ -178,9 +222,20 @@ second kind of evidence next to them (see methodology). Once a loop is recorded 
 failures, even if the command goes green after a later edit: the three runs
 with nothing changed already happened.
 
+**Waiting is not a loop.** If the very same command line fails 2 or more
+times and then *succeeds*, with no file change and no install/setup command
+in between, the agent was waiting for something outside the session: `gh pr
+checks` until CI is done, `curl -sf localhost:8000/health` until a server is
+up. The loop and its failures are dropped. A loop that never passes, or that
+passes only after an install or a change, stays.
+
 **Why:** the failure output did not lead the agent to a fix.
 
 **Attribution:** the normalized command.
+
+**False negatives:** a flaky test that fails twice and then passes untouched
+looks exactly like waiting and is dropped (a single red run followed by green
+stays on the record as an ordinary failure).
 
 ## `tool-rejected` — Tool call declined
 
@@ -276,12 +331,26 @@ old) strings of an earlier successful edit to the same file in the same
 session, or a write whose content equals an earlier version of the file after
 a different version was written in between. Strings are compared by hash.
 
+*Temporary debugging is not a revert:* if the earlier edit only **added**
+text (its old string survives inside its new string, e.g. a `print` after an
+existing line), a command ran successfully while it was in place, and the
+edit is then exactly undone, nothing is recorded. The agent looked at
+something and cleaned up after itself.
+
 **Why:** work on this file went in a circle.
 
 **Attribution:** the file.
 
+**False positives (known):** an experiment that *replaces* code, is run, and
+is deliberately taken back ("try the other algorithm, measure, restore") is
+counted, although nothing went wrong; so is a debug statement that is added
+and removed without any successful command in between (for example because
+the only run with it failed), or a toggle the human asked for twice. One
+revert on a file is weak evidence; the confidence rules treat it that way.
+
 **False negatives:** reverts done by `git checkout`, by a larger rewrite, or
-in a later session.
+in a later session; an abandoned attempt that only added lines and was run
+successfully once before being removed (read as debugging).
 
 ## `command-failure` — Command failure
 
@@ -314,7 +383,20 @@ in a later session.
   failure stays on the record when the command goes green with no edit in
   between (flaky, or fixed by something other than code), never goes green
   in the session, or was part of a [retry loop](#retry-loop--retry-loop).
-  Setup/invocation errors are never dropped.
+- *Test-first development is red, fix, green too:* a setup/invocation error
+  that names what is missing (`No module named 'app.newfeat'`, `can't open
+  file 'scripts/run.py'`, `file or directory not found: tests/test_x.py`,
+  `Cannot find module './util'`) is dropped when a file that provides exactly
+  that module or path is then written in the repo **and** the command goes
+  green. A missing third-party module (`No module named 'yaml'`) is never
+  created in the repo and stays a setup error. Other setup/invocation errors
+  are never dropped.
+- *Waiting:* the same command line failing repeatedly and then passing with
+  nothing changed is dropped (see [retry loop](#retry-loop--retry-loop)).
+- *`git commit` routines:* "nothing to commit" is a no-op and not recorded. A
+  commit stopped by a pre-commit hook that reformatted files ("files were
+  modified by this hook") is dropped when the next `git commit` succeeds; a
+  hook that rejects the commit for another reason is an ordinary failure.
 - *Which step of a chain failed:* for `a && b` the exit status does not say
   whether `b` ever ran. The output is matched against what each kind of step
   prints (`STEP_SIGNATURES`: `npm error code E401`, `Failed to build`,
@@ -387,7 +469,11 @@ allowed: either a routine command is missing from the allow-list (the agent
 stalls on it in every session), or the agent does not know a boundary.
 
 **Attribution:** the file the tool targeted, or the normalized shell command
-(for a chain, the step chosen as for `tool-rejected`).
+(for a chain, the step chosen as for `tool-rejected`: a step the refusal
+names in words of its own, else the first destructive step, so `ls build; rm
+-f build/out.bin` is keyed to `rm`. The harness usually quotes the whole
+command line in its message; that quotation is ignored when looking for the
+step it names).
 
 **False negatives:** harnesses and hooks word their refusals freely; only the
 shapes above are recognised, anything else that is flagged as an error is
@@ -406,7 +492,9 @@ mostly agent sloppiness and is recorded with a separate variant.
 
 ## `path-miss` — Path miss
 
-**What:** a read or edit of a path that does not exist.
+**What:** a read or edit of a path that does not exist. A read of a missing
+file that the agent then creates with a write in the same session (checking
+whether `CHANGELOG.md` exists before adding it) is not recorded.
 
 **Why:** the agent expected something to live there. Repeated identical wrong
 guesses mean the layout suggests a file that is not there.

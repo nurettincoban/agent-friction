@@ -109,7 +109,7 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
     ]
     hotspots = list(result.get("hotspots", []))[:top]
     commands = list(result.get("commands", []))[:top]
-    if not hotspots and not commands:
+    if not hotspots and not commands and not result.get("directories"):
         out += ["No recurring friction found.", ""]
         return "\n".join(out)
 

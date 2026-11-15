@@ -108,17 +108,19 @@ def _tool_call(block: dict[str, Any], line: int, base: dict[str, Any]) -> Event 
     elif name == "Edit":
         old, new = inp.get("old_string"), inp.get("new_string")
         if isinstance(old, str) and isinstance(new, str):
-            event.edits = ((common.digest(old), common.digest(new)),)
+            event.edits, event.insertions = common.edit_pairs([(old, new)])
             event.new_text = common.new_text(new)
     elif name == "MultiEdit":
         edits = inp.get("edits")
         if isinstance(edits, list):
-            event.edits = tuple(
-                (common.digest(e["old_string"]), common.digest(e["new_string"]))
-                for e in edits
-                if isinstance(e, dict)
-                and isinstance(e.get("old_string"), str)
-                and isinstance(e.get("new_string"), str)
+            event.edits, event.insertions = common.edit_pairs(
+                [
+                    (e["old_string"], e["new_string"])
+                    for e in edits
+                    if isinstance(e, dict)
+                    and isinstance(e.get("old_string"), str)
+                    and isinstance(e.get("new_string"), str)
+                ]
             )
             event.new_text = common.new_text(
                 *(e.get("new_string") for e in edits if isinstance(e, dict))
@@ -238,12 +240,12 @@ def _line_events(obj: dict[str, Any], line: int) -> list[Event] | None:
 
 
 def _asks_question(content: object) -> bool | None:
-    """Whether an assistant message ends on a question (``None``: it says nothing either way).
+    """Whether an assistant message asks the human something (``None``: no say either way).
 
     Only this one bit is kept from assistant prose; the text itself is discarded.
     """
     if isinstance(content, str):
-        return content.rstrip().endswith("?")
+        return common.asks_question(content)
     if not isinstance(content, list):
         return None
     verdict: bool | None = None
@@ -251,9 +253,11 @@ def _asks_question(content: object) -> bool | None:
         if not isinstance(block, dict):
             continue
         if block.get("type") == "text" and isinstance(block.get("text"), str):
-            verdict = block["text"].rstrip().endswith("?")
+            verdict = common.asks_question(block["text"])
         elif block.get("type") == "tool_use":
-            verdict = False  # it went on working: whatever it asked was rhetorical
+            # A question/choice tool is a question. Any other tool: it went on working, so
+            # whatever it asked was rhetorical.
+            verdict = bool(common.QUESTION_TOOL_RE.search(str(block.get("name") or "")))
     return verdict
 
 

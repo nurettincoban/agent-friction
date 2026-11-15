@@ -117,7 +117,7 @@ def render_terminal(
 
     hotspots = list(result.get("hotspots", []))[:top]
     commands = list(result.get("commands", []))[:top]
-    if not hotspots and not commands:
+    if not hotspots and not commands and not result.get("directories"):
         out.append(st.green("No recurring friction found. Agents seem to have a smooth ride here."))
         return "\n".join(out) + "\n"
 
@@ -152,6 +152,20 @@ def render_terminal(
             "drill in: agent-friction show <path> · full map: --format html -o map.html"
         )
     )
+    out.append(
+        st.dim(
+            "Per-row time can overlap (one stall can involve a file and a command); "
+            "the total counts each minute once."
+        )
+    )
+    skipped = sum(int(s.get("skipped_lines", 0)) for s in result.get("sources", []))
+    if skipped:
+        out.append(
+            st.yellow(
+                f"{plural(skipped, 'transcript line')} could not be parsed and "
+                "were skipped (see sources in --format json)."
+            )
+        )
     return "\n".join(out) + "\n"
 
 
@@ -221,7 +235,7 @@ def render_dir_detail(
     st = Style(color)
     score = float(node.get("score", 0))
     out = [
-        st.bold(f"directory: {node.get('path') or '.'}/"),
+        st.bold(f"directory: {node.get('path') or '.'}/ (everything inside, rolled up)"),
         st.heat(score, f"{bar(score)} {score:.1f}/100")
         + st.dim(
             f"  · {plural(int(node.get('events', 0)), 'event')}"

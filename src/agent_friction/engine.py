@@ -236,6 +236,7 @@ class _Analysis:
         self._is_file_cache: dict[str, bool | None] = {}
         self._facts: dict[str, recommend.FileFacts] = {}
         self.outside: dict[Path, set[str]] = {}
+        self.skipped_events: dict[str, int] = {}
         self.exposure: dict[tuple[str, str], set[str]] = {}
         self.git_used = False
 
@@ -320,9 +321,13 @@ class _Analysis:
         findings: list[Finding] = []
         exposure: dict[tuple[str, str], set[str]] = {}
         for stream in streams:
-            found, exposed = signals.detect_with_exposure(stream, ctx)
-            findings.extend(found)
-            for kind, key in exposed:
+            detection = signals.detect_stream(stream, ctx)
+            findings.extend(detection.findings)
+            source_key = str(stream.source)
+            self.skipped_events[source_key] = (
+                self.skipped_events.get(source_key, 0) + detection.skipped_events
+            )
+            for kind, key in detection.exposed:
                 self._expose(exposure, kind, key, stream.session_id)
 
         sources = self._sources(parsed)
@@ -335,6 +340,7 @@ class _Analysis:
                 "path": self.display_path(self.repo),
                 "sessions": 0,
                 "skipped_lines": 0,
+                "skipped_events": 0,
                 "ignored_lines": 0,
                 "available": history.available,
             }
@@ -442,12 +448,14 @@ class _Analysis:
                     "path": key[1],
                     "sessions": 0,
                     "skipped_lines": 0,
+                    "skipped_events": 0,
                     "ignored_lines": 0,
                     "files": 0,
                     "sessions_outside_repo": 0,
                 },
             )
             entry["skipped_lines"] += item.skipped_lines
+            entry["skipped_events"] += self.skipped_events.get(str(item.path), 0)
             entry["ignored_lines"] += item.ignored_lines
             entry["files"] += 1
             sessions.setdefault(key, set()).update(s.session_id for s in item.streams)
@@ -521,7 +529,17 @@ class _Analysis:
                 ),
                 "friction_events": len(findings),
                 "est_minutes_lost": scoring.lost_minutes(findings),
-                "corrections": counts.get(signals.USER_CORRECTION, 0),
+                # Corroborated corrections only; "probable" ones are listed as evidence.
+                "corrections": sum(
+                    1
+                    for f in findings
+                    if f.signal == signals.USER_CORRECTION and f.weight >= signals.CORRECTION_STRONG
+                ),
+                "probable_corrections": sum(
+                    1
+                    for f in findings
+                    if f.signal == signals.USER_CORRECTION and f.weight < signals.CORRECTION_STRONG
+                ),
                 "files_affected": len(by_kind[model.FILE]),
                 "commands_affected": len(by_kind[model.COMMAND]),
                 "directories_affected": len(by_kind[model.DIR]),
@@ -727,9 +745,25 @@ def _pick_evidence(findings: Sequence[Finding], limit: int) -> list[Finding]:
     return sorted(chosen, key=_finding_order)
 
 
+def _sanitized(value: Any) -> Any:
+    """Strip terminal control and bidi characters from every string of a result.
+
+    Paths, command keys and messages come from transcripts; none of it may be
+    able to move a cursor, retitle a terminal or reorder text in a report.
+    """
+    if isinstance(value, str):
+        return redact.strip_controls(value)
+    if isinstance(value, dict):
+        return {_sanitized(k): _sanitized(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitized(v) for v in value]
+    return value
+
+
 def analyze(options: AnalyzeOptions) -> dict[str, Any]:
     """Analyse agent transcripts (and git history) for ``options.repo``.
 
     Raises :class:`NoTranscriptsError` when no transcript files can be found.
     """
-    return _Analysis(options).run()
+    result: dict[str, Any] = _sanitized(_Analysis(options).run())
+    return result

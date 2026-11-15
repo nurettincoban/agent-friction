@@ -293,3 +293,25 @@ def test_error_tag_inside_successful_output_is_not_an_error(tmp_path: Path) -> N
     ]
     assert [(r.ok, r.error) for r in results] == [(True, ""), (True, ""), (False, "not_read")]
     assert "<tool_use_error>" in results[0].output  # successful output is kept verbatim
+
+
+def test_question_detection_keeps_one_bit_of_agent_prose() -> None:
+    from agent_friction.adapters.common import QUESTION_TOOL_RE, asks_question
+
+    assert asks_question("Done.\n\nWant me to refactor util.py? It would take a few minutes.")
+    assert asks_question("Which one?")
+    assert not asks_question("Why did it fail? A typo.\n\nFixed in a.py.")
+    assert not asks_question("") and not asks_question("Done.")
+    for tool in ("AskUserQuestion", "ask_user", "ExitPlanMode", "ask_followup_question"):
+        assert QUESTION_TOOL_RE.search(tool), tool
+    for tool in ("Bash", "Edit", "Task", "TodoWrite", "WebSearch"):
+        assert not QUESTION_TOOL_RE.search(tool), tool
+
+
+def test_pure_insertions_are_flagged_without_keeping_text(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.edit("/repo/a.py", "x = 1", "x = 1\nprint(x)").edit("/repo/a.py", "x = 1", "x = 2")
+    (stream,) = parse_transcript(s.save(tmp_path)).streams
+    first, second = (e for e in stream.events if e.kind == model.TOOL_CALL)
+    assert first.insertions == frozenset(first.edits) and second.insertions == frozenset()
+    assert "print" not in repr(first.edits)

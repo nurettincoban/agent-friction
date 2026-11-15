@@ -218,7 +218,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=3,
         metavar="N",
-        help="below N sessions on either side, report but never trip the gate (default 3)",
+        help="below N sessions overall on either side, report but never trip the gate; "
+        "a target touched in fewer than N sessions on either side is 'too little data' "
+        "(default 3)",
     )
     cmp_.add_argument(
         "--allow-repo-mismatch",
@@ -246,6 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="another absolute path where this repo lived, as for `scan`",
     )
+    src.add_argument("--no-git", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -390,7 +393,11 @@ def _cmd_show(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         if node is not None:
             stdout.write(render_dir_detail(result, node, color=color))
         if item is not None:
-            stdout.write("\n" + render_detail(result, item, color=color))
+            stdout.write(
+                "\nFriction attributed to the directory itself "
+                "(for example searches in it that found nothing):\n\n"
+            )
+            stdout.write(render_detail(result, item, color=color))
         return EXIT_OK
     stderr.write(
         f"agent-friction: no friction recorded for {args.target!r}. "
@@ -417,7 +424,13 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
             f"these scans are of different repositories ({names[0]!r} vs {names[1]!r}). "
             "Pass --allow-repo-mismatch if the repository was renamed."
         )
-    changes = compare(before, after, threshold=args.threshold, min_events=args.min_events)
+    changes = compare(
+        before,
+        after,
+        threshold=args.threshold,
+        min_events=args.min_events,
+        min_exposure=args.min_sessions,
+    )
     sessions = (int(before["totals"]["sessions"]), int(after["totals"]["sessions"]))
     low_sample = min(sessions) < args.min_sessions
     if low_sample:

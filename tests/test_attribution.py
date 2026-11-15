@@ -335,3 +335,51 @@ def test_roles_and_setup_commands() -> None:
         assert is_setup_command(key), key
     for key in ("pytest", "git add", "make test", "mytool", ""):
         assert not is_setup_command(key), key
+
+
+# ---- robustness ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [
+        ("sed -i '' 's/a/b/' f", "sed"),
+        ("git commit -m ''", "git commit"),
+        ('echo ""', "echo"),
+        ("grep '' file", "grep"),
+        ("pytest -k '' tests", "pytest"),
+        ("printf '' > file", "printf"),
+        ("'' ''", ""),
+        ("", ""),
+        ("python3 - <<EOF\nprint(1)\nEOF", "python <stdin>"),
+        ("python3 - <<'PY'\nimport app\nPY", "python <stdin>"),
+    ],
+)
+def test_empty_words_and_stdin_scripts(command: str, key: str) -> None:
+    assert parse_command(command).key == key
+
+
+_FUZZ_ATOMS = (
+    "pytest", "git", "commit", "-m", "''", '""', "'", '"', "`", "$(", ")", "(", "{", "}", ";",
+    "&&", "||", "|", "&", ">", ">>", "<", "<<EOF", "<<'EOF'", "<<-", "EOF", "\n", "\t", " ", "\\",
+    "$", "${X:-", "2>&1", "-", "--", "=", "FOO=", "sed", "-i", "bash", "-c", "sh", "env", "sudo",
+    "cd", "src/a.py", "é", "日本語", "‮", "\x1b[2J", "\x00", "#", "!", "*", "?", "[", "]",
+    "for", "do", "done", "if", "then", "fi", "while", "case", "esac", "python3", "npm", "run",
+    "docker", "compose", "exec", "uv", "make", "time", "xargs", "<(", "<<<", "~", "..", "/",
+)  # fmt: skip
+
+
+def test_parse_command_never_raises_on_shell_ish_noise() -> None:
+    import random
+
+    rng = random.Random(20261115)
+    for _ in range(4000):
+        size = rng.randint(0, 14)
+        glue = rng.choice(("", " ", " ", " "))
+        command = glue.join(rng.choice(_FUZZ_ATOMS) for _ in range(size))
+        parsed = parse_command(command)  # must not raise, whatever the input
+        assert isinstance(parsed.key, str) and len(parsed.key) < 200, command
+        assert "\n" not in parsed.key, command
+        assert public_key(parsed.key) is not None
+        path_candidates(parsed.tokens)
+        objectionable_step(parsed, command)

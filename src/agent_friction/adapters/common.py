@@ -52,6 +52,37 @@ def new_text(*parts: object) -> str:
     return "\n".join(p for p in parts if isinstance(p, str))[:NEW_TEXT_LIMIT]
 
 
+#: Tools with which an agent asks the human to choose or confirm, in any harness.
+QUESTION_TOOL_RE = re.compile(
+    r"ask.?(?:user|human|followup|question)|user.?(?:question|input)|request.?(?:input|decision)"
+    r"|exit.?plan|confirm",
+    re.I,
+)
+
+
+def asks_question(text: str) -> bool:
+    """Does agent prose put a question to the human in its final paragraph?
+
+    "Want me to refactor util.py? It would take a few minutes." asks, although
+    it does not end in a question mark. Only this one bit is kept of the text.
+    """
+    paragraphs = [p for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+    return bool(paragraphs) and "?" in paragraphs[-1]
+
+
+def edit_pairs(
+    pairs: list[tuple[str, str]],
+) -> tuple[tuple[tuple[str, str], ...], frozenset[tuple[str, str]]]:
+    """``Event.edits`` and ``Event.insertions`` for (old, new) replacement texts."""
+    hashed = tuple((digest(old), digest(new)) for old, new in pairs)
+    added = frozenset(
+        (digest(old), digest(new))
+        for old, new in pairs
+        if old.strip() and old != new and old in new
+    )
+    return hashed, added
+
+
 def digest(text: str) -> str:
     """Short stable fingerprint used to compare edit strings without storing them."""
     return hashlib.sha1(text.encode("utf-8", "replace"), usedforsecurity=False).hexdigest()[:16]

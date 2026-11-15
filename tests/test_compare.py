@@ -87,3 +87,13 @@ def test_rates_use_exposure_not_window_size() -> None:
     assert c.status == "improved"
     assert c.before_rate == 28.0 and c.after_rate == 2.8
     assert c.to_dict()["after_exposure_sessions"] == 50
+
+
+def test_targets_touched_too_rarely_are_too_little_data() -> None:
+    before, after = sample_result(), sample_result()
+    for side in (before, after):
+        side["hotspots"][1]["exposure_sessions"] = side["hotspots"][1]["sessions"] = 1
+    after["hotspots"][1]["events"] = 30
+    assert _statuses(before, after)["src/shop/api/client.py"] == "regressed"
+    changes = {c.path: c.status for c in compare(before, after, min_exposure=3)}
+    assert changes["src/shop/api/client.py"] == "too-little-data"

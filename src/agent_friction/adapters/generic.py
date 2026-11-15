@@ -45,7 +45,7 @@ def _event(obj: dict[str, Any], line: int) -> Event | None:
         event.read_range = str(obj.get("range", ""))
         old, new = obj.get("old"), obj.get("new")
         if isinstance(old, str) and isinstance(new, str):
-            event.edits = ((common.digest(old), common.digest(new)),)
+            event.edits, event.insertions = common.edit_pairs([(old, new)])
         content = obj.get("content")
         if isinstance(content, str):
             event.content_digest = common.digest(content)
@@ -111,7 +111,7 @@ def parse_file(path: Path) -> ParsedFile:
             if obj.get("kind") == ASSISTANT_MESSAGE and isinstance(session, (str, int)):
                 text = obj.get("text")
                 key = (str(session), obj.get("subagent") is True)
-                asking[key] = isinstance(text, str) and text.rstrip().endswith("?")
+                asking[key] = isinstance(text, str) and common.asks_question(text)
                 if key in streams:  # the time only: the agent was active
                     marker = Event(kind=model.AGENT_MESSAGE, line=number)
                     marker.ts = common.parse_ts(obj.get("ts"))
@@ -130,7 +130,10 @@ def parse_file(path: Path) -> ParsedFile:
             if event.kind == model.USER_MESSAGE:
                 event.after_question = asking.pop(key, False)
             elif event.kind == model.TOOL_CALL:
-                asking.pop(key, None)
+                if common.QUESTION_TOOL_RE.search(event.tool):
+                    asking[key] = True
+                else:
+                    asking.pop(key, None)
             streams[key].events.append(event)
     parsed.streams = list(streams.values())
     return parsed

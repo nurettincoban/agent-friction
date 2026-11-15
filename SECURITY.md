@@ -9,6 +9,8 @@ command output, and sometimes secrets. The tool is designed around that:
   common password forms, credentials in URLs and `curl -u`, emails, high-entropy strings, your
   home directory) and truncated. `--no-excerpts` removes all transcript text, leaving paths,
   pseudonymized command names, counts, and timestamps (details below).
+- Terminal control sequences and bidirectional-text characters from transcripts are stripped
+  from every report, so a hostile transcript can't rewrite your terminal.
 - It only reads files; it never modifies transcripts or your repository.
 
 Redaction is best-effort pattern matching. It recognises secrets by their shape, so an opaque

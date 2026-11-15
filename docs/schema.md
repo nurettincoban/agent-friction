@@ -83,6 +83,7 @@ in the same cases: nothing found; a given path that does not exist; a given
 | `path` | Claude Code project directory, generic file, or repo root for git (home as `~`). |
 | `sessions` | Distinct sessions with activity in the repo (for git: agent commits in the window). |
 | `skipped_lines` | Lines that were not valid JSON objects or lacked required structure. |
+| `skipped_events` | Events on which a detector raised an unexpected error. They are skipped; anything above 0 is a bug worth reporting. |
 | `ignored_lines` | Valid lines of a type that is not analysed (attachments, summaries, ...). |
 | `files` | Transcript files read (not for git). |
 | `sessions_outside_repo` | Sessions dropped because they never touched this repo (not for git). |
@@ -96,7 +97,8 @@ in the same cases: nothing found; a given path that does not exist; a given
 | `tool_calls` | Tool calls in those sessions. |
 | `friction_events` | All detected events, equal to the sum of `signals[].count`. |
 | `est_minutes_lost` | Union of all claimed intervals, in minutes (1 decimal). |
-| `corrections` | Number of `user-correction` events. |
+| `corrections` | `user-correction` events with confidence 1.0: clear wording **and** corroborated by what the human named or the agent did next. A lower bound. |
+| `probable_corrections` | `user-correction` events with confidence 0.4 (wording only, or two weak cues). Listed as evidence, never quoted in recommendations. `signals[]` counts both kinds. |
 | `files_affected` | File hotspots before `max_hotspots` truncation. |
 | `commands_affected`, `directories_affected` | Likewise. |
 | `unattributed_events` | Events that could not be tied to a path or command. |
@@ -224,8 +226,10 @@ Common fields:
 of it is stored or emitted. It is used for two things: its `ts` marks that
 the agent was active (a failed call is then timed up to the agent's next
 message instead of only its own duration), and if the agent's last message
-before a `user_message` ends with a question mark, a reply that opens with
-"No, ..." is read as an answer rather than a correction.
+before a `user_message` has a question mark in its final paragraph, a reply
+that opens with "No, ...", "Not quite" or "Stop." is read as an answer rather
+than a correction. A `tool_call` whose `tool` is a question tool (`ask_user`,
+`AskUserQuestion`, ...) has the same effect.
 
 ```jsonl
 {"session":"s1","ts":"2026-11-05T16:00:00Z","kind":"user_message","text":"Add a sku field"}

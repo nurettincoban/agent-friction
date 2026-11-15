@@ -88,6 +88,9 @@ CORRECTION_MIN_CUES = 2
 #: A verdict ("No, ...", "that's wrong") typed longer than this after the agent finished
 #: is only a probable correction: the human has probably moved on to something else.
 CORRECTION_STALE_SECONDS = 300
+#: Identical failures in a row that, when the same command line then succeeds with nothing
+#: changed in between, are read as waiting (polling CI, a server coming up), not friction.
+POLL_MIN_FAILURES = 2
 
 CATALOG: tuple[SignalDef, ...] = (
     SignalDef(
@@ -340,6 +343,53 @@ def failing_step(cmd: ParsedCommand, output: str) -> tuple[Step | None, bool]:
     return primary, False
 
 
+#: An invocation failure that names the module or file it could not find: ``(kind, name)``.
+_MISSING_RES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("module", re.compile(r"No module named ['\"]?([\w.]+)")),
+    ("file", re.compile(r"Cannot find module ['\"]([^'\"]+)['\"]")),
+    ("file", re.compile(r"can't open file ['\"]([^'\"]+)['\"]")),
+    ("file", re.compile(r"file or directory not found: (\S+)")),
+    ("file", re.compile(r"No such file or directory: ['\"]([^'\"]+)['\"]")),
+)
+#: `git commit` with nothing staged: a no-op, not a failure of anything.
+NOTHING_TO_COMMIT_RE = re.compile(
+    r"nothing to commit|no changes added to commit|nothing added to commit", re.I
+)
+#: A pre-commit hook reformatted files and stopped the commit so they can be re-staged.
+HOOK_MODIFIED_RE = re.compile(r"files were modified by this hook|^Fixing \S+", re.I | re.M)
+#: git subcommands that put files back the way they were.
+_GIT_UNDO_KEYS = frozenset({"git revert", "git reset", "git restore", "git stash"})
+
+
+def missing_name(output: str) -> tuple[str, str] | None:
+    """The module or file an invocation error says does not exist, if it names one."""
+    for kind, pattern in _MISSING_RES:
+        match = pattern.search(output)
+        if match is not None:
+            return kind, match.group(1)
+    return None
+
+
+def provides(path: str, kind: str, name: str) -> bool:
+    """Would creating repo file ``path`` supply the missing module or file ``name``?"""
+    stem = path.rsplit(".", 1)[0] if "." in path.rsplit("/", 1)[-1] else path
+    if kind == "module":
+        want = name.strip(".").replace(".", "/")
+        if not want:
+            return False
+        return any(
+            candidate == want or candidate.endswith("/" + want)
+            for candidate in (stem, stem.removesuffix("/__init__"))
+        )
+    want = posixpath.normpath(name.replace("\\", "/")).lstrip("./")
+    if not want:
+        return False
+    return any(
+        a == b or a.endswith("/" + b) or b.endswith("/" + a)
+        for a, b in ((path, want), (stem, want))
+    )
+
+
 #: Exit codes the shell itself uses for "cannot execute" and "not found".
 INVOCATION_EXIT_CODES = frozenset({126, 127})
 
@@ -367,7 +417,8 @@ _SOFTENER_RE = re.compile(
     r"|no worries|never ?mind|ignore (?:it|that|this)|unrelated|not your fault|flaky"
     r"|(?:that's|it's|that is|it is|is|are) (?:fine|ok|okay)"
     # the human takes the blame, or is only asking
-    r"|because (?:i|my|we|our)\b|my (?:bad|fault|mistake)|just (?:curious|wondering|asking)"
+    r"|(?:because|after|since|when|once) (?:i|my|we|our)\b|my (?:bad|fault|mistake)"
+    r"|just (?:curious|wondering|asking|checking|confirming|making sure)"
     r"|out of curiosity|no complaints?)\b",
     re.I,
 )
@@ -386,10 +437,12 @@ _OPEN = (
 _YOU_DID = (
     r"\byou (?:broke|removed|deleted|forgot|missed|ignored|misunderstood|overwrote)\b"
     r"(?! (?:nothing|anything)\b)"
+    r"|\byou(?:'ve| have) (?:broken|removed|deleted|forgotten|missed|ignored|overwritten)\b"
+    r"(?! (?:nothing|anything)\b)"
     r"|\byou (?:didn't|did not) (?:\w+ )?(?:run|read|follow|do|use|update|fix|check|add|listen"
-    r"|test|change|remove|answer)\b"
+    r"|test|change|remove|answer)\b(?! (?:nothing|anything)\b)"
     r"|\byou (?:shouldn't|should not) have\b|\byou (?:weren't|were not) supposed\b"
-    r"|\byou keep \w+ing\b|\byou(?:'re| are) still \w+ing\b"
+    r"|\byou keep \w+ing\b"
 )
 _THING = (
     r"file|branch|directory|dir|folder|function|module|place|repo|path|approach|way|one|test"
@@ -405,7 +458,9 @@ _UNDO_OBJECT = (
 )
 _STILL = (
     r"still (?:failing|fails|broken|not working|not fixed|doesn't work|does not work"
-    r"|wrong|the same (?:error|problem|issue|bug)|crash(?:es|ing)?)\b"
+    r"|wrong|the same (?:error|problem|issue|bug)|crash(?:es|ing)?"
+    r"|(?:getting|seeing|hitting) (?:the|that|this|an?) (?:same |exact same )?"
+    r"(?:error|errors|failure|failures|exception|problem|issue|bug|crash|traceback))\b"
     r"|(?:failing|fails|broken|crashing|crashes) again\b"
 )
 
@@ -416,8 +471,10 @@ _RESULT_NOUN = (
     r"|error|bug|issue|problem|output|result|check|checks|job|deploy|import"
 )
 
-#: Label of the one pattern that is void when the agent had just asked a question.
+#: Labels of the openers that are an *answer*, not a verdict, when the agent had just asked
+#: a question ("Shall I refactor util.py?" -> "No, leave it." / "Stop. Just commit.").
 _ANSWER_LABEL = "no, …"
+_ANSWER_LABELS = frozenset({_ANSWER_LABEL, "not quite", "wrong. / stop."})
 
 #: (label, pattern, addressed). *Addressed* phrases speak to the agent in the second person
 #: or about what the human had asked for, and count wherever they stand in the head of the
@@ -435,12 +492,17 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
             r"(?!(?:thanks|thank you|problem|worries|rush|need|that's (?:fine|ok|okay|great|all|it)"
             r"|it's (?:fine|ok|okay)|all (?:good|set|done)|go ahead|way|nothing|none"
             r"|not (?:yet|now|really|necessary|needed|today)|i'm (?:good|fine|done)"
-            r"|we're (?:good|fine|done)|just (?:that|this)|leave it|keep it)\b)\S)",
+            r"|we're (?:good|fine|done)|just (?:that|this)|leave it|keep it"
+            # a choice between options the agent offered, not a verdict on its work
+            r"|(?:go|let's go|stick|continue|proceed) with|option|the (?:first|second|third"
+            r"|former|latter|other) (?:one|option))\b)\S)",
             False,
         ),
         (
             "not quite",
-            r"^(?:not quite|not exactly|not like that|close,? but|almost,? but)\b",
+            # not "Not quite sure how auth works", "Almost, but one more feature: ..."
+            r"^(?:not quite|not exactly)\b(?! (?:sure|certain|clear|ready|following"
+            r"|understanding|done yet|finished)\b)|^not like that\b",
             False,
         ),
         (
@@ -448,7 +510,7 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
             "wrong. / stop.",
             r"^(?:wrong|incorrect)(?:[.!]*$|\s*[.,;:!—-]+\s+\S)"
             r"|^stop(?:[.!]*$|\s*[.,;:!—-]+\s+(?:use|don't|do not|you|that|this|it\b|revert|undo"
-            r"|wait|i |we |not |wrong|go back|put|leave|keep|read|look|check|ask|please|just)"
+            r"|wait|not |wrong|go back|put|leave|keep|read|look|check|ask|please|just)"
             r"|\s+(?:that|it|this|doing|right there|\w+ing)\b)",
             False,
         ),
@@ -463,7 +525,16 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
         ),
         (
             "that didn't work",
-            _OPEN + r"(?:that|this|it) (?:didn't|doesn't|does not|did not) (?:work|help)\b",
+            # also a bare "doesn't work."; not "It doesn't work in Safari, can you ...",
+            # which describes where a feature is missing.
+            _OPEN + r"(?:(?:that|this|it) )?(?:didn't|doesn't|does not|did not) (?:work|help)\b"
+            r"(?! (?:in|on|for|with|when|if|under|until|unless|without)\b)",
+            False,
+        ),
+        (
+            "that broke …",
+            _OPEN + r"(?:that|this|it|your (?:change|changes|edit|edits|fix|commit))"
+            r"(?: just)? (?:broke|breaks)\b",
             False,
         ),
         (
@@ -479,20 +550,22 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
             "revert/undo",
             rf"^(?:(?:please|pls|just|now|ok|okay|so)[, ]+)*{_UNDO}(?:[.!,]|$|\s+{_UNDO_OBJECT})"
             rf"|(?:[.,;:!?]|\b(?:please|just|and|then|so))\s+{_UNDO}\s+{_UNDO_OBJECT}"
+            rf"|\b(?:can|could|would|will) you (?:please |just )?{_UNDO}\s+{_UNDO_OBJECT}"
             r"|\bput (?:it|that|this|them|those|everything) (?:all )?back\b",
             True,
         ),
         (
             "still failing",
-            _OPEN + r"(?:(?:it|that|this|(?:the |my |our )?(?:" + _RESULT_NOUN + r"))"
-            r"(?:'s| is| are| was| were| keeps?)? )?(?:" + _STILL + ")",
+            _OPEN + r"(?:(?:it|that|this|i|we|(?:the |my |our )?(?:" + _RESULT_NOUN + r"))"
+            r"(?:'s|'m|'re| is| am| are| was| were| keeps?)? )?(?:" + _STILL + ")",
             False,
         ),
         (
             # Said *to the agent*: "I told you", "I asked you to", "I said use X".
             "I told you",
             r"\bi (?:told you|already (?:said|told|asked)|specifically (?:said|asked)"
-            r"|(?:didn't|did not|never) ask(?:ed)?\b"
+            r"|(?:didn't|did not|never) ask(?:ed)? (?:for|you to)\b"
+            r"|(?:didn't|did not|never) (?:want|mean) (?:that|this|it|those|these|any of)\b"
             r"|asked you (?:not )?to\b"
             r"|said (?:not to\b|to (?:use|keep|leave|run|stop|add|remove|put)\b|use\b|don't"
             r"|do not|no\b|not\b|only\b))",
@@ -558,7 +631,7 @@ def correction_confidence(
             continue
         if not addressed and new_task:
             continue
-        if label == _ANSWER_LABEL and after_question:
+        if label in _ANSWER_LABELS and after_question:
             continue
         strong.append(label)
         addressed_any = addressed_any or addressed
@@ -647,6 +720,18 @@ def _scope(call: Event, ctx: DetectContext) -> str | None:
 
 
 @dataclass
+class _Unconfirmed:
+    """A correction whose wording is clear but whose effect is not yet seen."""
+
+    finding: Finding
+    files: frozenset[str]  # what the agent had changed in the turn being corrected
+    matched: str
+    how: str
+    note: str = ""  # what the agent then did, once it has done it
+    followed: list[str] = field(default_factory=list)  # which of ``files`` it went back to
+
+
+@dataclass
 class _State:
     """Mutable per-stream detector state."""
 
@@ -657,7 +742,11 @@ class _State:
     thrash: dict[str, Finding] = field(default_factory=dict)
     reads: dict[tuple[str, str], int] = field(default_factory=dict)
     read_findings: dict[tuple[str, str], Finding] = field(default_factory=dict)
-    edit_history: dict[str, dict[tuple[str, str], float | None]] = field(default_factory=dict)
+    # (old, new) of each successful edit -> (when, successful commands so far, only added?)
+    edit_history: dict[str, dict[tuple[str, str], tuple[float | None, int, bool]]] = field(
+        default_factory=dict
+    )
+    ok_commands: int = 0
     write_history: dict[str, list[str]] = field(default_factory=dict)
     write_times: dict[tuple[str, str], float | None] = field(default_factory=dict)
     # consecutive failures of one exact command line: (key, normalized argv) -> count
@@ -674,6 +763,14 @@ class _State:
     setup_after: dict[int, str] = field(default_factory=dict)
     # empty searches that a later created file or written text may explain
     probes: list[tuple[Finding, Event, str]] = field(default_factory=list)
+    # failures of one exact command line since the last change or setup step
+    streak: dict[tuple[str, str], list[Finding]] = field(default_factory=dict)
+    # invocation failures naming a module/file that does not exist: (finding, key, kind, name)
+    missing: list[tuple[Finding, str, str, str]] = field(default_factory=list)
+    # reads of files that did not exist (yet), by path
+    missing_reads: dict[str, list[Finding]] = field(default_factory=dict)
+    # a strongly worded correction waiting for the agent to act on it
+    unconfirmed: _Unconfirmed | None = None
 
 
 class _Detector:
@@ -682,6 +779,7 @@ class _Detector:
         self.ctx = ctx
         self.findings: list[Finding] = []
         self.exposed: set[tuple[str, str]] = set()  # every target the agent went near
+        self.skipped_events = 0  # events a detector could not handle (never fatal)
         self.state = _State()
 
     # ---- helpers ---------------------------------------------------------------------
@@ -737,31 +835,54 @@ class _Detector:
         if extended is not None and extended[1] > finding.interval[1]:
             finding.interval = extended
 
+    def _drop(self, ids: set[int]) -> None:
+        """Remove findings (by ``id``) from the record and from every pending list."""
+        if not ids:
+            return
+        state = self.state
+        self.findings = [f for f in self.findings if id(f) not in ids]
+        state.pending = [p for p in state.pending if id(p[0]) not in ids]
+        state.missing = [m for m in state.missing if id(m[0]) not in ids]
+        for table in (state.red, state.red_then_edited, state.replaced):
+            for name in list(table):
+                table[name] = [f for f in table[name] if id(f) not in ids]
+                if not table[name]:
+                    del table[name]
+
     # ---- pairing ---------------------------------------------------------------------
+
+    def _classify(self, action: _Action) -> None:
+        """Resolve what a call is about: a repo file, a command, or a search scope."""
+        event = action.call
+        resolver = self.ctx.resolver
+        if event.op in (model.OP_READ, model.OP_EDIT, model.OP_WRITE):
+            rel = resolver.resolve(event.path, event.cwd)
+            action.file = rel or None
+            if action.file:
+                self.exposed.add((model.FILE, action.file))
+        elif event.op == model.OP_SHELL and event.command and resolver.contains(event.cwd):
+            parsed = parse_command(event.command)
+            if parsed.key:
+                action.cmd = parsed
+                if not parsed.inspection:
+                    self.exposed.add((model.COMMAND, self.ctx.command_key(parsed.key)))
+        elif event.op == model.OP_SEARCH:
+            scope = _scope(event, self.ctx)
+            if scope is not None:
+                is_file = bool(scope) and self.ctx.is_file(scope)
+                self.exposed.add((model.FILE if is_file else model.DIR, scope or "."))
 
     def _items(self) -> list[_Action | Event]:
         items: list[_Action | Event] = []
         by_id: dict[str, _Action] = {}
-        resolver = self.ctx.resolver
         for event in self.stream.events:
             if event.kind == model.TOOL_CALL:
                 action = _Action(call=event)
-                if event.op in (model.OP_READ, model.OP_EDIT, model.OP_WRITE):
-                    rel = resolver.resolve(event.path, event.cwd)
-                    action.file = rel or None
-                    if action.file:
-                        self.exposed.add((model.FILE, action.file))
-                elif event.op == model.OP_SHELL and event.command and resolver.contains(event.cwd):
-                    parsed = parse_command(event.command)
-                    if parsed.key:
-                        action.cmd = parsed
-                        if not parsed.inspection:
-                            self.exposed.add((model.COMMAND, self.ctx.command_key(parsed.key)))
-                elif event.op == model.OP_SEARCH:
-                    scope = _scope(event, self.ctx)
-                    if scope is not None:
-                        is_file = bool(scope) and self.ctx.is_file(scope)
-                        self.exposed.add((model.FILE if is_file else model.DIR, scope or "."))
+                try:
+                    self._classify(action)
+                except Exception:  # keep the call, without attribution
+                    self.skipped_events += 1
+                    action.file = action.cmd = None
                 by_id[event.call_id] = action
                 items.append(action)
             elif event.kind == model.TOOL_RESULT:
@@ -786,27 +907,36 @@ class _Detector:
     # ---- main loop -------------------------------------------------------------------
 
     def run(self) -> list[Finding]:
-        state = self.state
         for item in self._items():
-            if isinstance(item, _Action):
-                self._on_action(item)
-                state.turn.append(item)
-            elif item.kind == model.AGENT_MESSAGE:
-                state.agent_seen = _epoch(item) or state.agent_seen
-            elif item.kind == model.INTERRUPT:
-                self._on_interrupt(item)
-            elif item.kind == model.USER_MESSAGE:
-                if not self.stream.sidechain:
-                    if not item.synthetic and state.prompts > 0 and state.turn:
-                        self._on_prompt(item)
-                    state.prompts += 1
-                state.turn = []
-                state.agent_seen = None
-                state.turn_edits = {}
-                state.thrash = {}
-                state.pending = []
-                state.open_edits = {}
+            try:
+                self._step(item)
+            except Exception:  # one odd event must never end the scan
+                self.skipped_events += 1
+        self._settle_correction()
         return self.findings
+
+    def _step(self, item: _Action | Event) -> None:
+        state = self.state
+        if isinstance(item, _Action):
+            self._on_action(item)
+            state.turn.append(item)
+        elif item.kind == model.AGENT_MESSAGE:
+            state.agent_seen = _epoch(item) or state.agent_seen
+        elif item.kind == model.INTERRUPT:
+            self._on_interrupt(item)
+        elif item.kind == model.USER_MESSAGE:
+            if not self.stream.sidechain:
+                if not item.synthetic:
+                    self._settle_correction()
+                    if state.prompts > 0 and state.turn:
+                        self._on_prompt(item)
+                state.prompts += 1
+            state.turn = []
+            state.agent_seen = None
+            state.turn_edits = {}
+            state.thrash = {}
+            state.pending = []
+            state.open_edits = {}
 
     def _on_action(self, action: _Action) -> None:
         result = action.result
@@ -893,6 +1023,15 @@ class _Detector:
         targets = [Target(model.FILE, path)]
         self._on_change()
         self._explain_probes(path, call)
+        self._confirm_correction({path}, f"the agent then changed {path} again")
+        if call.op == model.OP_WRITE:
+            # Reading a file to see whether it exists, then creating it, is not a miss.
+            self._drop({id(f) for f in state.missing_reads.pop(path, [])})
+        # Creating the module a command could not import is test-first development: the
+        # failure becomes red -> change, and is forgotten when the command goes green.
+        for entry in [m for m in state.missing if provides(path, m[2], m[3])]:
+            state.missing.remove(entry)
+            state.red_then_edited.setdefault(entry[1], []).append(entry[0])
         # Any successful change resets read-loop tracking for the file.
         for key in [k for k in state.reads if k[0] == path]:
             del state.reads[key]
@@ -913,10 +1052,15 @@ class _Detector:
             if old == new:
                 continue
             if (new, old) in history:
+                made_at, commands_then, inserted = history.pop((new, old))
+                if inserted and state.ok_commands > commands_then:
+                    # Lines were only added, a command ran successfully with them in place,
+                    # and now they are gone again: a temporary debug print, not a retreat.
+                    continue
                 reverted = True
-                reverted_at = history.pop((new, old))
+                reverted_at = made_at
             else:
-                history[(old, new)] = now
+                history[(old, new)] = (now, state.ok_commands, (old, new) in call.insertions)
         if call.op == model.OP_WRITE and call.content_digest:
             versions = state.write_history.setdefault(path, [])
             if versions and versions[-1] != call.content_digest and call.content_digest in versions:
@@ -947,6 +1091,7 @@ class _Detector:
         # A change ends every "same command, nothing changed" streak.
         state.fail_runs.clear()
         state.retry.clear()
+        state.streak.clear()
 
     def _explain_probes(self, path: str, call: Event) -> None:
         """Drop earlier empty searches that only checked a name was free before creating it."""
@@ -969,7 +1114,7 @@ class _Detector:
     def _path_miss(self, action: _Action, result: Event) -> None:
         if action.file is None:
             return
-        self._emit(
+        finding = self._emit(
             PATH_MISS,
             result,
             f"{action.call.tool} targeted {action.file}, which does not exist",
@@ -977,6 +1122,8 @@ class _Detector:
             excerpt=result.output,
             interval=self._round_trip(action),
         )
+        if action.call.op == model.OP_READ:
+            self.state.missing_reads.setdefault(action.file, []).append(finding)
 
     def _on_read(self, action: _Action, result: Event) -> None:
         path = action.file
@@ -1032,6 +1179,23 @@ class _Detector:
         if result.ok and is_shell_edit(cmd, action.call.command or ""):
             self._on_change()  # `sed -i`, a formatter, `--fix`: a change like any edit
         if result.ok:
+            if not cmd.inspection:
+                state.ok_commands += 1
+                self._shell_undo(action)
+            # The very same command line failed repeatedly and now passes, and nothing was
+            # changed or installed in between: the agent was waiting for something (CI, a
+            # server starting), which is not friction.
+            argv = normalize_argv(action.call.command or "")
+            waited: set[int] = set()
+            for same in [k for k in state.streak if k[1] == argv]:
+                streak = state.streak.pop(same)
+                if len(streak) >= POLL_MIN_FAILURES:
+                    waited |= {id(f) for f in streak}
+                    if same in state.retry:
+                        waited.add(id(state.retry[same]))
+            self._drop(waited)
+            if is_setup_command(key):
+                state.streak.clear()  # whatever passes after an install was not just waiting
             state.fail_runs = {k: v for k, v in state.fail_runs.items() if k[0] != key}
             state.retry = {k: v for k, v in state.retry.items() if k[0] != key}
             # red -> edit -> green is the development loop working: forget those failures,
@@ -1045,9 +1209,7 @@ class _Detector:
             for failed_key in list(state.red):
                 if failed_key == key or is_replacement(failed_key, key):
                     del state.red[failed_key]
-            if fixed:
-                self.findings = [f for f in self.findings if id(f) not in fixed]
-                state.pending = [p for p in state.pending if id(p[0]) not in fixed]
+            self._drop(fixed)
             # The command works after all, so nothing "replaced" it earlier in the session.
             for finding in state.replaced.pop(key, []):
                 finding.detail.pop("recovered_by", None)
@@ -1084,6 +1246,13 @@ class _Detector:
         step, certain = failing_step(cmd, result.output)
         if step is not None and step.key:
             key = step.key
+        hook_fixed = False
+        if key == "git commit":
+            if NOTHING_TO_COMMIT_RE.search(result.output):
+                return  # nothing was staged: a no-op, not a failure
+            hook_fixed = HOOK_MODIFIED_RE.search(result.output) is not None
+            if hook_fixed:
+                self._on_change()  # the hook rewrote files; committing again is the routine
         tokens = step.args if step is not None else cmd.tokens
         targets = [Target(model.COMMAND, shown(key))]
         # A setup/invocation error says nothing about the files on the command line, and
@@ -1120,12 +1289,19 @@ class _Detector:
             detail=detail,
         )
         state.pending.append((finding, key, RECOVERY_LOOKAHEAD))
-        if not invocation:
+        if hook_fixed:
+            state.red_then_edited.setdefault(key, []).append(finding)
+        elif not invocation:
             state.red.setdefault(key, []).append(finding)
+        else:
+            missing = missing_name(result.output)
+            if missing is not None:
+                state.missing.append((finding, key, *missing))
         # The same command line again, not a narrowed or otherwise changed invocation.
         same = (key, normalize_argv(call.command or ""))
         run = state.fail_runs.get(same, 0) + 1
         state.fail_runs[same] = run
+        state.streak.setdefault(same, []).append(finding)
         if run == RETRY_LOOP_MIN_FAILURES:
             state.retry[same] = self._emit(
                 RETRY_LOOP, result, "", [Target(model.COMMAND, shown(key))]
@@ -1137,7 +1313,79 @@ class _Detector:
             )
             state.retry[same].detail["count"] = str(run)
 
+    def _shell_undo(self, action: _Action) -> None:
+        """A successful shell command that changes or restores files a correction was about."""
+        pending = self.state.unconfirmed
+        cmd = action.cmd
+        if pending is None or cmd is None:
+            return
+        command = action.call.command or ""
+        named = {
+            rel
+            for rel in (
+                self.ctx.resolver.resolve(c, action.call.cwd) for c in path_candidates(cmd.tokens)
+            )
+            if rel
+        }
+        hit = named & pending.files
+        whole_tree = cmd.key in _GIT_UNDO_KEYS and not named
+        changes = (
+            cmd.key in _GIT_UNDO_KEYS
+            or cmd.key == "git checkout"
+            or cmd.program in ("rm", "mv")
+            or is_shell_edit(cmd, command)
+        )
+        if changes and (hit or whole_tree):
+            what = sorted(hit)[0] if hit else "the working tree"
+            self._confirm_correction(
+                hit or pending.files,
+                f"the agent then ran `{self.ctx.command_key(cmd.key)}` on {what}",
+            )
+
     # ---- human signals ---------------------------------------------------------------
+
+    @staticmethod
+    def _correction_summary(confidence: float, matched: str, note: str, how: str) -> str:
+        return f"User correction (confidence {confidence:g}; matched {matched}; {note}); {how}"
+
+    def _confirm_correction(self, paths: set[str] | frozenset[str], note: str) -> None:
+        """The agent acted on files a strongly worded correction was about."""
+        pending = self.state.unconfirmed
+        if pending is None or not (pending.files & paths):
+            return
+        pending.note = pending.note or note
+        if len(paths) < len(pending.files) or len(pending.files) == 1:
+            # named files only: an undo of the whole working tree singles none of them out
+            pending.followed.extend(sorted((pending.files & paths) - set(pending.followed)))
+
+    def _settle_correction(self) -> None:
+        """The turn after a strongly worded correction is over: did the agent act on it?"""
+        pending = self.state.unconfirmed
+        if pending is None:
+            return
+        self.state.unconfirmed = None
+        finding = pending.finding
+        if pending.note:
+            how = pending.how
+            if pending.followed:
+                # The files the agent went back to are the ones the correction was about.
+                back = pending.followed[:CORRECTION_MAX_FILES]
+                finding.targets = [Target(model.FILE, rel, 1.0 / len(back)) for rel in back]
+                how = "attributed to " + ", ".join(back)
+            finding.summary = self._correction_summary(
+                CORRECTION_STRONG, pending.matched, pending.note, how
+            )
+            finding.detail["corroborated"] = "followed"
+            return
+        finding.weight = CORRECTION_PROBABLE
+        finding.detail["confidence"] = f"{CORRECTION_PROBABLE:g}"
+        finding.detail["corroborated"] = "no"
+        finding.summary = self._correction_summary(
+            CORRECTION_PROBABLE,
+            pending.matched,
+            "not corroborated: the agent did not change those files again",
+            pending.how,
+        )
 
     def _on_rejected(self, action: _Action, result: Event) -> None:
         call = action.call
@@ -1177,7 +1425,10 @@ class _Detector:
         if call.op == model.OP_SHELL:
             if action.cmd is None:
                 return
-            step = objectionable_step(action.cmd, result.output)
+            # The harness quotes the whole command line in its message; only words it adds
+            # can say which step was the problem. Otherwise: the destructive step.
+            said = result.output.replace(call.command or "\0", " ")
+            step = objectionable_step(action.cmd, said)
             if step is not None and step.key:
                 targets = [Target(model.COMMAND, self.ctx.command_key(step.key))]
         by = "a hook" if result.reason == "hook" else "permission settings"
@@ -1252,6 +1503,7 @@ class _Detector:
                 hits = by_name if len(by_name) == 1 else []
             named.extend(h for h in hits if h not in named)
         targets: list[Target]
+        edited_all = list(edited)
         if named:
             targets = [Target(model.FILE, rel) for rel in named[:CORRECTION_MAX_FILES]]
             how = "names " + ", ".join(t.key for t in targets)
@@ -1264,25 +1516,61 @@ class _Detector:
             how = "no file edited in the preceding turn, so not attributed to a path"
         start, end = self._turn_bounds()
         matched = ", ".join(f'"{label}"' for label in labels)
-        self._emit(
+        # Wording alone never makes a certain correction: either the human names a file
+        # the agent had just changed, or the agent goes back to one of those files next.
+        changed = frozenset(edited_all)
+        strong = confidence >= CORRECTION_STRONG
+        named_changed = [rel for rel in named if rel in changed]
+        corroborated = ""
+        if not strong:
+            note = "wording only"
+        elif named_changed:
+            note, corroborated = f"the user names {named_changed[0]}, which it had changed", "named"
+        elif changed:
+            note = "awaiting the agent's response"
+        else:
+            confidence = CORRECTION_PROBABLE
+            note = "not corroborated: no file was changed in the preceding turn"
+        finding = self._emit(
             USER_CORRECTION,
             event,
-            f"User correction (confidence {confidence:g}; matched {matched}); {how}",
+            self._correction_summary(confidence, matched, note, how),
             targets,
             excerpt=event.text,
             weight=confidence,
             interval=_capped_back(start, end),
             detail={"quote": event.text, "confidence": f"{confidence:g}"},
         )
+        if corroborated:
+            finding.detail["corroborated"] = corroborated
+        elif strong and changed:
+            self.state.unconfirmed = _Unconfirmed(finding, changed, matched, how)
+
+
+@dataclass
+class Detection:
+    """What one stream yielded."""
+
+    findings: list[Finding]
+    #: Every ``(kind, key)`` target the agent went near, friction or not.
+    exposed: set[tuple[str, str]]
+    #: Events a detector raised on. They are skipped and counted, never fatal.
+    skipped_events: int = 0
+
+
+def detect_stream(stream: Stream, ctx: DetectContext) -> Detection:
+    """Run every transcript detector over one stream."""
+    detector = _Detector(stream, ctx)
+    findings = detector.run()
+    return Detection(findings, detector.exposed, detector.skipped_events)
 
 
 def detect_with_exposure(
     stream: Stream, ctx: DetectContext
 ) -> tuple[list[Finding], set[tuple[str, str]]]:
     """Findings plus every ``(kind, key)`` target the agent touched, friction or not."""
-    detector = _Detector(stream, ctx)
-    findings = detector.run()
-    return findings, detector.exposed
+    found = detect_stream(stream, ctx)
+    return found.findings, found.exposed
 
 
 def detect(stream: Stream, ctx: DetectContext) -> list[Finding]:

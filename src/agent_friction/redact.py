@@ -95,7 +95,8 @@ _RULES: tuple[_Rule, ...] = (
     (
         "assignment",
         re.compile(
-            rf"(?i)\b([\w-]*(?:{_SECRET_KEY_WORDS})[\"']?\s*[:=]\s*[\"']?)"
+            rf"(?i)\b([\w-]*(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"
+            r"[\"']?\s*[:=]\s*[\"']?)"
             r"(?!\[REDACTED)([^\s\"',;&]{4,})"
         ),
         r"\1[REDACTED]",
@@ -123,6 +124,11 @@ _RULES: tuple[_Rule, ...] = (
         r"\1[REDACTED]",
     ),
     (
+        "login-password-flag",
+        re.compile(r"(\blogin\b[^\n|;&]*?\s(?:-p|--password)(?:\s+|=))(?!\[REDACTED)(\S+)"),
+        r"\1[REDACTED]",
+    ),
+    (
         "prose-secret",
         re.compile(
             r"(?i)\b((?:password|passwd|passphrase|pwd|secret|token|api[ _-]?key|access[ _-]?key)"
@@ -132,12 +138,53 @@ _RULES: tuple[_Rule, ...] = (
     ),
     (
         "email",
-        re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\b"),
+        # the host must end in a name, so ``root@10.0.0.1`` (an ssh target) is not an email
+        re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"),
         "[REDACTED:email]",
     ),
 )
 
 _HEX_RE = re.compile(rf"\b[0-9a-fA-F]{{{HEX_MIN_LENGTH},}}\b")
+#: Length of a full git commit id. Lower-case hex of exactly this length is left alone:
+#: evidence is full of commit ids, and they identify nothing outside the repository.
+GIT_SHA_LENGTH = 40
+#: A bare AWS-style secret key: 40 characters of base64 with at least one ``/`` or ``+``.
+_BASE64_40_RE = re.compile(r"(?<![A-Za-z0-9/+=])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+=])")
+#: Terminal control characters and invisible direction marks. Text from a transcript may
+#: contain escape sequences that clear a screen or reorder what a reader sees.
+_ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])")
+_CONTROL_RE = re.compile(
+    "[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]"
+)
+
+
+def strip_controls(text: str) -> str:
+    """Remove ANSI escape sequences, C0/C1 controls (except newline and tab) and bidi marks."""
+    if text.isascii() and text.isprintable():
+        return text
+    return _CONTROL_RE.sub("", _ANSI_RE.sub("", text))
+
+
+def _hex_sub(match: re.Match[str]) -> str:
+    token = match.group(0)
+    if len(token) == GIT_SHA_LENGTH and token == token.lower():
+        return token
+    return "[REDACTED:hex]"
+
+
+def _base64_sub(match: re.Match[str]) -> str:
+    token = match.group(0)
+    if (
+        ("/" in token or "+" in token)
+        and any(c.isdigit() for c in token)
+        and any(c.islower() for c in token)
+        and any(c.isupper() for c in token)
+        and shannon_entropy(token) >= ENTROPY_MIN_BITS
+    ):
+        return "[REDACTED:high-entropy]"
+    return token
+
+
 _ENTROPY_RE = re.compile(rf"[A-Za-z0-9+_=-]{{{ENTROPY_MIN_LENGTH},}}")
 _HOME_RES = (
     re.compile(r"(?<![\w.~-])/(?:home|Users)/[^/\s:\"'`<>|]+"),
@@ -186,9 +233,11 @@ def redact_home(text: str, home: Path | str | None = None) -> str:
 
 def redact(text: str, home: Path | str | None = None) -> str:
     """Return ``text`` with secrets, emails and home directories masked."""
+    text = strip_controls(text)
     for _name, pattern, replacement in _RULES:
         text = pattern.sub(replacement, text)
-    text = _HEX_RE.sub("[REDACTED:hex]", text)
+    text = _HEX_RE.sub(_hex_sub, text)
+    text = _BASE64_40_RE.sub(_base64_sub, text)
     text = _ENTROPY_RE.sub(_entropy_sub, text)
     return redact_home(text, home)
 

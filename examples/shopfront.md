@@ -1,6 +1,6 @@
 # Agent friction map: shopfront
 
-6 agent sessions analysed · 34 friction events · ~28m lost · 5 human corrections · 6 files affected
+6 agent sessions analysed · 34 friction events · ~28m lost · 4 human corrections · 5 files affected
 
 ## What to fix first
 
@@ -15,11 +15,10 @@
 | # | File | Score | Sessions | Events | Est. time lost | Top signals | Confidence |
 |---:|---|---:|---:|---:|---:|---|---|
 | 1 | `src/shopfront/api/schema_gen.py` | 56.8 | 4 | 12 | 11m | `edit-miss`×6, `user-correction`×3, `read-loop`×1 | high |
-| 2 | `src/shopfront/checkout/service.py` | 39.8 | 3 | 6 | 19m | `user-correction`×3, `edit-revert`×2, `edit-thrash`×1 | high |
-| 3 | `tests/test_refunds.py` | 15.0 | 1 | 2 | 5m | `command-failure`×1, `user-correction`×1 | low |
-| 4 | `src/shopfront/payments/refunds.py` | 11.4 | 1 | 1 | 18s | `path-miss`×1 | low |
-| 5 | `src/shopfront/payments/client.py` | 11.1 | 1 | 1 | 5m | `user-correction`×1 | low |
-| 6 | `api/openapi.yaml` | 9.7 | 1 | 1 | 24s | `search-miss`×1 | low |
+| 2 | `src/shopfront/checkout/service.py` | 43.5 | 3 | 6 | 19m | `user-correction`×3, `edit-revert`×2, `edit-thrash`×1 | high |
+| 3 | `src/shopfront/payments/refunds.py` | 11.4 | 1 | 1 | 18s | `path-miss`×1 | low |
+| 4 | `api/openapi.yaml` | 9.7 | 1 | 1 | 24s | `search-miss`×1 | low |
+| 5 | `tests/test_refunds.py` | 8.5 | 1 | 1 | 0s | `command-failure`×1 | low |
 
 ## Commands that keep failing
 
@@ -54,7 +53,7 @@
 - `2026-11-03 09:01` session `4132e18c` · Stale edit: Edit on src/shopfront/api/schema_gen.py refused: the file changed on disk after it was read
   > File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.
 - `2026-11-03 09:04` session `4132e18c` · User interrupt: The user interrupted the agent while it was working on src/shopfront/api/schema_gen.py
-- `2026-11-05 16:06` session `aider-20` · User correction: User correction (confidence 1; matched "that's wrong", "revert/undo"); names src/shopfront/api/schema_gen.py
+- `2026-11-05 16:06` session `aider-20` · User correction: User correction (confidence 1; matched "that's wrong", "revert/undo"; the user names src/shopfront/api/schema_gen.py, which it had changed); names src/shopfront/api/schema_gen.py
   > That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml.
 - `2026-11-12 11:00` session `fb4e20bf` · Edit miss: Edit on src/shopfront/api/schema_gen.py failed: the text to replace was not found
   > String to replace not found in file. String: API_VERSION = "2.3"
@@ -63,7 +62,7 @@
 </details>
 
 <details>
-<summary><code>src/shopfront/checkout/service.py</code> · score 39.8 · 3 sessions</summary>
+<summary><code>src/shopfront/checkout/service.py</code> · score 43.5 · 3 sessions</summary>
 
 6 friction events in all 3 sessions that touched it (3 user corrections, 2 reverted edits, 1 edit thrash episode); high confidence because it recurs across sessions with several kinds of evidence.
 
@@ -74,27 +73,13 @@
 
 **Evidence**
 
-- `2026-10-29 14:11` session `9f6ff626` · User correction: User correction (confidence 1; matched "no, …", "I told you"); after edits to src/shopfront/checkout/service.py, tests/test_refunds.py, src/shopfront/payments/client.py
+- `2026-10-29 14:11` session `9f6ff626` · User correction: User correction (confidence 1; matched "no, …", "I told you"; the agent then changed src/shopfront/checkout/service.py again); attributed to src/shopfront/checkout/service.py
   > No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.
 - `2026-11-09 15:02` session `8d986baa` · Edit reverted: Edit on src/shopfront/checkout/service.py undid an earlier edit from the same session
 - `2026-11-09 15:03` session `8d986baa` · Edit thrash: 7 successful edits to src/shopfront/checkout/service.py within one user turn
-- `2026-11-09 15:14` session `8d986baa` · User correction: User correction (confidence 1; matched "still failing", "I told you"); names src/shopfront/checkout/service.py
+- `2026-11-09 15:14` session `8d986baa` · User correction: User correction (confidence 1; matched "still failing", "I told you"; the user names src/shopfront/checkout/service.py, which it had changed); names src/shopfront/checkout/service.py
   > It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only.
 - `2026-11-09 15:15` session `8d986baa` · Edit reverted: Edit on src/shopfront/checkout/service.py undid an earlier edit from the same session
-
-</details>
-
-<details>
-<summary><code>tests/test_refunds.py</code> · score 15.0 · 1 session</summary>
-
-2 friction events in the only session that touched it (1 command failure, 1 user correction); low confidence because there is too little independent evidence so far.
-
-**Evidence**
-
-- `2026-10-29 14:04` session `9f6ff626` · Command failure: `pytest` failed (exit 1; ordinary failure)
-  > $ pytest tests/test_refunds.py -x Exit code 1 tests/conftest.py:11: in engine     return make_engine(os.environ['DATABASE_URL']) E   KeyError: 'DATABASE_URL' ERROR tests/test_checkout.py - KeyError: 'DATABASE_URL'
-- `2026-10-29 14:11` session `9f6ff626` · User correction: User correction (confidence 1; matched "no, …", "I told you"); after edits to src/shopfront/checkout/service.py, tests/test_refunds.py, src/shopfront/payments/client.py
-  > No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.
 
 </details>
 
@@ -111,18 +96,6 @@
 </details>
 
 <details>
-<summary><code>src/shopfront/payments/client.py</code> · score 11.1 · 1 session</summary>
-
-1 friction event in 1 of the 2 sessions that touched it (1 user correction); low confidence because there is too little independent evidence so far.
-
-**Evidence**
-
-- `2026-10-29 14:11` session `9f6ff626` · User correction: User correction (confidence 1; matched "no, …", "I told you"); after edits to src/shopfront/checkout/service.py, tests/test_refunds.py, src/shopfront/payments/client.py
-  > No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.
-
-</details>
-
-<details>
 <summary><code>api/openapi.yaml</code> · score 9.7 · 1 session</summary>
 
 1 friction event in 1 of the 2 sessions that touched it (1 search miss); low confidence because there is too little independent evidence so far.
@@ -131,6 +104,18 @@
 
 - `2026-11-12 11:01` session `fb4e20bf` · Search miss: Grep search in api/openapi.yaml returned nothing
   > pattern: API_VERSION
+
+</details>
+
+<details>
+<summary><code>tests/test_refunds.py</code> · score 8.5 · 1 session</summary>
+
+1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far.
+
+**Evidence**
+
+- `2026-10-29 14:04` session `9f6ff626` · Command failure: `pytest` failed (exit 1; ordinary failure)
+  > $ pytest tests/test_refunds.py -x Exit code 1 tests/conftest.py:11: in engine     return make_engine(os.environ['DATABASE_URL']) E   KeyError: 'DATABASE_URL' ERROR tests/test_checkout.py - KeyError: 'DATABASE_URL'
 
 </details>
 

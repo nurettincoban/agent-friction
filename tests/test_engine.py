@@ -105,8 +105,10 @@ def test_sources_and_totals(result: dict[str, Any]) -> None:
     assert (generic["kind"], generic["sessions"]) == ("generic", 1)
     totals = result["totals"]
     assert totals["sessions"] == 6  # the subagent transcript belongs to its parent session
-    assert totals["corrections"] == 5
-    assert totals["files_affected"] == len(result["hotspots"]) == 6
+    # four corroborated corrections; "Don't call legacy_charge() ..." is only probable
+    assert (totals["corrections"], totals["probable_corrections"]) == (4, 1)
+    assert all(source["skipped_events"] == 0 for source in result["sources"])
+    assert totals["files_affected"] == len(result["hotspots"]) == 5
     assert totals["est_minutes_lost"] > 0
 
 
@@ -173,8 +175,13 @@ def test_exposure_covers_everything_the_agent_touched(result: dict[str, Any]) ->
     assert "make codegen" not in [c["path"] for c in result["commands"]]
     # read-only inspection (cat, ls, git status) is not exposure
     assert not {"cat", "ls", "git status", "grep"} & set(exposure["command"])
-    client = entry(result["hotspots"], "src/shopfront/payments/client.py")
-    assert (client["sessions"], client["exposure_sessions"], client["friction_rate"]) == (1, 2, 0.5)
+    # ... as are files: the payments client was read and edited, and nobody had to correct it
+    assert exposure["file"]["src/shopfront/payments/client.py"] == 2
+    assert "src/shopfront/payments/client.py" not in [h["path"] for h in result["hotspots"]]
+    refunds = entry(result["hotspots"], "tests/test_refunds.py")
+    assert (refunds["sessions"], refunds["exposure_sessions"], refunds["friction_rate"]) == (
+        1, 1, 1.0,
+    )  # fmt: skip
 
 
 def test_story_search_misses_roll_up_to_the_directory(result: dict[str, Any]) -> None:
@@ -381,7 +388,7 @@ def test_limits(result: dict[str, Any]) -> None:
     small = story(max_hotspots=2, max_evidence=1, excerpt_chars=40)
     assert [h["path"] for h in small["hotspots"]] == [h["path"] for h in result["hotspots"][:2]]
     assert len(small["commands"]) == 2
-    assert small["totals"]["files_affected"] == 6  # totals are not truncated
+    assert small["totals"]["files_affected"] == 5  # totals are not truncated
     assert all(len(h["evidence"]) == 1 for h in small["hotspots"])
     assert all(len(e["excerpt"] or "") <= 40 for h in small["commands"] for e in h["evidence"])
     assert small["tree"] == result["tree"]
@@ -431,7 +438,8 @@ def test_auto_discovery_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert out["sources"][0]["skipped_lines"] == 1
     assert out["sources"][-1] == {
         "kind": "git", "path": out["repo"]["root"], "sessions": 0, "skipped_lines": 0,
-        "ignored_lines": 0, "available": False, "note": out["sources"][-1]["note"],
+        "skipped_events": 0, "ignored_lines": 0, "available": False,
+        "note": out["sources"][-1]["note"],
     }  # fmt: skip
 
 
@@ -708,3 +716,43 @@ def test_permission_denials_get_their_own_advice(tmp_path: Path) -> None:
 
 
 DENIED = "Claude requested permissions to use Bash, but you haven't granted it yet."
+
+
+def test_control_characters_from_transcripts_never_reach_the_result(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    evil = "\x1b[2J\x1b]0;pwned\x07‮"
+    s = Session("ctl", cwd=str(repo)).user("go")
+    s.edit(f"{repo}/src/a‮b.py", error=builders.EDIT_NOT_FOUND)
+    s.bash(f"./run.sh --tag '{evil}'", f"bash: ./run.sh: {evil}command not found", exit_code=127)
+    s.edit(f"{repo}/src/c.py").user(f"No, you broke c.py {evil} revert that")
+    s.save(tmp_path / "t")
+    out = analyze(
+        AnalyzeOptions(repo=repo, transcripts=[tmp_path / "t"], include_git=False, now=NOW)
+    )
+    text = json.dumps(out, ensure_ascii=False)
+    assert out["totals"]["friction_events"] == 3 and out["totals"]["corrections"] == 1
+    for bad in ("\x1b", "\x07", "‮", "\\u001b", "\\u202e"):
+        assert bad not in text, repr(bad)
+    assert "src/ab.py" in [h["path"] for h in out["hotspots"]]
+
+
+def test_detector_errors_are_counted_per_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    s = Session("odd", cwd=str(repo)).user("go")
+    s.bash("pytest -q", "bash: pytest: command not found", exit_code=127)
+    s.edit(f"{repo}/src/a.py", error=builders.EDIT_NOT_FOUND)
+    s.save(tmp_path / "t")
+
+    def boom(self: object, action: object, result: object) -> None:
+        raise RuntimeError("unexpected transcript shape")
+
+    monkeypatch.setattr(signals._Detector, "_on_shell", boom)
+    out = analyze(
+        AnalyzeOptions(repo=repo, transcripts=[tmp_path / "t"], include_git=False, now=NOW)
+    )
+    assert out["sources"][0]["skipped_events"] == 1
+    assert out["totals"]["friction_events"] == 1  # the rest of the session still counts

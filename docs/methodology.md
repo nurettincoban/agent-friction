@@ -14,10 +14,14 @@ constants live next to the code that uses them and are listed here.
    discarded at this step and never reach the output. Of the agent's prose
    two things are kept: *when* it was written (a marker that the agent was
    active, used for time estimates) and whether the last message before a
-   human reply ended with a question mark. Harness and IDE blocks inside user
+   human reply asked something (a question mark in its final paragraph, or a
+   question/choice tool). Of the text of an edit only hashes are kept, plus
+   one bit: whether it only added text. Harness and IDE blocks inside user
    turns (`<system-reminder>`, `<ide_opened_file>`, ...) are stripped.
 3. **Detect.** Deterministic rules turn events into friction events
-   ([signal catalog](signals.md)). Git history adds `human-rework`.
+   ([signal catalog](signals.md)). Git history adds `human-rework`. An event
+   a detector cannot handle is skipped and counted
+   (`sources[].skipped_events`); it never ends the scan.
 4. **Attribute** each event to a file, a directory or a normalized command.
 5. **Score, estimate time, grade confidence** per hotspot.
 6. **Recommend** from the signal mix.
@@ -349,11 +353,22 @@ Transcripts contain secrets. The engine therefore:
   parameters (`?token=`, `&sig=`); `Cookie:` / `Set-Cookie:` header values;
   connection-string fields (`AccountKey=`, `SharedAccessKey=`, `Password=`);
   `mysql -pSECRET` / `sshpass -p SECRET`; SendGrid keys (`SG.x.y`); prose
-  such as "the password is x"; e-mail addresses;
-  hex strings of 32+ characters; mixed-case alphanumeric
+  such as "the password is x"; `docker login -p x`; assignments to names
+  ending in `_KEY`, `_ID`, `_SALT` ... (`SECRET_KEY = '...'`); e-mail
+  addresses (not `user@10.0.0.1`: an IP host is not a mailbox);
+  hex strings of 32+ characters, **except** strings of exactly 40 lower-case
+  hex digits, which are git commit ids and are kept; bare 40-character
+  base64 strings containing `/` or `+` (the shape of an AWS secret access
+  key); mixed-case alphanumeric
   strings of 24+ characters with Shannon entropy of at least 4.0 bits per
   character; home directories (`/home/x`, `/Users/x`, `C:\Users\x`, the real
   home) become `~`.
+
+**Control characters.** Transcripts can contain terminal escape sequences
+(`ESC[2J`, OSC title changes) and invisible direction marks (U+202E). ANSI
+sequences, C0/C1 control characters other than newline and tab, and bidi
+controls are removed from every excerpt and, in a final pass, from every
+string of the result: paths, command keys, summaries, recommendation text.
 
 Redaction is pattern matching and will miss secrets that look like ordinary
 words (a short password passed as a bare argument, an internal code name).
@@ -363,8 +378,8 @@ a user name) and appear in `sources[].path` and `evidence[].source`.
 
 ## Known limitations
 
-- **Heuristics, not understanding.** A correction is recognised by its opening
-  words; a setup error by its output. Both directions of error exist and are
+- **Heuristics, not understanding.** A correction is recognised by its
+  wording plus what the agent does next; a setup error by its output. Both directions of error exist and are
   listed per signal in the catalog.
 - **Friction is not always the codebase's fault.** Some events reflect the
   agent, the prompt or the harness. The recurrence requirement behind
@@ -373,7 +388,13 @@ a user name) and appear in `sources[].path` and `evidence[].source`.
   run of the same job is not counted, and ordinary failures never produce a
   recommendation. Other ordinary failures are down-weighted, not removed: a
   session that ends red, or a flaky test, still adds a little score. A retry
-  loop needs three identical failing invocations with no change in between.
+  loop needs three identical failing invocations with no change in between,
+  and is dropped as *waiting* if the same invocation then passes untouched
+  (which also hides a flaky test that fails twice in a row).
+- **Edit reverts cannot see intent.** An exact undo is counted unless it
+  removes lines that were only added and were run successfully once (a debug
+  print). A deliberate experiment that replaces code and is taken back is
+  counted although nothing went wrong.
 - **Changes made by shell commands are recognised by name.** `sed -i`,
   formatters and `--fix` flags count as edits; a script that rewrites files
   (`python tools/fix_imports.py`) does not, so a red run it fixes stays on
@@ -396,8 +417,9 @@ a user name) and appear in `sources[].path` and `evidence[].source`.
   confidence.
 - **Corrections are English-only.** Correction phrases are matched in
   English; corrections in other languages are missed (never misread).
-- **Corrections are attributed by proximity.** If the human corrects
-  something unrelated to the files just edited, the attribution is wrong.
+- **Corrections are attributed by proximity.** A certain correction belongs
+  to the changed file the human names or the agent goes back to; if the human
+  meant something else in the same breath, the attribution is wrong.
 - **Command grouping is coarse.** `pytest tests/a.py` and `pytest tests/b.py`
   are one hotspot; `pytest` and `python -m pytest` are two; every use of a
   tool that is not on the subcommand allowlist is one hotspot (`mytool build`
@@ -405,9 +427,15 @@ a user name) and appear in `sources[].path` and `evidence[].source`.
   which step failed unless the output shows it. The shell is tokenized,
   not interpreted: aliases, functions, `eval` and command substitution are not
   followed.
-- **Corrections are under-counted on purpose.** Only unambiguous phrasing, or
-  two weaker cues together, counts; polite, indirect and non-English
-  corrections are missed.
+- **Corrections are under-counted on purpose.** `totals.corrections` counts
+  only messages whose wording addresses the agent's work **and** that are
+  corroborated by behaviour (the human names a file the agent had just
+  changed, or the agent goes back to one). Everything else that sounds like a
+  correction is "probable": listed, weighted 0.4, never quoted, not in the
+  headline count. Polite, indirect and non-English corrections, and
+  corrections of something done with a command rather than an edit, are
+  missed. The count is a lower bound, and it is still a heuristic: see the
+  false positives in the catalog.
 - **Only what is recorded.** A session started above the repo is found only
   if it mentions the repo's absolute path. Rework that never reaches the
   current branch is invisible. Squashed merges lose agent
@@ -420,4 +448,5 @@ a user name) and appear in `sources[].path` and `evidence[].source`.
   shortens with a hash are not matched.
 - **Format drift.** The Claude Code transcript format is not a public,
   versioned contract. Unknown line types are ignored and malformed lines are
-  counted (`skipped_lines`), never fatal.
+  counted (`skipped_lines`), never fatal. An event that makes a detector
+  raise is skipped and counted (`skipped_events`).

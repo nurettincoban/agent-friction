@@ -1,14 +1,13 @@
 agent-friction · shopfront
-6 sessions · 74 tool calls · 34 friction events · ~28m lost · 5 human corrections · 2026-10-26 → 2026-11-12
+6 sessions · 74 tool calls · 34 friction events · ~28m lost · 4 human corrections · 2026-10-26 → 2026-11-12
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals
   █████▋      56.8 src/shopfront/api/schema_gen.py           4     12     11m  ● edit-miss×6, user-correction×3
-  ████        39.8 src/shopfront/checkout/service.py         3      6     19m  ● user-correction×3, edit-revert×2
-  █▌          15.0 tests/test_refunds.py                     1      2      5m  ○ command-failure×1, user-correction×1
+  ████▍       43.5 src/shopfront/checkout/service.py         3      6     19m  ● user-correction×3, edit-revert×2
   █▏          11.4 src/shopfront/payments/refunds.py         1      1     18s  ○ path-miss×1
-  █▏          11.1 src/shopfront/payments/client.py          1      1      5m  ○ user-correction×1
   █            9.7 api/openapi.yaml                          1      1     24s  ○ search-miss×1
+  ▉            8.5 tests/test_refunds.py                     1      1      0s  ○ command-failure×1
 
 Commands that keep failing
   score            path                                   sess events    lost  top signals
@@ -48,3 +47,4 @@ What to fix first
      permission rule. Reasons given: "never delete existing migrations, add a new revision on top"
 
 ● high ◐ medium ○ low confidence · drill in: agent-friction show <path> · full map: --format html -o map.html
+Per-row time can overlap (one stall can involve a file and a command); the total counts each minute once.

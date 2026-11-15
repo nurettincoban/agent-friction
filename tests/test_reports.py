@@ -119,3 +119,18 @@ def test_markdown_escapes_html_in_free_text() -> None:
     r["hotspots"][1]["recommendations"][0]["detail"] = 'The human said: "<img src=x onerror=1>"'
     md = render_markdown(r)
     assert "<img" not in md and "&lt;img" in md
+
+
+def test_directory_only_results_are_not_reported_as_smooth() -> None:
+    r = sample_result()
+    directory = {**r["hotspots"][0], "path": "src/shop", "kind": "dir"}
+    r["hotspots"], r["commands"], r["directories"] = [], [], [directory]
+    assert "No recurring friction" not in render_terminal(r)
+    assert "No recurring friction" not in render_markdown(r)
+    assert "search in vain" in render_terminal(r)
+
+
+def test_skipped_lines_are_mentioned() -> None:
+    r = sample_result()
+    r["sources"][0]["skipped_lines"] = 3
+    assert "3 transcript lines could not be parsed" in render_terminal(r)
