@@ -210,4 +210,14 @@ def render_compare(
         out.append("")
     if not any_change:
         out += ["No meaningful change.", ""]
+    if any(
+        (c.status == "regressed" and c.after_score < c.before_score)
+        or (c.status == "improved" and c.after_score > c.before_score)
+        for c in changes
+    ):
+        out += [
+            "Verdicts follow the event rate in the sessions that touched each target, not the "
+            "score, which also weighs severity and recurrence, so the two can move apart.",
+            "",
+        ]
     return "\n".join(out)

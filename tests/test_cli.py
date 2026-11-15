@@ -299,3 +299,24 @@ def test_absurd_since_and_directory_output_are_usage_errors(tmp_path: Path) -> N
 def test_bot_author_flag_validates_regex() -> None:
     assert run("scan", *INPUT, "--bot-author", "(")[0] == EXIT_USAGE
     assert run("scan", *INPUT, "--bot-author", "ci-robot")[0] == EXIT_OK
+
+
+def test_repo_alias_must_be_absolute() -> None:
+    assert run("scan", *INPUT, "--repo-alias", "relative/path")[0] == EXIT_USAGE
+    assert run("scan", *INPUT, "--repo-alias", "C:\\Users\\dev\\shop")[0] == EXIT_OK
+
+
+def test_scan_from_a_subdirectory_uses_the_repo_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "src").mkdir()
+    monkeypatch.chdir(tmp_path / "src")
+    _, _, err = run("sources", "-t", str(tmp_path / "none.jsonl"))
+    assert f"using the repository root {tmp_path}" in err
+
+
+def test_show_accepts_repo_positionally() -> None:
+    code, out, _ = run("show", "pytest", *INPUT)
+    assert code == EXIT_OK and "pytest" in out
+    assert run("show", "pytest", *INPUT, "--repo", INPUT[0])[0] == EXIT_USAGE

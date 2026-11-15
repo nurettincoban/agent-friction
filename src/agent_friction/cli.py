@@ -13,7 +13,7 @@ import re
 import sys
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, TextIO
 
 from agent_friction import __version__
@@ -44,6 +44,39 @@ _EXT_FORMAT = {
     ".json": "json",
     ".txt": "terminal",
 }
+
+
+_REPO_HELP = "repo root (default: the git repository containing the current directory)"
+
+
+def _absolute_path(value: str) -> str:
+    # Aliases are usually recorded on another machine, so accept either OS's form.
+    if not (PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()):
+        raise argparse.ArgumentTypeError(f"{value!r} is not an absolute path")
+    return value
+
+
+def _find_repo_root(start: Path) -> Path | None:
+    for d in (start, *start.parents):
+        if (d / ".git").exists():
+            return d
+    return None
+
+
+def _resolve_repo(args: argparse.Namespace, err: TextIO) -> None:
+    """Fill in ``args.repo``: explicit path, else the enclosing git repository, else ``.``."""
+    pos = getattr(args, "repo_pos", None)
+    if pos is not None:
+        if args.repo is not None:
+            raise UsageError("give the repo either as an argument or with --repo, not both")
+        args.repo = pos
+    if args.repo is not None:
+        return
+    cwd = Path.cwd()
+    root = _find_repo_root(cwd)
+    if root is not None and root != cwd:
+        err.write(f"agent-friction: using the repository root {root}\n")
+    args.repo = Path() if root is None or root == cwd else root
 
 
 def _regex(value: str) -> str:
@@ -125,6 +158,7 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
         "--repo-alias",
         action="append",
         default=[],
+        type=_absolute_path,
         metavar="PATH",
         help="another absolute path where this repo lived when sessions were recorded "
         "(another machine, an old checkout); repeatable",
@@ -182,7 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     scan = sub.add_parser("scan", help="analyse agent sessions and print the friction map")
-    scan.add_argument("repo", nargs="?", type=Path, default=Path(), help="repo root (default .)")
+    scan.add_argument("repo", nargs="?", type=Path, help=_REPO_HELP)
     _add_input_options(scan)
     out = scan.add_argument_group("output")
     out.add_argument(
@@ -193,7 +227,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     out.add_argument("-o", "--output", type=Path, metavar="FILE", help="write to FILE")
     out.add_argument(
-        "--top", type=_positive_int, default=10, metavar="N", help="rows per table (default 10)"
+        "--top",
+        type=_positive_int,
+        default=10,
+        metavar="N",
+        help="rows per table in terminal and Markdown output (default 10); JSON and "
+        "HTML always include every hotspot",
     )
     out.add_argument(
         "--color", choices=("auto", "always", "never"), default="auto", help="terminal colors"
@@ -207,7 +246,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     show = sub.add_parser("show", help="show the evidence behind one file, directory, or command")
     show.add_argument("target", help="repo-relative file or directory, or a normalized command")
-    show.add_argument("--repo", type=Path, default=Path(), help="repo root (default .)")
+    show.add_argument("repo_pos", nargs="?", type=Path, metavar="repo", help=_REPO_HELP)
+    show.add_argument("--repo", type=Path, help=argparse.SUPPRESS)
     show.add_argument(
         "--from",
         dest="from_json",
@@ -257,7 +297,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     src = sub.add_parser("sources", help="list the transcripts that would be analysed")
-    src.add_argument("repo", nargs="?", type=Path, default=Path(), help="repo root (default .)")
+    src.add_argument("repo", nargs="?", type=Path, help=_REPO_HELP)
     src.add_argument(
         "-t",
         "--transcripts",
@@ -270,6 +310,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--repo-alias",
         action="append",
         default=[],
+        type=_absolute_path,
         metavar="PATH",
         help="another absolute path where this repo lived, as for `scan`",
     )
@@ -554,6 +595,8 @@ def main(
         "sources": _cmd_sources,
     }
     try:
+        if hasattr(args, "repo"):
+            _resolve_repo(args, err)
         return handlers[args.command](args, out, err)
     except UsageError as exc:
         err.write(f"agent-friction: {exc}\n")

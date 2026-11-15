@@ -142,6 +142,25 @@ _RULES: tuple[_Rule, ...] = (
         re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"),
         "[REDACTED:email]",
     ),
+    (
+        "private-ip",
+        # RFC 1918 addresses: they describe somebody's network, not the problem at hand
+        re.compile(
+            r"(?<![\w.])(?:10(?:\.\d{1,3}){3}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}"
+            r"|192\.168(?:\.\d{1,3}){2})(?!\.?\d)"
+        ),
+        "[REDACTED:private-ip]",
+    ),
+    (
+        "internal-host",
+        # ``db.internal``, ``build01.corp``, ``nas.local``: names that only resolve inside
+        # an organisation. Not ``settings.local.json`` or ``threading.local()``.
+        re.compile(
+            r"(?i)(?<![\w.-])(?!(?:self|cls|this)\.)(?:[a-z0-9-]+\.)+"
+            r"(?:internal|local|corp|lan)\b(?![\w(]|\.[a-z])"
+        ),
+        "[REDACTED:internal-host]",
+    ),
 )
 
 _HEX_RE = re.compile(rf"\b[0-9a-fA-F]{{{HEX_MIN_LENGTH},}}\b")

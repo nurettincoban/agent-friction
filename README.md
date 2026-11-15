@@ -28,7 +28,7 @@ Files where agents struggle
   ████▍       43.4 src/shopfront/checkout/service.py         3      6     14m  ● edit-revert×2, user-correction×2
 
 Commands that keep failing
-  ████▉       48.6 pytest                                    4      7      2m  ◐ command-failure×7
+  ████▉       48.6 pytest                                    4      7      3m  ◐ command-failure×7
 
 What to fix first
   1. src/shopfront/api/schema_gen.py: Generated file: point agents at its source
@@ -41,7 +41,7 @@ What to fix first
      ...In their words: "No, I said use PaymentClient, not the legacy module. [...]"
 ```
 
-That output is real: it comes from the synthetic sessions in [`tests/fixtures`](https://github.com/nurettincoban/agent-friction/tree/main/tests/fixtures).
+That output is real, abridged to its top rows: it comes from the synthetic sessions in [`tests/fixtures`](https://github.com/nurettincoban/agent-friction/tree/main/tests/fixtures).
 See the full example as [Markdown](https://github.com/nurettincoban/agent-friction/blob/main/examples/shopfront.md), [JSON](https://github.com/nurettincoban/agent-friction/blob/main/examples/shopfront.json),
 or [interactive HTML](https://github.com/nurettincoban/agent-friction/blob/main/examples/shopfront.html) (download it and open it in a browser).
 

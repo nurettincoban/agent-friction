@@ -11,7 +11,7 @@ Files where agents struggle
 
 Commands that keep failing
   score            path                                   sess events    lost  top signals
-  ████▉       48.6 pytest                                    4      7      2m  ◐ command-failure×7
+  ████▉       48.6 pytest                                    4      7      3m  ◐ command-failure×7
   █▋          16.3 rm                                        1      1     42s  ○ tool-rejected×1
   █▌          15.2 curl                                      1      1     12s  ○ command-failure×1
   █▌          15.2 python -m pytest                          1      1     30s  ○ command-failure×1

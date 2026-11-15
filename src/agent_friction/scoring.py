@@ -15,6 +15,8 @@ from agent_friction.signals import (
     COMMAND_FAILURE,
     EDIT_THRASH,
     HUMAN_REWORK,
+    NO_CONVERGENCE,
+    PATH_MISS,
     PROBABLE_CORRECTION,
     READ_LOOP,
     RETRY_LOOP,
@@ -45,7 +47,7 @@ WEAK_ONLY_SCORE_CAP = 19.0
 WEAK_SIGNALS = WEAK_ALONE_SIGNALS
 #: Signals computed from other findings. Next to their source they are the same evidence
 #: counted again, so they do not add a distinct signal type for confidence.
-DERIVED_SIGNALS = {RETRY_LOOP: COMMAND_FAILURE}
+DERIVED_SIGNALS = {RETRY_LOOP: COMMAND_FAILURE, NO_CONVERGENCE: COMMAND_FAILURE}
 #: Session ids with this prefix are agent commits (git), not transcript sessions.
 GIT_SESSION_PREFIX = "git:"
 
@@ -198,6 +200,7 @@ SIGNAL_NOUNS: dict[str, str] = {
     "read-loop": "read loop",
     "probable-correction": "probable correction",
     "file-too-large": "refused read of a too-large file",
+    "no-convergence": "edit-and-run stretch that never went green",
 }
 
 
@@ -260,6 +263,8 @@ def is_weak(finding: Finding) -> bool:
     """
     if finding.signal == COMMAND_FAILURE:
         return finding.detail.get("variant") == "ordinary"
+    if finding.signal == PATH_MISS:
+        return finding.detail.get("probe") == "1"  # looking for an optional README, .env, ...
     return finding.signal in WEAK_ALONE_SIGNALS
 
 
@@ -271,8 +276,11 @@ def weak_only(findings: Iterable[Finding]) -> bool:
     one-off probe before creating something new.
     """
     found = list(findings)
-    if not found or not all(is_weak(f) for f in found):
+    stuck = {f.session_id for f in found if f.signal == NO_CONVERGENCE}
+    if not found or not all(is_weak(f) or f.signal == NO_CONVERGENCE for f in found):
         return False
+    if len(stuck) >= MEDIUM_MIN_SESSIONS:
+        return False  # one stuck session can be a hard task; the same check twice is a pattern
     sessions_by_pattern: dict[str, set[str]] = {}
     for finding in found:
         pattern = finding.detail.get("pattern", "").casefold()

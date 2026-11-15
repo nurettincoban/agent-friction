@@ -437,8 +437,60 @@ def _strip_prefixes(words: Sequence[str]) -> list[str]:
         elif head in WRAPPER_PROGRAMS:
             out = _strip_wrapper(head, out[1:])
         else:
-            break
+            inner = _container_command(out)
+            if not inner:
+                break
+            out = inner  # ``docker compose exec web pytest`` is about ``pytest``
     return out
+
+
+#: Options of ``docker``/``compose``/``exec``/``run`` that take a separate value.
+_CONTAINER_VALUE_OPTIONS = frozenset(
+    {"-f", "--file", "-p", "--project-name", "--project-directory", "--profile", "--env-file"}
+    | {"-H", "--host", "--context", "-c", "--config", "--log-level", "-e", "--env", "-u"}
+    | {"--user", "-w", "--workdir", "--name", "-v", "--volume", "--publish", "--entrypoint"}
+    | {"--index", "-l", "--label", "--detach-keys", "--scale", "--network", "-n", "--namespace"}
+    | {"--container", "--kubeconfig", "--cluster", "--pod-running-timeout"}
+)
+
+
+def _skip_container_options(words: list[str]) -> list[str]:
+    out = list(words)
+    while out and out[0].startswith("-") and out[0] != "--":
+        option = out.pop(0)
+        if option in _CONTAINER_VALUE_OPTIONS and out:
+            out.pop(0)
+    return out
+
+
+def _container_command(words: Sequence[str]) -> list[str]:
+    """The command run *inside* a container, or ``[]`` if ``words`` is not such a call.
+
+    ``docker compose exec|run <service> CMD``, ``docker exec <container> CMD`` and
+    ``kubectl exec <pod> -- CMD``. Where a check runs does not change what it is.
+    """
+    head = _program_name(words[0]) if words else ""
+    rest = list(words[1:])
+    if head == "kubectl":
+        if "exec" not in rest or "--" not in rest or rest.index("exec") > rest.index("--"):
+            return []
+        return rest[rest.index("--") + 1 :]
+    if head in ("docker", "podman"):
+        rest = _skip_container_options(rest)
+        if rest and rest[0] == "compose":
+            head, rest = "docker-compose", rest[1:]
+        elif rest and rest[0] == "exec":
+            rest = _skip_container_options(rest[1:])
+            return rest[1:]  # after the container name
+        else:
+            return []
+    if head in ("docker-compose", "podman-compose"):
+        rest = _skip_container_options(rest)
+        if not rest or rest[0] not in ("exec", "run"):
+            return []
+        rest = _skip_container_options(rest[1:])
+        return rest[1:]  # after the service name
+    return []
 
 
 def _strip_wrapper(wrapper: str, rest: list[str]) -> list[str]:

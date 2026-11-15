@@ -782,6 +782,15 @@
       "why": "The failure output did not tell the agent what to do, so it kept guessing."
     },
     {
+      "attribution": "The normalized command, and the files edited between the runs (the 3 most edited, split evenly).",
+      "count": 0,
+      "description": "Within one turn the agent edited files and re-ran the same command 4 or more times, the command failed every time, and the turn ended with it still failing.",
+      "id": "no-convergence",
+      "severity": 3.0,
+      "title": "No convergence",
+      "why": "Edit, run, red, again and again without ever going green: the agent could not work out what the check wants."
+    },
+    {
       "attribution": "The file the tool targeted, or the normalized command for shell calls.",
       "count": 1,
       "description": "The human declined a tool call the agent proposed.",

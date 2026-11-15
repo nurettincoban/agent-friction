@@ -24,7 +24,7 @@
 
 | # | Command | Score | Sessions | Events | Est. time lost | Top signals | Confidence |
 |---:|---|---:|---:|---:|---:|---|---|
-| 1 | `pytest` | 48.6 | 4 | 7 | 2m | `command-failure`×7 | medium |
+| 1 | `pytest` | 48.6 | 4 | 7 | 3m | `command-failure`×7 | medium |
 | 2 | `rm` | 16.3 | 1 | 1 | 42s | `tool-rejected`×1 | low |
 | 3 | `curl` | 15.2 | 1 | 1 | 12s | `command-failure`×1 | low |
 | 4 | `python -m pytest` | 15.2 | 1 | 1 | 30s | `command-failure`×1 | low |

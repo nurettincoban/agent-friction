@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_friction import signals
+from agent_friction import scoring, signals
 from agent_friction.signals import correction_confidence
 from tests import builders
 from tests.builders import Session, by_signal, detect
@@ -20,7 +20,7 @@ def keys(finding: object) -> list[tuple[str, str]]:
 
 def test_catalog_is_consistent() -> None:
     ids = [s.id for s in signals.CATALOG]
-    assert len(ids) == len(set(ids)) == 16
+    assert len(ids) == len(set(ids)) == 17
     for definition in signals.CATALOG:
         assert definition.title and definition.description and definition.why
         assert definition.attribution and definition.severity > 0
@@ -1886,3 +1886,154 @@ def test_a_revert_of_an_earlier_turns_edit_costs_one_round_trip(tmp_path: Path) 
     later.user("now the next feature").edit(A, "two", "one")
     (other,) = by_signal(detect(later, tmp_path), signals.EDIT_REVERT)
     assert other.interval is None or other.interval[1] - other.interval[0] < 30
+
+
+# ---- round 8 --------------------------------------------------------------------------------
+
+NO_RULE = "make: *** No rule to make target 'build'.  Stop."
+
+
+@pytest.mark.parametrize("command", ["cd repo && make build", "cd /work/repo && make build"])
+def test_a_cd_into_the_repo_from_a_parent_directory_counts(tmp_path: Path, command: str) -> None:
+    s = Session(cwd="/work").user("go").bash(command, NO_RULE, exit_code=2)
+    (found,) = detect(s, tmp_path, repo="/work/repo")
+    assert found.signal == signals.COMMAND_FAILURE and keys(found) == [("command", "make build")]
+    assert found.detail["variant"] == "invocation"
+
+
+@pytest.mark.parametrize("command", ["make build", "cd other && make build", "cd $X && make"])
+def test_commands_in_a_parent_directory_still_do_not_count(tmp_path: Path, command: str) -> None:
+    s = Session(cwd="/work").user("go").bash(command, NO_RULE, exit_code=2)
+    assert detect(s, tmp_path, repo="/work/repo") == []
+
+
+def stuck(rounds: int, *, green: bool = False) -> Session:
+    s = Session().user("make the test pass")
+    for i in range(rounds):
+        s.edit(A, f"a{i}", f"b{i}")
+        s.bash("pytest tests/test_app.py", "1 failed", exit_code=1, took=60)
+    if green:
+        s.edit(A, "last", "fix").bash("pytest tests/test_app.py", "1 passed")
+    return s
+
+
+def test_edit_and_run_rounds_that_never_go_green_do_not_converge(tmp_path: Path) -> None:
+    (found,) = by_signal(detect(stuck(8), tmp_path), signals.NO_CONVERGENCE)
+    assert keys(found) == [("command", "pytest"), ("file", "src/a.py")]
+    assert found.detail["count"] == "8" and "8 rounds" in found.summary
+    assert found.interval is not None
+    assert 7 * 60 < found.interval[1] - found.interval[0] <= signals.NO_CONVERGENCE_CAP_SECONDS
+    long = by_signal(detect(stuck(40), tmp_path), signals.NO_CONVERGENCE)[0]
+    assert long.interval is not None
+    assert long.interval[1] - long.interval[0] == signals.NO_CONVERGENCE_CAP_SECONDS
+
+
+def test_rounds_that_converge_or_are_few_are_not_recorded(tmp_path: Path) -> None:
+    converged = {f.signal for f in detect(stuck(8, green=True), tmp_path)}
+    # red -> fix -> green, eventually: no failures on record, at most a weak thrash note
+    assert converged <= {signals.EDIT_THRASH}
+    few = detect(stuck(signals.NO_CONVERGENCE_MIN_CYCLES - 1), tmp_path)
+    assert by_signal(few, signals.NO_CONVERGENCE) == []
+    # re-running without editing is a retry loop, not edit-and-run rounds
+    s = Session().user("go").edit(A, "a", "b")
+    for _ in range(6):
+        s.bash("pytest tests/test_app.py", "1 failed", exit_code=1)
+    assert by_signal(detect(s, tmp_path), signals.NO_CONVERGENCE) == []
+    # rounds spread over turns the human steered are not one stretch
+    spread = Session().user("go")
+    for i in range(6):
+        spread.edit(A, f"a{i}", f"b{i}").bash("pytest", "1 failed", exit_code=1)
+        spread.user(f"try approach {i}")
+    assert by_signal(detect(spread, tmp_path), signals.NO_CONVERGENCE) == []
+    # a green run of another command doing the same job ends it too
+    other = stuck(5).edit(A, "x", "y").bash("make test", "ok")
+    assert by_signal(detect(other, tmp_path), signals.NO_CONVERGENCE) == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "CLAUDE.md",
+        "AGENTS.md",
+        ".cursorrules",
+        ".env",
+        ".env.local",
+        "README.md",
+        "docs/README",
+        "pyproject.toml",
+        "setup.cfg",
+        ".editorconfig",
+        "tsconfig.json",
+        "web/package.json",
+    ],
+)
+def test_a_look_for_an_optional_file_is_a_probe(tmp_path: Path, name: str) -> None:
+    s = Session().user("go").read(f"/repo/{name}", missing=True)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.PATH_MISS and found.detail.get("probe") == "1"
+    assert scoring.is_weak(found)
+
+
+def test_a_missing_file_somebody_named_is_not_a_probe(tmp_path: Path) -> None:
+    told = Session().user("the settings are in .env.local, read them")
+    told.read("/repo/.env.local", missing=True)
+    (found,) = detect(told, tmp_path)
+    assert "probe" not in found.detail and not scoring.is_weak(found)
+    listed = Session().user("go").bash("ls docs", "README.md\nguide.md")
+    listed.read("/repo/README.md", missing=True)
+    assert "probe" not in detect(listed, tmp_path)[0].detail
+    ordinary = Session().user("go").read("/repo/src/models.py", missing=True)
+    assert "probe" not in detect(ordinary, tmp_path)[0].detail
+
+
+def test_a_search_for_text_the_agent_removed_confirms_the_removal(tmp_path: Path) -> None:
+    s = Session().user("rename it").edit(A, "legacy_charge(order)", "charge(order)")
+    s.grep("legacy_charge", "/repo/src")
+    assert detect(s, tmp_path) == []
+    kept = Session().user("go").edit(A, "legacy_charge(order)", "legacy_charge(order, retry=1)")
+    kept.grep("legacy_charge", "/repo/src")  # still there according to the edit: a real miss
+    assert [f.signal for f in detect(kept, tmp_path)] == [signals.SEARCH_MISS]
+    before = Session().user("go").grep("legacy_charge", "/repo/src")
+    before.edit(A, "legacy_charge(order)", "charge(order)")
+    assert [f.signal for f in detect(before, tmp_path)] == [signals.SEARCH_MISS]
+
+
+@pytest.mark.parametrize("tool", ["ExitPlanMode", "AskUserQuestion", "ask_followup_question"])
+def test_declining_a_plan_or_a_question_is_not_a_declined_tool(tmp_path: Path, tool: str) -> None:
+    s = Session().user("go").edit(A).reject(tool, {"plan": "do it"}, "not yet, look at B first")
+    assert detect(s, tmp_path) == []
+    real = (
+        Session().user("go").reject("Edit", {"file_path": A, "old_string": "a", "new_string": "b"})
+    )
+    assert signals.TOOL_REJECTED in {f.signal for f in detect(real, tmp_path)}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "same error",
+        "Same error as before.",
+        "hmm, I'm getting the same error",
+        "go back",
+        "Go back to the previous version",
+        "no no, not that file",
+        "you changed the wrong thing",
+        "this isn't what I wanted",
+    ],
+)
+def test_round_eight_correction_openers(text: str) -> None:
+    assert signals.correction_confidence(text)[0] == signals.CORRECTION_STRONG
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I told you about the flag, right?",
+        "You removed the flag as asked, now add the tests",
+        "Why did you add this? (not complaining, curious)",
+        "go back to the dashboard page and add a button",
+        "same error handling as in util.py please",
+    ],
+)
+def test_round_eight_not_corrections(text: str) -> None:
+    assert signals.correction_confidence(text)[0] == 0.0

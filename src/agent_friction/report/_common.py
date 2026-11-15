@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
 def fmt_minutes(minutes: float) -> str:
     """Render a duration in minutes compactly: ``42s``, ``7m``, ``2h 05m``."""
+    # Round half up (not Python's half-to-even) so this matches the HTML report.
     if minutes <= 0:
         return "0s"
-    if minutes < 1:
-        return f"{round(minutes * 60)}s"
-    if minutes < 60:
-        return f"{round(minutes)}m"
-    hours, mins = divmod(round(minutes), 60)
+    secs = math.floor(minutes * 60 + 0.5)
+    if secs < 60:
+        return f"{secs}s"
+    whole = math.floor(minutes + 0.5)
+    if whole < 60:
+        return f"{whole}m"
+    hours, mins = divmod(whole, 60)
     return f"{hours}h {mins:02d}m"
 
 

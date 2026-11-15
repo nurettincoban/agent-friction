@@ -19,6 +19,8 @@ def test_fmt_minutes() -> None:
     assert fmt_minutes(0.5) == "30s"
     assert fmt_minutes(7.4) == "7m"
     assert fmt_minutes(125) == "2h 05m"
+    assert fmt_minutes(2.5) == "3m"  # half up, like the HTML report
+    assert fmt_minutes(0.999) == "1m"
 
 
 def test_bar_bounds() -> None:

@@ -94,34 +94,47 @@ def _in_window(ts: datetime | None, since: datetime | None, until: datetime | No
     return not ((since is not None and ts < since) or (until is not None and ts > until))
 
 
-def _apply_window(stream: Stream, since: datetime | None, until: datetime | None) -> None:
-    """Drop events outside the window. Events without a timestamp inherit the previous one."""
+def _apply_window(
+    stream: Stream, since: datetime | None, until: datetime | None
+) -> list[model.Event]:
+    """Drop events outside the window. Events without a timestamp inherit the previous one.
+
+    Returns the events *before* the window: they are not counted, but what the
+    agent did there is the context for judging the first events inside it.
+    """
     if since is None and until is None:
-        return
-    kept = []
+        return []
+    kept, before = [], []
     last: datetime | None = None
     for event in stream.events:
         last = event.ts or last
         if _in_window(last, since, until):
             kept.append(event)
+        elif since is not None and last is not None and last < since:
+            before.append(event)
     stream.events = kept
+    return before
 
 
 def _load(
     files: Sequence[Path], since: datetime | None, until: datetime | None
-) -> list[ParsedFile]:
+) -> tuple[list[ParsedFile], dict[str, list[model.Event]]]:
+    """Parsed files cut to the window, and each stream's events from before it (by key)."""
     seen: dict[str, str] = {}
     parsed: list[ParsedFile] = []
+    context: dict[str, list[model.Event]] = {}
     for path in files:
         try:
             item = parse_transcript(path, seen)
         except OSError:
             continue
         for stream in item.streams:
-            _apply_window(stream, since, until)
+            before = _apply_window(stream, since, until)
+            if before and stream.events:
+                context[stream.key] = before
         item.streams = [s for s in item.streams if s.events]
         parsed.append(item)
-    return parsed
+    return parsed, context
 
 
 #: A commit up to this long after a session's last event still belongs to that session.
@@ -347,7 +360,7 @@ class _Analysis:
             if not (options.allow_no_transcripts and options.include_git):
                 raise
             missing, files = exc, []
-        parsed = _load(files, self.since, self.until)
+        parsed, context = _load(files, self.since, self.until)
         for item in parsed:
             # Sessions that never worked in this repo are not this repo's sessions.
             relevant = [s for s in item.streams if self._in_repo(s)]
@@ -380,6 +393,19 @@ class _Analysis:
         exposure: dict[tuple[str, str], set[str]] = {}
         for stream in streams:
             detection = signals.detect_stream(stream, ctx)
+            before = context.get(stream.key)
+            if before:
+                # Judge the window with what happened before it in view (the edit a
+                # correction refers to, the red run an edit answers), but count and
+                # expose only what lies inside it.
+                first = stream.events[0].line
+                whole = dataclasses.replace(stream, events=[*before, *stream.events])
+                full = signals.detect_stream(whole, ctx)
+                detection = dataclasses.replace(
+                    detection,
+                    findings=[f for f in full.findings if f.line >= first],
+                    skipped_events=full.skipped_events,
+                )
             findings.extend(detection.findings)
             source_key = str(stream.source)
             self.skipped_events[source_key] = (
@@ -456,7 +482,9 @@ class _Analysis:
     def _in_repo(self, stream: Stream) -> bool:
         resolver = self.resolver
         return any(
-            resolver.contains(event.cwd) or resolver.resolve(event.path, event.cwd) is not None
+            resolver.contains(event.cwd)
+            or resolver.resolve(event.path, event.cwd) is not None
+            or (event.command is not None and signals.runs_inside(resolver, event))
             for event in stream.events
         )
 

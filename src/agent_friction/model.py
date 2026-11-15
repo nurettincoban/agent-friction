@@ -89,6 +89,9 @@ class Event:
     #: Text an edit or write put into the file (capped). Held in memory only, to see whether
     #: an earlier empty search was a check before creating something; never emitted.
     new_text: str = ""
+    #: Text an edit replaced (capped), kept the same way: a later search for it that finds
+    #: nothing confirms the removal and is not a miss.
+    old_text: str = ""
     # tool_result
     ok: bool = True
     error: str = ""

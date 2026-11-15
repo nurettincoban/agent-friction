@@ -997,3 +997,114 @@ def test_the_same_generic_log_twice_is_one_set_of_events(tmp_path: Path) -> None
         AnalyzeOptions(repo=repo, transcripts=[tmp_path / "t"], include_git=False, now=NOW)
     )
     assert out["totals"]["friction_events"] == 1 and out["totals"]["sessions"] == 1
+
+
+# ---- round 8 --------------------------------------------------------------------------------
+
+
+def _make_build_score(tmp_path: Path, cwd: str, command: str) -> list[tuple[str, float]]:
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    cwd = cwd.replace("PARENT", str(tmp_path)).replace("REPO", str(repo))
+    command = command.replace("REPO", str(repo))
+    s = Session("b1", cwd=cwd).user("build it")
+    s.bash(command, "make: *** No rule to make target 'build'.  Stop.", exit_code=2)
+    out = _scan(tmp_path, [s])
+    return [(c["path"], c["score"]) for c in out["commands"]]
+
+
+def test_a_session_started_in_a_parent_directory_is_seen_through_its_cd(tmp_path: Path) -> None:
+    inside = _make_build_score(tmp_path, "REPO", "make build")
+    assert inside and inside[0][0] == "make build"
+    assert _make_build_score(tmp_path, "PARENT", "cd repo && make build") == inside
+    assert _make_build_score(tmp_path, "PARENT", "cd REPO && make build") == inside
+
+
+def test_a_session_that_never_enters_the_repo_is_still_left_out(tmp_path: Path) -> None:
+    (tmp_path / "repo").mkdir()
+    s = Session("b1", cwd=str(tmp_path)).user("build it")
+    s.bash("cd elsewhere && make build", "make: *** No rule to make target", exit_code=2)
+    s.save(tmp_path / "t", "s0")
+    out = analyze(
+        AnalyzeOptions(
+            repo=tmp_path / "repo",
+            transcripts=[tmp_path / "t"],
+            include_git=False,
+            now=NOW,
+        )
+    )
+    assert out["totals"]["sessions"] == 0 and out["commands"] == []
+
+
+def _stuck_sessions(repo: Path, count: int) -> list[Session]:
+    sessions = []
+    for n in range(count):
+        s = Session(f"stuck{n}", cwd=str(repo)).user("make the test pass")
+        for i in range(8):
+            s.edit(f"{repo}/src/app.py", f"a{i}", f"b{i}")
+            s.bash("pytest tests/test_app.py", "1 failed", exit_code=1, took=60)
+        sessions.append(s)
+    return sessions
+
+
+def test_work_that_never_converges_is_a_hotspot_with_time_lost(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "test_app.py").write_text("def test_app(): ...\n")
+    out = _scan(tmp_path, _stuck_sessions(repo, 6))
+    assert out["totals"]["est_minutes_lost"] > 40
+    command = entry(out["commands"], "pytest")
+    source = entry(out["hotspots"], "src/app.py")
+    for row in (command, source):
+        assert row["signals"]["no-convergence"] == 6 and row["score"] > 45
+        assert row["score_detail"]["capped"] is False and row["est_minutes_lost"] > 40
+    (rec,) = command["recommendations"]
+    assert rec["id"] == "explain-the-failing-check"
+    assert rec["title"] == "Agents cannot get `pytest` to pass"
+    advice = {r["id"]: r for r in source["recommendations"]}
+    assert "`pytest`" in advice["explain-the-failing-check"]["detail"]
+
+
+def test_one_stuck_session_stays_capped(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out = _scan(tmp_path, _stuck_sessions(repo, 1))
+    command = entry(out["commands"], "pytest")
+    assert command["signals"]["no-convergence"] == 1 and command["score"] <= 19.0
+    assert command["score_detail"]["capped"] is True and command["recommendations"] == []
+
+
+def test_routine_probes_do_not_become_a_pattern(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sessions = []
+    for i in range(5):
+        s = Session(f"r{i}", cwd=str(repo)).user(f"task {i}")
+        s.read(f"{repo}/CLAUDE.md", missing=True).read(f"{repo}/.env", missing=True)
+        s.edit(f"{repo}/src/app.py", "old_name()", "new_name()").grep("old_name", str(repo))
+        s.reject("ExitPlanMode", {"plan": "ship it"}, "split it in two steps")
+        sessions.append(s)
+    out = _scan(tmp_path, sessions)
+    assert out["totals"]["friction_events"] == 10 and out["directories"] == []
+    assert {s["id"]: s["count"] for s in out["signals"]}["tool-rejected"] == 0
+    for row in out["hotspots"]:
+        assert row["signals"] == {"path-miss": 5} and row["score"] <= 19.0
+        assert row["recommendations"] == []
+
+
+def test_events_before_the_window_are_context_not_counts(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    s = Session("w", cwd=str(repo), start=datetime(2026, 11, 2, 23, 50, tzinfo=timezone.utc))
+    s.user("add the client").edit(f"{repo}/src/app.py", error=builders.EDIT_NOT_FOUND)
+    s.edit(f"{repo}/src/app.py").say("Done.")
+    s.now = datetime(2026, 11, 3, 0, 5, tzinfo=timezone.utc)
+    s.user("No, you broke the import in src/app.py").edit(f"{repo}/src/app.py", "x", "y")
+    whole = _scan(tmp_path, [s])
+    assert whole["totals"]["friction_events"] == 2 and whole["totals"]["corrections"] == 1
+    late = _scan(tmp_path, [s], since=datetime(2026, 11, 3, tzinfo=timezone.utc))
+    # the correction is in the window and still knows which file it is about ...
+    assert late["totals"]["corrections"] == 1 and late["totals"]["friction_events"] == 1
+    assert [h["path"] for h in late["hotspots"]] == ["src/app.py"]
+    assert late["hotspots"][0]["signals"] == {"user-correction": 1}  # ... the miss is not counted
+    assert late["totals"]["tool_calls"] == 1

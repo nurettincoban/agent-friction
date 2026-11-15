@@ -12,6 +12,7 @@ All thresholds are named constants in `src/agent_friction/signals.py`.
 | --- | --- | --- |
 | `user-correction` | 4.0 | transcript |
 | `retry-loop` | 3.0 | transcript |
+| `no-convergence` | 3.0 | transcript |
 | `tool-rejected` | 2.5 | transcript |
 | `user-interrupt` | 2.5 | transcript |
 | `edit-miss` | 2.0 | transcript |
@@ -36,7 +37,9 @@ repeats costs more than one that might be routine.
 exited non-zero, as opposed to a setup/invocation error) also show up in
 perfectly productive sessions. A file, command or directory whose *only*
 evidence is of these kinds has its score capped (see methodology), gets no
-recommendation and never "high" confidence.
+recommendation and never "high" confidence. Two more kinds are weak in this
+sense: a `path-miss` on a routinely probed optional file (`README.md`, `.env`,
+`AGENTS.md`, ...), and a `no-convergence` event seen in only one session.
 The one exception: a search for the *same* pattern that misses in two or more
 sessions is treated as real evidence.
 
@@ -85,11 +88,14 @@ corroborated: ...").
     "you didn't run | read | follow | use | fix | check ..." (not "you didn't
     do anything wrong"), "you shouldn't have", "you weren't supposed", "you
     keep <doing>";
-  - "you're editing the wrong file | branch | directory | function ...";
+  - "you're editing the wrong file | branch | directory | function ...", "you
+    changed the wrong thing | part | section | field ...";
   - "I told you", "I already said", "I asked you to", "I said use / don't /
     not / only / to use", "I never asked for / you to", "I didn't ask for /
-    you to" (not "I didn't ask before, but ..."), "I didn't want that";
-  - "not what I asked | wanted | meant | said";
+    you to" (not "I didn't ask before, but ..."), "I didn't want that". Not
+    "I told you about X", and not when the sentence ends by asking for
+    confirmation ("I told you to use pnpm, right?");
+  - "not | isn't | wasn't what I asked | wanted | meant | said";
   - "why did you delete | remove | change | add | use | skip | ignore ...";
   - an undo of the agent's own change: "revert" / "undo" / "roll back" at the
     start of the message or of a clause, followed by "that | this | it | your
@@ -104,6 +110,11 @@ corroborated: ...").
     problem", "no need", "no, that's fine", "nope, all good", "nope, nothing
     else", "no, not yet", and not a choice between options: "No, go with
     option B", "No, the second one");
+  - "no no", "no, no, not that file";
+  - "same error | problem | failure | result", "I'm getting the exact same
+    error" (not "same error handling as in util.py, please");
+  - "go back", "go back to the previous version | how it was | what you had"
+    (not "go back to the dashboard page and add a button");
   - "Not quite", "not exactly", "not like that" (not "Not quite sure how auth
     works"; "almost, but ..." and "close, but ..." are not cues: they usually
     introduce one more request);
@@ -273,6 +284,39 @@ passes only after an install or a change, stays.
 looks exactly like waiting and is dropped (a single red run followed by green
 stays on the record as an ordinary failure).
 
+## `no-convergence` — No convergence
+
+**What:** within one turn the agent ran the same command 4 or more times,
+each of those runs came after a file change since the previous one (an
+edit-and-run round), every run failed as an *ordinary* failure, and the turn
+(or the session) ended with the command still red. One event per command and
+turn. A green run of the command, or of another command doing the same job
+(`make test` after `pytest ...`), at any point in the turn clears the count:
+red, fix, green is never recorded, however many rounds it took. Re-running
+without changing anything is a [retry loop](#retry-loop--retry-loop) instead,
+and rounds in different turns are not added up, because a human steered in
+between. Inline code (`python -c`) and setup/invocation errors do not count
+as rounds.
+
+**Why:** eight rounds of edit, run, red are not eight red tests during
+development. The agent could not work out what the check wants, and gave up
+or handed back.
+
+**Attribution:** the normalized command, in full, and the files edited between
+the red runs (the 3 most edited, the event split evenly between them).
+
+**Time:** from the first red run to the end of the last one, at most 15
+minutes. Waiting for a human is never inside a turn, so it is not included.
+
+**One session is not a pattern.** A hard task can take many rounds. A target
+whose `no-convergence` events all come from one session is treated like weak
+evidence (capped, no recommendation); from two sessions on it counts in full.
+It is derived from `command-failure`, so next to it it is not a second kind
+of evidence for confidence.
+
+**False positives:** a genuinely hard change that was abandoned for unrelated
+reasons; a long-running refactoring that keeps a suite red on purpose.
+
 ## `tool-rejected` — Tool call declined
 
 **What:** the human declined a proposed tool call (Claude Code records this as
@@ -280,6 +324,11 @@ a tool result starting "The user doesn't want to proceed with this tool use").
 The reason, if the human typed one, is kept as the excerpt.
 
 **Why:** the agent tried to do something a human considered wrong or unsafe.
+
+**Not counted:** declining a plan or a question the agent put to the human
+(`ExitPlanMode`, `AskUserQuestion`, `ask_followup_question` and their like in
+other harnesses; `QUESTION_TOOL_RE`). "Not yet, look at B first" is an answer,
+not a veto of an action. These are in no total.
 
 **Attribution:** the file the tool targeted, or the normalized shell command.
 For a chain of commands it is the step the human most plausibly objected to,
@@ -503,6 +552,12 @@ successfully once before being removed (read as debugging).
   `mv`, ...) whose path arguments all lie outside the repo. A `cd` that
   cannot be followed (`cd -`, `cd "$DIR"`) changes nothing. The same applies
   to declined and denied commands.
+- *... and commands that go into the repository are:* the same rule in the
+  other direction. A session started in a parent directory (`~`, a monorepo
+  root) whose command is `cd repo && make build` or `cd /abs/repo && make
+  build` runs `make build` in the repo, and counts exactly as if the session
+  had been started there. Subagents typically prefix every command this way.
+  A command in the parent directory without such a `cd` still does not count.
 
 **Why:** agents guess how to build, test and run things; a wrong guess costs a
 round trip in every session until the right command is written down.
@@ -613,6 +668,17 @@ whether `CHANGELOG.md` exists before adding it) is not recorded.
 **Why:** the agent expected something to live there. Repeated identical wrong
 guesses mean the layout suggests a file that is not there.
 
+**Routine probes are weak.** Agents look for a set of well-known optional
+files as a matter of course: `CLAUDE.md`, `AGENTS.md`, `.cursorrules`,
+`.env*`, `README*`, `CONTRIBUTING*`, `Makefile`, `pyproject.toml`,
+`setup.cfg`, `package.json`, `tsconfig*.json`, `.editorconfig`, and the other
+usual instruction and tool-configuration names (`PROBE_FILE_RE`). A miss on
+one of them is marked as a probe, and a path with nothing but probes is capped
+and gets no recommendation, in however many sessions it happens: the absence
+of a `.env` is not a layout problem. It is ordinary evidence again when the
+file name appeared earlier in the session in a human prompt or in a tool's
+output (somebody said it is there).
+
 **Attribution:** the non-existent path itself.
 
 ## `search-miss` — Search miss
@@ -633,7 +699,11 @@ counted: a check that a name is free before creating it. A miss is
 dropped when, later in the same session, the agent creates or edits a file
 inside the searched scope whose name matches the glob (`src/new_feature*.py`
 then writing `src/new_feature.py`), or writes text that contains the grep
-pattern (`NewFeature` then writing `class NewFeature`).
+pattern (`NewFeature` then writing `class NewFeature`). Nor is a search that
+confirms a removal: if an earlier successful edit in the session replaced
+text that matches the pattern with text that does not (renaming
+`legacy_charge` to `charge`, then `grep legacy_charge`), finding nothing is
+the expected result.
 
 **False positives:** searching to *confirm absence* for other reasons ("no
 remaining callers") is normal. This is therefore a weak signal: a place with

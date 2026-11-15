@@ -47,6 +47,7 @@ path = "src/agent_friction/__init__.py"
 include = [
   "src", "tests", "docs", "examples", "scripts",
   "README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md",
+  "AGENTS.md", "Makefile",
 ]
 exclude = ["docs/assets"]
 

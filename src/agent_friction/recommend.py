@@ -67,6 +67,7 @@ RULE_IDS: tuple[str, ...] = (
     "make-the-failure-actionable",
     "run-it-in-the-background",
     "give-it-more-time",
+    "explain-the-failing-check",
 )
 
 
@@ -231,6 +232,31 @@ class _Rules:
             [signals.USER_INTERRUPT],
         )
 
+    def no_convergence(self, key: str | None) -> None:
+        """``key`` is the command for a command hotspot, ``None`` for a file."""
+        found = self.get(signals.NO_CONVERGENCE)
+        if len(found) < MIN_EVENTS:
+            return
+        rounds = max(int(f.detail.get("count", "0")) for f in found)
+        if key is not None:
+            title = f"Agents cannot get `{key}` to pass"
+            opening = f"Agents edited and re-ran `{key}`"
+        else:
+            commands = _top([_command_key(f) for f in found], 2)
+            names = " / ".join(f"`{name}`" for name, _ in commands) or "the check"
+            title = "Edits here do not get the check to pass"
+            opening = f"Agents edited this file and re-ran {names}"
+        self.add(
+            "explain-the-failing-check",
+            title,
+            f"{opening} up to {rounds} times in a row without it ever going green "
+            f"({_in_sessions(found)}). The failure output did not lead them to a fix. "
+            "Document in AGENTS.md how to run and debug this check (one test at a time, "
+            "where its fixtures and expected values come from) and what behaviour it "
+            "expects, or make its failure message say so.",
+            [signals.NO_CONVERGENCE],
+        )
+
     def search_misses(self, where: str) -> None:
         found = self.get(signals.SEARCH_MISS)
         if len(found) < MIN_EVENTS:
@@ -379,6 +405,7 @@ class _Rules:
             )
 
         self.search_misses("this file")
+        self.no_convergence(None)
 
         loops = self.get(signals.READ_LOOP)
         if len(loops) >= MIN_EVENTS:
@@ -506,6 +533,7 @@ class _Rules:
                 "make the command fail fast with a message that says what to do.",
                 [signals.RETRY_LOOP],
             )
+        self.no_convergence(key)
         self.rejections()
         self.denials(f"`{key}`")
         self.interrupts()

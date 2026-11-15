@@ -157,7 +157,7 @@ def test_commit_ids_and_ip_hosts_are_kept() -> None:
     assert len(sha) == redact.GIT_SHA_LENGTH
     assert redact.redact(f"git revert {sha}") == f"git revert {sha}"
     assert sha + "ab" not in redact.redact(f"token {sha}ab")  # longer hex is still masked
-    assert redact.redact("ssh root@10.0.0.1 uptime") == "ssh root@10.0.0.1 uptime"
+    assert redact.redact("ssh root@8.8.4.4 uptime") == "ssh root@8.8.4.4 uptime"
     assert "jane@example.com" not in redact.redact("mail jane@example.com")
 
 
@@ -167,3 +167,19 @@ def test_control_and_bidi_characters_never_survive() -> None:
     assert redact.excerpt(raw, 240) == "abcd\te\nfg"
     assert redact.one_line(raw, 240) == "abcd e fg"
     assert redact.strip_controls("plain text") == "plain text"
+
+
+def test_private_addresses_and_internal_hosts_are_masked() -> None:
+    text = redact.redact(
+        'connection to "db.internal" (10.2.3.4) failed; tried 192.168.1.20, 172.16.0.9, '
+        "http://nas.local:8080/x and build01.corp"
+    )
+    for secret in ("db.internal", "10.2.3.4", "192.168.1.20", "172.16.0.9", "nas.local", "build01"):
+        assert secret not in text
+    assert text.count("[REDACTED:private-ip]") == 3
+    assert text.count("[REDACTED:internal-host]") == 3
+    kept = (
+        "8.8.8.8 172.32.0.1 110.2.3.4 version 10.2.3 .claude/settings.local.json "
+        "threading.local() self.internal example.com"
+    )
+    assert redact.redact(kept) == kept

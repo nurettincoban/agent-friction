@@ -48,8 +48,8 @@ directory) if set, otherwise `~/.claude` and `~/.config/claude`.
   `<id>`: subagents do not inflate session counts.
 - Lines with a `uuid` already seen in another file are skipped (resumed
   sessions replay earlier lines).
-- A session with no activity in the repo (no working directory inside it and
-  no path that resolves into it) is left out and reported as
+- A session with no activity in the repo (no working directory inside it, no
+  path that resolves into it, and no command that `cd`s into it) is left out and reported as
   `sessions_outside_repo`.
 - For `human-rework`, an agent commit made during an analysed transcript
   session (first event to 10 minutes after the last) belongs to that session.
@@ -113,7 +113,14 @@ together, and so that the key can be shown even when excerpts are off:
      without excerpts);
    - **every other program is its executable name alone**: `./run s3cret` is
      `run`, `mytool acme-codename --x` is `mytool`, `ssh host cmd` is `ssh`,
-     `docker run <image>` is `docker run`.
+     `docker run <image>` is `docker run`;
+   - **a command run inside a container is keyed as the command itself:**
+     `docker compose exec web pytest -q`, `docker compose run --rm api
+     pytest`, `docker exec -it shop_web_1 pytest` and `kubectl exec deploy/web
+     -- pytest` are all `pytest`. Where a check runs does not change what it
+     is, and it is the same job as a bare `pytest` for red-fix-green and
+     replacement purposes. Without an inner command (`docker compose exec
+     web`) the key stays `docker compose exec`.
 
 5. **Sanitize.** A key is cut at the first word that is a number or that the
    redactor would change (`make 2` is `make`; a key that would start with
@@ -198,7 +205,7 @@ score       = 100 x severity x recurrence x consistency
 - **weight** is 1 except that an ordinary `command-failure` uses 0.3.
 - **Weak evidence is capped.** If every event on a target is of a weak kind
   (`edit-thrash`, `read-loop`, `search-miss`, `probable-correction`, or an
-  *ordinary* `command-failure`; see the [catalog](signals.md)), the score is capped at **19**, below the band where
+  *ordinary* `command-failure`; see the [catalog](signals.md); also a `path-miss` on a routinely probed optional file, and `no-convergence` events that all come from one session), the score is capped at **19**, below the band where
   a single real incident lands, `score_detail.capped` is true, and no
   recommendation is made. Such a target can be a lead; it cannot be an alarm
   or fail a build on its own. This is what keeps `git stash pop` with nothing
@@ -263,6 +270,7 @@ Each event may claim a wall-clock interval from transcript timestamps:
 | `path-miss`, `search-miss`, `file-too-large`, `tool-rejected`, `permission-denied` | one round trip |
 | `edit-revert` | from the original edit to the revert if both are in the same turn; otherwise one round trip |
 | `user-correction`, `user-interrupt` | the agent's working time in the corrected turn (first tool call to last agent activity / the interrupt) |
+| `no-convergence` | from the first red run of the stretch to the end of the last, at most 15 minutes |
 | `retry-loop`, `edit-thrash`, `read-loop`, `human-rework` | none (no defensible estimate) |
 
 **One round trip** runs from the call to the agent's *next activity* (its next
@@ -277,7 +285,7 @@ the first file cost one round trip, not the minutes in between: that time was
 productive. Only an unbroken run of failures (miss, miss, miss, then the edit
 lands) is counted as one stretch.
 
-Every interval is capped at **5 minutes**. `est_minutes_lost` for a hotspot,
+Every interval is capped at **5 minutes** (`no-convergence`: 15). `est_minutes_lost` for a hotspot,
 a tree node or the whole report is the length of the **union** of its
 intervals (merged per transcript stream), so overlapping events are never
 counted twice.
@@ -299,8 +307,8 @@ counting. Events without timestamps claim nothing.
 | `low` | a single session |
 
 A signal that is computed from other events is not a second kind of evidence
-next to them: `retry-loop` is derived from `command-failure`, so a command
-with both has one signal type (`DERIVED_SIGNALS`). A command that fails with
+next to them: `retry-loop` and `no-convergence` are derived from
+`command-failure`, so a command with them has one signal type (`DERIVED_SIGNALS`). A command that fails with
 the same setup error in every session is therefore "medium" until something
 independent (a correction, a declined call) is also seen.
 
@@ -347,6 +355,7 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `make-the-failure-actionable` | 1+ `retry-loop` on a command |
 | `run-it-in-the-background` | 2+ harness timeouts of a command that is a server or watcher (`npm run dev`, `uvicorn`, ...); replaces `document-the-command` for those |
 | `give-it-more-time` | 2+ harness timeouts of any other command (`npm run build` cut off after 2 minutes): say how long it takes, raise the timeout or run it in the background, or name a narrower command; replaces `document-the-command` for those |
+| `explain-the-failing-check` | 2+ `no-convergence` events from 2+ sessions, on the command ("Agents cannot get `pytest` to pass") or on a file edited during the rounds: document how to run and debug the check and what it expects |
 
 ## Privacy and redaction
 
@@ -380,7 +389,10 @@ Transcripts contain secrets. The engine therefore:
   `mysql -pSECRET` / `sshpass -p SECRET`; SendGrid keys (`SG.x.y`); prose
   such as "the password is x"; `docker login -p x`; assignments to names
   ending in `_KEY`, `_ID`, `_SALT` ... (`SECRET_KEY = '...'`); e-mail
-  addresses (not `user@10.0.0.1`: an IP host is not a mailbox);
+  addresses (not `user@8.8.4.4`: an IP host is not a mailbox); private
+  network addresses (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) and host
+  names ending in `.internal`, `.local`, `.corp` or `.lan` (`db.internal`,
+  `build01.corp`; not `settings.local.json` or `threading.local()`);
   hex strings of 32+ characters, **except** strings of exactly 40 lower-case
   hex digits, which are git commit ids and are kept; bare 40-character
   base64 strings containing `/` or `+` (the shape of an AWS secret access

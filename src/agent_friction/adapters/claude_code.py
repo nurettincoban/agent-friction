@@ -110,6 +110,7 @@ def _tool_call(block: dict[str, Any], line: int, base: dict[str, Any]) -> Event 
         if isinstance(old, str) and isinstance(new, str):
             event.edits, event.insertions = common.edit_pairs([(old, new)])
             event.new_text = common.new_text(new)
+            event.old_text = common.new_text(old)
     elif name == "MultiEdit":
         edits = inp.get("edits")
         if isinstance(edits, list):
@@ -124,6 +125,9 @@ def _tool_call(block: dict[str, Any], line: int, base: dict[str, Any]) -> Event 
             )
             event.new_text = common.new_text(
                 *(e.get("new_string") for e in edits if isinstance(e, dict))
+            )
+            event.old_text = common.new_text(
+                *(e.get("old_string") for e in edits if isinstance(e, dict))
             )
     elif name == "Write":
         content = inp.get("content")

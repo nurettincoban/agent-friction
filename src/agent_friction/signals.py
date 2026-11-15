@@ -14,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from agent_friction import model
+from agent_friction.adapters.common import QUESTION_TOOL_RE
 from agent_friction.attribution import (
     DESTRUCTIVE_PROGRAMS,
     HOUSEKEEPING_PROGRAMS,
@@ -61,6 +62,7 @@ USER_CORRECTION = "user-correction"
 HUMAN_REWORK = "human-rework"
 PROBABLE_CORRECTION = "probable-correction"
 FILE_TOO_LARGE = "file-too-large"
+NO_CONVERGENCE = "no-convergence"
 
 # ---- thresholds (see docs/signals.md) -------------------------------------------------
 #: Successful edits to one file within one user turn that count as thrashing.
@@ -95,6 +97,41 @@ CORRECTION_STALE_SECONDS = 300
 #: Identical failures in a row that, when the same command line then succeeds with nothing
 #: changed in between, are read as waiting (polling CI, a server coming up), not friction.
 POLL_MIN_FAILURES = 2
+#: Characters of a prompt or tool output scanned for names of optional files.
+MENTION_SCAN_CHARS = 20_000
+#: Edits whose removed text is remembered, to recognise a search that confirms the removal.
+REMOVED_TEXTS_KEPT = 200
+#: Edit-then-red-run cycles of one command within one turn, with no green run, that count
+#: as work that does not converge.
+NO_CONVERGENCE_MIN_CYCLES = 4
+#: Cap for the time claimed by one such stretch (first red run to last red run), seconds.
+NO_CONVERGENCE_CAP_SECONDS = 900.0
+#: Files edited during the cycles that share the event, at most (the most edited first).
+NO_CONVERGENCE_MAX_FILES = 3
+
+#: Files that agents look for as a matter of routine, whether or not a project has them:
+#: instructions, environment files, READMEs and the usual tool configuration.
+PROBE_FILE_RE = re.compile(
+    r"(?:^|/)(?:"
+    r"CLAUDE(?:\.local)?\.md|AGENTS\.md|GEMINI\.md|\.cursorrules|\.windsurfrules|\.clinerules"
+    r"|copilot-instructions\.md|\.env(?:\.[\w.-]+)?|\.envrc"
+    r"|(?:README|CONTRIBUTING|CHANGELOG|CHANGES|HISTORY|LICEN[CS]E|SECURITY|TODO|NOTES)"
+    r"(?:\.\w+)?"
+    r"|Makefile|GNUmakefile|justfile|Taskfile\.ya?ml|Dockerfile|\.dockerignore"
+    r"|(?:docker-)?compose(?:\.[\w-]+)?\.ya?ml"
+    r"|pyproject\.toml|setup\.(?:py|cfg)|requirements[\w.-]*\.txt|Pipfile|tox\.ini"
+    r"|pytest\.ini|conftest\.py|mypy\.ini|\.flake8|\.pylintrc|\.?ruff\.toml|\.coveragerc"
+    r"|\.editorconfig|\.gitignore|\.gitattributes|\.pre-commit-config\.ya?ml"
+    r"|package\.json|[tj]sconfig(?:\.[\w.-]+)?\.json|\.npmrc|\.nvmrc|\.babelrc"
+    r"|\.eslintrc(?:\.\w+)?|\.prettierrc(?:\.\w+)?"
+    r"|(?:eslint|prettier|vite|vitest|jest|webpack|rollup|babel|next|tailwind|playwright)"
+    r"\.config\.\w+"
+    r"|Cargo\.toml|go\.mod|Gemfile|Rakefile|pom\.xml|build\.gradle(?:\.kts)?"
+    r"|CMakeLists\.txt|\.python-version|\.tool-versions|\.ruby-version"
+    r")$",
+    re.I,
+)
+_FILE_NAME_RE = re.compile(r"[\w.-]*[A-Za-z][\w.-]*")
 
 CATALOG: tuple[SignalDef, ...] = (
     SignalDef(
@@ -117,6 +154,18 @@ CATALOG: tuple[SignalDef, ...] = (
         "one session with identical arguments, no success and no file change in between.",
         "The failure output did not tell the agent what to do, so it kept guessing.",
         "The normalized command.",
+        3.0,
+    ),
+    SignalDef(
+        NO_CONVERGENCE,
+        "No convergence",
+        f"Within one turn the agent edited files and re-ran the same command "
+        f"{NO_CONVERGENCE_MIN_CYCLES} or more times, the command failed every time, and the "
+        "turn ended with it still failing.",
+        "Edit, run, red, again and again without ever going green: the agent could not "
+        "work out what the check wants.",
+        "The normalized command, and the files edited between the runs (the "
+        f"{NO_CONVERGENCE_MAX_FILES} most edited, split evenly).",
         3.0,
     ),
     SignalDef(
@@ -494,11 +543,15 @@ _SOFTENER_RE = re.compile(
     # the human takes the blame, or is only asking
     r"|(?:because|after|since|when|once) (?:i|my|we|our)\b|my (?:bad|fault|mistake)"
     r"|just (?:curious|wondering|asking|checking|confirming|making sure)"
-    r"|out of curiosity|no complaints?)\b",
+    r"|out of curiosity|no complaints?|not complaining|curious|genuine(?:ly)? (?:question|asking)"
+    # an acknowledgement: "you removed the flag as asked, now ..."
+    r"|as (?:asked|requested|expected|planned|discussed|agreed|i (?:asked|wanted|said)))\b",
     re.I,
 )
 #: The human is moving on to something else: a description of a bug ("it doesn't work on
 #: Windows yet; next task: ...") is then a task, not a verdict on the agent's work.
+#: A phrase whose sentence ends by asking for confirmation is a question.
+_CONFIRM_TAIL_RE = re.compile(r"^[^.!?\n]*,? (?:right|correct|yes|no|or not)\?", re.I)
 _NEW_TASK_RE = re.compile(
     r"\b(?:next|new|another|separate|different|unrelated) (?:task|topic|thing|issue|ticket|bug)\b"
     r"|\bnext(?: up)?:|\bmov(?:e|ing) on\b|\bnext,? (?:please )?(?:add|fix|implement|do|let's)\b",
@@ -521,7 +574,8 @@ _YOU_DID = (
 )
 _THING = (
     r"file|branch|directory|dir|folder|function|module|place|repo|path|approach|way|one|test"
-    r"|package|version|line|class|method|command"
+    r"|package|version|line|class|method|command|thing|part|section|variable|field|column"
+    r"|table|endpoint|component|config|setting|key|value|import|test file|page"
 )
 _UNDO = r"(?:revert|undo|roll ?back)"
 #: What an undo must refer to: the agent's own change, by pronoun or as "the last edit".
@@ -549,7 +603,7 @@ _RESULT_NOUN = (
 #: Labels of the openers that are an *answer*, not a verdict, when the agent had just asked
 #: a question ("Shall I refactor util.py?" -> "No, leave it." / "Stop. Just commit.").
 _ANSWER_LABEL = "no, …"
-_ANSWER_LABELS = frozenset({_ANSWER_LABEL, "not quite", "wrong. / stop."})
+_ANSWER_LABELS = frozenset({_ANSWER_LABEL, "no no", "not quite", "wrong. / stop."})
 
 #: (label, pattern, addressed). *Addressed* phrases speak to the agent in the second person
 #: or about what the human had asked for, and count wherever they stand in the head of the
@@ -571,6 +625,25 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
             # a choice between options the agent offered, not a verdict on its work
             r"|(?:go|let's go|stick|continue|proceed) with|option|the (?:first|second|third"
             r"|former|latter|other) (?:one|option))\b)\S)",
+            False,
+        ),
+        ("no no", r"^(?:no|nope)[\s,.!]+(?:no|nope)\b", False),
+        (
+            # "same error", "I'm getting the exact same failure"; not "same error handling
+            # as in util.py, please"
+            "same error",
+            _OPEN
+            + r"(?:(?:i|we)(?:'m|'re| am| are)? (?:still )?(?:get(?:ting)?|see(?:ing)?|got) )?"
+            r"(?:the |that |exact(?:ly)? )*same (?:error|errors|problem|issue|failure|exception"
+            r"|bug|crash|result|thing)\b(?! (?:handling|message|format|code|class|type|as in)\b)",
+            False,
+        ),
+        (
+            # "go back", "go back to how it was"; not "go back to the dashboard page and ..."
+            "go back",
+            r"^(?:(?:please|pls|just|ok|okay|now)[, ]+)*go back(?:[.!]*$|[.!,;—-]+\s"
+            r"|\s+to (?:the (?:previous|old|older|original|earlier|first|last|way)\b|how\b"
+            r"|what (?:it|you|we|i)\b|before\b|(?:my|your) (?:previous|first|original|earlier)\b))",
             False,
         ),
         (
@@ -638,7 +711,7 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
         (
             # Said *to the agent*: "I told you", "I asked you to", "I said use X".
             "I told you",
-            r"\bi (?:told you|already (?:said|told|asked)|specifically (?:said|asked)"
+            r"\bi (?:told you(?! about\b)|already (?:said|told|asked)|specifically (?:said|asked)"
             r"|(?:didn't|did not|never) ask(?:ed)? (?:for|you to)\b"
             r"|(?:didn't|did not|never) (?:want|mean) (?:that|this|it|those|these|any of)\b"
             r"|asked you (?:not )?to\b"
@@ -646,7 +719,11 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
             r"|do not|no\b|not\b|only\b))",
             True,
         ),
-        ("not what I asked", r"\bnot what i (?:asked|wanted|meant|said)\b", True),
+        (
+            "not what I asked",
+            r"\b(?:not|isn't|wasn't|ain't) what i (?:asked|wanted|meant|said)\b",
+            True,
+        ),
         (
             "why did you",
             r"\bwhy did you (?:delete|remove|change|edit|touch|rewrite|revert|add|create|skip"
@@ -709,6 +786,8 @@ def correction_confidence(
             continue
         if label in _ANSWER_LABELS and after_question:
             continue
+        if label == "I told you" and _CONFIRM_TAIL_RE.search(head[match.start() :]):
+            continue  # "I told you about the flag, right?" asks; it does not reproach
         strong.append(label)
         addressed_any = addressed_any or addressed
     if strong:
@@ -855,11 +934,34 @@ class _State:
     # successful tool calls so far, and that count when each finding was recorded
     ok_actions: int = 0
     turns: int = 0
+    # successful file changes so far: (number, path or "" for a shell rewrite)
+    changes: int = 0
+    change_log: list[tuple[int, str]] = field(default_factory=list)
+    turn_changes: int = 0  # ``changes`` when the turn began
+    # this turn: red runs of a command that each followed a change, never a green one
+    cycles: dict[str, _Cycle] = field(default_factory=dict)
+    # optional files (README, .env, ...) that a prompt or tool output named
+    mentioned: set[str] = field(default_factory=set)
+    # text that successful edits took out of files: (old, new)
+    removed: list[tuple[str, str]] = field(default_factory=list)
     edit_turns: dict[tuple[str, str, str], int] = field(default_factory=dict)
     write_turns: dict[tuple[str, str], int] = field(default_factory=dict)
     emitted_at: dict[int, int] = field(default_factory=dict)
     turn_shell_ok: bool | None = None
     turn_misses: list[tuple[Finding, str]] = field(default_factory=list)
+
+
+@dataclass
+class _Cycle:
+    """Edit -> red run -> edit -> red run ... of one command within a turn."""
+
+    seen: int  # ``_State.changes`` at its last run
+    count: int = 0
+    first: float | None = None
+    last: float | None = None
+    result: Event | None = None
+    command: str = ""
+    files: dict[str, int] = field(default_factory=dict)
 
 
 #: What makes a run of edits to one file "thrash" rather than a productive sitting.
@@ -955,6 +1057,12 @@ class _Detector:
 
     # ---- pairing ---------------------------------------------------------------------
 
+    def _where(self, step: Step | None, cwd: str | None) -> str | None:
+        """Directory ``step`` runs in: ``cwd`` after its ``cd``s, as far as they can be followed."""
+        if step is None or not step.moves:
+            return cwd
+        return self.ctx.resolver.chdir(cwd, step.moves) or cwd
+
     def _elsewhere(self, step: Step | None, cwd: str | None) -> bool:
         """Does ``step`` run, or only act, outside the repository?
 
@@ -983,10 +1091,13 @@ class _Detector:
             action.file = rel or None
             if action.file:
                 self.exposed.add((model.FILE, action.file))
-        elif event.op == model.OP_SHELL and event.command and resolver.contains(event.cwd):
+        elif event.op == model.OP_SHELL and event.command:
             parsed = parse_command(event.command)
             primary = next((s for s in parsed.steps if s.key == parsed.key), None)
-            if parsed.key and not self._elsewhere(primary, event.cwd):
+            # ``cd /abs/repo && make`` from a session started in a parent directory runs
+            # in the repo: what counts is where the step runs, not where the shell began.
+            inside = resolver.contains(self._where(primary, event.cwd))
+            if inside and parsed.key and not self._elsewhere(primary, event.cwd):
                 action.cmd = parsed
                 if not parsed.inspection:
                     self.exposed.add((model.COMMAND, self.ctx.command_key(parsed.key)))
@@ -1054,12 +1165,47 @@ class _Detector:
         if state.turn_shell_ok:
             for finding in state.thrash.values():
                 finding.detail["ended_green"] = "1"
+        for key, cycle in state.cycles.items():
+            if cycle.count >= NO_CONVERGENCE_MIN_CYCLES and cycle.result is not None:
+                self._no_convergence(key, cycle)
+        state.cycles = {}
+        state.turn_changes = state.changes
         state.thrash = {}
         state.turn_trouble = False
         state.turns += 1
         state.turn_trouble_files = set()
         state.turn_shell_ok = None
         state.turn_misses = []
+
+    def _no_convergence(self, key: str, cycle: _Cycle) -> None:
+        assert cycle.result is not None
+        ranked = sorted(cycle.files.items(), key=lambda kv: (-kv[1], kv[0]))
+        files = [path for path, _ in ranked[:NO_CONVERGENCE_MAX_FILES]]
+        targets = [Target(model.COMMAND, self.ctx.command_key(key))]
+        targets += [Target(model.FILE, path, 1.0 / len(files)) for path in files]
+        interval = None
+        if cycle.first is not None and cycle.last is not None and cycle.last > cycle.first:
+            interval = (max(cycle.first, cycle.last - NO_CONVERGENCE_CAP_SECONDS), cycle.last)
+        where = f" (edits to {', '.join(files)})" if files else ""
+        self._emit(
+            NO_CONVERGENCE,
+            cycle.result,
+            f"`{self.ctx.command_key(key)}` was still failing after {cycle.count} rounds of "
+            f"edit and re-run{where}; the turn ended red",
+            targets,
+            excerpt=f"$ {cycle.command}\n{cycle.result.output}",
+            interval=interval,
+            detail={"count": str(cycle.count), "command": cycle.command},
+        )
+
+    def _mention(self, text: str) -> None:
+        """Remember optional files that a prompt or a tool's output named."""
+        if not text:
+            return
+        for match in _FILE_NAME_RE.finditer(text[:MENTION_SCAN_CHARS]):
+            word = match.group(0)
+            if PROBE_FILE_RE.search(word):
+                self.state.mentioned.add(word.casefold())
 
     def _step(self, item: _Action | Event) -> None:
         state = self.state
@@ -1069,12 +1215,15 @@ class _Detector:
             finally:
                 if item.result is not None and item.result.ok:
                     state.ok_actions += 1
+                if item.result is not None:
+                    self._mention(item.result.output)
             state.turn.append(item)
         elif item.kind == model.AGENT_MESSAGE:
             state.agent_seen = _epoch(item) or state.agent_seen
         elif item.kind == model.INTERRUPT:
             self._on_interrupt(item)
         elif item.kind == model.USER_MESSAGE:
+            self._mention(item.text)
             if not self.stream.sidechain:
                 if not item.synthetic:
                     self._settle_correction()
@@ -1171,7 +1320,10 @@ class _Detector:
         call = action.call
         now = _epoch(call)
         targets = [Target(model.FILE, path)]
-        self._on_change()
+        self._on_change(path)
+        if call.old_text:
+            state.removed.append((call.old_text, call.new_text))
+            del state.removed[:-REMOVED_TEXTS_KEPT]
         self._explain_probes(path, call)
         self._confirm_correction({path}, f"the agent then changed {path} again")
         if call.op == model.OP_WRITE:
@@ -1234,9 +1386,11 @@ class _Detector:
                 interval=_capped_back(reverted_at, now) or self._round_trip(action),
             )
 
-    def _on_change(self) -> None:
+    def _on_change(self, path: str = "") -> None:
         """Files changed (an edit, a write, or a shell command that rewrites files)."""
         state = self.state
+        state.changes += 1
+        state.change_log.append((state.changes, path))
         # A change turns the red runs so far into red -> edit -> (maybe) green, unless they
         # were a retry loop: re-running a failing command three times with nothing changed
         # is friction whatever happens afterwards.
@@ -1271,13 +1425,22 @@ class _Detector:
     def _path_miss(self, action: _Action, result: Event) -> None:
         if action.file is None:
             return
+        # Looking whether a project has a README, a .env or an AGENTS.md is routine, unless
+        # the human or some output said that the file is there.
+        name = action.file.rsplit("/", 1)[-1].casefold()
+        mentioned = self.state.mentioned
+        probe = PROBE_FILE_RE.search(action.file) is not None and not (
+            name in mentioned or action.file.casefold() in mentioned
+        )
         finding = self._emit(
             PATH_MISS,
             result,
-            f"{action.call.tool} targeted {action.file}, which does not exist",
+            f"{action.call.tool} targeted {action.file}, which does not exist"
+            + (" (a routine look for an optional file)" if probe else ""),
             [Target(model.FILE, action.file)],
             excerpt=result.output,
             interval=self._round_trip(action),
+            detail={"probe": "1"} if probe else None,
         )
         if action.call.op == model.OP_READ:
             self.state.missing_reads.setdefault(action.file, []).append(finding)
@@ -1330,6 +1493,16 @@ class _Detector:
         scope = _scope(call, self.ctx)
         if scope is None:
             return
+        pattern = call.pattern or ""
+        if (
+            pattern
+            and call.tool.lower() != "glob"
+            and any(
+                _text_matches(pattern, old) and not _text_matches(pattern, new)
+                for old, new in self.state.removed
+            )
+        ):
+            return  # the agent took this text out itself: the search confirms it is gone
         is_file = bool(scope) and self.ctx.is_file(scope)
         where = scope or "the repo root"
         finding = self._emit(
@@ -1382,6 +1555,9 @@ class _Detector:
             # red -> edit -> green is the development loop working: forget those failures,
             # also when the green run is another command doing the same job (`make test`
             # after a red `pytest tests/test_a.py`).
+            for failed_key in list(state.cycles):
+                if failed_key == key or is_replacement(failed_key, key):
+                    del state.cycles[failed_key]
             fixed: set[int] = set()
             for failed_key in list(state.red_then_edited):
                 if failed_key == key or is_replacement(failed_key, key):
@@ -1456,7 +1632,9 @@ class _Detector:
         # A setup/invocation error says nothing about the files on the command line, and
         # neither does a failure we cannot pin on one step.
         for candidate in () if invocation or not certain else path_candidates(tokens):
-            rel = self.ctx.resolver.resolve(candidate, call.cwd)
+            rel = self.ctx.resolver.resolve(candidate, self._where(step, call.cwd))
+            if not (rel and self.ctx.is_known_file(rel)):
+                rel = self.ctx.resolver.resolve(candidate, call.cwd)
             if rel and self.ctx.is_known_file(rel) and Target(model.FILE, rel) not in targets:
                 targets.append(Target(model.FILE, rel))
             if len(targets) > COMMAND_MAX_FILES:
@@ -1501,6 +1679,8 @@ class _Detector:
             state.red_then_edited.setdefault(key, []).append(finding)
         elif not invocation:
             state.red.setdefault(key, []).append(finding)
+            if not inline:
+                self._red_run(key, action, result)
         else:
             missing = missing_name(result.output)
             if missing is not None:
@@ -1520,6 +1700,26 @@ class _Detector:
                 "and failed each time"
             )
             state.retry[same].detail["count"] = str(run)
+
+    def _red_run(self, key: str, action: _Action, result: Event) -> None:
+        """Count a red run that followed a change: one more round that did not converge."""
+        state = self.state
+        cycle = state.cycles.get(key)
+        if cycle is None:
+            cycle = state.cycles[key] = _Cycle(seen=state.turn_changes)
+        if state.changes > cycle.seen:
+            cycle.count += 1
+            for number, path in reversed(state.change_log):
+                if number <= cycle.seen:
+                    break
+                if path:
+                    cycle.files[path] = cycle.files.get(path, 0) + 1
+        cycle.seen = state.changes
+        start, end = _epoch(action.call), _epoch(result) or _epoch(action.call)
+        cycle.first = cycle.first if cycle.first is not None else start
+        cycle.last = end if end is not None else cycle.last
+        cycle.result = result
+        cycle.command = action.call.command or ""
 
     def _shell_undo(self, action: _Action) -> None:
         """A successful shell command that changes or restores files a correction was about."""
@@ -1600,6 +1800,8 @@ class _Detector:
 
     def _on_rejected(self, action: _Action, result: Event) -> None:
         call = action.call
+        if QUESTION_TOOL_RE.search(call.tool):
+            return  # a plan or a question put to the human: "no" is an answer, not a veto
         targets = self._action_targets(action)
         if call.op in (model.OP_READ, model.OP_EDIT, model.OP_WRITE) and not targets:
             return  # a file outside the repo
@@ -1798,6 +2000,20 @@ def detect_with_exposure(
     """Findings plus every ``(kind, key)`` target the agent touched, friction or not."""
     found = detect_stream(stream, ctx)
     return found.findings, found.exposed
+
+
+def runs_inside(resolver: PathResolver, event: Event) -> bool:
+    """Does the shell call ``event`` run its main step inside the repository?
+
+    ``cd /abs/repo && make build`` does, wherever the session itself was started.
+    """
+    if not event.command:
+        return False
+    parsed = parse_command(event.command)
+    primary = next((s for s in parsed.steps if s.key == parsed.key), None)
+    if primary is None or not primary.moves:
+        return resolver.contains(event.cwd)
+    return resolver.contains(resolver.chdir(event.cwd, primary.moves) or event.cwd)
 
 
 def detect(stream: Stream, ctx: DetectContext) -> list[Finding]:

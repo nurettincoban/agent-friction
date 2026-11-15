@@ -97,3 +97,13 @@ def test_targets_touched_too_rarely_are_too_little_data() -> None:
     assert _statuses(before, after)["src/shop/api/client.py"] == "regressed"
     changes = {c.path: c.status for c in compare(before, after, min_exposure=3)}
     assert changes["src/shop/api/client.py"] == "too-little-data"
+
+
+def test_score_moving_against_the_verdict_is_explained() -> None:
+    before, after = sample_result(), sample_result()
+    after["hotspots"][1]["events"] = 20
+    after["hotspots"][1]["score"] = 1.0
+    text = render_compare(before, after, compare(before, after))
+    assert "not the score" in text
+    plain = render_compare(before, before, compare(before, before))
+    assert "not the score" not in plain

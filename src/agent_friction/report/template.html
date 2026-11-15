@@ -140,10 +140,13 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
   }
   function mins(m) {
     m = Number(m) || 0;
-    if (m <= 0) return "0m";
-    if (m < 1) return Math.round(m * 60) + "s";
-    if (m < 60) return Math.round(m) + "m";
-    var h = Math.floor(Math.round(m) / 60), r = Math.round(m) % 60;
+    // Same rules as fmt_minutes in report/_common.py: round half up.
+    if (m <= 0) return "0s";
+    var secs = Math.floor(m * 60 + 0.5);
+    if (secs < 60) return secs + "s";
+    var whole = Math.floor(m + 0.5);
+    if (whole < 60) return whole + "m";
+    var h = Math.floor(whole / 60), r = whole % 60;
     return h + "h " + (r < 10 ? "0" : "") + r + "m";
   }
   function heat(score) {
