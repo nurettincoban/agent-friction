@@ -617,12 +617,19 @@ def test_settings_describe_the_scan(result: dict[str, Any]) -> None:
 def test_repo_root_only_abbreviates_the_real_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    transcript = Session("a", cwd="/home/someone/x").user("go").edit("/home/someone/x/a.py")
+    home, other = tmp_path / "someone", tmp_path / "root"
+    repo = home / "x"
+    repo.mkdir(parents=True)
+    other.mkdir()
+    transcript = Session("a", cwd=str(repo)).user("go").edit(str(repo / "a.py"))
     path = transcript.save(tmp_path / "t")
-    options = AnalyzeOptions(repo=Path("/home/someone/x"), transcripts=[path], include_git=False)
-    monkeypatch.setenv("HOME", "/root")
-    assert analyze(options)["repo"]["root"] == "/home/someone/x"
-    monkeypatch.setenv("HOME", "/home/someone")
+    options = AnalyzeOptions(repo=repo, transcripts=[path], include_git=False)
+    for var in ("HOME", "USERPROFILE"):  # Path.home() reads USERPROFILE on Windows
+        monkeypatch.setenv(var, str(other))
+    root = analyze(options)["repo"]["root"]
+    assert not root.startswith("~") and root.endswith("someone/x")
+    for var in ("HOME", "USERPROFILE"):
+        monkeypatch.setenv(var, str(home))
     assert analyze(options)["repo"]["root"] == "~/x"
 
 
