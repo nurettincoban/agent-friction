@@ -1,0 +1,24 @@
+name: Wrong or misleading hotspot
+description: A file or command scored high but the friction isn't real (or real friction was missed)
+labels: [heuristics]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Heuristic quality is the heart of this project, so these reports are very welcome.
+        Run `agent-friction show <path> --no-excerpts` and paste the signals and summaries below.
+        **Do not paste raw transcripts**: they can contain secrets and private code.
+  - type: textarea
+    id: show
+    attributes:
+      label: Output of `agent-friction show <path> --no-excerpts`
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why is this wrong?
+      description: What actually happened in those sessions?
+    validations:
+      required: true

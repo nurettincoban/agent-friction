@@ -1,0 +1,536 @@
+"""Public entry point: :func:`analyze`.
+
+Pipeline: locate transcripts -> parse into normalized streams -> detect
+findings (plus git rework) -> attribute to files, directories and commands ->
+score -> recommend -> emit a deterministic, JSON-serializable dict whose
+schema is documented in docs/schema.md.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from agent_friction import __version__, gitsignals, model, recommend, redact, scoring, signals
+from agent_friction.adapters import claude_code, parse_transcript
+from agent_friction.attribution import PathResolver
+from agent_friction.discovery import (
+    claude_config_dirs,
+    discover_repo_transcripts,
+    expand_transcript_paths,
+    repo_roots,
+)
+from agent_friction.errors import AgentFrictionError, NoTranscriptsError
+from agent_friction.model import Finding, ParsedFile, Stream
+
+__all__ = [
+    "SCHEMA_VERSION",
+    "AgentFrictionError",
+    "AnalyzeOptions",
+    "NoTranscriptsError",
+    "analyze",
+]
+
+SCHEMA_VERSION = 1
+TOOL_NAME = "agent-friction"
+
+Item = tuple[Finding, float]
+
+
+@dataclass
+class AnalyzeOptions:
+    """Inputs for :func:`analyze`. Only ``repo`` is required."""
+
+    repo: Path
+    #: Transcript files or directories. ``None`` auto-discovers Claude Code transcripts.
+    transcripts: Sequence[Path] | None = None
+    since: datetime | None = None
+    until: datetime | None = None
+    include_git: bool = True
+    #: ``False`` removes every verbatim transcript quote from the result.
+    include_excerpts: bool = True
+    max_evidence: int = 5
+    max_hotspots: int = 50
+    #: Fixed "now" for ``generated_at`` (deterministic output in tests).
+    now: datetime | None = None
+    # ---- additions to the base contract ----
+    #: Maximum characters per excerpt.
+    excerpt_chars: int = redact.DEFAULT_EXCERPT_CHARS
+    #: Other absolute paths that are this repo (e.g. where it lived when recorded).
+    repo_aliases: Sequence[Path | str] = field(default_factory=tuple)
+    rework_window_days: int = gitsignals.DEFAULT_REWORK_WINDOW_DAYS
+    #: Regexes marking a commit as agent-authored; ``None`` uses the defaults.
+    agent_commit_patterns: Sequence[str] | None = None
+    git_max_commits: int = gitsignals.DEFAULT_MAX_COMMITS
+
+
+def _utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+def _iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _in_window(ts: datetime | None, since: datetime | None, until: datetime | None) -> bool:
+    if ts is None:
+        return True
+    return not ((since is not None and ts < since) or (until is not None and ts > until))
+
+
+def _apply_window(stream: Stream, since: datetime | None, until: datetime | None) -> None:
+    """Drop events outside the window. Events without a timestamp inherit the previous one."""
+    if since is None and until is None:
+        return
+    kept = []
+    last: datetime | None = None
+    for event in stream.events:
+        last = event.ts or last
+        if _in_window(last, since, until):
+            kept.append(event)
+    stream.events = kept
+
+
+def _load(
+    files: Sequence[Path], since: datetime | None, until: datetime | None
+) -> list[ParsedFile]:
+    seen: set[str] = set()
+    parsed: list[ParsedFile] = []
+    for path in files:
+        try:
+            item = parse_transcript(path, seen)
+        except OSError:
+            continue
+        for stream in item.streams:
+            _apply_window(stream, since, until)
+        item.streams = [s for s in item.streams if s.events]
+        parsed.append(item)
+    return parsed
+
+
+def _source_root(item: ParsedFile) -> Path:
+    """Claude Code files are grouped by project directory; other files stand alone."""
+    if item.kind != claude_code.KIND:
+        return item.path
+    if item.path.parent.name == "subagents":
+        return item.path.parent.parent.parent
+    return item.path.parent
+
+
+class _Analysis:
+    def __init__(self, options: AnalyzeOptions) -> None:
+        self.options = options
+        self.repo = options.repo.expanduser().absolute()
+        self.since = _utc(options.since)
+        self.until = _utc(options.until)
+        roots = repo_roots(self.repo)
+        self.roots = roots
+        self.resolver = PathResolver(self.repo, [*roots[1:], *options.repo_aliases])
+        self.touched: set[str] = set()
+        self._is_file_cache: dict[str, bool | None] = {}
+        self._facts: dict[str, recommend.FileFacts] = {}
+        self.outside: dict[Path, set[str]] = {}
+
+    # ---- repository knowledge --------------------------------------------------------
+
+    def _disk_is_file(self, rel: str) -> bool | None:
+        """True/False for an existing file/directory, ``None`` if the path is absent."""
+        if rel not in self._is_file_cache:
+            path = self.repo / rel
+            try:
+                self._is_file_cache[rel] = (
+                    True if path.is_file() else (False if path.is_dir() else None)
+                )
+            except OSError:
+                self._is_file_cache[rel] = None
+        return self._is_file_cache[rel]
+
+    def is_file(self, rel: str) -> bool:
+        on_disk = self._disk_is_file(rel)
+        if on_disk is not None:
+            return on_disk
+        return rel in self.touched or "." in rel.rsplit("/", 1)[-1].lstrip(".")
+
+    def is_known_file(self, rel: str) -> bool:
+        return rel in self.touched or self._disk_is_file(rel) is True
+
+    def facts(self, rel: str) -> recommend.FileFacts:
+        if rel not in self._facts:
+            self._facts[rel] = recommend.file_facts(self.repo, rel)
+        return self._facts[rel]
+
+    # ---- text helpers ----------------------------------------------------------------
+
+    def clean(self, text: str) -> str:
+        return redact.one_line(text, 2 * self.options.excerpt_chars)
+
+    def quote(self, text: str, limit: int) -> str:
+        return redact.one_line(text, min(limit, max(self.options.excerpt_chars, 1)))
+
+    def display_path(self, path: Path | str) -> str:
+        return redact.redact_home(str(path))
+
+    # ---- pipeline --------------------------------------------------------------------
+
+    def run(self) -> dict[str, Any]:
+        options = self.options
+        files = self._transcript_files()
+        parsed = _load(files, self.since, self.until)
+        for item in parsed:
+            # Sessions that never worked in this repo are not this repo's sessions.
+            relevant = [s for s in item.streams if self._in_repo(s)]
+            self.outside[item.path] = {s.session_id for s in item.streams} - {
+                s.session_id for s in relevant
+            }
+            item.streams = relevant
+        streams = [s for item in parsed for s in item.streams]
+        for stream in streams:
+            for event in stream.events:
+                if event.kind == model.TOOL_CALL and event.op in (
+                    model.OP_READ,
+                    model.OP_EDIT,
+                    model.OP_WRITE,
+                ):
+                    rel = self.resolver.resolve(event.path, event.cwd)
+                    if rel:
+                        self.touched.add(rel)
+
+        ctx = signals.DetectContext(self.resolver, self.is_file, self.is_known_file)
+        findings: list[Finding] = []
+        for stream in streams:
+            findings.extend(signals.detect(stream, ctx))
+
+        sources = self._sources(parsed)
+        if options.include_git:
+            history = gitsignals.read_history(
+                self.repo, options.git_max_commits, options.agent_commit_patterns
+            )
+            source: dict[str, Any] = {
+                "kind": "git",
+                "path": self.display_path(self.repo),
+                "sessions": 0,
+                "skipped_lines": 0,
+                "ignored_lines": 0,
+                "available": history.available,
+            }
+            if history.available:
+                rework = [
+                    f
+                    for f in gitsignals.find_rework(history.commits, options.rework_window_days)
+                    if _in_window(f.ts, self.since, self.until)
+                ]
+                findings.extend(rework)
+                source["sessions"] = sum(
+                    1
+                    for c in history.commits
+                    if c.is_agent and _in_window(c.date, self.since, self.until)
+                )
+            else:
+                source["note"] = history.reason
+            sources.append(source)
+
+        findings.sort(key=_finding_order)
+        for index, finding in enumerate(findings):
+            finding.fid = index
+        return self._emit(streams, findings, sources)
+
+    def _in_repo(self, stream: Stream) -> bool:
+        resolver = self.resolver
+        return any(
+            resolver.contains(event.cwd) or resolver.resolve(event.path, event.cwd) is not None
+            for event in stream.events
+        )
+
+    def _transcript_files(self) -> list[Path]:
+        options = self.options
+        if options.transcripts is not None:
+            files = expand_transcript_paths(options.transcripts)
+            if not files:
+                listed = ", ".join(str(p) for p in options.transcripts) or "(none given)"
+                raise NoTranscriptsError(
+                    f"No .jsonl transcript files found in: {listed}. Pass transcript files "
+                    "or directories that contain them."
+                )
+            return files
+        files = discover_repo_transcripts(self.repo, self.roots)
+        if not files:
+            searched = ", ".join(str(c / "projects") for c in claude_config_dirs())
+            raise NoTranscriptsError(
+                f"No Claude Code transcripts found for {self.repo}. Looked in: {searched}. "
+                "Transcripts are stored per working directory, so run this from the "
+                "directory where you use the agent (or pass --repo), set CLAUDE_CONFIG_DIR "
+                "if your config lives elsewhere, or pass transcript paths explicitly. Logs "
+                "from other agents can be converted to the generic JSONL format described "
+                "in docs/schema.md."
+            )
+        return files
+
+    def _sources(self, parsed: Sequence[ParsedFile]) -> list[dict[str, Any]]:
+        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        sessions: dict[tuple[str, str], set[str]] = {}
+        outside: dict[tuple[str, str], set[str]] = {}
+        for item in parsed:
+            key = (item.kind, self.display_path(_source_root(item)))
+            entry = grouped.setdefault(
+                key,
+                {
+                    "kind": key[0],
+                    "path": key[1],
+                    "sessions": 0,
+                    "skipped_lines": 0,
+                    "ignored_lines": 0,
+                    "files": 0,
+                    "sessions_outside_repo": 0,
+                },
+            )
+            entry["skipped_lines"] += item.skipped_lines
+            entry["ignored_lines"] += item.ignored_lines
+            entry["files"] += 1
+            sessions.setdefault(key, set()).update(s.session_id for s in item.streams)
+            outside.setdefault(key, set()).update(self.outside.get(item.path, ()))
+        for key, entry in grouped.items():
+            entry["sessions"] = len(sessions[key])
+            entry["sessions_outside_repo"] = len(outside[key] - sessions[key])
+        return [grouped[key] for key in sorted(grouped)]
+
+    # ---- output ----------------------------------------------------------------------
+
+    def _emit(
+        self, streams: Sequence[Stream], findings: Sequence[Finding], sources: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        options = self.options
+        groups: dict[tuple[str, str], list[Item]] = {}
+        for finding in findings:
+            for target in finding.targets:
+                key = target.key
+                if target.kind == model.COMMAND:
+                    key = self.clean(key)
+                groups.setdefault((target.kind, key), []).append((finding, target.share))
+
+        by_kind: dict[str, list[dict[str, Any]]] = {
+            model.FILE: [],
+            model.DIR: [],
+            model.COMMAND: [],
+        }
+        for (kind, key), items in groups.items():
+            by_kind[kind].append(self._entry(kind, key, items))
+        for entries in by_kind.values():
+            entries.sort(key=lambda e: (-e["score"], -e["events"], e["path"]))
+        limit = max(options.max_hotspots, 0)
+        shown: dict[str, list[dict[str, Any]]] = {}
+        for kind, entries in by_kind.items():
+            shown[kind] = entries[:limit]
+            for entry in shown[kind]:
+                self._decorate(entry, groups[(kind, entry["path"])])
+
+        stamps = [e.ts for s in streams for e in s.events if e.ts is not None]
+        stamps.extend(f.ts for f in findings if f.ts is not None)
+        first, last = (min(stamps), max(stamps)) if stamps else (None, None)
+        counts: dict[str, int] = {}
+        for finding in findings:
+            counts[finding.signal] = counts.get(finding.signal, 0) + 1
+        now = _utc(options.now) or datetime.now(timezone.utc)
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "tool": {"name": TOOL_NAME, "version": __version__},
+            "generated_at": _iso(now),
+            "repo": {"root": self.display_path(self.repo), "name": self.repo.name or "repo"},
+            "window": {
+                "start": _iso(self.since or first),
+                "end": _iso(self.until or last),
+                "since": _iso(self.since),
+                "until": _iso(self.until),
+                "first_event": _iso(first),
+                "last_event": _iso(last),
+            },
+            "sources": sources,
+            "totals": {
+                "sessions": len({s.session_id for s in streams}),
+                "tool_calls": sum(
+                    1 for s in streams for e in s.events if e.kind == model.TOOL_CALL
+                ),
+                "friction_events": len(findings),
+                "est_minutes_lost": scoring.lost_minutes(findings),
+                "corrections": counts.get(signals.USER_CORRECTION, 0),
+                "files_affected": len(by_kind[model.FILE]),
+                "commands_affected": len(by_kind[model.COMMAND]),
+                "directories_affected": len(by_kind[model.DIR]),
+                "unattributed_events": sum(1 for f in findings if not f.targets),
+            },
+            "signals": [
+                {
+                    "id": s.id,
+                    "title": s.title,
+                    "description": s.description,
+                    "count": counts.get(s.id, 0),
+                    "severity": s.severity,
+                    "why": s.why,
+                    "attribution": s.attribution,
+                }
+                for s in signals.CATALOG
+            ],
+            "hotspots": shown[model.FILE],
+            "commands": shown[model.COMMAND],
+            "directories": shown[model.DIR],
+            "tree": self._tree(groups),
+        }
+
+    def _entry(self, kind: str, key: str, items: Sequence[Item]) -> dict[str, Any]:
+        """The cheap part of a hotspot (everything needed for ranking)."""
+        found = [f for f, _ in items]
+        result = scoring.score_items(items)
+        signal_counts: dict[str, int] = {}
+        for finding in found:
+            signal_counts[finding.signal] = signal_counts.get(finding.signal, 0) + 1
+        ranked = sorted(signal_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        sessions = len(result.sessions)
+        level = scoring.confidence(sessions, signal_counts)
+        return {
+            "path": key,
+            "kind": kind,
+            "score": result.score,
+            "sessions": sessions,
+            "events": len(found),
+            "est_minutes_lost": scoring.lost_minutes(found),
+            "signals": dict(ranked),
+            "confidence": level,
+            "why": scoring.explain(ranked, sessions, level),
+            "recommendations": [],
+            "evidence": [],
+            "score_detail": {
+                "intensity": result.intensity,
+                "sessions": [
+                    {
+                        "session_id": s.session_id,
+                        "weighted_events": s.weighted_events,
+                        "points": s.points,
+                    }
+                    for s in result.sessions
+                ],
+            },
+        }
+
+    def _decorate(self, entry: dict[str, Any], items: Sequence[Item]) -> None:
+        """Add recommendations, evidence and file facts to a hotspot that will be shown."""
+        options = self.options
+        kind, key = entry["kind"], entry["path"]
+        found = [f for f, _ in items]
+        facts = self.facts(key) if kind == model.FILE else None
+        quote = self.quote if options.include_excerpts else None
+        shares = {f.fid: share for f, share in items}
+        entry["recommendations"] = recommend.recommend(kind, key, found, facts, quote, shares)
+        entry["evidence"] = [self._evidence(f) for f in _pick_evidence(found, options.max_evidence)]
+        if facts is not None:
+            entry["file"] = facts.as_dict()
+
+    def _evidence(self, finding: Finding) -> dict[str, Any]:
+        options = self.options
+        text: str | None = None
+        if options.include_excerpts and finding.excerpt.strip():
+            text = redact.excerpt(finding.excerpt, options.excerpt_chars)
+        return {
+            "signal": finding.signal,
+            "session_id": finding.session_id,
+            "timestamp": _iso(finding.ts),
+            "summary": self.clean(finding.summary),
+            "excerpt": text,
+            "source": self.display_path(finding.source),
+            "line": finding.line,
+        }
+
+    def _tree(self, groups: dict[tuple[str, str], list[Item]]) -> dict[str, Any]:
+        direct: dict[str, list[Item]] = {"": []}
+        children: dict[str, set[str]] = {"": set()}
+        for (kind, key), items in groups.items():
+            if kind == model.COMMAND:
+                continue
+            path = "" if key == "." else key
+            direct.setdefault(path, []).extend(items)
+            children.setdefault(path, set())
+            while path:
+                parent = path.rsplit("/", 1)[0] if "/" in path else ""
+                children.setdefault(parent, set()).add(path)
+                direct.setdefault(parent, [])
+                path = parent
+        dir_keys = {("" if k == "." else k) for (kind, k) in groups if kind == model.DIR}
+
+        def build(path: str) -> tuple[dict[str, Any], dict[int, Item]]:
+            merged: dict[int, Item] = {}
+
+            def absorb(items: Sequence[Item]) -> None:
+                for finding, share in items:
+                    previous = merged.get(finding.fid)
+                    total = share + (previous[1] if previous else 0.0)
+                    merged[finding.fid] = (finding, min(total, 1.0))
+
+            absorb(direct[path])
+            nodes = []
+            for child in sorted(children[path]):
+                node, child_items = build(child)
+                nodes.append(node)
+                absorb(list(child_items.values()))
+            nodes.sort(key=lambda n: (-n["score"], n["path"]))
+            found = [f for f, _ in merged.values()]
+            is_dir = bool(nodes) or path in dir_keys or path == ""
+            node = {
+                "name": path.rsplit("/", 1)[-1] if path else (self.repo.name or "repo"),
+                "path": path,
+                "kind": model.DIR if is_dir else model.FILE,
+                "score": scoring.score_items(merged.values()).score,
+                "events": len(found),
+                "sessions": len({f.session_id for f in found}),
+                "est_minutes_lost": scoring.lost_minutes(found),
+                "children": nodes,
+            }
+            return node, merged
+
+        return build("")[0]
+
+
+def _finding_order(finding: Finding) -> tuple[float, str, int, str]:
+    stamp = finding.ts.timestamp() if finding.ts is not None else float("-inf")
+    return (stamp, finding.source, finding.line, finding.signal)
+
+
+def _pick_evidence(findings: Sequence[Finding], limit: int) -> list[Finding]:
+    """Choose up to ``limit`` findings, favouring severe signals and distinct sessions.
+
+    Signals are visited round-robin from most to least severe. Within a signal
+    the heaviest finding from a session not shown yet goes first, newest first.
+    The result is returned in chronological order.
+    """
+    if limit <= 0:
+        return []
+    queues: dict[str, list[Finding]] = {}
+    for finding in findings:
+        queues.setdefault(finding.signal, []).append(finding)
+    order = sorted(queues, key=lambda sid: (-signals.SEVERITY[sid], sid))
+    for queue in queues.values():
+        queue.sort(key=lambda f: (-f.weight, [-x for x in _finding_order(f)[:1]], f.fid))
+    chosen: list[Finding] = []
+    seen_sessions: set[str] = set()
+    while len(chosen) < limit and any(queues[sid] for sid in order):
+        for sid in order:
+            queue = queues[sid]
+            if not queue or len(chosen) >= limit:
+                continue
+            index = next((i for i, f in enumerate(queue) if f.session_id not in seen_sessions), 0)
+            pick = queue.pop(index)
+            chosen.append(pick)
+            seen_sessions.add(pick.session_id)
+    return sorted(chosen, key=_finding_order)
+
+
+def analyze(options: AnalyzeOptions) -> dict[str, Any]:
+    """Analyse agent transcripts (and git history) for ``options.repo``.
+
+    Raises :class:`NoTranscriptsError` when no transcript files can be found.
+    """
+    return _Analysis(options).run()

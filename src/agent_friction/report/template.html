@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
+<title>Agent friction map</title>
+<style>
+:root {
+  --bg: #fbfaf8; --panel: #ffffff; --ink: #1d1b18; --muted: #6b665e; --line: #e6e2db;
+  --accent: #b4462b; --chip: #f2eee8; --cold: #e9ecef;
+  --h0: #f3e7c6; --h1: #f2c98f; --h2: #ec9b62; --h3: #d9683f; --h4: #b33a26;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15130f; --panel: #1e1b16; --ink: #eeeae3; --muted: #a39d93; --line: #2f2b25;
+    --accent: #f08a62; --chip: #2a261f; --cold: #26231e;
+    --h0: #4a3f22; --h1: #6b4a22; --h2: #8a4524; --h3: #a83c23; --h4: #cf3b22;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+header { padding: 24px 16px 8px; max-width: 1200px; margin: 0 auto; }
+h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+h2 { font-size: 15px; margin: 28px 0 10px; }
+.sub { color: var(--muted); }
+main { max-width: 1200px; margin: 0 auto; padding: 0 16px 48px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin: 16px 0; }
+.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.stat b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+.stat span { color: var(--muted); font-size: 12px; }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; }
+@media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+#map { position: relative; height: 460px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; overflow: hidden; }
+.cell { position: absolute; border: 1px solid var(--bg); overflow: hidden; cursor: pointer;
+  padding: 4px 6px; font-size: 11.5px; line-height: 1.25; color: var(--ink); }
+.cell:hover, .cell.sel { outline: 2px solid var(--accent); outline-offset: -2px; z-index: 2; }
+.cell .n { font-weight: 600; word-break: break-all; }
+.cell .s { color: var(--ink); opacity: .75; }
+.cell.dir { border-color: var(--line); color: var(--muted); }
+.cell.dir > .n { font-weight: 600; color: var(--muted); }
+#crumbs { margin: 0 0 8px; color: var(--muted); }
+#crumbs a { color: var(--accent); cursor: pointer; text-decoration: none; }
+aside { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px;
+  max-height: 520px; overflow: auto; }
+aside h3 { margin: 0 0 4px; font-size: 14px; word-break: break-all; }
+.chip { display: inline-block; background: var(--chip); border-radius: 999px; padding: 1px 8px;
+  margin: 2px 4px 2px 0; font-size: 12px; }
+.ev { border-left: 3px solid var(--line); padding: 4px 0 4px 10px; margin: 8px 0; }
+.ev .meta { color: var(--muted); font-size: 12px; }
+.ev blockquote { margin: 4px 0 0; padding: 6px 8px; background: var(--chip); border-radius: 6px;
+  white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.rec { margin: 6px 0; } .rec b { display: block; }
+table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; overflow: hidden; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; color: var(--muted); font-weight: 600; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr.row { cursor: pointer; } tr.row:hover { background: var(--chip); }
+.tablewrap { overflow-x: auto; }
+.legend { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; margin-top: 6px; }
+.legend i { width: 18px; height: 10px; display: inline-block; border-radius: 2px; }
+input[type=search] { width: 100%; max-width: 320px; padding: 6px 10px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--panel); color: var(--ink); }
+footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
+.empty { padding: 40px; text-align: center; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Agent friction map</h1>
+  <div class="sub" id="subtitle"></div>
+</header>
+<main>
+  <div class="stats" id="stats"></div>
+  <h2>Where agents struggle</h2>
+  <div id="crumbs"></div>
+  <div class="layout">
+    <div>
+      <div id="map" role="img" aria-label="Treemap of friction by directory and file"></div>
+      <div class="legend">less <i style="background:var(--h0)"></i><i style="background:var(--h1)"></i><i style="background:var(--h2)"></i><i style="background:var(--h3)"></i><i style="background:var(--h4)"></i> more friction · area = estimated time lost · click a directory to zoom</div>
+    </div>
+    <aside id="detail"><div class="sub">Select a file or command to see why it scores high, what to change, and the evidence.</div></aside>
+  </div>
+  <h2>Hotspots</h2>
+  <input type="search" id="filter" placeholder="Filter files and commands…" aria-label="Filter hotspots">
+  <div class="tablewrap" style="margin-top:8px"><table id="table"><thead><tr>
+    <th>Path or command</th><th class="num">Score</th><th class="num">Sessions</th><th class="num">Events</th><th class="num">Time lost</th><th>Top signals</th><th>Confidence</th>
+  </tr></thead><tbody></tbody></table></div>
+  <footer id="footer"></footer>
+</main>
+<script id="data" type="application/json">__DATA__</script>
+<script>
+(function () {
+  "use strict";
+  var R = JSON.parse(document.getElementById("data").textContent);
+  var titles = {};
+  (R.signals || []).forEach(function (s) { titles[s.id] = s.title || s.id; });
+  var items = (R.hotspots || []).concat(R.commands || [], R.directories || []);
+  var byPath = {};
+  items.forEach(function (h) { byPath[h.kind + ":" + h.path] = h; });
+
+  function el(tag, attrs, text) {
+    var e = document.createElement(tag);
+    if (attrs) for (var k in attrs) { if (k === "class") e.className = attrs[k]; else e.setAttribute(k, attrs[k]); }
+    if (text !== undefined && text !== null) e.textContent = String(text);
+    return e;
+  }
+  function mins(m) {
+    m = Number(m) || 0;
+    if (m <= 0) return "0m";
+    if (m < 1) return Math.round(m * 60) + "s";
+    if (m < 60) return Math.round(m) + "m";
+    var h = Math.floor(Math.round(m) / 60), r = Math.round(m) % 60;
+    return h + "h " + (r < 10 ? "0" : "") + r + "m";
+  }
+  function heat(score) {
+    var s = Number(score) || 0;
+    var i = s >= 80 ? 4 : s >= 60 ? 3 : s >= 40 ? 2 : s >= 20 ? 1 : 0;
+    return "var(--h" + i + ")";
+  }
+  function topSignals(h, n) {
+    return Object.keys(h.signals || {}).map(function (k) { return [k, h.signals[k]]; })
+      .sort(function (a, b) { return b[1] - a[1] || (a[0] < b[0] ? -1 : 1); }).slice(0, n);
+  }
+
+  // Header & stats
+  var repo = R.repo || {}, t = R.totals || {};
+  document.getElementById("title").textContent = "Agent friction map · " + (repo.name || "");
+  var w = R.window || {};
+  document.getElementById("subtitle").textContent =
+    (w.start || w.end ? String(w.start || "…").slice(0, 10) + " → " + String(w.end || "…").slice(0, 10) + " · " : "") +
+    "generated " + String(R.generated_at || "").slice(0, 16).replace("T", " ");
+  [["sessions", "agent sessions"], ["tool_calls", "tool calls"], ["friction_events", "friction events"],
+   ["est_minutes_lost", "est. time lost"], ["corrections", "human corrections"], ["files_affected", "files affected"]]
+    .forEach(function (p) {
+      var box = el("div", { class: "stat" });
+      box.appendChild(el("b", null, p[0] === "est_minutes_lost" ? mins(t[p[0]]) : (t[p[0]] || 0)));
+      box.appendChild(el("span", null, p[1]));
+      document.getElementById("stats").appendChild(box);
+    });
+
+  // Detail panel
+  var detail = document.getElementById("detail");
+  function showItem(h) {
+    detail.textContent = "";
+    detail.appendChild(el("div", { class: "sub" }, h.kind === "command" ? "command" : h.kind === "dir" ? "directory" : "file"));
+    detail.appendChild(el("h3", { class: "mono" }, h.path));
+    detail.appendChild(el("div", { class: "sub" }, "score " + Number(h.score).toFixed(1) + " · " + h.sessions +
+      " sessions · " + h.events + " events · ~" + mins(h.est_minutes_lost) + " lost · " + h.confidence + " confidence"));
+    if (h.why) detail.appendChild(el("p", null, h.why));
+    var chips = el("div");
+    topSignals(h, 99).forEach(function (s) { chips.appendChild(el("span", { class: "chip", title: s[0] }, (titles[s[0]] || s[0]) + " × " + s[1])); });
+    detail.appendChild(chips);
+    if ((h.recommendations || []).length) {
+      detail.appendChild(el("h2", null, "What to change"));
+      h.recommendations.forEach(function (r) {
+        var d = el("div", { class: "rec" }); d.appendChild(el("b", null, r.title)); d.appendChild(el("span", null, r.detail)); detail.appendChild(d);
+      });
+    }
+    if ((h.evidence || []).length) {
+      detail.appendChild(el("h2", null, "Evidence"));
+      h.evidence.forEach(function (e) {
+        var d = el("div", { class: "ev" });
+        d.appendChild(el("div", { class: "meta" }, String(e.timestamp || "").slice(0, 16).replace("T", " ") + " · session " + String(e.session_id || "").slice(0, 8) + " · " + (titles[e.signal] || e.signal)));
+        d.appendChild(el("div", null, e.summary));
+        if (e.excerpt) d.appendChild(el("blockquote", null, e.excerpt));
+        if (e.source) d.appendChild(el("div", { class: "meta mono" }, e.source + ":" + (e.line || "?")));
+        detail.appendChild(d);
+      });
+    }
+  }
+  function showDir(n) {
+    detail.textContent = "";
+    detail.appendChild(el("div", { class: "sub" }, "directory"));
+    detail.appendChild(el("h3", { class: "mono" }, (n.path || ".") + "/"));
+    detail.appendChild(el("div", { class: "sub" }, "score " + Number(n.score).toFixed(1) + " · " + n.events + " events · ~" + mins(n.est_minutes_lost) + " lost"));
+  }
+
+  // Squarified treemap
+  function weight(n) { return Math.max(Number(n.est_minutes_lost) || 0, 0) + 0.5 * (Number(n.events) || 0) + 0.01; }
+  function squarify(nodes, x, y, w, h) {
+    var out = [], total = 0;
+    nodes.forEach(function (n) { total += weight(n); });
+    var scale = (w * h) / (total || 1);
+    var rest = nodes.map(function (n) { return { n: n, a: weight(n) * scale }; });
+    function worst(row, side) {
+      var s = 0, mx = 0, mn = Infinity;
+      row.forEach(function (r) { s += r.a; mx = Math.max(mx, r.a); mn = Math.min(mn, r.a); });
+      return Math.max(side * side * mx / (s * s), (s * s) / (side * side * mn));
+    }
+    while (rest.length) {
+      var side = Math.min(w, h), row = [rest[0]], i = 1;
+      while (i < rest.length && worst(row.concat([rest[i]]), side) <= worst(row, side)) { row.push(rest[i]); i++; }
+      rest = rest.slice(i);
+      var sum = 0; row.forEach(function (r) { sum += r.a; });
+      if (w >= h) {
+        var cw = sum / h, cy = y;
+        row.forEach(function (r) { var ch = r.a / cw; out.push({ n: r.n, x: x, y: cy, w: cw, h: ch }); cy += ch; });
+        x += cw; w -= cw;
+      } else {
+        var rh = sum / w, cx = x;
+        row.forEach(function (r) { var cw2 = r.a / rh; out.push({ n: r.n, x: cx, y: y, w: cw2, h: rh }); cx += cw2; });
+        y += rh; h -= rh;
+      }
+    }
+    return out;
+  }
+  var map = document.getElementById("map"), crumbs = document.getElementById("crumbs");
+  var stack = [];
+  function draw(node) {
+    map.textContent = "";
+    crumbs.textContent = "";
+    stack.forEach(function (n, i) {
+      if (i) crumbs.appendChild(document.createTextNode(" / "));
+      var a = el("a", null, i === 0 ? (repo.name || "repo") : n.name);
+      a.addEventListener("click", function () { stack = stack.slice(0, i + 1); draw(n); });
+      crumbs.appendChild(a);
+    });
+    function kidsOf(n) {
+      return (n.children || []).filter(function (c) { return (c.events || 0) > 0; })
+        .sort(function (a, b) { return weight(b) - weight(a) || (a.path < b.path ? -1 : 1); });
+    }
+    if (!kidsOf(node).length) { map.appendChild(el("div", { class: "empty" }, "No friction recorded here.")); return; }
+    var W = map.clientWidth || 800, H = map.clientHeight || 460;
+    // Nested treemap: directories get a header strip and contain their children,
+    // so every file with friction is visible at once (up to a depth limit).
+    function layout(n, x, y, w, h, depth) {
+      squarify(kidsOf(n), x, y, w, h).forEach(function (r) {
+        var isDir = kidsOf(r.n).length > 0;
+        var nest = isDir && depth < 4 && r.w > 70 && r.h > 50;
+        var c = el("div", { class: "cell" + (nest ? " dir" : ""), tabindex: "0", role: "button" });
+        c.style.left = r.x + "px"; c.style.top = r.y + "px"; c.style.width = r.w + "px"; c.style.height = r.h + "px";
+        c.style.background = nest ? "var(--panel)" : heat(r.n.score);
+        var label = (r.n.path || r.n.name) + (isDir ? "/" : "");
+        c.title = label + " · score " + Number(r.n.score).toFixed(1) + " · ~" + mins(r.n.est_minutes_lost) + " lost";
+        c.setAttribute("aria-label", c.title);
+        if (r.w > 46 && r.h > 18) {
+          c.appendChild(el("div", { class: "n" }, r.n.name + (isDir ? "/" : "")));
+          if (!nest && r.h > 38) c.appendChild(el("div", { class: "s" }, Number(r.n.score).toFixed(0) + " · " + mins(r.n.est_minutes_lost)));
+        }
+        function activate(e) {
+          if (e) e.stopPropagation();
+          Array.prototype.forEach.call(map.querySelectorAll(".sel"), function (s) { s.classList.remove("sel"); });
+          c.classList.add("sel");
+          if (isDir) { stack.push(r.n); draw(r.n); showDir(r.n); }
+          else { var hs = byPath["file:" + r.n.path]; if (hs) showItem(hs); else showDir(r.n); }
+        }
+        c.addEventListener("click", activate);
+        c.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activate(e); } });
+        map.appendChild(c);
+        if (nest) layout(r.n, r.x + 3, r.y + 18, r.w - 6, r.h - 21, depth + 1);
+      });
+    }
+    layout(node, 0, 0, W, H, 0);
+  }
+  if (R.tree) { stack = [R.tree]; draw(R.tree); }
+  var resizeTimer;
+  window.addEventListener("resize", function () { clearTimeout(resizeTimer); resizeTimer = setTimeout(function () { draw(stack[stack.length - 1]); }, 120); });
+
+  // Table
+  var tbody = document.querySelector("#table tbody");
+  function fill(q) {
+    tbody.textContent = "";
+    q = (q || "").toLowerCase();
+    items.slice().sort(function (a, b) { return b.score - a.score || (a.path < b.path ? -1 : 1); })
+      .filter(function (h) { return !q || String(h.path).toLowerCase().indexOf(q) >= 0; })
+      .forEach(function (h) {
+        var tr = el("tr", { class: "row", tabindex: "0" });
+        var td = el("td", { class: "mono" }, (h.kind === "command" ? "$ " : "") + h.path + (h.kind === "dir" ? "/" : "")); tr.appendChild(td);
+        tr.appendChild(el("td", { class: "num" }, Number(h.score).toFixed(1)));
+        tr.appendChild(el("td", { class: "num" }, h.sessions));
+        tr.appendChild(el("td", { class: "num" }, h.events));
+        tr.appendChild(el("td", { class: "num" }, mins(h.est_minutes_lost)));
+        tr.appendChild(el("td", null, topSignals(h, 3).map(function (s) { return s[0] + "×" + s[1]; }).join(", ")));
+        tr.appendChild(el("td", null, h.confidence));
+        function pick() { showItem(h); detail.scrollIntoView({ block: "nearest", behavior: "smooth" }); }
+        tr.addEventListener("click", pick);
+        tr.addEventListener("keydown", function (e) { if (e.key === "Enter") pick(); });
+        tbody.appendChild(tr);
+      });
+    if (!tbody.children.length) { var tr = el("tr"); var td = el("td", { colspan: "7", class: "sub" }, "No hotspots."); tr.appendChild(td); tbody.appendChild(tr); }
+  }
+  fill("");
+  document.getElementById("filter").addEventListener("input", function (e) { fill(e.target.value); });
+  if (items.length) showItem(items.slice().sort(function (a, b) { return b.score - a.score; })[0]);
+
+  var tool = R.tool || {};
+  document.getElementById("footer").textContent = "Generated by agent-friction " + (tool.version || "") +
+    " · schema v" + R.schema_version + " · all data stays in this file; nothing is loaded from the network.";
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+openapi: 3.1.0
+info:
+  title: shopfront
+  version: 2.3.0
+components:
+  schemas:
+    Price:
+      type: object
+      properties:
+        amount:
+          type: integer
+    Order:
+      type: object
+      properties:
+        id:
+          type: integer
+        note:
+          type: string

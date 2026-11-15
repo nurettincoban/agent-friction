@@ -1,0 +1,115 @@
+"""Adapter for the generic normalized JSONL event format (docs/schema.md).
+
+One JSON object per line. Convert transcripts from any agent into this shape
+and agent-friction analyses them with the same detectors as Claude Code.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from agent_friction import model
+from agent_friction.adapters import common
+from agent_friction.model import Event, ParsedFile, Stream
+
+KIND = "generic"
+
+KINDS = (model.TOOL_CALL, model.TOOL_RESULT, model.USER_MESSAGE, model.INTERRUPT)
+
+
+def _str(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _event(obj: dict[str, Any], line: int) -> Event | None:
+    kind = obj.get("kind")
+    if kind not in KINDS:
+        return None
+    event = Event(kind=kind, line=line, ts=common.parse_ts(obj.get("ts")), cwd=_str(obj.get("cwd")))
+    if kind in (model.TOOL_CALL, model.TOOL_RESULT):
+        call_id = obj.get("id")
+        if not isinstance(call_id, (str, int)) or isinstance(call_id, bool) or call_id == "":
+            return None
+        event.call_id = str(call_id)
+    if kind == model.TOOL_CALL:
+        op = obj.get("op")
+        event.op = op if op in model.OPS else model.OP_OTHER
+        event.tool = _str(obj.get("tool")) or event.op
+        event.path = _str(obj.get("path"))
+        event.command = _str(obj.get("command"))
+        event.pattern = _str(obj.get("pattern"))
+        event.read_range = str(obj.get("range", ""))
+        old, new = obj.get("old"), obj.get("new")
+        if isinstance(old, str) and isinstance(new, str):
+            event.edits = ((common.digest(old), common.digest(new)),)
+        content = obj.get("content")
+        if isinstance(content, str):
+            event.content_digest = common.digest(content)
+    elif kind == model.TOOL_RESULT:
+        output = obj.get("output")
+        text = output if isinstance(output, str) else ""
+        code = obj.get("exit_code")
+        if isinstance(code, int) and not isinstance(code, bool):
+            event.exit_code = code
+        declared = obj.get("error")
+        ok = obj.get("ok")
+        failed = ok is False or (ok is None and (bool(declared) or bool(event.exit_code)))
+        if failed:
+            event.ok = False
+            if declared in model.ERROR_CLASSES:
+                event.error = str(declared)
+            elif event.exit_code:
+                event.error = model.ERR_EXIT
+            else:
+                event.error, event.matches = common.classify_error(text)
+        else:
+            matches = obj.get("matches")
+            if isinstance(matches, int) and not isinstance(matches, bool):
+                event.empty = matches == 0
+            elif obj.get("empty") is True:
+                event.empty = True
+            elif isinstance(output, str):
+                event.empty = common.is_empty_search(text)
+        event.reason = _str(obj.get("reason")) or ""
+        event.output = common.clip_output(text)
+    elif kind == model.USER_MESSAGE:
+        message = obj.get("text")
+        if not isinstance(message, str) or not message.strip():
+            return None
+        event.text = message.strip()
+    return event
+
+
+def parse_file(path: Path) -> ParsedFile:
+    """Parse one generic-format ``.jsonl`` file (it may hold several sessions)."""
+    streams: dict[tuple[str, bool], Stream] = {}
+    parsed = ParsedFile(path=path, kind=KIND, streams=[])
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for number, raw in enumerate(handle, 1):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except ValueError:
+                parsed.skipped_lines += 1
+                continue
+            if not isinstance(obj, dict):
+                parsed.skipped_lines += 1
+                continue
+            if obj.get("kind") not in KINDS:
+                parsed.ignored_lines += 1
+                continue
+            session = obj.get("session")
+            event = _event(obj, number)
+            if event is None or not isinstance(session, (str, int)) or session == "":
+                parsed.skipped_lines += 1
+                continue
+            key = (str(session), obj.get("subagent") is True)
+            if key not in streams:
+                streams[key] = Stream(session_id=key[0], source=path, kind=KIND, sidechain=key[1])
+            streams[key].events.append(event)
+    parsed.streams = list(streams.values())
+    return parsed

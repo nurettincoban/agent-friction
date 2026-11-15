@@ -1,0 +1,16 @@
+name: Support another agent
+description: Ask for (or offer) an adapter for another coding agent's transcripts
+labels: [adapter]
+body:
+  - type: input
+    id: agent
+    attributes:
+      label: Agent and version
+      placeholder: e.g. Codex CLI 0.x, Aider 0.x, Cursor
+    validations:
+      required: true
+  - type: textarea
+    id: format
+    attributes:
+      label: Where are transcripts stored and what do they look like?
+      description: A short, synthetic, redacted sample is ideal. See docs/schema.md for the generic format you can convert to today.
