@@ -236,3 +236,39 @@ def test_parse_log_tolerates_junk() -> None:
     (commit,) = gitsignals.parse_log("preamble" + junk + good, patterns)
     assert commit.sha == "abc123" and commit.files == {"src/a.py": (3, 1), "bin.dat": (0, 0)}
     assert gitsignals.parse_log("", patterns) == []
+
+
+def test_bot_commits_are_not_human_rework(repo: Repo) -> None:
+    repo.commit(1, "initial", {"a.py": BASE, "b.py": BASE, "c.py": BASE})
+    by_agent = lines(BASE, l3="agent 3", l4="agent 4")
+    repo.commit(2, f"feat\n\n{CLAUDE}", dict.fromkeys(("a.py", "b.py", "c.py"), by_agent))
+    formatted = lines(by_agent, l4="agent  4")
+    bot = "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+    repo.commit(3, "style: auto-format", {"a.py": formatted}, author=bot)
+    repo.commit(3, "bump", {"b.py": formatted}, author="dependabot <support@dependabot.com>")
+    repo.commit(3, "format", {"c.py": formatted}, author="Format Robot <fmt@corp.test>")
+    human = repo.commit(4, "fix: the handler", {"a.py": lines(formatted, l3="human 3")})
+
+    history = gitsignals.read_history(repo.path)
+    assert [c.is_bot for c in history.commits] == [False, False, True, True, False, False]
+    found = gitsignals.find_rework(history.commits, hunks=gitsignals.HunkReader(repo.path))
+    # the bots are skipped; the human fix after them still counts against the agent commit
+    assert sorted(f.targets[0].key for f in found) == ["a.py", "c.py"]
+    assert human[:8] in "".join(str(f.detail) + f.summary for f in found)
+
+    history = gitsignals.read_history(repo.path, bot_patterns=[r"^author: Format Robot"])
+    found = gitsignals.find_rework(history.commits, hunks=gitsignals.HunkReader(repo.path))
+    assert [f.targets[0].key for f in found] == ["a.py"]
+
+
+def test_default_bot_patterns() -> None:
+    bots = gitsignals.compile_bot_patterns()
+
+    def bot(author: str) -> bool:
+        return any(p.search(f"author: {author}") for p in bots)
+
+    assert bot("renovate[bot] <29139614+renovate[bot]@users.noreply.github.com>")
+    assert bot("pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>")
+    assert bot("dependabot <49699333+dependabot@users.noreply.github.com>")
+    assert bot("GitHub Actions <actions@github.com>")
+    assert not bot("Dana Dev <dana@corp.test>") and not bot("Abbot Lee <abbot@corp.test>")

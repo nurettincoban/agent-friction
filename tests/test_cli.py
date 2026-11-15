@@ -235,7 +235,7 @@ def test_inverted_window_is_a_usage_error() -> None:
 
 def test_output_into_missing_directory_is_an_error(tmp_path: Path) -> None:
     code, _, err = run("scan", *INPUT, "-o", str(tmp_path / "missing" / "x.html"))
-    assert code == EXIT_ERROR and "does not exist" in err
+    assert code == EXIT_USAGE and "does not exist" in err
 
 
 def test_sources_with_explicit_transcripts() -> None:
@@ -294,3 +294,8 @@ def test_absurd_since_and_directory_output_are_usage_errors(tmp_path: Path) -> N
     assert run("scan", *INPUT, "--since", "99999999999d")[0] == EXIT_USAGE
     code, _, err = run("scan", *INPUT, "-o", str(tmp_path))
     assert code == EXIT_USAGE and "is a directory" in err
+
+
+def test_bot_author_flag_validates_regex() -> None:
+    assert run("scan", *INPUT, "--bot-author", "(")[0] == EXIT_USAGE
+    assert run("scan", *INPUT, "--bot-author", "ci-robot")[0] == EXIT_OK

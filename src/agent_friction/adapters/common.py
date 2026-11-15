@@ -16,8 +16,20 @@ _TS_RE = re.compile(
 )
 
 
+#: Timestamps before this are placeholders (0, 1970-01-01), not when something happened.
+EARLIEST_YEAR = 2000
+
+
 def parse_ts(value: object) -> datetime | None:
-    """Parse an ISO-8601 timestamp (or epoch seconds). Naive values are taken as UTC."""
+    """Parse an ISO-8601 timestamp (or epoch seconds). Naive values are taken as UTC.
+
+    Anything unparsable, or earlier than ``EARLIEST_YEAR``, counts as missing.
+    """
+    parsed = _parse_ts(value)
+    return parsed if parsed is not None and parsed.year >= EARLIEST_YEAR else None
+
+
+def _parse_ts(value: object) -> datetime | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):

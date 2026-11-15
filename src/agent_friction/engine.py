@@ -67,6 +67,9 @@ class AnalyzeOptions:
     rework_window_days: int = gitsignals.DEFAULT_REWORK_WINDOW_DAYS
     #: Regexes marking a commit as agent-authored; ``None`` uses the defaults.
     agent_commit_patterns: Sequence[str] | None = None
+    #: Extra regexes (matched against ``"author: <name> <email>"``) for automation whose
+    #: commits are never human rework, in addition to ``gitsignals.DEFAULT_BOT_PATTERNS``.
+    bot_commit_patterns: Sequence[str] = field(default_factory=tuple)
     git_max_commits: int = gitsignals.DEFAULT_MAX_COMMITS
     #: With no transcripts at all, analyse git history alone instead of raising (needs
     #: ``include_git`` and a readable git history).
@@ -388,7 +391,10 @@ class _Analysis:
         sources = self._sources(parsed)
         if options.include_git:
             history = gitsignals.read_history(
-                self.repo, options.git_max_commits, options.agent_commit_patterns
+                self.repo,
+                options.git_max_commits,
+                options.agent_commit_patterns,
+                options.bot_commit_patterns,
             )
             source: dict[str, Any] = {
                 "kind": "git",

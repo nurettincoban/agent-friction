@@ -14,7 +14,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_friction import model, scoring, signals
+from agent_friction import attribution, model, scoring, signals
 from agent_friction.model import Finding
 
 #: A file with at least this many lines is called "large" in recommendations.
@@ -66,6 +66,7 @@ RULE_IDS: tuple[str, ...] = (
     "document-the-command",
     "make-the-failure-actionable",
     "run-it-in-the-background",
+    "give-it-more-time",
 )
 
 
@@ -162,7 +163,9 @@ class _Rules:
         found = self.get(signals.USER_CORRECTION)
         if sum(self.shares.get(f.fid, 1.0) for f in found) < CORRECTION_MIN_SHARE:
             return  # nothing, or only thin slices of corrections spread over many files
-        repeated = len(found) >= MIN_EVENTS
+        # "Keeps repeating" is a claim about the same thing being said twice: it needs two
+        # corrections that share wording. Two unrelated corrections are two one-offs.
+        repeated = _share_wording([f.detail.get("quote", "") for f in found])
         detail = (
             f"A human corrected the agent here {_in_sessions(found)}. Put the rule in "
             "AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read "
@@ -170,9 +173,11 @@ class _Rules:
         )
         if not repeated:
             detail = (
-                "A human corrected the agent here once. If what they said is a standing "
-                "rule rather than a one-off, put it in AGENTS.md / CLAUDE.md (or a comment "
-                "at the top of the file)."
+                "A human corrected the agent here "
+                + ("once" if len(found) == 1 else _in_sessions(found))
+                + ("" if len(found) == 1 else ", each time about something else")
+                + ". If what they said is a standing rule rather than a one-off, put it in "
+                "AGENTS.md / CLAUDE.md (or a comment at the top of the file)."
             )
         if self.quote is not None:
             # Only unambiguous corrections are quoted: a "probable" one may be small talk.
@@ -188,7 +193,11 @@ class _Rules:
             "write-down-the-rule",
             "Write down the rule the human keeps repeating"
             if repeated
-            else "Check whether this correction is a standing rule",
+            else (
+                "Check whether this correction is a standing rule"
+                if len(found) == 1
+                else "Check whether these corrections are standing rules"
+            ),
             detail,
             [signals.USER_CORRECTION],
         )
@@ -418,6 +427,20 @@ class _Rules:
         retries = self.get(signals.RETRY_LOOP)
         servers = [f for f in invocation if f.detail.get("server")]
         invocation = [f for f in invocation if not f.detail.get("server")]
+        slow = [f for f in invocation if f.detail.get("timeout")]
+        invocation = [f for f in invocation if not f.detail.get("timeout")]
+        if attribution.is_inline_code(key):
+            invocation = []  # ad-hoc code is not a command anyone could document
+        if len(slow) >= MIN_EVENTS:
+            self.add(
+                "give-it-more-time",
+                f"`{key}` outlasts the harness timeout",
+                f"`{key}` was cut off by the harness timeout {_in_sessions(slow)}. Say in "
+                "AGENTS.md how long it normally takes and to run it with a longer timeout or "
+                "in the background, or point agents at a faster, narrower command for the "
+                "inner loop.",
+                [signals.COMMAND_FAILURE],
+            )
         if len(servers) >= MIN_EVENTS:
             self.add(
                 "run-it-in-the-background",
@@ -486,6 +509,72 @@ class _Rules:
         self.rejections()
         self.denials(f"`{key}`")
         self.interrupts()
+
+
+_WORD_RE = re.compile(r"[a-z_][a-z0-9_]{3,}")
+_COMMON_WORDS = frozenset(
+    {
+        "that",
+        "this",
+        "with",
+        "from",
+        "have",
+        "here",
+        "there",
+        "what",
+        "when",
+        "then",
+        "they",
+        "them",
+        "your",
+        "just",
+        "again",
+        "still",
+        "told",
+        "said",
+        "asked",
+        "please",
+        "should",
+        "would",
+        "could",
+        "wrong",
+        "revert",
+        "undo",
+        "broke",
+        "not",
+        "don",
+        "the",
+        "and",
+        "for",
+        "you",
+        "use",
+        "was",
+        "were",
+        "are",
+        "but",
+    }
+)
+#: Two corrections are "the same thing again" if they share this many content words, or
+#: one long word: a name such as ``PaymentClient`` or ``schema_gen`` rarely recurs by chance.
+SHARED_WORDS_MIN = 2
+SHARED_NAME_CHARS = 7
+
+
+def _content_words(text: str) -> set[str]:
+    return set(_WORD_RE.findall(text.lower())) - _COMMON_WORDS
+
+
+def _share_wording(quotes: Sequence[str]) -> bool:
+    """Do at least two of these messages talk about the same thing?"""
+    words = [_content_words(q) for q in quotes if q]
+    for index, first in enumerate(words):
+        for second in words[index + 1 :]:
+            shared = first & second
+            if len(shared) >= SHARED_WORDS_MIN or any(
+                len(word) >= SHARED_NAME_CHARS for word in shared
+            ):
+                return True
+    return False
 
 
 def _command_key(finding: Finding) -> str:

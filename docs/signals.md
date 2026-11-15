@@ -31,10 +31,12 @@ Severities are ordered by one principle: a human having to step in costs more
 than the agent wasting its own round trips, and a failure that provably
 repeats costs more than one that might be routine.
 
-**Weak signals.** `edit-thrash`, `read-loop`, `search-miss` and
-`probable-correction` also show up in perfectly productive sessions. A file,
-command or directory whose *only* evidence is of these kinds has its score
-capped (see methodology), gets no recommendation and never "high" confidence.
+**Weak signals.** `edit-thrash`, `read-loop`, `search-miss`,
+`probable-correction` and *ordinary* command failures (a command that ran and
+exited non-zero, as opposed to a setup/invocation error) also show up in
+perfectly productive sessions. A file, command or directory whose *only*
+evidence is of these kinds has its score capped (see methodology), gets no
+recommendation and never "high" confidence.
 The one exception: a search for the *same* pattern that misses in two or more
 sessions is treated as real evidence.
 
@@ -224,6 +226,10 @@ corrections, put words in a human's mouth, or trigger "write down the rule".
 **Attribution:** split evenly over the files edited in the preceding turn (the
 5 most recent). Weak signal: alone it is capped and recommends nothing.
 
+**Never quoted.** The human's words are not kept for a guess: the event has a
+summary (which cues matched) and a transcript line to open, but its `excerpt`
+is always `null`, with or without `--no-excerpts`.
+
 ## `retry-loop` — Retry loop
 
 **What:** the same command line fails 3 or more times in a row within a
@@ -292,7 +298,10 @@ call is not counted again.
 
 **Why:** the human saw the agent going wrong and stopped it.
 
-**Attribution:** the target of the agent's most recent tool call.
+**Attribution:** the target of the agent's most recent tool call. If that call
+was a shell command, the command is *not* blamed (stopping a running `pytest`
+says nothing about `pytest`): the event goes to the files edited in the turn
+(the 5 most recent, split evenly), or is unattributed if there are none.
 
 **False positives:** people also interrupt to add information or because they
 ran out of time.
@@ -320,6 +329,14 @@ Anthropic, Copilot, Codex, Cursor, Aider, Devin, OpenHands, Gemini, Jules or
 Windsurf; "Generated with Claude Code"; an `aider: ` subject prefix; an
 "(aider)" author; or a bot author with one of those names. Override with
 `agent_commit_patterns`.
+
+**Automation is not a human.** Commits by other bots are ignored on the human
+side, as if they were not in the history: an author name containing `[bot]`
+or starting with `dependabot`, `renovate`, `pre-commit-ci`, `github-actions`
+and similar, or a known bot e-mail address (`DEFAULT_BOT_PATTERNS`). A CI
+auto-formatter that rewrites the agent's lines is not rework, and the human
+commit after it is still compared with the agent commit. Add your own with
+`bot_commit_patterns` (regexes matched against `author: Name <email>`).
 
 **Why:** agent output here needed a human follow-up soon after it landed.
 
@@ -425,8 +442,17 @@ successfully once before being removed (read as debugging).
   it could not find and that program is a step or pipeline stage of the line
   (`cat x | jqq . | sort`), the event is keyed to that stage.
 - *Ordinary failures* (anything else: a red test, a linter or type checker
-  reporting problems, `git diff --exit-code`) count at weight 0.3 and claim no
+  reporting problems, a script that raises) count at weight 0.3 and claim no
   lost time. A red test during development is the tool working as intended.
+  They are weak evidence: a command with nothing but ordinary failures is
+  capped below the "pattern" band and gets no recommendation, however many
+  sessions it appears in.
+- *Inline code is not a command of the repository:* `python -c '...'`,
+  `node -e '...'`, `ruby -e`, `perl -e`, `bun -e`, `php -r`, and scripts piped
+  to an interpreter are keyed `python <inline>` / `python <stdin>`. What an
+  ad-hoc snippet does is the snippet's business, so its failures are ordinary
+  whatever they print; only a missing or non-executable interpreter (exit
+  126/127) is a setup error. Inline code never gets "document the command".
 - *Red, fix, green is not counted at all:* an ordinary failure that is
   followed by a file change (an edit, or a shell command that rewrites files,
   see `retry-loop`) and then by a success of the same command, **or of
@@ -459,12 +485,24 @@ successfully once before being removed (read as debugging).
   error, not a pytest failure. If no step can be confirmed, the event stays on
   the last significant command, **no file is blamed**, and the summary says
   that the step is unknown (`ambiguous_step`).
-- *Ignored:* read-only inspection commands (`ls`, `cat`, `head`, `tail`, `wc`,
-  `grep`, `rg`, `find`, `sed` without `-i`, `awk`, `jq`, `diff`, `test`,
-  `which`, `git diff | status | log | show | blame`, ...); pipelines ending in
+- *Ignored:* read-only inspection commands and probes whose exit status is
+  the answer (`ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `find`, `sed`
+  without `-i`, `awk`, `jq`, `diff`, `test`, `[`, `which`, `command -v`,
+  `type`, `hash`, `pgrep`, `lsof`, `git diff | status | log | show | blame |
+  rev-parse | merge-base | check-ignore`, `gh pr view | status | checks`, `pip
+  show | list`, `npm ls`, `docker ps`, ...; the lists are
+  `INSPECTION_PROGRAMS` and `INSPECTION_KEYS`); pipelines ending in
   `grep`/`rg`/`diff`/`test` with exit code 1 ("nothing matched"); interrupted
-  commands; declined commands; and commands run with a working directory
-  outside the repo.
+  commands; and declined commands.
+- *Commands run somewhere else are not this repository's:* a leading `cd
+  <dir>` (also `pushd`, and several in a row) is followed lexically from the
+  event's working directory (absolute paths, `~`, `..`), as are `git -C`,
+  `make -C`, `npm --prefix`, `uv --directory` and their like. If the step
+  that failed ran outside the repo, the event is dropped (`cd /tmp/scratch &&
+  python repro.py`, `cd .. && make lint`). So is a file command (`rm`, `cp`,
+  `mv`, ...) whose path arguments all lie outside the repo. A `cd` that
+  cannot be followed (`cd -`, `cd "$DIR"`) changes nothing. The same applies
+  to declined and denied commands.
 
 **Why:** agents guess how to build, test and run things; a wrong guess costs a
 round trip in every session until the right command is written down.
@@ -496,8 +534,9 @@ error.
 ## `edit-thrash` — Edit thrash
 
 **What:** 6 or more successful edits to one file within a single turn **in
-which something also went wrong**: an edit miss, a stale edit, a reverted
-edit, a failed command or a retry loop. One event per file and turn. Eight
+which something also went wrong**: an edit miss, a stale edit or a reverted
+edit *on that file*, or a failed command or retry loop in the turn. A miss on
+another file does not count. One event per file and turn. Eight
 clean edits followed by a green test run are a productive sitting, not thrash,
 and are not recorded. The event notes whether the turn's last command
 succeeded (`ended_green`); if it did, the "edits did not converge"

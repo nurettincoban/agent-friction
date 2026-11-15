@@ -20,15 +20,15 @@ with the evidence quoted so you can check it yourself.
 ```console
 $ agent-friction scan
 agent-friction · shopfront
-6 sessions · 74 tool calls · 34 friction events · ~28m lost · 4 human corrections
+6 sessions · 74 tool calls · 34 friction events · ~23m lost · 4 human corrections
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals
   █████▋      56.8 src/shopfront/api/schema_gen.py           4     12     11m  ● edit-miss×6, user-correction×2
-  ████▍       43.4 src/shopfront/checkout/service.py         3      6     19m  ● edit-revert×2, user-correction×2
+  ████▍       43.4 src/shopfront/checkout/service.py         3      6     14m  ● edit-revert×2, user-correction×2
 
 Commands that keep failing
-  ████▉       48.6 pytest                                    4      7      7m  ◐ command-failure×7
+  ████▉       48.6 pytest                                    4      7      2m  ◐ command-failure×7
 
 What to fix first
   1. src/shopfront/api/schema_gen.py: Generated file: point agents at its source
@@ -166,6 +166,8 @@ Transcripts contain your code and sometimes your secrets, so:
   Project-specific names (your own scripts, make targets, tools) become short hashes such as
   `make <target:37bd73>`: stable, so grouping still works, but a pseudonym rather than
   anonymous, since someone who guesses the name can confirm it.
+- Even with `--no-excerpts`, reports always show your repository's file paths, its directory
+  name, and when sessions happened. Those are the map itself.
 
 Redaction is pattern-based: it catches secrets that look like secrets, not an opaque password
 typed as a bare argument. Skim a report before you share it outside your team, or use

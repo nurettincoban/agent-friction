@@ -1,6 +1,6 @@
 # Agent friction map: shopfront
 
-6 agent sessions analysed · 34 friction events · ~28m lost · 4 human corrections · 5 files affected
+6 agent sessions analysed · 34 friction events · ~23m lost · 4 human corrections · 5 files affected
 
 ## What to fix first
 
@@ -15,7 +15,7 @@
 | # | File | Score | Sessions | Events | Est. time lost | Top signals | Confidence |
 |---:|---|---:|---:|---:|---:|---|---|
 | 1 | `src/shopfront/api/schema_gen.py` | 56.8 | 4 | 12 | 11m | `edit-miss`×6, `user-correction`×2, `probable-correction`×1 | high |
-| 2 | `src/shopfront/checkout/service.py` | 43.4 | 3 | 6 | 19m | `edit-revert`×2, `user-correction`×2, `edit-thrash`×1 | high |
+| 2 | `src/shopfront/checkout/service.py` | 43.4 | 3 | 6 | 14m | `edit-revert`×2, `user-correction`×2, `edit-thrash`×1 | high |
 | 3 | `src/shopfront/payments/refunds.py` | 11.4 | 1 | 1 | 18s | `path-miss`×1 | low |
 | 4 | `api/openapi.yaml` | 9.7 | 1 | 1 | 24s | `search-miss`×1 | low |
 | 5 | `tests/test_refunds.py` | 8.5 | 1 | 1 | 0s | `command-failure`×1 | low |
@@ -24,7 +24,7 @@
 
 | # | Command | Score | Sessions | Events | Est. time lost | Top signals | Confidence |
 |---:|---|---:|---:|---:|---:|---|---|
-| 1 | `pytest` | 48.6 | 4 | 7 | 7m | `command-failure`×7 | medium |
+| 1 | `pytest` | 48.6 | 4 | 7 | 2m | `command-failure`×7 | medium |
 | 2 | `rm` | 16.3 | 1 | 1 | 42s | `tool-rejected`×1 | low |
 | 3 | `curl` | 15.2 | 1 | 1 | 12s | `command-failure`×1 | low |
 | 4 | `python -m pytest` | 15.2 | 1 | 1 | 30s | `command-failure`×1 | low |
@@ -51,7 +51,6 @@
 **Evidence**
 
 - `2026-10-26 10:08` session `e65615b3` · Probable correction: Probable correction (confidence 0.4; matched "don't", "instead", "not allowed"; wording only); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py
-  > Don't call legacy_charge() here, it's deprecated. Use PaymentClient.charge() instead.
 - `2026-11-03 09:01` session `4132e18c` · Stale edit: Edit on src/shopfront/api/schema_gen.py refused: the file changed on disk after it was read
   > File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.
 - `2026-11-03 09:04` session `4132e18c` · User interrupt: The user interrupted the agent while it was working on src/shopfront/api/schema_gen.py
@@ -75,7 +74,6 @@
 **Evidence**
 
 - `2026-10-26 10:08` session `e65615b3` · Probable correction: Probable correction (confidence 0.4; matched "don't", "instead", "not allowed"; wording only); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py
-  > Don't call legacy_charge() here, it's deprecated. Use PaymentClient.charge() instead.
 - `2026-10-29 14:11` session `9f6ff626` · User correction: User correction (confidence 1; matched "no, …", "I told you"; the agent then changed src/shopfront/checkout/service.py again); attributed to src/shopfront/checkout/service.py
   > No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.
 - `2026-11-09 15:03` session `8d986baa` · Edit thrash: 7 successful edits to src/shopfront/checkout/service.py within one user turn
@@ -112,7 +110,7 @@
 <details>
 <summary><code>tests/test_refunds.py</code> · score 8.5 · 1 session</summary>
 
-1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far.
+1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far. Only weak signals, which also accompany productive work: the score is capped at 19 and nothing is recommended.
 
 **Evidence**
 

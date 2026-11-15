@@ -98,12 +98,37 @@ class PathResolver:
 
     def _relative(self, absolute: str) -> str | None:
         for root in self.roots:
-            if absolute == root:
+            # Windows file systems ignore case: a root with a drive letter matches any
+            # spelling of itself (``c:\\Users\\Dev\\Shop`` is ``C:/users/dev/shop``).
+            fold = bool(_DRIVE_RE.match(root))
+            here, there = (absolute.casefold(), root.casefold()) if fold else (absolute, root)
+            if here == there:
                 return ""
-            prefix = root.rstrip("/") + "/"
-            if absolute.startswith(prefix):
+            prefix = there.rstrip("/") + "/"
+            if here.startswith(prefix):
                 return absolute[len(prefix) :]
         return None
+
+    def chdir(self, cwd: str | None, moves: Iterable[str]) -> str | None:
+        """Absolute directory after applying ``cd``-style ``moves`` to ``cwd``.
+
+        ``None`` if a move cannot be followed lexically (``cd -``, ``cd $DIR``):
+        the caller then keeps what it knew.
+        """
+        here = cwd
+        for move in moves:
+            if not move or move == "-" or any(ch in move for ch in "$`*?"):
+                return None
+            there = self._absolute(move, here)
+            if there is None:
+                return None
+            here = there
+        return here
+
+    def outside(self, raw: str, cwd: str | None = None) -> bool:
+        """True if ``raw`` is a path that provably lies outside every root."""
+        absolute = self._absolute(raw, cwd)
+        return absolute is not None and self._relative(absolute) is None
 
     def resolve(self, raw: str | None, cwd: str | None = None) -> str | None:
         """Repo-relative path for ``raw``, ``""`` for the repo root, ``None`` if outside.
@@ -254,14 +279,26 @@ INSPECTION_PROGRAMS = frozenset(
     | {"type", "grep", "egrep", "fgrep", "rg", "test", "[", "diff", "cmp", "true", "false"}
     | {"command", "du", "df", "ps", "tree", "sleep", "kill", "pkill", "lsof", "awk", "jq"}
     | {"sed", "sort", "uniq", "cut", "tr", "less", "more", "printf", "date", "env", "printenv"}
+    | {"hash", "pgrep", "pidof", "nc", "ss", "netstat", "whoami", "id", "uname", "hostname"}
 )
 #: Read-only subcommands of otherwise significant programs.
 INSPECTION_KEYS = frozenset(
     {"git diff", "git status", "git log", "git show", "git branch", "git blame", "git grep"}
     | {"git ls-files", "git rev-parse", "git remote", "git stash list", "git describe"}
+    # exit-status probes: "is there a PR / is it installed / is it ignored / an ancestor?"
+    | {"git check-ignore", "git merge-base", "git ls-remote", "git cat-file", "git config"}
+    | {"git show-ref", "git symbolic-ref", "git name-rev", "git for-each-ref", "git worktree list"}
+    | {"gh pr view", "gh pr status", "gh pr checks", "gh pr list", "gh pr diff", "gh run view"}
+    | {"gh run list", "gh run watch", "gh issue view", "gh issue list", "gh repo view"}
+    | {"gh auth", "pip show", "pip list", "pip freeze", "pip3 show", "pip3 list", "npm ls"}
+    | {"npm list", "npm view", "npm outdated", "pnpm list", "pnpm ls", "pnpm why", "yarn list"}
+    | {"yarn why", "uv pip show", "uv pip list", "uv pip freeze", "uv tree", "cargo tree"}
+    | {"docker ps", "docker images", "docker inspect", "kubectl get", "kubectl describe"}
+    | {"brew list", "systemctl status", "systemctl is-active"}
 )
 #: Flags that turn an inspection command into one with a meaningful result.
-_NOT_INSPECTION_FLAGS = ("-i", "--in-place", "--exit-code", "--quiet")
+_NOT_INSPECTION_FLAGS = ("-i", "--in-place")
+_IN_PLACE_EDITORS = frozenset({"sed", "awk", "sort"})
 #: Filters whose exit status 1 means "nothing matched / differs", not "failed".
 MATCH_FILTERS = frozenset({"grep", "egrep", "fgrep", "rg", "diff", "cmp", "test", "["})
 #: Programs that only trim or count another command's output at the end of a pipeline.
@@ -306,6 +343,9 @@ class Step:
     args: tuple[str, ...]
     inspection: bool
     significant: bool
+    #: Directory changes in effect when the step runs, in order: earlier ``cd`` commands
+    #: of the line, then its own ``-C`` / ``--prefix`` / ``--directory`` option.
+    moves: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -392,6 +432,8 @@ def _strip_prefixes(words: Sequence[str]) -> list[str]:
             return []
         if head in _KEYWORD_PREFIXES or _ENV_ASSIGN_RE.match(head):
             out.pop(0)
+        elif head == "command" and len(out) > 1 and out[1] in ("-v", "-V"):
+            return ["command"]  # `command -v docker` asks whether docker exists
         elif head in WRAPPER_PROGRAMS:
             out = _strip_wrapper(head, out[1:])
         else:
@@ -450,6 +492,19 @@ def _skip_options(tool: str, rest: Sequence[str]) -> list[str]:
     return out
 
 
+#: Placeholders for code passed on the command line or on standard input.
+INLINE = "<inline>"
+STDIN = "<stdin>"
+_INLINE_FLAGS = frozenset({"-c", "-e", "-lc", "-ic", "--eval", "-p", "--print", "-r", "-pe", "-ne"})
+#: Scripts that are themselves command dispatchers.
+_SUBCOMMAND_SCRIPTS = frozenset({"manage.py", "artisan"})
+
+
+def is_inline_code(key: str) -> bool:
+    """A key that stands for ad-hoc code (``python <inline>``), not a repeatable command."""
+    return key.endswith((INLINE, STDIN))
+
+
 def _key(words: Sequence[str]) -> str:
     """Normalized identity of one simple command (documented in docs/methodology.md)."""
     return _sanitize(_raw_key(words))
@@ -463,7 +518,7 @@ def _sanitize(key: str) -> str:
     """
     kept: list[str] = []
     for word in key.split(" "):
-        if word in ("-m", "-c"):
+        if word in ("-m", INLINE, STDIN):
             kept.append(word)
             continue
         if not word or _NUMERIC_RE.match(word) or redact(word) != word:
@@ -485,19 +540,32 @@ def _raw_key(words: Sequence[str]) -> str:
     if base in INTERPRETERS:
         if rest and rest[0] == "-m" and len(rest) > 1:
             return f"{program} -m {rest[1]}"
-        if rest and rest[0] in ("-c", "-e", "-lc", "-ic"):
-            return f"{program} -c"
+        if rest and rest[0] in _INLINE_FLAGS:
+            return f"{program} {INLINE}"  # ``python -c``, ``node -e``: code, not a command
         if rest and rest[0] == "-":
-            return f"{program} <stdin>"  # ``python - <<EOF``: a script on standard input
+            return f"{program} {STDIN}"  # ``python - <<EOF``: a script on standard input
         if rest and _looks_like_script(rest[0]):
-            return f"{program} {_program_name(rest[0])}"
+            script = _program_name(rest[0])
+            # ``python manage.py migrate``, ``php artisan migrate``: the subcommand counts
+            dispatcher = script.rsplit("/", 1)[-1] in _SUBCOMMAND_SCRIPTS
+            if dispatcher and len(rest) > 1 and _SUBCOMMAND_RE.match(rest[1]):
+                return f"{program} {script} {rest[1]}"
+            return f"{program} {script}"
+        if base == "php" and rest and rest[0] == "artisan":
+            sub = rest[1] if len(rest) > 1 and _SUBCOMMAND_RE.match(rest[1]) else ""
+            return f"{program} artisan {sub}".strip()
     if base not in SUBCOMMAND_TOOLS or "/" in program:
         return program  # unknown tool or repo script: the executable alone, never its arguments
     rest = _skip_options(base, rest)
     parts = [program]
     if rest and _SUBCOMMAND_RE.match(rest[0]):
         parts.append(rest[0])
-        if rest[0] in CONTINUING_SUBCOMMANDS.get(base, ()):
+        if base == "yarn" and rest[0] == "workspace" and len(rest) > 2:
+            # ``yarn workspace <name> <script>``: which package, and what is run in it
+            parts.append(rest[1])
+            if _SUBCOMMAND_RE.match(rest[2]):
+                parts.append(rest[2])
+        elif rest[0] in CONTINUING_SUBCOMMANDS.get(base, ()):
             tail = _skip_options(base, rest[1:])
             if tail and _SUBCOMMAND_RE.match(tail[0]):
                 runs = "python" if _PYTHON_RE.match(tail[0]) else tail[0]
@@ -511,25 +579,68 @@ def _is_inspection(words: Sequence[str], key: str) -> bool:
     program = _program_name(words[0]).rsplit("/", 1)[-1]
     if program not in INSPECTION_PROGRAMS and key not in INSPECTION_KEYS:
         return False
+    if program not in _IN_PLACE_EDITORS:
+        return True
     return not any(
         w == f or w.startswith(f + "=") for w in words[1:] for f in _NOT_INSPECTION_FLAGS
     )
 
 
-def _steps(command: str, depth: int = 0) -> list[Step]:
+#: Options with which a tool is told to work in another directory.
+_DIR_OPTIONS: dict[str, frozenset[str]] = {
+    "git": frozenset({"-C"}),
+    "make": frozenset({"-C", "--directory"}),
+    "npm": frozenset({"--prefix", "-C"}),
+    "pnpm": frozenset({"--dir", "-C", "--prefix"}),
+    "yarn": frozenset({"--cwd"}),
+    "bun": frozenset({"--cwd"}),
+    "uv": frozenset({"--directory", "--project"}),
+    "cargo": frozenset({"-C"}),
+    "poetry": frozenset({"-C", "--directory", "-P", "--project"}),
+    "pip": frozenset(),
+    "just": frozenset({"-d", "--working-directory"}),
+    "terraform": frozenset({"-chdir"}),
+    "docker": frozenset({"--project-directory"}),
+    "cmake": frozenset({"-S", "--build"}),
+    "go": frozenset({"-C"}),
+    "tar": frozenset(),
+}
+
+
+def _own_directory(program: str, args: Sequence[str]) -> list[str]:
+    """The directory a tool was pointed at with ``-C dir`` / ``--prefix=dir``, if any."""
+    options = _DIR_OPTIONS.get(program)
+    if not options:
+        return []
+    for index, word in enumerate(args):
+        if not word.startswith("-"):
+            break  # options of the tool itself come before its subcommand
+        name, eq, value = word.partition("=")
+        if name in options:
+            if eq:
+                return [value]
+            if index + 1 < len(args):
+                return [args[index + 1]]
+    return []
+
+
+def _steps(command: str, depth: int = 0, moves: tuple[str, ...] = ()) -> list[Step]:
     steps: list[Step] = []
     for segment in _segments(_tokenize(command)):
         words = _strip_prefixes(segment)
         if not words:
             continue
         program = _program_name(words[0]).rsplit("/", 1)[-1]
+        if program in ("cd", "pushd"):
+            target = next((w for w in words[1:] if not w.startswith("-") or w == "-"), "~")
+            moves = (*moves, target)
         if (
             program in SHELLS
             and depth < _MAX_NESTING
             and len(words) > 2
             and words[1] in ("-c", "-lc", "-ic")
         ):
-            nested = _steps(words[2], depth + 1)
+            nested = _steps(words[2], depth + 1, moves)
             if nested:
                 steps.extend(nested)
                 continue
@@ -538,7 +649,8 @@ def _steps(command: str, depth: int = 0) -> list[Step]:
         significant = not (
             inspection or program in SETUP_PROGRAMS or program in HOUSEKEEPING_PROGRAMS
         )
-        steps.append(Step(key, program, tuple(words[1:]), inspection, significant))
+        where = (*moves, *_own_directory(program, words[1:]))
+        steps.append(Step(key, program, tuple(words[1:]), inspection, significant, where))
     return steps
 
 
@@ -701,7 +813,11 @@ def is_replacement(failed: str, other: str) -> bool:
     role = command_role(failed)
     if role is not None and role == command_role(other):
         return True
-    return failed.split()[-1] == other.split()[-1] and failed.split()[-1] not in ("run", "-c")
+    return failed.split()[-1] == other.split()[-1] and failed.split()[-1] not in (
+        "run",
+        INLINE,
+        STDIN,
+    )
 
 
 # ---- keys without free-form names (include_excerpts=False) -------------------------------
@@ -722,8 +838,23 @@ _PUBLIC_WORDS = frozenset(
     | {"exec", "run", "run-script", "dlx", "x", "pip", "compose", "buildx", "pr", "issue", "repo"}
     | {"workflow", "mr", "stash", "remote", "worktree", "submodule", "task", "workspace"}
     | {"revision", "downgrade", "history", "current", "makemigrations", "runserver", "head"}
-    | {"-m", "-c", "<stdin>", "http.server", "json.tool", "pdb", "timeit", "ensurepip", "django"}
-    | {"twine", "pre_commit", "compileall"}
+    | {
+        "-m",
+        "-c",
+        "<stdin>",
+        "<inline>",
+        "manage.py",
+        "artisan",
+        "http.server",
+        "json.tool",
+        "pdb",
+        "timeit",
+        "ensurepip",
+        "django",
+    }
+    | {"twine", "pre_commit", "compileall", "check-ignore", "merge-base", "rev-parse"}
+    | {"ls-files", "ls-remote", "cat-file", "show-ref", "symbolic-ref", "name-rev", "ls"}
+    | {"for-each-ref", "freeze", "tree", "is-active", "checks", "status"}
 )
 #: Well-known executables (beyond the tables above) that may open a key.
 _PUBLIC_PROGRAMS = frozenset(

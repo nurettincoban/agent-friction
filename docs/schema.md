@@ -23,16 +23,17 @@ fields may be added within a version, never removed or re-typed.
 | --- | --- | --- |
 | `repo` | required | Repository root. |
 | `transcripts` | `None` | Files or directories (searched recursively for `*.jsonl`). `None` auto-discovers Claude Code transcripts for the repo, its subdirectories, worktrees and parent directories (see methodology, Discovery). The format of each file is detected from its first lines. |
-| `since`, `until` | `None` | Only events inside this window (naive datetimes are UTC). |
+| `since`, `until` | `None` | Only **events** whose own timestamp lies inside this window, both ends inclusive (naive datetimes are UTC). The filter is per event, not per session or file: a session that straddles a boundary contributes only its events inside it; an event without a timestamp inherits the previous event's. Git commits are filtered by author date. |
 | `include_git` | `True` | Add `human-rework` from `git log`. Silently unavailable outside a git repo. |
 | `include_excerpts` | `True` | `False` removes everything verbatim: excerpts become `null` and recommendations stop quoting prompts, search patterns, error lines and reasons. Repo paths remain; command keys keep only publicly known words, and project-specific names in them become hash placeholders such as `make <target:37bd73>` (methodology, Attribution). |
 | `max_evidence` | `5` | Evidence items per hotspot. |
 | `max_hotspots` | `50` | Maximum entries in each of `hotspots`, `commands`, `directories`. |
 | `now` | `None` | Fixed `generated_at`, for reproducible output. |
 | `excerpt_chars` | `240` | Maximum excerpt length. |
-| `repo_aliases` | `()` | Other absolute paths that are this repo, e.g. where it lived on the machine that recorded the transcripts. |
+| `repo_aliases` | `()` | Other absolute paths that are this repo, e.g. where it lived on the machine that recorded the transcripts. Windows paths (with a drive letter) are compared case-insensitively. |
 | `rework_window_days` | `14` | Window for `human-rework`. |
 | `agent_commit_patterns` | `None` | Regexes (case-insensitive, multiline) matched against `author: Name <email>\n<commit message>`; replaces the defaults. |
+| `bot_commit_patterns` | `()` | Extra regexes, matched the same way against `author: Name <email>`, for automation whose commits are never human rework (added to `gitsignals.DEFAULT_BOT_PATTERNS`: `[bot]` authors, dependabot, renovate, pre-commit-ci, github-actions, ...). |
 | `git_max_commits` | `5000` | Newest commits read from the current branch. |
 | `allow_no_transcripts` | `False` | `True`: if no transcript is found but git history is readable (and `include_git` is on), analyse git history alone (`human-rework` only) instead of raising. |
 
@@ -167,7 +168,7 @@ was fixed only if its target still has exposure there.
 | `session_id` | Transcript session, or `git:<sha>` of the agent commit when no analysed session made it. |
 | `timestamp` | ISO-8601 UTC; `null` only for generic events without `ts`. |
 | `summary` | What happened, built from structure only: tool name, repo-relative path, normalized command name, counts, commit hashes. Never contains prompts, search patterns, command arguments or output. |
-| `excerpt` | Redacted, truncated transcript text (error output, the command, the human's words, the search pattern), or `null`. Always `null` with `include_excerpts=False`. May contain newlines. |
+| `excerpt` | Redacted, truncated transcript text (error output, the command, the human's words, the search pattern), or `null`. Always `null` with `include_excerpts=False`, and always `null` for `probable-correction` (a guess never quotes the human). May contain newlines. |
 | `source` | Where to look the event up: `claude-code:<repo name>/<session file>.jsonl` (never the project directory), a generic transcript file (home as `~`), or `"git"`. `null` for transcript evidence with `include_excerpts=False`. |
 | `line` | 1-based line number in `source`; `0` for git. |
 
@@ -195,7 +196,7 @@ Common fields:
 | --- | --- | --- |
 | `session` | yes | Session id (string or number). |
 | `kind` | yes | `"tool_call"`, `"tool_result"`, `"user_message"`, `"interrupt"` or (optional) `"assistant_message"`. Other kinds are ignored. |
-| `ts` | no | ISO-8601 timestamp or epoch seconds. Without it no time is estimated. |
+| `ts` | no | ISO-8601 timestamp or epoch seconds. Without it no time is estimated. A value that cannot be parsed, or that lies before the year 2000 (a zeroed clock, a counter), is treated as missing. |
 | `cwd` | no | Working directory; relative paths resolve against it. Unknown means the repo root. |
 | `subagent` | no | `true` for events of a sub-agent: its `user_message`s are not treated as human. |
 
@@ -226,6 +227,11 @@ Common fields:
 | `reason` | What the human said when declining (`error: "rejected"`). |
 
 `user_message` needs `text`. `interrupt` needs nothing else.
+
+A line that an earlier file of the same scan already contained (the same
+JSON object: session, `ts`, kind and payload) is read once, so a copied or
+re-exported log does not double its events. Identical lines within one file
+are kept.
 
 `assistant_message` (optional) carries the agent's prose in `text`. Nothing
 of it is stored or emitted. It is used for two things: its `ts` marks that

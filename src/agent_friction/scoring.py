@@ -251,6 +251,18 @@ def explain(
     return text
 
 
+def is_weak(finding: Finding) -> bool:
+    """Evidence that is routine on its own: a weak signal, or an *ordinary* command failure.
+
+    A command that merely exits non-zero (a red test, a probe that answers
+    "no", an ad-hoc snippet that raises) is what commands do. Only setup and
+    invocation errors, retry loops and human reactions make a command a hotspot.
+    """
+    if finding.signal == COMMAND_FAILURE:
+        return finding.detail.get("variant") == "ordinary"
+    return finding.signal in WEAK_ALONE_SIGNALS
+
+
 def weak_only(findings: Iterable[Finding]) -> bool:
     """True if there is evidence and all of it is of the weak-alone kind.
 
@@ -259,7 +271,7 @@ def weak_only(findings: Iterable[Finding]) -> bool:
     one-off probe before creating something new.
     """
     found = list(findings)
-    if not found or any(f.signal not in WEAK_ALONE_SIGNALS for f in found):
+    if not found or not all(is_weak(f) for f in found):
         return False
     sessions_by_pattern: dict[str, set[str]] = {}
     for finding in found:

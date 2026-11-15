@@ -84,8 +84,30 @@ def test_real_directories_resolve_on_this_platform(tmp_path: Path) -> None:
 def test_parse_command_flags_inspection() -> None:
     for command in ("sed -n 1,5p a.py", "git log -3", "cat a | wc -l", "git diff | grep x"):
         assert parse_command(command).inspection, command
-    for command in ("sed -i s/a/b/ a.py", "git diff --exit-code", "git commit -m x", "pytest"):
+    for command in ("sed -i s/a/b/ a.py", "git commit -m x", "pytest", "git stash pop"):
         assert not parse_command(command).inspection, command
+    # exit-status probes ask a question; "no" is an answer, not a failure
+    for command in (
+        "command -v docker",
+        "type docker",
+        "hash docker 2>/dev/null",
+        "pgrep -f vite",
+        "lsof -i :3000",
+        "gh pr view",
+        "gh pr checks 12",
+        "pip show requests",
+        "npm ls left-pad",
+        "git diff --quiet",
+        "git diff --exit-code",
+        "git merge-base --is-ancestor a b",
+        "git check-ignore -q build",
+        "git rev-parse --verify feature",
+        "test -f x",
+        "[ -d node_modules ]",
+    ):
+        assert parse_command(command).inspection, command
+    assert parse_command("command -v docker").key == "command"
+    assert parse_command("command docker ps -q").key == "docker ps"
 
 
 def test_extra_roots_and_nested_worktree_win() -> None:
@@ -126,8 +148,8 @@ def test_symlinked_repo_root_matches_both_spellings(tmp_path: Path) -> None:
         ("/home/u/.venv/bin/pytest -q", "pytest"),
         (".venv/bin/python scripts/gen.py --all", "python scripts/gen.py"),
         ("python3 -m pytest -k x", "python -m pytest"),
-        ("python3.12 manage.py migrate", "python manage.py"),
-        ("python -c 'print(1)'", "python -c"),
+        ("python3.12 manage.py migrate", "python manage.py migrate"),
+        ("python -c 'print(1)'", "python <inline>"),
         ("uv run pytest tests/", "uv run pytest"),
         ("./scripts/build.sh --fast", "scripts/build.sh"),
         ('git commit -m "fix; a && b | c"', "git commit"),
@@ -195,7 +217,7 @@ def test_symlinked_repo_root_matches_both_spellings(tmp_path: Path) -> None:
         ("docker compose run web pytest", "docker compose run"),
         ("docker run --rm -it registry.corp/img pytest", "docker run"),
         ("kubectl exec pod-1 -- ls", "kubectl exec"),
-        ("yarn workspace web test", "yarn workspace"),
+        ("yarn workspace web test", "yarn workspace web test"),
         ("aws s3 cp secret-bucket/x .", "aws s3"),
         ("tox -e py312", "tox"),
         # anything else is the executable alone: arguments are never part of a key
@@ -383,3 +405,68 @@ def test_parse_command_never_raises_on_shell_ish_noise() -> None:
         assert public_key(parsed.key) is not None
         path_candidates(parsed.tokens)
         objectionable_step(parsed, command)
+
+
+def test_chdir_follows_cd_lexically(resolver: PathResolver) -> None:
+    cwd = "/work/repo"
+    assert resolver.chdir(cwd, ("src",)) == "/work/repo/src"
+    assert resolver.chdir(cwd, ("src", "..", "..")) == "/work"
+    assert resolver.chdir(cwd, ("~/other",)) == "/home/dev/other"
+    assert resolver.chdir(cwd, ()) == cwd
+    for unknown in ("-", "$WORK", "build-*", ""):
+        assert resolver.chdir(cwd, (unknown,)) is None
+    assert resolver.outside("/tmp/scratch") and resolver.outside("../sibling", cwd)
+    assert not resolver.outside("src/a.py", cwd) and not resolver.outside("/work/repo/x")
+
+
+@pytest.mark.parametrize(
+    ("command", "moves"),
+    [
+        ("cd /tmp/x && python repro.py", ("/tmp/x",)),
+        ("cd web; cd src && npm test", ("web", "src")),
+        ("git -C ../other status", ("../other",)),
+        ("make -C docs html", ("docs",)),
+        ("npm --prefix web test", ("web",)),
+        ("uv --directory tools run pytest", ("tools",)),
+        ("pytest -q", ()),
+    ],
+)
+def test_steps_remember_where_they_run(command: str, moves: tuple[str, ...]) -> None:
+    assert parse_command(command).steps[-1].moves == moves
+
+
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [
+        ("node -e 'process.exit(1)'", "node <inline>"),
+        ("ruby -e 'puts 1'", "ruby <inline>"),
+        ("perl -e 'print 1'", "perl <inline>"),
+        ("bun -e 'console.log(1)'", "bun <inline>"),
+        ("python3 - <<'PY'\nprint(1)\nPY", "python <stdin>"),
+        ("php artisan migrate --force", "php artisan migrate"),
+        ("poetry run pytest -q", "poetry run pytest"),
+        ("command -v docker", "command"),
+    ],
+)
+def test_round_seven_keys(command: str, key: str) -> None:
+    assert normalize_command(command) == key
+
+
+def test_a_workspace_name_is_not_public() -> None:
+    hidden = public_key("yarn workspace acme-billing test")
+    assert (
+        "acme" not in hidden and hidden.startswith("yarn workspace <") and hidden.endswith("test")
+    )
+    assert public_key("python <inline>") == "python <inline>"
+    assert public_key("python manage.py migrate") == "python manage.py migrate"
+
+
+def test_drive_letter_roots_ignore_case() -> None:
+    resolver = PathResolver(Path("/work/repo"), ["C:\\Users\\Dev\\Shop"])
+    for raw in (
+        "c:\\users\\dev\\shop\\src\\a.py",
+        "C:/Users/Dev/Shop/src/a.py",
+        "C:\\USERS\\DEV\\SHOP\\src\\a.py",
+    ):
+        assert resolver.resolve(raw) == "src/a.py"
+    assert resolver.resolve("C:\\Users\\Dev\\Shopping\\a.py") is None

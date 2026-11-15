@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 
 from agent_friction import model
 from agent_friction.attribution import (
+    DESTRUCTIVE_PROGRAMS,
     HOUSEKEEPING_PROGRAMS,
     MATCH_FILTERS,
     SETUP_PROGRAMS,
@@ -22,6 +23,7 @@ from agent_friction.attribution import (
     PathResolver,
     Step,
     command_role,
+    is_inline_code,
     is_replacement,
     is_setup_command,
     is_shell_edit,
@@ -849,12 +851,21 @@ class _State:
     unconfirmed: _Unconfirmed | None = None
     # this turn: did anything go wrong, how did its last command end, which searches missed
     turn_trouble: bool = False
+    turn_trouble_files: set[str] = field(default_factory=set)
+    # successful tool calls so far, and that count when each finding was recorded
+    ok_actions: int = 0
+    turns: int = 0
+    edit_turns: dict[tuple[str, str, str], int] = field(default_factory=dict)
+    write_turns: dict[tuple[str, str], int] = field(default_factory=dict)
+    emitted_at: dict[int, int] = field(default_factory=dict)
     turn_shell_ok: bool | None = None
     turn_misses: list[tuple[Finding, str]] = field(default_factory=list)
 
 
 #: What makes a run of edits to one file "thrash" rather than a productive sitting.
-_TROUBLE = frozenset({EDIT_MISS, STALE_EDIT, EDIT_REVERT, COMMAND_FAILURE, RETRY_LOOP})
+#: A failed command counts for every file of the turn; a miss or revert only for its own.
+_TROUBLE = frozenset({COMMAND_FAILURE, RETRY_LOOP})
+_FILE_TROUBLE = frozenset({EDIT_MISS, STALE_EDIT, EDIT_REVERT})
 
 
 class _Detector:
@@ -896,7 +907,10 @@ class _Detector:
         )
         self.findings.append(finding)
         self.exposed.update((t.kind, t.key) for t in targets)
-        if signal in _TROUBLE:
+        self.state.emitted_at[id(finding)] = self.state.ok_actions
+        if signal in _FILE_TROUBLE:
+            self.state.turn_trouble_files.update(t.key for t in targets if t.kind == model.FILE)
+        elif signal in _TROUBLE:
             self.state.turn_trouble = True
         return finding
 
@@ -915,6 +929,10 @@ class _Detector:
     def _recover(self, finding: Finding, action: _Action) -> None:
         """Extend a failure's interval up to the successful ``action`` that resolved it."""
         if finding.interval is None:
+            return
+        if self.state.emitted_at.get(id(finding)) != self.state.ok_actions:
+            # Something else already succeeded in between: the agent had moved on, and
+            # the failure cost one round trip, not everything until it came back.
             return
         end = _epoch(action.result) or _epoch(action.call)
         extended = _capped(finding.interval[0], end)
@@ -937,6 +955,25 @@ class _Detector:
 
     # ---- pairing ---------------------------------------------------------------------
 
+    def _elsewhere(self, step: Step | None, cwd: str | None) -> bool:
+        """Does ``step`` run, or only act, outside the repository?
+
+        ``cd /tmp/scratch && python repro.py``, ``git -C ~/other status`` and
+        ``rm -rf /var/tmp/build`` say nothing about this repo.
+        """
+        if step is None:
+            return False
+        resolver = self.ctx.resolver
+        if step.moves:
+            there = resolver.chdir(cwd, step.moves)
+            if there is not None and not resolver.contains(there):
+                return True
+            cwd = there or cwd
+        if step.program in HOUSEKEEPING_PROGRAMS | DESTRUCTIVE_PROGRAMS:
+            paths = [a for a in step.args if not a.startswith("-")]
+            return bool(paths) and all(resolver.outside(path, cwd) for path in paths)
+        return False
+
     def _classify(self, action: _Action) -> None:
         """Resolve what a call is about: a repo file, a command, or a search scope."""
         event = action.call
@@ -948,7 +985,8 @@ class _Detector:
                 self.exposed.add((model.FILE, action.file))
         elif event.op == model.OP_SHELL and event.command and resolver.contains(event.cwd):
             parsed = parse_command(event.command)
-            if parsed.key:
+            primary = next((s for s in parsed.steps if s.key == parsed.key), None)
+            if parsed.key and not self._elsewhere(primary, event.cwd):
                 action.cmd = parsed
                 if not parsed.inspection:
                     self.exposed.add((model.COMMAND, self.ctx.command_key(parsed.key)))
@@ -1005,21 +1043,32 @@ class _Detector:
     def _end_turn(self) -> None:
         """Judge what can only be judged once a turn is over."""
         state = self.state
-        if state.thrash and not state.turn_trouble:
-            # Many edits, nothing failed, missed or was taken back: that is just writing.
-            self._drop({id(f) for f in state.thrash.values()})
-        elif state.turn_shell_ok:
+        # Many edits to a file with no command failing and nothing on that file missed or
+        # taken back: that is just writing.
+        calm = {
+            id(finding)
+            for path, finding in state.thrash.items()
+            if not state.turn_trouble and path not in state.turn_trouble_files
+        }
+        self._drop(calm)
+        if state.turn_shell_ok:
             for finding in state.thrash.values():
                 finding.detail["ended_green"] = "1"
         state.thrash = {}
         state.turn_trouble = False
+        state.turns += 1
+        state.turn_trouble_files = set()
         state.turn_shell_ok = None
         state.turn_misses = []
 
     def _step(self, item: _Action | Event) -> None:
         state = self.state
         if isinstance(item, _Action):
-            self._on_action(item)
+            try:
+                self._on_action(item)
+            finally:
+                if item.result is not None and item.result.ok:
+                    state.ok_actions += 1
             state.turn.append(item)
         elif item.kind == model.AGENT_MESSAGE:
             state.agent_seen = _epoch(item) or state.agent_seen
@@ -1159,23 +1208,30 @@ class _Detector:
                     # and now they are gone again: a temporary debug print, not a retreat.
                     continue
                 reverted = True
-                reverted_at = made_at
+                # Only within one turn is the time in between the detour itself; an undo
+                # of work from an earlier turn costs the undoing call and nothing more.
+                same_turn = state.edit_turns.pop((path, new, old), -1) == state.turns
+                reverted_at = made_at if same_turn else None
             else:
                 history[(old, new)] = (now, state.ok_commands, (old, new) in call.insertions)
+                state.edit_turns[(path, old, new)] = state.turns
         if call.op == model.OP_WRITE and call.content_digest:
             versions = state.write_history.setdefault(path, [])
             if versions and versions[-1] != call.content_digest and call.content_digest in versions:
                 reverted = True
-                reverted_at = state.write_times.get((path, versions[-1]))
+                written = state.write_times.get((path, versions[-1]))
+                same_turn = state.write_turns.get((path, versions[-1]), -1) == state.turns
+                reverted_at = written if same_turn else None
             versions.append(call.content_digest)
             state.write_times[(path, call.content_digest)] = now
+            state.write_turns[(path, call.content_digest)] = state.turns
         if reverted:
             self._emit(
                 EDIT_REVERT,
                 result,
                 f"{call.tool} on {path} undid an earlier edit from the same session",
                 targets,
-                interval=_capped_back(reverted_at, now),
+                interval=_capped_back(reverted_at, now) or self._round_trip(action),
             )
 
     def _on_change(self) -> None:
@@ -1379,8 +1435,15 @@ class _Detector:
             named = next((s for s in cmd.steps if s.key and name in (s.program, s.key)), None)
             if named is not None:
                 step, certain = named, True
+        if self._elsewhere(step, call.cwd):
+            return  # the step that failed ran, or only touched things, outside the repo
         if step is not None and step.key:
             key = step.key
+        inline = is_inline_code(key)
+        if inline and code not in INVOCATION_EXIT_CODES:
+            # Ad-hoc code failing says something about that code, not about how to run
+            # anything here. Only a missing interpreter is a setup problem.
+            invocation = False
         hook_fixed = False
         if key == "git commit":
             if NOTHING_TO_COMMIT_RE.search(result.output):
@@ -1412,6 +1475,8 @@ class _Detector:
         }
         if not certain:
             detail["ambiguous_step"] = "1"
+        if inline:
+            detail["inline"] = "1"
         if timed_out:
             detail["timeout"] = "1"
             if DEV_SERVER_RE.search(call.command or ""):
@@ -1522,6 +1587,8 @@ class _Detector:
             finding.detail["corroborated"] = "followed"
             return
         finding.signal = PROBABLE_CORRECTION
+        finding.excerpt = ""  # a guess is never put in anyone's mouth
+        finding.detail.pop("quote", None)
         finding.detail["confidence"] = f"{CORRECTION_PROBABLE:g}"
         finding.detail["corroborated"] = "no"
         finding.summary = self._correction_summary(
@@ -1541,6 +1608,8 @@ class _Detector:
                 return
             # Name the step the human objected to (`rm`, `git push`), not the last one.
             step = objectionable_step(action.cmd, result.reason)
+            if self._elsewhere(step, call.cwd):
+                return
             if step is not None and step.key:
                 targets = [Target(model.COMMAND, self.ctx.command_key(step.key))]
         what = targets[0].key if targets else call.tool
@@ -1573,6 +1642,8 @@ class _Detector:
             # can say which step was the problem. Otherwise: the destructive step.
             said = result.output.replace(call.command or "\0", " ")
             step = objectionable_step(action.cmd, said)
+            if self._elsewhere(step, call.cwd):
+                return
             if step is not None and step.key:
                 targets = [Target(model.COMMAND, self.ctx.command_key(step.key))]
         by = {"hook": "a hook", "blocked": "the harness"}.get(result.reason, "permission settings")
@@ -1608,7 +1679,18 @@ class _Detector:
                 return  # the agent was working outside the repo
             what = f"running {last.call.tool}"
         elif targets[0].kind == model.COMMAND:
+            # Stopping a running command is about the work in progress, not about the
+            # command: the event goes to what the agent had been changing, if anything.
             what = f"running `{targets[0].key}`"
+            edited: list[str] = []
+            for action in reversed(turn):
+                changed = action.call.op in (model.OP_EDIT, model.OP_WRITE)
+                if changed and action.file and action.file not in edited:
+                    edited.append(action.file)
+            edited = edited[:CORRECTION_MAX_FILES]
+            targets = [Target(model.FILE, rel, 1.0 / len(edited)) for rel in edited]
+            if edited:
+                what += " after edits to " + ", ".join(edited)
         else:
             what = f"working on {targets[0].key}"
         start, _ = self._turn_bounds()
@@ -1675,14 +1757,16 @@ class _Detector:
         else:
             confidence = CORRECTION_PROBABLE
             note = "not corroborated: no file was changed in the preceding turn"
+        certain = confidence >= CORRECTION_STRONG
         finding = self._emit(
-            USER_CORRECTION if confidence >= CORRECTION_STRONG else PROBABLE_CORRECTION,
+            USER_CORRECTION if certain else PROBABLE_CORRECTION,
             event,
             self._correction_summary(confidence, matched, note, how),
             targets,
-            excerpt=event.text,
+            # a guess is never put in anyone's mouth: only a correction keeps the words
+            excerpt=event.text if certain else "",
             interval=_capped_back(start, end),
-            detail={"quote": event.text, "confidence": f"{confidence:g}"},
+            detail={"confidence": f"{confidence:g}", **({"quote": event.text} if certain else {})},
         )
         if corroborated:
             finding.detail["corroborated"] = corroborated

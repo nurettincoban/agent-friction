@@ -371,7 +371,8 @@ def test_only_unambiguous_corrections_are_quoted(result: dict[str, Any]) -> None
         for e in h["evidence"]
         if e["signal"] == "probable-correction" and "confidence 0.4" in e["summary"]
     ]
-    assert probable and all("Don't call legacy_charge" in e["excerpt"] for e in probable)
+    assert probable and all(e["excerpt"] is None for e in probable)
+    assert "Don't call legacy_charge" not in json.dumps(story(max_evidence=50))
 
 
 def test_windows_transcripts_resolve_on_any_platform(tmp_path: Path) -> None:
@@ -912,3 +913,87 @@ def test_inspect_transcripts_reports_what_each_file_held(tmp_path: Path) -> None
     assert report["empty.jsonl"] == (0, 0)
     assert report["binary.jsonl"] == (0, 3)
     assert report["partly.jsonl"][1] == 1
+
+
+def test_probes_and_snippets_do_not_make_a_command_hotspot(tmp_path: Path) -> None:
+    (tmp_path / "repo").mkdir()
+    sessions = []
+    for i in range(10):
+        s = Session(f"q{i}", cwd=str(tmp_path / "repo")).user(f"task {i}")
+        s.bash("gh pr view", "no pull requests found", exit_code=1)
+        s.bash("git diff --quiet", "", exit_code=1)
+        s.bash("command -v docker", "", exit_code=1)
+        s.bash(f"python -c 'import json; print(json.loads(\"{i}\")[0])'", "TypeError", exit_code=1)
+        s.bash("git stash pop", "No stash entries found.", exit_code=1)
+        s.bash("cd /tmp/scratch && python repro.py", "sh: 1: python: not found", exit_code=127)
+        sessions.append(s)
+    out = _scan(tmp_path, sessions)
+    assert sorted(c["path"] for c in out["commands"]) == ["git stash pop", "python <inline>"]
+    for row in out["commands"]:
+        assert row["score"] <= 19.0 and row["score_detail"]["capped"] is True
+        assert row["recommendations"] == []
+
+
+def test_time_lost_after_a_failed_edit_is_one_round_trip(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sessions = []
+    for i in range(3):
+        s = Session(f"e{i}", cwd=str(repo)).user("go")
+        s.edit(f"{repo}/src/app.py", error=builders.EDIT_NOT_FOUND)
+        for k in range(8):
+            s.edit(f"{repo}/src/util.py", f"a{k}", f"b{k}").bash("pytest", "ok", took=30)
+        s.edit(f"{repo}/src/app.py", "x", "y")
+        sessions.append(s)
+    out = _scan(tmp_path, sessions)
+    assert out["totals"]["est_minutes_lost"] < 1.0
+
+
+def test_probable_corrections_are_never_quoted(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    s = Session("pq", cwd=str(repo)).user("implement it")
+    s.edit(f"{repo}/src/app.py").say("Done.")
+    s.user("Actually we should have a retry here instead, can you add it")
+    s.write(f"{repo}/src/helper.py", "x")
+    out = _scan(tmp_path, [s])
+    evidence = [e for h in out["hotspots"] for e in h["evidence"]]
+    assert [e["signal"] for e in evidence] == ["probable-correction"]
+    assert evidence[0]["excerpt"] is None and "retry here" not in json.dumps(out)
+
+
+def test_drive_letter_aliases_ignore_case(tmp_path: Path) -> None:
+    repo = tmp_path / "shop"
+    repo.mkdir()
+    s = Session("win", cwd="c:\\users\\dev\\shop").user("go")
+    s.edit("C:\\Users\\Dev\\Shop\\src\\a.py", error=builders.EDIT_NOT_FOUND)
+    s.edit("c:/users/dev/shop/src/a.py", error=builders.EDIT_NOT_FOUND)
+    out = analyze(
+        AnalyzeOptions(
+            repo=repo,
+            transcripts=[s.save(tmp_path / "t")],
+            repo_aliases=["C:\\Users\\Dev\\Shop"],
+            include_git=False,
+        )
+    )
+    assert [(h["path"], h["events"]) for h in out["hotspots"]] == [("src/a.py", 2)]
+
+
+def test_the_same_generic_log_twice_is_one_set_of_events(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    lines = [
+        {"session": "g1", "ts": "2026-11-05T16:00:00Z", "kind": "user_message", "text": "go"},
+        {"session": "g1", "ts": "2026-11-05T16:00:01Z", "kind": "tool_call", "id": 1, "op": "shell",
+         "command": "make build", "cwd": str(repo)},
+        {"session": "g1", "ts": "2026-11-05T16:00:02Z", "kind": "tool_result", "id": 1,
+         "exit_code": 127, "output": "sh: 1: make: not found"},
+    ]  # fmt: skip
+    text = "\n".join(json.dumps(line) for line in lines) + "\n"
+    for name in ("a.jsonl", "backup/a.jsonl"):
+        (tmp_path / "t" / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "t" / name).write_text(text)
+    out = analyze(
+        AnalyzeOptions(repo=repo, transcripts=[tmp_path / "t"], include_git=False, now=NOW)
+    )
+    assert out["totals"]["friction_events"] == 1 and out["totals"]["sessions"] == 1

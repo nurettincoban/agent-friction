@@ -3,7 +3,7 @@
     {
       "agent_commits": 0,
       "confidence": "medium",
-      "est_minutes_lost": 6.8,
+      "est_minutes_lost": 2.5,
       "events": 7,
       "evidence": [
         {
@@ -370,7 +370,7 @@
       "events": 12,
       "evidence": [
         {
-          "excerpt": "Don't call legacy_charge() here, it's deprecated. Use PaymentClient.charge() instead.",
+          "excerpt": null,
           "line": 28,
           "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
           "signal": "probable-correction",
@@ -496,11 +496,11 @@
     {
       "agent_commits": 0,
       "confidence": "high",
-      "est_minutes_lost": 18.9,
+      "est_minutes_lost": 14.2,
       "events": 6,
       "evidence": [
         {
-          "excerpt": "Don't call legacy_charge() here, it's deprecated. Use PaymentClient.charge() instead.",
+          "excerpt": null,
           "line": 28,
           "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
           "signal": "probable-correction",
@@ -731,7 +731,7 @@
       "recommendations": [],
       "score": 8.5,
       "score_detail": {
-        "capped": false,
+        "capped": true,
         "consistency": 0.7,
         "intensity": 0.678,
         "mean_session_points": 0.678,
@@ -749,7 +749,7 @@
       "signals": {
         "command-failure": 1
       },
-      "why": "1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far."
+      "why": "1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far. Only weak signals, which also accompany productive work: the score is capped at 19 and nothing is recommended."
     }
   ],
   "repo": {
@@ -938,7 +938,7 @@
     "commands_affected": 4,
     "corrections": 4,
     "directories_affected": 1,
-    "est_minutes_lost": 27.7,
+    "est_minutes_lost": 23.0,
     "files_affected": 5,
     "friction_events": 34,
     "probable_corrections": 1,
@@ -981,7 +981,7 @@
                 "children": [
                   {
                     "children": [],
-                    "est_minutes_lost": 18.9,
+                    "est_minutes_lost": 14.2,
                     "events": 6,
                     "exposure_sessions": 3,
                     "friction_rate": 1.0,
@@ -992,7 +992,7 @@
                     "sessions": 3
                   }
                 ],
-                "est_minutes_lost": 18.9,
+                "est_minutes_lost": 14.2,
                 "events": 6,
                 "exposure_sessions": 3,
                 "friction_rate": 1.0,
@@ -1028,7 +1028,7 @@
                 "sessions": 1
               }
             ],
-            "est_minutes_lost": 26.6,
+            "est_minutes_lost": 21.8,
             "events": 23,
             "exposure_sessions": 6,
             "friction_rate": 1.0,
@@ -1039,7 +1039,7 @@
             "sessions": 6
           }
         ],
-        "est_minutes_lost": 26.6,
+        "est_minutes_lost": 21.8,
         "events": 23,
         "exposure_sessions": 6,
         "friction_rate": 1.0,
@@ -1100,7 +1100,7 @@
         "sessions": 1
       }
     ],
-    "est_minutes_lost": 27.0,
+    "est_minutes_lost": 22.3,
     "events": 25,
     "exposure_sessions": 6,
     "friction_rate": 1.0,

@@ -227,3 +227,15 @@ def test_weak_only_evidence() -> None:
     counts = [(signals.READ_LOOP, 5)]
     assert "capped at 19" in scoring.explain(counts, 5, 5, "medium", capped=True)
     assert "capped" not in scoring.explain(counts, 5, 5, "medium")
+
+
+def test_ordinary_command_failures_are_weak_on_their_own() -> None:
+    def failure(variant: str, session: str = "s1") -> Finding:
+        found = finding(signals.COMMAND_FAILURE, session)
+        found.detail["variant"] = variant
+        return found
+
+    assert scoring.is_weak(failure("ordinary")) and not scoring.is_weak(failure("invocation"))
+    assert scoring.weak_only([failure("ordinary", f"s{i}") for i in range(10)])
+    assert not scoring.weak_only([failure("ordinary"), failure("invocation")])
+    assert not scoring.weak_only([failure("ordinary"), finding(signals.RETRY_LOOP)])

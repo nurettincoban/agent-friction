@@ -89,8 +89,16 @@ def _event(obj: dict[str, Any], line: int) -> Event | None:
     return event
 
 
-def parse_file(path: Path) -> ParsedFile:
-    """Parse one generic-format ``.jsonl`` file (it may hold several sessions)."""
+def parse_file(path: Path, seen: dict[str, str] | None = None) -> ParsedFile:
+    """Parse one generic-format ``.jsonl`` file (it may hold several sessions).
+
+    ``seen`` de-duplicates across files: a line that an earlier file already
+    contributed (same session, timestamp, kind and payload, i.e. the same
+    text) is skipped, so a copied or re-exported log does not double its
+    events. Repeated lines within one file are kept.
+    """
+    earlier = seen if seen is not None else {}
+    mine: set[str] = set()
     streams: dict[tuple[str, bool], Stream] = {}
     parsed = ParsedFile(path=path, kind=KIND, streams=[])
     asking: dict[tuple[str, bool], bool] = {}
@@ -107,6 +115,10 @@ def parse_file(path: Path) -> ParsedFile:
             if not isinstance(obj, dict):
                 parsed.skipped_lines += 1
                 continue
+            fingerprint = "generic:" + common.digest(json.dumps(obj, sort_keys=True))
+            if earlier.get(fingerprint, str(path)) != str(path):
+                continue  # the same event, already read from another file
+            mine.add(fingerprint)
             session = obj.get("session")
             if obj.get("kind") == ASSISTANT_MESSAGE and isinstance(session, (str, int)):
                 text = obj.get("text")
@@ -135,5 +147,7 @@ def parse_file(path: Path) -> ParsedFile:
                 else:
                     asking.pop(key, None)
             streams[key].events.append(event)
+    for fingerprint in mine:
+        earlier.setdefault(fingerprint, str(path))
     parsed.streams = list(streams.values())
     return parsed

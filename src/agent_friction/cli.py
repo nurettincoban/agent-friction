@@ -31,6 +31,11 @@ from agent_friction.report.terminal import render_detail, render_dir_detail
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_GATE = 0, 1, 2, 3
 
+
+class UsageError(AgentFrictionError):
+    """A problem with the arguments rather than the data (exit code 2)."""
+
+
 _REL = re.compile(r"^(\d+)\s*([hdwm])$")
 _EXT_FORMAT = {
     ".html": "html",
@@ -39,6 +44,14 @@ _EXT_FORMAT = {
     ".json": "json",
     ".txt": "terminal",
 }
+
+
+def _regex(value: str) -> str:
+    try:
+        re.compile(value)
+    except re.error as exc:
+        raise argparse.ArgumentTypeError(f"invalid regex {value!r}: {exc}") from None
+    return value
 
 
 def parse_when(value: str, *, now: datetime | None = None) -> datetime:
@@ -104,9 +117,9 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
         "--since",
         type=parse_when,
         metavar="WHEN",
-        help="only sessions after WHEN (30d, 2026-01-31)",
+        help="only events after WHEN (30d, 2026-01-31); a session that straddles it is cut",
     )
-    g.add_argument("--until", type=parse_when, metavar="WHEN", help="only sessions before WHEN")
+    g.add_argument("--until", type=parse_when, metavar="WHEN", help="only events before WHEN")
     g.add_argument("--no-git", action="store_true", help="skip git history (human-rework signal)")
     g.add_argument(
         "--repo-alias",
@@ -122,6 +135,15 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
         default=14,
         metavar="N",
         help="human edits within N days of an agent commit count as rework (default 14)",
+    )
+    g.add_argument(
+        "--bot-author",
+        action="append",
+        default=[],
+        type=_regex,
+        metavar="REGEX",
+        help='treat commits whose author ("Name <email>") matches REGEX as automation, '
+        "not human rework; repeatable",
     )
     g.add_argument(
         "--no-excerpts",
@@ -271,6 +293,7 @@ def _analyze(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
             max_evidence=args.max_evidence,
             repo_aliases=tuple(args.repo_alias),
             rework_window_days=args.rework_days,
+            bot_commit_patterns=[f"^author: .*(?:{p})" for p in args.bot_author],
             allow_no_transcripts=args.allow_empty,
         )
     )
@@ -333,7 +356,7 @@ def _write(text: str, output: Path | None, stdout: TextIO) -> None:
         stdout.write(text)
         return
     if not output.parent.is_dir():
-        raise AgentFrictionError(f"{output.parent}: directory does not exist")
+        raise UsageError(f"{output.parent}: directory does not exist")
     output.write_text(text, encoding="utf-8")
 
 
@@ -532,6 +555,9 @@ def main(
     }
     try:
         return handlers[args.command](args, out, err)
+    except UsageError as exc:
+        err.write(f"agent-friction: {exc}\n")
+        return EXIT_USAGE
     except AgentFrictionError as exc:
         err.write(f"agent-friction: {exc}\n")
         return EXIT_ERROR

@@ -318,3 +318,29 @@ def test_pure_insertions_are_flagged_without_keeping_text(tmp_path: Path) -> Non
     first, second = (e for e in stream.events if e.kind == model.TOOL_CALL)
     assert first.insertions == frozenset(first.edits) and second.insertions == frozenset()
     assert "print" not in repr(first.edits)
+
+
+def test_generic_events_repeated_across_files_are_read_once(tmp_path: Path) -> None:
+    lines = [
+        {"session": "s1", "ts": "2026-11-05T16:00:00Z", "kind": "user_message", "text": "go"},
+        {"session": "s1", "ts": "2026-11-05T16:00:01Z", "kind": "tool_call", "id": 1, "op": "shell",
+         "command": "make"},
+        {"session": "s1", "ts": "2026-11-05T16:00:02Z", "kind": "tool_result", "id": 1,
+         "exit_code": 2, "output": "nope"},
+    ]  # fmt: skip
+    text = "\n".join(json.dumps(line) for line in lines) + "\n"
+    first, copy = tmp_path / "a.jsonl", tmp_path / "copy.jsonl"
+    first.write_text(text)
+    copy.write_text(text)
+    seen: dict[str, str] = {}
+    one = parse_transcript(first, seen)
+    two = parse_transcript(copy, seen)
+    assert sum(len(s.events) for s in one.streams) == 3
+    assert sum(len(s.events) for s in two.streams) == 0
+    assert sum(len(s.events) for s in parse_transcript(copy).streams) == 3
+
+
+def test_implausible_timestamps_are_missing() -> None:
+    assert parse_ts("1970-01-01T00:00:05Z") is None and parse_ts(12) is None
+    assert parse_ts("1999-12-31T23:59:59Z") is None and parse_ts("not a time") is None
+    assert parse_ts("2000-01-01T00:00:00Z") == datetime(2000, 1, 1, tzinfo=timezone.utc)

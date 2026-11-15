@@ -91,7 +91,12 @@ together, and so that the key can be shown even when excerpts are off:
    `scripts/build.sh`.
 4. **Keep arguments only where they are known to be names, not data:**
    - interpreters keep `-m module` or the script path (`python -m pytest`,
-     `python scripts/gen.py`);
+     `python scripts/gen.py`), plus the subcommand of a script that is itself
+     a dispatcher (`python manage.py migrate`, `php artisan migrate`);
+   - inline code has no name: `python -c '...'`, `node -e '...'`, `ruby -e`,
+     `perl -e`, `bun -e` are `<program> <inline>`, and a script on standard
+     input (`python - <<EOF`) is `<program> <stdin>`. These keys never get a
+     "document the command" recommendation;
    - tools on a fixed allowlist of multi-command tools (`SUBCOMMAND_TOOLS`:
      `git`, `npm`, `pnpm`, `yarn`, `uv`, `cargo`, `go`, `make`, `docker`,
      `kubectl`, `gh`, `terraform`, `aws`, ...) keep **one** lower-case
@@ -102,7 +107,10 @@ together, and so that the key can be shown even when excerpts are off:
      -> `uv run pytest`);
    - one further word is kept only after a script runner or command group of
      that tool (`CONTINUING_SUBCOMMANDS`: `npm run build`, `uv run pytest`,
-     `poetry run python -m pytest`, `docker compose up`, `gh pr create`);
+     `poetry run python -m pytest`, `bundle exec rspec`, `docker compose
+     up`, `gh pr create`), and `yarn workspace <name> <script>` keeps both
+     (the workspace name is project-specific and becomes a placeholder
+     without excerpts);
    - **every other program is its executable name alone**: `./run s3cret` is
      `run`, `mytool acme-codename --x` is `mytool`, `ssh host cmd` is `ssh`,
      `docker run <image>` is `docker run`.
@@ -189,11 +197,14 @@ score       = 100 x severity x recurrence x consistency
 - **severity(signal)** is the per-signal constant from the [catalog](signals.md).
 - **weight** is 1 except that an ordinary `command-failure` uses 0.3.
 - **Weak evidence is capped.** If every event on a target is of a weak kind
-  (`edit-thrash`, `read-loop`, `search-miss`, `probable-correction`; see the
-  [catalog](signals.md)), the score is capped at **19**, below the band where
+  (`edit-thrash`, `read-loop`, `search-miss`, `probable-correction`, or an
+  *ordinary* `command-failure`; see the [catalog](signals.md)), the score is capped at **19**, below the band where
   a single real incident lands, `score_detail.capped` is true, and no
   recommendation is made. Such a target can be a lead; it cannot be an alarm
-  or fail a build on its own.
+  or fail a build on its own. This is what keeps `git stash pop` with nothing
+  stashed, a red `mypy` run or ten unrelated `python -c` snippets from adding
+  up to "a command that keeps failing": it takes a setup/invocation error, a
+  retry loop or a human reaction to lift a command out of the cap.
 - **share** is 1 except when one correction is split over several files.
 - **log2 per session** gives diminishing returns: a session contributes one
   more point each time its friction doubles, so one pathological session
@@ -246,11 +257,11 @@ Each event may claim a wall-clock interval from transcript timestamps:
 
 | Event | Interval |
 | --- | --- |
-| `edit-miss`, `stale-edit` | from the failed call until the next successful edit of the same file in the same turn; if there is none, one round trip |
-| `command-failure` (setup/invocation) | from the failed call until the end of the command that recovered it (the same command succeeding, or a replacement doing the same job, within the next 5 shell calls of the turn); otherwise one round trip |
+| `edit-miss`, `stale-edit` | one round trip; extended to the edit of the same file that lands only if every tool call in between failed too |
+| `command-failure` (setup/invocation) | one round trip; extended to the end of the command that recovered it (the same command succeeding, or a replacement doing the same job, within the next 5 shell calls of the turn) only if every tool call in between failed too |
 | `command-failure` (ordinary) | none |
-| `path-miss`, `search-miss`, `tool-rejected`, `permission-denied` | one round trip |
-| `edit-revert` | from the original edit to the revert |
+| `path-miss`, `search-miss`, `file-too-large`, `tool-rejected`, `permission-denied` | one round trip |
+| `edit-revert` | from the original edit to the revert if both are in the same turn; otherwise one round trip |
 | `user-correction`, `user-interrupt` | the agent's working time in the corrected turn (first tool call to last agent activity / the interrupt) |
 | `retry-loop`, `edit-thrash`, `read-loop`, `human-rework` | none (no defensible estimate) |
 
@@ -259,6 +270,12 @@ tool call or its next message). If the next thing in the transcript is a
 human message, the agent's turn was over: only the call itself (call to
 result) is claimed, never the time until the human replied. A failure that
 the agent reports and then waits an hour on costs seconds, not an hour.
+
+**As soon as anything succeeds, the clock stops.** A failed edit followed by
+eight green test cycles on another file and, much later, an unrelated edit of
+the first file cost one round trip, not the minutes in between: that time was
+productive. Only an unbroken run of failures (miss, miss, miss, then the edit
+lands) is counted as one stretch.
 
 Every interval is capped at **5 minutes**. `est_minutes_lost` for a hotspot,
 a tree node or the whole report is the length of the **union** of its
@@ -277,7 +294,7 @@ counting. Events without timestamps claim nothing.
 
 | Level | Rule |
 | --- | --- |
-| `high` | 3 or more distinct sessions **and** 2 or more distinct signal types, not counting hotspots whose only signals are the weak ones (`read-loop`, `edit-thrash`, `search-miss`, `probable-correction`) |
+| `high` | 3 or more distinct sessions **and** 2 or more distinct signal types, not counting hotspots whose only signals are the weak ones (`read-loop`, `edit-thrash`, `search-miss`, `probable-correction`, ordinary command failures) |
 | `medium` | 2 or more distinct sessions |
 | `low` | a single session |
 
@@ -316,7 +333,7 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `make-edits-land` | 2+ `edit-miss` on a file that is neither large nor generated (wording depends on whether misses were mostly ambiguous or not-found) |
 | `document-what-rewrites-this-file` | 2+ `stale-edit` of the "modified since read" kind |
 | `path-agents-expect` | 2+ `path-miss` |
-| `write-down-the-rule` | corroborated `user-correction` events whose attributed shares sum to 0.5 or more; quotes up to 3. With one correction it only asks whether that was a standing rule; "the human keeps repeating" needs 2+. A `probable-correction` never counts |
+| `write-down-the-rule` | corroborated `user-correction` events whose attributed shares sum to 0.5 or more; quotes up to 3. "The rule the human keeps repeating" is claimed only when 2+ of the corrections share wording (two content words, or one distinctive word of 7+ letters, e.g. the same class name); otherwise the recommendation only asks whether the correction(s) reflect a standing rule. A `probable-correction` never counts |
 | `state-the-boundary` | 2+ `tool-rejected`, or 1 with a stated reason |
 | `allow-or-document-the-boundary` | 2+ `permission-denied` |
 | `clarify-before-acting` | 2+ `user-interrupt` |
@@ -329,6 +346,7 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `document-the-command` | 2+ setup/invocation failures of a command (and neither of the above) |
 | `make-the-failure-actionable` | 1+ `retry-loop` on a command |
 | `run-it-in-the-background` | 2+ harness timeouts of a command that is a server or watcher (`npm run dev`, `uvicorn`, ...); replaces `document-the-command` for those |
+| `give-it-more-time` | 2+ harness timeouts of any other command (`npm run build` cut off after 2 minutes): say how long it takes, raise the timeout or run it in the background, or name a narrower command; replaces `document-the-command` for those |
 
 ## Privacy and redaction
 
@@ -395,6 +413,14 @@ follow one rule: anything that looks like a home directory becomes `~`.
 - **Heuristics, not understanding.** A correction is recognised by its
   wording plus what the agent does next; a setup error by its output. Both directions of error exist and are
   listed per signal in the catalog.
+- **Where a command runs is followed lexically.** `cd`, `pushd` and
+  directory options (`git -C`, `make -C`, `npm --prefix`, `uv --directory`)
+  are resolved from the text of the command line. A `cd` through a variable,
+  a symlink or a shell function is not seen: such a command is judged by the
+  event's recorded working directory.
+- **Bots are recognised by name.** A CI formatter that commits under a
+  person's name counts as that person unless `bot_commit_patterns` says
+  otherwise.
 - **Friction is not always the codebase's fault.** Some events reflect the
   agent, the prompt or the harness. The recurrence requirement behind
   "medium" and "high" confidence is the main defence; treat "low" as a lead.

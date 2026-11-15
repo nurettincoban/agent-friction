@@ -175,10 +175,20 @@ def test_one_correction_is_not_a_rule_the_human_keeps_repeating() -> None:
     assert rec["title"] == "Check whether this correction is a standing rule"
     assert "corrected the agent here once." in str(rec["detail"])
     assert "keeps repeating" not in str(rec) and '"No, use the client"' in str(rec["detail"])
-    twice = [finding(signals.USER_CORRECTION, f"s{i}", fid=i, quote="No") for i in range(2)]
+    said = ("No, use PaymentClient, not the legacy module", "I told you: PaymentClient only!")
+    twice = [finding(signals.USER_CORRECTION, f"s{i}", fid=i, quote=q) for i, q in enumerate(said)]
     (rec,) = recommend.recommend(model.FILE, "a.py", twice, None, quote)
     assert rec["title"] == "Write down the rule the human keeps repeating"
     assert "2 times in 2 sessions" in str(rec["detail"])
+    # the same verdict holds when the words themselves may not be shown
+    (bare,) = recommend.recommend(model.FILE, "a.py", twice, None, None)
+    assert bare["title"] == rec["title"] and "PaymentClient" not in str(bare)
+    # two corrections about different things are two one-offs, not a rule being repeated
+    said = ("No, use PaymentClient, not the legacy module", "That broke the migration, revert it")
+    other = [finding(signals.USER_CORRECTION, f"s{i}", fid=i, quote=q) for i, q in enumerate(said)]
+    (rec,) = recommend.recommend(model.FILE, "a.py", other, None, quote)
+    assert rec["title"] == "Check whether these corrections are standing rules"
+    assert "each time about something else" in str(rec["detail"])
 
 
 def test_probable_corrections_and_other_weak_signals_get_no_advice() -> None:
@@ -236,7 +246,8 @@ def test_a_foreground_server_is_to_be_run_in_the_background() -> None:
         finding(signals.COMMAND_FAILURE, f"s{i}", variant="invocation", timeout="1")
         for i in range(2)
     ]
-    assert ids(recommend.recommend(model.COMMAND, "npm test", plain)) == ["document-the-command"]
+    (rec,) = recommend.recommend(model.COMMAND, "npm run build", plain)
+    assert rec["id"] == "give-it-more-time" and "longer timeout" in str(rec["detail"])
 
 
 def test_harness_blocks_get_their_own_wording() -> None:
@@ -244,3 +255,14 @@ def test_harness_blocks_get_their_own_wording() -> None:
     (rec,) = recommend.recommend(model.COMMAND, "gh run view", found)
     assert rec["id"] == "allow-or-document-the-boundary"
     assert "the harness itself refuses" in str(rec["detail"]) and "allow rule" not in str(rec)
+
+
+def test_inline_code_is_never_a_command_to_document() -> None:
+    found = [
+        finding(signals.COMMAND_FAILURE, f"s{i}", variant="invocation", key="python <inline>")
+        for i in range(3)
+    ]
+    recs = recommend.recommend(model.COMMAND, "python <inline>", found)
+    assert "document-the-command" not in ids(recs)
+    ordinary = [finding(signals.COMMAND_FAILURE, f"s{i}", variant="ordinary") for i in range(5)]
+    assert recommend.recommend(model.COMMAND, "pytest", ordinary) == []

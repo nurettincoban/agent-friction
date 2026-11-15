@@ -287,7 +287,8 @@ def test_linters_and_exit_code_checks_are_ordinary_failures(tmp_path: Path) -> N
     s.bash("pytest -q", "E   FileNotFoundError: No such file or directory: 'x'", exit_code=1)
     s.bash("pytest -q", "assert 'sh: foo: command not found' in captured.err", exit_code=1)
     found = detect(s, tmp_path)
-    assert len(found) == 8 + 1  # eight failures plus the retry loop on `pytest -q`
+    # `git diff --exit-code` is a probe; seven failures plus the retry loop on `pytest -q`
+    assert len(found) == 7 + 1
     for failure in by_signal(found, signals.COMMAND_FAILURE):
         assert failure.detail["variant"] == "ordinary", failure.excerpt
         assert failure.weight == signals.ORDINARY_FAILURE_WEIGHT and failure.interval is None
@@ -511,8 +512,9 @@ def test_failure_time_runs_until_the_command_that_recovers(tmp_path: Path) -> No
     s.bash("frobnicate", "command not found", exit_code=127)  # never recovered: one round trip
     setup, ordinary, lost = detect(s, tmp_path)
     assert setup.interval is not None and lost.interval is not None
-    # 5 (run) + 10 + 4 (think) + 2 (read) + 10 + 4 (think) + 5 (run)
-    assert setup.interval[1] - setup.interval[0] == pytest.approx(40)
+    # One round trip, 5 (run) + 10 + 4 (think): the read succeeded, so the agent had moved
+    # on; what it did until `make test` is work, not waste.
+    assert setup.interval[1] - setup.interval[0] == pytest.approx(19)
     assert ordinary.interval is None
     assert lost.interval[1] - lost.interval[0] == pytest.approx(5)
 
@@ -565,7 +567,13 @@ def test_interrupt_attributes_to_last_tool_target(tmp_path: Path) -> None:
 
     shell = Session().user("go")
     shell.bash("npm run build", "…").interrupt()
-    assert keys(detect(shell, tmp_path)[0]) == [("command", "npm run build")]
+    (stopped,) = detect(shell, tmp_path)  # stopping a command says nothing about the command
+    assert stopped.targets == [] and "while it was running `npm run build`" in stopped.summary
+
+    testing = Session().user("go")
+    testing.edit(A).edit(B).bash("pytest", "…").interrupt()
+    (stopped,) = detect(testing, tmp_path)  # it goes to what the agent had been changing
+    assert [(t.key, t.share) for t in stopped.targets] == [("src/b.py", 0.5), ("src/a.py", 0.5)]
 
 
 def test_interrupt_negative_cases(tmp_path: Path) -> None:
@@ -818,7 +826,8 @@ def test_answering_the_agents_question_is_not_a_correction(tmp_path: Path) -> No
     asked.edit(A, "p", "q").say("Pagination is in.")
     asked.user("No, that is the wrong endpoint")  # nothing was asked this time
     (fix,) = detect(asked, tmp_path)
-    assert fix.signal == signals.PROBABLE_CORRECTION and "wrong endpoint" in fix.excerpt
+    assert fix.signal == signals.PROBABLE_CORRECTION and fix.line == len(asked.lines)
+    assert fix.excerpt == "" and "quote" not in fix.detail  # a guess is never quoted
 
     # the question must be the last thing the agent said before the reply
     stale = Session().user("add the feature")
@@ -1236,6 +1245,7 @@ def test_ide_context_blocks_are_not_human_text(tmp_path: Path) -> None:
     s = Session().user("add the feature")
     s.read("/repo/README.md").edit(A)
     ide_prompt(s, IDE_BLOCK, "No, use the Decimal type, I told you.")
+    s.edit(A, "new", "newer")
     (fix,) = detect(s, tmp_path, known=("README.md",))
     assert fix.excerpt == "No, use the Decimal type, I told you."  # the quote is the human's
     assert keys(fix) == [("file", "src/a.py")]  # README.md is named by the IDE, not the human
@@ -1441,7 +1451,7 @@ def test_polling_until_something_is_ready_is_not_friction(tmp_path: Path) -> Non
 def test_a_loop_that_never_passes_or_needed_a_fix_is_still_friction(tmp_path: Path) -> None:
     stuck = Session().user("go")
     for _ in range(3):
-        stuck.bash("gh pr checks 12", "build  fail", exit_code=8)
+        stuck.bash("make deploy-check", "build  fail", exit_code=8)
     assert len(by_signal(detect(stuck, tmp_path), signals.RETRY_LOOP)) == 1
 
     installed = Session().user("go")
@@ -1758,3 +1768,121 @@ def test_a_pipeline_is_keyed_to_the_stage_the_shell_could_not_find(tmp_path: Pat
     first, second, third = detect(s, tmp_path)
     assert keys(first) == [("command", "pnpm test")]
     assert keys(second) == [("command", "jqq")] and keys(third) == [("command", "frob")]
+
+
+# ---- round 7: time, probes, commands run elsewhere ------------------------------------------
+
+
+def test_a_failed_edit_costs_one_round_trip_once_the_agent_moves_on(tmp_path: Path) -> None:
+    s = Session().user("go").edit(A, error=builders.EDIT_NOT_FOUND)
+    for i in range(8):  # unrelated, successful work
+        s.edit(B, f"a{i}", f"b{i}").bash("pytest -q", "1 passed", took=30)
+    s.edit(A, "x", "y")
+    (miss,) = by_signal(detect(s, tmp_path), signals.EDIT_MISS)
+    assert miss.interval is not None
+    assert miss.interval[1] - miss.interval[0] < 30
+
+    again = Session().user("go").edit(A, error=builders.EDIT_NOT_FOUND)
+    again.edit(A, error=builders.EDIT_NOT_FOUND).edit(A, "x", "y")
+    first, second = by_signal(detect(again, tmp_path), signals.EDIT_MISS)
+    assert first.interval is not None and second.interval is not None
+    # consecutive failures on the same file: the first one lasts until the edit lands
+    assert first.interval[1] == second.interval[1] > first.interval[0] + 5
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd /tmp/scratch && python repro.py",
+        "cd ~/other-project && npm test",
+        "cd .. && make lint",
+        "cd ../sibling; pytest",
+        "git -C /srv/elsewhere pull",
+        "make -C ../other lint",
+        "npm --prefix /srv/web test",
+        "uv --directory /srv/tool run pytest",
+        "rm /nonexistent/build/out.html",
+    ],
+)
+def test_commands_run_outside_the_repo_are_not_its_friction(tmp_path: Path, command: str) -> None:
+    s = Session().user("go")
+    s.bash(command, "sh: 1: thing: not found", exit_code=127)
+    s.reject("Bash", {"command": command}, "not there")
+    assert detect(s, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [
+        ("cd src && pytest", "pytest"),
+        ("cd /repo/web && npm test", "npm test"),
+        ("cd $WORK && make lint", "make lint"),  # cannot be followed: keep what we knew
+        ("git -C /repo push", "git push"),
+        ("rm build/out.html", "rm"),
+    ],
+)
+def test_commands_run_inside_the_repo_still_count(tmp_path: Path, command: str, key: str) -> None:
+    s = Session().user("go").bash(command, "sh: 1: thing: not found", exit_code=127)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.COMMAND_FAILURE and found.targets[0].key == key
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "command -v docker",
+        "type rg",
+        "hash node",
+        "pgrep -f server.py",
+        "lsof -i :8000",
+        "gh pr view",
+        "gh pr checks",
+        "pip show requests",
+        "npm ls left-pad",
+        "git diff --quiet",
+        "git diff --exit-code",
+        "git merge-base --is-ancestor main HEAD",
+        "git check-ignore -q build",
+        "git rev-parse --verify feature",
+        "test -f config.yml",
+        "[ -d node_modules ]",
+    ],
+)
+def test_a_probe_that_answers_no_is_not_a_failure(tmp_path: Path, command: str) -> None:
+    s = Session().user("go").bash(command, "", exit_code=1)
+    assert detect(s, tmp_path) == []
+
+
+def test_inline_code_is_ordinary_unless_the_interpreter_is_missing(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.bash("node -e 'process.exit(1)'", "", exit_code=1)
+    s.bash("python -c 'import nope'", "ModuleNotFoundError: No module named 'nope'", exit_code=1)
+    s.bash("ruby -e 'puts 1'", "sh: 1: ruby: not found", exit_code=127)
+    node, python, ruby = detect(s, tmp_path)
+    assert [f.targets[0].key for f in (node, python, ruby)] == [
+        "node <inline>",
+        "python <inline>",
+        "ruby <inline>",
+    ]
+    assert node.detail["variant"] == python.detail["variant"] == "ordinary"
+    assert ruby.detail["variant"] != "ordinary"
+
+
+def test_thrash_needs_the_trouble_on_the_same_file(tmp_path: Path) -> None:
+    s = Session().user("go")
+    for i in range(7):
+        s.edit(A, f"old{i}", f"new{i}")
+    s.edit(B, error=builders.EDIT_NOT_FOUND)  # a miss on another file
+    assert {f.signal for f in detect(s, tmp_path)} == {signals.EDIT_MISS}
+
+
+def test_a_revert_of_an_earlier_turns_edit_costs_one_round_trip(tmp_path: Path) -> None:
+    s = Session().user("go").edit(A, "one", "two").tick(60).edit(A, "two", "one")
+    (same,) = by_signal(detect(s, tmp_path), signals.EDIT_REVERT)
+    assert same.interval is not None and same.interval[1] - same.interval[0] > 60
+    later = Session().user("go").edit(A, "one", "two")
+    for i in range(6):
+        later.edit(B, f"a{i}", f"b{i}").bash("pytest -q", "1 passed", took=30)
+    later.user("now the next feature").edit(A, "two", "one")
+    (other,) = by_signal(detect(later, tmp_path), signals.EDIT_REVERT)
+    assert other.interval is None or other.interval[1] - other.interval[0] < 30
