@@ -208,3 +208,22 @@ def test_a_derived_signal_is_not_a_second_kind_of_evidence() -> None:
     assert scoring.confidence(sessions, [*loop_and_failures, signals.TOOL_REJECTED]) == "high"
     # a retry loop next to unrelated evidence is still its own signal
     assert scoring.confidence(sessions, [signals.RETRY_LOOP, signals.USER_CORRECTION]) == "high"
+
+
+def test_weak_only_evidence() -> None:
+    def miss(session: str, pattern: str) -> Finding:
+        found = finding(signals.SEARCH_MISS, session)
+        found.detail["pattern"] = pattern
+        return found
+
+    assert not scoring.weak_only([])
+    assert scoring.weak_only([finding(signals.EDIT_THRASH), finding(signals.READ_LOOP)])
+    assert scoring.weak_only([finding(signals.PROBABLE_CORRECTION)])
+    assert not scoring.weak_only([finding(signals.READ_LOOP), finding(signals.EDIT_MISS)])
+    assert scoring.weak_only([miss("s1", "feature_1"), miss("s2", "feature_2")])
+    assert scoring.weak_only([miss("s1", "Policy"), miss("s1", "Policy")])
+    # the same name missed in two sessions is no longer a one-off probe
+    assert not scoring.weak_only([miss("s1", "Policy"), miss("s2", "policy")])
+    counts = [(signals.READ_LOOP, 5)]
+    assert "capped at 19" in scoring.explain(counts, 5, 5, "medium", capped=True)
+    assert "capped" not in scoring.explain(counts, 5, 5, "medium")

@@ -274,3 +274,23 @@ def test_git_only_scan_with_allow_empty(tmp_path: Path, monkeypatch: pytest.Monk
     code, out, err = run("scan", str(repo), "--allow-empty", "-f", "json")
     assert code == EXIT_OK, err
     assert json.loads(out)["settings"]["git"] is True
+
+
+def test_bad_json_inputs_are_clean_errors(tmp_path: Path) -> None:
+    code, _, err = run("compare", str(tmp_path), str(tmp_path))
+    assert code == EXIT_ERROR and "is a directory" in err
+    good = tmp_path / "r.json"
+    run("scan", *INPUT, "-o", str(good))
+    utf16 = tmp_path / "ps.json"
+    utf16.write_text(good.read_text(encoding="utf-8"), encoding="utf-16")
+    assert run("compare", str(good), str(utf16))[0] == EXIT_OK
+    garbage = tmp_path / "bin.json"
+    garbage.write_bytes(b"\x80\x81\x82{")
+    code, _, err = run("compare", str(good), str(garbage))
+    assert code == EXIT_ERROR and "Traceback" not in err
+
+
+def test_absurd_since_and_directory_output_are_usage_errors(tmp_path: Path) -> None:
+    assert run("scan", *INPUT, "--since", "99999999999d")[0] == EXIT_USAGE
+    code, _, err = run("scan", *INPUT, "-o", str(tmp_path))
+    assert code == EXIT_USAGE and "is a directory" in err

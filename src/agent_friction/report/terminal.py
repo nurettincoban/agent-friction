@@ -118,7 +118,11 @@ def render_terminal(
     hotspots = list(result.get("hotspots", []))[:top]
     commands = list(result.get("commands", []))[:top]
     if not hotspots and not commands and not result.get("directories"):
-        out.append(st.green("No recurring friction found. Agents seem to have a smooth ride here."))
+        calls = int(totals.get("tool_calls", 0))
+        out.append(
+            st.green(f"No recurring friction found in {plural(calls, 'tool call')}.")
+            + (st.dim(" That is a small sample; check again later.") if calls < 50 else "")
+        )
         return "\n".join(out) + "\n"
 
     if hotspots:

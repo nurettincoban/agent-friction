@@ -11,7 +11,7 @@
           "line": 20,
           "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
           "signal": "command-failure",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/e65615b3-b6e0-5853-afdf-c13d1b54f9b5.jsonl",
+          "source": "claude-code:shopfront/e65615b3-b6e0-5853-afdf-c13d1b54f9b5.jsonl",
           "summary": "`pytest` failed (exit 4; setup/invocation error)",
           "timestamp": "2026-10-26T10:03:31Z"
         },
@@ -20,7 +20,7 @@
           "line": 17,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
           "signal": "command-failure",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
+          "source": "claude-code:shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
           "summary": "`pytest` failed (exit 4; setup/invocation error)",
           "timestamp": "2026-10-29T14:03:15Z"
         },
@@ -29,7 +29,7 @@
           "line": 19,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
           "signal": "command-failure",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
+          "source": "claude-code:shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
           "summary": "`pytest` failed (exit 4; setup/invocation error)",
           "timestamp": "2026-10-29T14:03:44Z"
         },
@@ -47,7 +47,7 @@
           "line": 13,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
           "signal": "command-failure",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
+          "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
           "summary": "`pytest` failed (exit 4; setup/invocation error)",
           "timestamp": "2026-11-09T15:01:53Z"
         }
@@ -68,6 +68,7 @@
       ],
       "score": 48.6,
       "score_detail": {
+        "capped": false,
         "consistency": 0.88,
         "intensity": 7.503,
         "mean_session_points": 1.876,
@@ -113,7 +114,7 @@
           "line": 19,
           "session_id": "4132e18c-d843-510d-aee7-82374ae93389",
           "signal": "tool-rejected",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/4132e18c-d843-510d-aee7-82374ae93389.jsonl",
+          "source": "claude-code:shopfront/4132e18c-d843-510d-aee7-82374ae93389.jsonl",
           "summary": "The user declined Bash on `rm` and said why",
           "timestamp": "2026-11-03T09:03:15Z"
         }
@@ -134,6 +135,7 @@
       ],
       "score": 16.3,
       "score_detail": {
+        "capped": false,
         "consistency": 0.7,
         "intensity": 1.807,
         "mean_session_points": 1.807,
@@ -164,7 +166,7 @@
           "line": 33,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
           "signal": "command-failure",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
+          "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
           "summary": "`curl` failed (exit 7; setup/invocation error)",
           "timestamp": "2026-11-09T15:15:24Z"
         }
@@ -176,6 +178,7 @@
       "recommendations": [],
       "score": 15.2,
       "score_detail": {
+        "capped": false,
         "consistency": 0.7,
         "intensity": 1.585,
         "mean_session_points": 1.585,
@@ -206,7 +209,7 @@
           "line": 19,
           "session_id": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
           "signal": "command-failure",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/fb4e20bf-8179-51b6-93e1-be4a26ada996.jsonl",
+          "source": "claude-code:shopfront/fb4e20bf-8179-51b6-93e1-be4a26ada996.jsonl",
           "summary": "`python -m pytest` failed (exit 4; setup/invocation error)",
           "timestamp": "2026-11-12T11:02:35Z"
         }
@@ -218,6 +221,7 @@
       "recommendations": [],
       "score": 15.2,
       "score_detail": {
+        "capped": false,
         "consistency": 0.7,
         "intensity": 1.585,
         "mean_session_points": 1.585,
@@ -250,7 +254,7 @@
           "line": 5,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
           "signal": "search-miss",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
+          "source": "claude-code:shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
           "summary": "Grep search in src/shopfront returned nothing",
           "timestamp": "2026-10-29T14:00:06Z"
         },
@@ -259,7 +263,7 @@
           "line": 7,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
           "signal": "search-miss",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
+          "source": "claude-code:shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
           "summary": "Glob search in src/shopfront returned nothing",
           "timestamp": "2026-10-29T14:00:22Z"
         },
@@ -268,7 +272,7 @@
           "line": 3,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
           "signal": "search-miss",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58/subagents/agent-a1f3c9.jsonl",
+          "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58/subagents/agent-a1f3c9.jsonl",
           "summary": "Grep search in src/shopfront returned nothing",
           "timestamp": "2026-11-09T15:00:06Z"
         },
@@ -277,7 +281,7 @@
           "line": 5,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
           "signal": "search-miss",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58/subagents/agent-a1f3c9.jsonl",
+          "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58/subagents/agent-a1f3c9.jsonl",
           "summary": "Grep search in src/shopfront returned nothing",
           "timestamp": "2026-11-09T15:00:20Z"
         },
@@ -286,7 +290,7 @@
           "line": 7,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
           "signal": "search-miss",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58/subagents/agent-a1f3c9.jsonl",
+          "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58/subagents/agent-a1f3c9.jsonl",
           "summary": "Glob search in src/shopfront returned nothing",
           "timestamp": "2026-11-09T15:00:34Z"
         }
@@ -307,6 +311,7 @@
       ],
       "score": 29.5,
       "score_detail": {
+        "capped": false,
         "consistency": 0.8,
         "intensity": 3.585,
         "mean_session_points": 1.792,
@@ -365,11 +370,20 @@
       "events": 12,
       "evidence": [
         {
+          "excerpt": "Don't call legacy_charge() here, it's deprecated. Use PaymentClient.charge() instead.",
+          "line": 28,
+          "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
+          "signal": "probable-correction",
+          "source": "claude-code:shopfront/e65615b3-b6e0-5853-afdf-c13d1b54f9b5.jsonl",
+          "summary": "Probable correction (confidence 0.4; matched \"don't\", \"instead\", \"not allowed\"; wording only); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py",
+          "timestamp": "2026-10-26T10:08:42Z"
+        },
+        {
           "excerpt": "File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.",
           "line": 13,
           "session_id": "4132e18c-d843-510d-aee7-82374ae93389",
           "signal": "stale-edit",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/4132e18c-d843-510d-aee7-82374ae93389.jsonl",
+          "source": "claude-code:shopfront/4132e18c-d843-510d-aee7-82374ae93389.jsonl",
           "summary": "Edit on src/shopfront/api/schema_gen.py refused: the file changed on disk after it was read",
           "timestamp": "2026-11-03T09:01:39Z"
         },
@@ -378,7 +392,7 @@
           "line": 24,
           "session_id": "4132e18c-d843-510d-aee7-82374ae93389",
           "signal": "user-interrupt",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/4132e18c-d843-510d-aee7-82374ae93389.jsonl",
+          "source": "claude-code:shopfront/4132e18c-d843-510d-aee7-82374ae93389.jsonl",
           "summary": "The user interrupted the agent while it was working on src/shopfront/api/schema_gen.py",
           "timestamp": "2026-11-03T09:04:16Z"
         },
@@ -396,18 +410,9 @@
           "line": 9,
           "session_id": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
           "signal": "edit-miss",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/fb4e20bf-8179-51b6-93e1-be4a26ada996.jsonl",
+          "source": "claude-code:shopfront/fb4e20bf-8179-51b6-93e1-be4a26ada996.jsonl",
           "summary": "Edit on src/shopfront/api/schema_gen.py failed: the text to replace was not found",
           "timestamp": "2026-11-12T11:00:48Z"
-        },
-        {
-          "excerpt": null,
-          "line": 10,
-          "session_id": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
-          "signal": "read-loop",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/fb4e20bf-8179-51b6-93e1-be4a26ada996.jsonl",
-          "summary": "src/shopfront/api/schema_gen.py was read 3 times with no edit in between",
-          "timestamp": "2026-11-12T11:01:07Z"
         }
       ],
       "exposure_sessions": 4,
@@ -438,7 +443,7 @@
           "title": "Large file: split it or add unique anchors"
         },
         {
-          "detail": "A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: \"No, stop hand-editing src/shopfront/api/schema_gen.py. It is generated: change api/openapi.yaml and run make codegen.\" / \"That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml.\"",
+          "detail": "A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: \"No, stop hand-editing src/shopfront/api/schema_gen.py. It is generated: change api/openapi.yaml and run make codegen.\" / \"That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml.\"",
           "id": "write-down-the-rule",
           "signals": [
             "user-correction"
@@ -448,9 +453,10 @@
       ],
       "score": 56.8,
       "score_detail": {
+        "capped": false,
         "consistency": 0.88,
-        "intensity": 10.795,
-        "mean_session_points": 2.699,
+        "intensity": 10.782,
+        "mean_session_points": 2.696,
         "recurrence": 0.774,
         "sessions": [
           {
@@ -464,9 +470,9 @@
             "weighted_events": 6.0
           },
           {
-            "points": 2.536,
+            "points": 2.524,
             "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
-            "weighted_events": 4.8
+            "weighted_events": 4.75
           },
           {
             "points": 1.807,
@@ -474,17 +480,18 @@
             "weighted_events": 2.5
           }
         ],
-        "severity": 0.835
+        "severity": 0.834
       },
       "sessions": 4,
       "signals": {
         "edit-miss": 6,
+        "probable-correction": 1,
         "read-loop": 1,
         "stale-edit": 1,
-        "user-correction": 3,
+        "user-correction": 2,
         "user-interrupt": 1
       },
-      "why": "12 friction events in all 4 sessions that touched it (6 edit misses, 3 user corrections, 1 read loop, 2 more signal types); high confidence because it recurs across sessions with several kinds of evidence."
+      "why": "12 friction events in all 4 sessions that touched it (6 edit misses, 2 user corrections, 1 probable correction, 3 more signal types); high confidence because it recurs across sessions with several kinds of evidence."
     },
     {
       "agent_commits": 0,
@@ -493,29 +500,29 @@
       "events": 6,
       "evidence": [
         {
+          "excerpt": "Don't call legacy_charge() here, it's deprecated. Use PaymentClient.charge() instead.",
+          "line": 28,
+          "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
+          "signal": "probable-correction",
+          "source": "claude-code:shopfront/e65615b3-b6e0-5853-afdf-c13d1b54f9b5.jsonl",
+          "summary": "Probable correction (confidence 0.4; matched \"don't\", \"instead\", \"not allowed\"; wording only); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py",
+          "timestamp": "2026-10-26T10:08:42Z"
+        },
+        {
           "excerpt": "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.",
           "line": 29,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
           "signal": "user-correction",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
+          "source": "claude-code:shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
           "summary": "User correction (confidence 1; matched \"no, …\", \"I told you\"; the agent then changed src/shopfront/checkout/service.py again); attributed to src/shopfront/checkout/service.py",
           "timestamp": "2026-10-29T14:11:05Z"
-        },
-        {
-          "excerpt": null,
-          "line": 17,
-          "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
-          "signal": "edit-revert",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
-          "summary": "Edit on src/shopfront/checkout/service.py undid an earlier edit from the same session",
-          "timestamp": "2026-11-09T15:02:42Z"
         },
         {
           "excerpt": null,
           "line": 21,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
           "signal": "edit-thrash",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
+          "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
           "summary": "7 successful edits to src/shopfront/checkout/service.py within one user turn",
           "timestamp": "2026-11-09T15:03:39Z"
         },
@@ -524,7 +531,7 @@
           "line": 27,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
           "signal": "user-correction",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
+          "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
           "summary": "User correction (confidence 1; matched \"still failing\", \"I told you\"; the user names src/shopfront/checkout/service.py, which it had changed); names src/shopfront/checkout/service.py",
           "timestamp": "2026-11-09T15:14:23Z"
         },
@@ -533,7 +540,7 @@
           "line": 31,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
           "signal": "edit-revert",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
+          "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
           "summary": "Edit on src/shopfront/checkout/service.py undid an earlier edit from the same session",
           "timestamp": "2026-11-09T15:15:05Z"
         }
@@ -549,7 +556,7 @@
       "path": "src/shopfront/checkout/service.py",
       "recommendations": [
         {
-          "detail": "A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: \"It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only.\" / \"No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.\"",
+          "detail": "A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: \"It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only.\" / \"No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.\"",
           "id": "write-down-the-rule",
           "signals": [
             "user-correction"
@@ -557,20 +564,20 @@
           "title": "Write down the rule the human keeps repeating"
         },
         {
-          "detail": "Edits here did not converge: 1 thrash episode and 2 reverted edits in 1 session. Document the quickest command that validates this file (a single test, a type check) so agents can verify instead of iterating blind.",
+          "detail": "Edits here did not converge: 0 thrash episodes and 2 reverted edits in 1 session. Document the quickest command that validates this file (a single test, a type check) so agents can verify instead of iterating blind.",
           "id": "add-a-fast-check",
           "signals": [
-            "edit-revert",
-            "edit-thrash"
+            "edit-revert"
           ],
           "title": "Give agents a fast way to check changes to this file"
         }
       ],
-      "score": 43.5,
+      "score": 43.4,
       "score_detail": {
+        "capped": false,
         "consistency": 0.85,
-        "intensity": 6.562,
-        "mean_session_points": 2.187,
+        "intensity": 6.522,
+        "mean_session_points": 2.174,
         "recurrence": 0.667,
         "sessions": [
           {
@@ -584,20 +591,21 @@
             "weighted_events": 4.0
           },
           {
-            "points": 0.848,
+            "points": 0.807,
             "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
-            "weighted_events": 0.8
+            "weighted_events": 0.75
           }
         ],
-        "severity": 0.767
+        "severity": 0.765
       },
       "sessions": 3,
       "signals": {
         "edit-revert": 2,
         "edit-thrash": 1,
-        "user-correction": 3
+        "probable-correction": 1,
+        "user-correction": 2
       },
-      "why": "6 friction events in all 3 sessions that touched it (3 user corrections, 2 reverted edits, 1 edit thrash episode); high confidence because it recurs across sessions with several kinds of evidence."
+      "why": "6 friction events in all 3 sessions that touched it (2 reverted edits, 2 user corrections, 1 edit thrash episode, 1 more signal type); high confidence because it recurs across sessions with several kinds of evidence."
     },
     {
       "agent_commits": 0,
@@ -610,7 +618,7 @@
           "line": 9,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
           "signal": "path-miss",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
+          "source": "claude-code:shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
           "summary": "Read targeted src/shopfront/payments/refunds.py, which does not exist",
           "timestamp": "2026-10-29T14:00:38Z"
         }
@@ -627,6 +635,7 @@
       "recommendations": [],
       "score": 11.4,
       "score_detail": {
+        "capped": false,
         "consistency": 0.7,
         "intensity": 1.0,
         "mean_session_points": 1.0,
@@ -657,7 +666,7 @@
           "line": 13,
           "session_id": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
           "signal": "search-miss",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/fb4e20bf-8179-51b6-93e1-be4a26ada996.jsonl",
+          "source": "claude-code:shopfront/fb4e20bf-8179-51b6-93e1-be4a26ada996.jsonl",
           "summary": "Grep search in api/openapi.yaml returned nothing",
           "timestamp": "2026-11-12T11:01:35Z"
         }
@@ -674,6 +683,7 @@
       "recommendations": [],
       "score": 9.7,
       "score_detail": {
+        "capped": true,
         "consistency": 0.6,
         "intensity": 1.0,
         "mean_session_points": 1.0,
@@ -691,7 +701,7 @@
       "signals": {
         "search-miss": 1
       },
-      "why": "1 friction event in 1 of the 2 sessions that touched it (1 search miss); low confidence because there is too little independent evidence so far."
+      "why": "1 friction event in 1 of the 2 sessions that touched it (1 search miss); low confidence because there is too little independent evidence so far. Only weak signals, which also accompany productive work: the score is capped at 19 and nothing is recommended."
     },
     {
       "agent_commits": 0,
@@ -704,7 +714,7 @@
           "line": 23,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
           "signal": "command-failure",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
+          "source": "claude-code:shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
           "summary": "`pytest` failed (exit 1; ordinary failure)",
           "timestamp": "2026-10-29T14:04:51Z"
         }
@@ -721,6 +731,7 @@
       "recommendations": [],
       "score": 8.5,
       "score_detail": {
+        "capped": false,
         "consistency": 0.7,
         "intensity": 0.678,
         "mean_session_points": 0.678,
@@ -754,7 +765,7 @@
   "signals": [
     {
       "attribution": "Files the agent touched in the preceding turn that the message names; otherwise split evenly over the files it edited in that turn (the 5 most recent).",
-      "count": 5,
+      "count": 4,
       "description": "A human prompt that follows agent work and opens with an unambiguous correction (\"No, …\", \"I told you …\", \"revert that\", \"still failing\", \"you broke …\"), or with two weaker cues together. Single weak cues and friendly follow-ups do not count.",
       "id": "user-correction",
       "severity": 4.0,
@@ -852,6 +863,24 @@
       "why": "Something else (formatter, code generator, watcher, another agent) rewrites this file, or the agent edits it blind."
     },
     {
+      "attribution": "Split evenly over the files edited in the preceding turn (the 5 most recent).",
+      "count": 1,
+      "description": "A human prompt that is worded like a correction but is not backed by behaviour (no file named, the agent did not go back to what it had changed), or that only contains two weaker cues. It may be an ordinary follow-up request.",
+      "id": "probable-correction",
+      "severity": 1.5,
+      "title": "Probable correction",
+      "why": "Possibly a redirect by a human. Kept apart from corrections so that a guess never inflates their count; never quoted, never the basis of a recommendation."
+    },
+    {
+      "attribution": "The file.",
+      "count": 0,
+      "description": "A read was refused because the file exceeds what the harness returns in one piece.",
+      "id": "file-too-large",
+      "severity": 1.0,
+      "title": "File too large to read",
+      "why": "The agent has to page through the file or search it blind, in every session."
+    },
+    {
       "attribution": "The non-existent path (so repeated wrong guesses add up).",
       "count": 1,
       "description": "The agent tried to read or edit a path that does not exist.",
@@ -884,7 +913,7 @@
       "files": 6,
       "ignored_lines": 10,
       "kind": "claude-code",
-      "path": "tests/fixtures/transcripts/-home-dev-shopfront",
+      "path": "claude-code:shopfront",
       "sessions": 5,
       "sessions_outside_repo": 0,
       "skipped_events": 0,
@@ -959,7 +988,7 @@
                     "kind": "file",
                     "name": "service.py",
                     "path": "src/shopfront/checkout/service.py",
-                    "score": 43.5,
+                    "score": 43.4,
                     "sessions": 3
                   }
                 ],
@@ -970,7 +999,7 @@
                 "kind": "dir",
                 "name": "checkout",
                 "path": "src/shopfront/checkout",
-                "score": 43.5,
+                "score": 43.4,
                 "sessions": 3
               },
               {

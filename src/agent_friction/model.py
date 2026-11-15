@@ -40,6 +40,10 @@ ERR_REJECTED = "rejected"
 ERR_DENIED = "denied"
 ERR_INTERRUPTED = "interrupted"
 ERR_EXIT = "exit"
+#: The harness never started the call (cancelled sibling, malformed input).
+ERR_NOT_RUN = "not_run"
+#: A read refused because the file is bigger than the harness will return in one piece.
+ERR_TOO_LARGE = "too_large"
 ERR_OTHER = "error"
 ERROR_CLASSES = (
     ERR_EDIT_NOT_FOUND,
@@ -51,6 +55,8 @@ ERROR_CLASSES = (
     ERR_DENIED,
     ERR_INTERRUPTED,
     ERR_EXIT,
+    ERR_NOT_RUN,
+    ERR_TOO_LARGE,
     ERR_OTHER,
 )
 
@@ -93,6 +99,8 @@ class Event:
     reason: str = ""  # the user's stated reason when rejecting a tool
     # user_message
     text: str = ""
+    #: The result is the harness's own error message, not output of the tool.
+    harness_error: bool = False
     synthetic: bool = False  # slash command etc.: a turn boundary, never a correction
     after_question: bool = False  # the agent's last words before this message were a question
 

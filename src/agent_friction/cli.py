@@ -26,7 +26,7 @@ from agent_friction.report import (
     render_markdown,
     render_terminal,
 )
-from agent_friction.report._common import all_items, find_dir, find_target
+from agent_friction.report._common import all_items, find_dir, find_target, plural
 from agent_friction.report.terminal import render_detail, render_dir_detail
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_GATE = 0, 1, 2, 3
@@ -48,7 +48,10 @@ def parse_when(value: str, *, now: datetime | None = None) -> datetime:
     if m:
         n, unit = int(m.group(1)), m.group(2)
         days = {"h": n / 24, "d": n, "w": 7 * n, "m": 30 * n}[unit]
-        return now - timedelta(days=days)
+        try:
+            return now - timedelta(days=days)
+        except OverflowError:
+            raise argparse.ArgumentTypeError(f"{value!r} reaches too far back") from None
     try:
         parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
@@ -284,9 +287,23 @@ def _analyze(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
 
 def _load_json(path: Path) -> dict[str, Any]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        raw = path.read_bytes()
     except FileNotFoundError:
         raise AgentFrictionError(f"{path}: no such file") from None
+    except IsADirectoryError:
+        raise AgentFrictionError(
+            f"{path}: is a directory, expected a `scan -f json` file"
+        ) from None
+    except OSError as exc:
+        raise AgentFrictionError(f"{path}: cannot read ({exc.strerror or exc})") from None
+    # PowerShell 5's `>` writes UTF-16; accept it rather than failing on the BOM.
+    encoding = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
+    try:
+        data = json.loads(raw.decode(encoding))
+    except UnicodeDecodeError:
+        raise AgentFrictionError(
+            f"{path}: not UTF-8 or UTF-16 text; write it with `scan -f json -o FILE`"
+        ) from None
     except json.JSONDecodeError as exc:
         raise AgentFrictionError(f"{path}: not valid JSON ({exc})") from None
     if not isinstance(data, dict) or "schema_version" not in data:
@@ -341,6 +358,9 @@ def _utf8_safe(stream: TextIO) -> TextIO:
 
 def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     fmt = args.format
+    if args.output is not None and args.output.is_dir():
+        stderr.write(f"agent-friction: {args.output} is a directory; pass a file name\n")
+        return EXIT_USAGE
     if fmt is None and args.output is not None:
         fmt = _EXT_FORMAT.get(args.output.suffix.lower())
         if fmt is None:
@@ -455,11 +475,11 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
 
 
 def _cmd_sources(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
-    from agent_friction.engine import AnalyzeOptions, list_transcripts
+    from agent_friction.engine import AnalyzeOptions, inspect_transcripts
 
     if not args.repo.is_dir():
         raise AgentFrictionError(f"{args.repo}: not a directory (pass the repository root)")
-    found = list_transcripts(
+    report = inspect_transcripts(
         AnalyzeOptions(
             repo=args.repo,
             transcripts=args.transcripts,
@@ -467,8 +487,18 @@ def _cmd_sources(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
             include_git=False,
         )
     )
-    for path in found:
-        stdout.write(f"{path}\n")
+    unreadable = 0
+    for path, events, skipped in report:
+        if events == 0:
+            unreadable += 1
+            note = "  (no events: empty, binary, or not a transcript)"
+        elif skipped:
+            note = f"  ({events} events, {plural(skipped, 'line')} skipped)"
+        else:
+            note = f"  ({events} events)"
+        stdout.write(f"{path}{note}\n")
+    if unreadable:
+        stderr.write(f"agent-friction: {plural(unreadable, 'file')} contained nothing to analyse\n")
     return EXIT_OK
 
 

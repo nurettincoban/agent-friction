@@ -20,7 +20,7 @@ def keys(finding: object) -> list[tuple[str, str]]:
 
 def test_catalog_is_consistent() -> None:
     ids = [s.id for s in signals.CATALOG]
-    assert len(ids) == len(set(ids)) == 14
+    assert len(ids) == len(set(ids)) == 16
     for definition in signals.CATALOG:
         assert definition.title and definition.description and definition.why
         assert definition.attribution and definition.severity > 0
@@ -109,9 +109,15 @@ def test_edit_thrash_needs_six_edits_in_one_turn(tmp_path: Path) -> None:
     s = Session().user("go")
     for i in range(7):
         s.edit(A, f"old{i}", f"new{i}")
-    (thrash,) = detect(s, tmp_path)
-    assert thrash.signal == signals.EDIT_THRASH
+    assert detect(s, tmp_path) == []  # seven edits and nothing went wrong: just writing
+    s.edit(A, error=builders.EDIT_NOT_FOUND)
+    miss, thrash = sorted(detect(s, tmp_path), key=lambda f: f.signal)
+    assert miss.signal == signals.EDIT_MISS and thrash.signal == signals.EDIT_THRASH
     assert thrash.summary.startswith("7 successful edits to src/a.py")
+    assert "ended_green" not in thrash.detail
+    s.bash("pytest -q", "3 passed")
+    thrash = by_signal(detect(s, tmp_path), signals.EDIT_THRASH)[0]
+    assert thrash.detail["ended_green"] == "1"  # it converged after all
 
     spread = Session().user("go")
     for i in range(5):
@@ -193,7 +199,7 @@ def test_search_miss_attribution(tmp_path: Path) -> None:
     s.glob("src/api/**/*.proto")  # literal prefix narrows the scope
     s.glob("**/*.proto", "/repo/pkg")
     s.glob("/repo/docs/*.rst")
-    s.grep("Needle", "/repo/src", found=True)
+    s.grep("Other", "/repo/src", found=True)
     s.glob("*.py", found=True)
     s.grep("Needle", "/var/log")  # outside the repo
     found = detect(s, tmp_path)
@@ -797,7 +803,7 @@ def test_new_task_prompts_long_after_the_agent_finished(tmp_path: Path) -> None:
     late = Session().user("add the feature")
     late.edit(A).say("Done.").tick(600).user("No, the other module")
     (fix,) = detect(late, tmp_path)
-    assert fix.weight == signals.CORRECTION_PROBABLE and '"long pause"' in fix.summary
+    assert fix.signal == signals.PROBABLE_CORRECTION and '"long pause"' in fix.summary
 
 
 def test_other_strong_phrases_still_count_after_a_question() -> None:
@@ -812,7 +818,7 @@ def test_answering_the_agents_question_is_not_a_correction(tmp_path: Path) -> No
     asked.edit(A, "p", "q").say("Pagination is in.")
     asked.user("No, that is the wrong endpoint")  # nothing was asked this time
     (fix,) = detect(asked, tmp_path)
-    assert fix.signal == signals.USER_CORRECTION and "wrong endpoint" in fix.excerpt
+    assert fix.signal == signals.PROBABLE_CORRECTION and "wrong endpoint" in fix.excerpt
 
     # the question must be the last thing the agent said before the reply
     stale = Session().user("add the feature")
@@ -836,7 +842,7 @@ def test_generic_assistant_message_marks_an_answer(tmp_path: Path) -> None:
     path.write_text(events("Should I also add tests?"))
     assert detect(path, tmp_path) == []
     path.write_text(events("Added it to src/a.py."))
-    assert [f.signal for f in detect(path, tmp_path)] == [signals.USER_CORRECTION]
+    assert [f.signal for f in detect(path, tmp_path)] == [signals.PROBABLE_CORRECTION]
 
 
 def test_a_friendly_conversation_produces_no_corrections(tmp_path: Path) -> None:
@@ -873,7 +879,7 @@ def test_correction_splits_over_edited_files(tmp_path: Path) -> None:
     unanswered.edit(A).edit(B).user("No, that is not how we do it here")
     (fix,) = detect(unanswered, tmp_path)  # probable: spread over what had been edited
     assert [(t.key, t.share) for t in fix.targets] == [("src/b.py", 0.5), ("src/a.py", 0.5)]
-    assert fix.weight == signals.CORRECTION_PROBABLE
+    assert fix.signal == signals.PROBABLE_CORRECTION
 
 
 def test_correction_prefers_files_named_in_the_message(tmp_path: Path) -> None:
@@ -1343,51 +1349,51 @@ def test_wording_alone_is_only_a_probable_correction(tmp_path: Path) -> None:
     # the agent goes on to something else: nothing shows the human meant its changes
     moved_on = _corrected("that broke the build").read("/repo/src/c.py").bash("make build")
     (fix,) = detect(moved_on, tmp_path)
-    assert fix.weight == signals.CORRECTION_PROBABLE and fix.detail["corroborated"] == "no"
+    assert fix.signal == signals.PROBABLE_CORRECTION and fix.detail["corroborated"] == "no"
     assert "confidence 0.4" in fix.summary and "not corroborated" in fix.summary
 
     # settled by the next human message, not by what happens after it
     late = _corrected("that broke the build").read("/repo/src/c.py").user("ok, thanks").edit(A)
     (fix,) = detect(late, tmp_path)
-    assert fix.weight == signals.CORRECTION_PROBABLE
+    assert fix.signal == signals.PROBABLE_CORRECTION
 
     # nothing had been changed in the turn the human reacts to
     s = Session().user("look around")
     s.read(A).bash("make build").say("Built.").user("No, that's the wrong branch")
     s.edit(A)
     (fix,) = detect(s, tmp_path)
-    assert fix.weight == signals.CORRECTION_PROBABLE and fix.targets == []
+    assert fix.signal == signals.PROBABLE_CORRECTION and fix.targets == []
     assert "no file was changed in the preceding turn" in fix.summary
 
 
 def test_a_correction_is_certain_when_the_agent_returns_to_the_files(tmp_path: Path) -> None:
     edited = _corrected("that broke the build").edit(B, "new", "newer")
     (fix,) = detect(edited, tmp_path)
-    assert fix.weight == signals.CORRECTION_STRONG and fix.detail["corroborated"] == "followed"
+    assert fix.signal == signals.USER_CORRECTION and fix.detail["corroborated"] == "followed"
 
     for command in ("git checkout -- src/a.py", "git restore src/b.py", "git stash", "rm src/a.py"):
         undone = _corrected("can you undo that").bash(command)
         (fix,) = detect(undone, tmp_path)
-        assert fix.weight == signals.CORRECTION_STRONG, command
+        assert fix.signal == signals.USER_CORRECTION, command
         assert "the agent then ran `" in fix.summary, command
 
     for command in ("git checkout main", "pytest src/a.py", "git status", "rm other.txt"):
         other = _corrected("can you undo that").bash(command)
         (fix,) = detect(other, tmp_path)
-        assert fix.weight == signals.CORRECTION_PROBABLE, command
+        assert fix.signal == signals.PROBABLE_CORRECTION, command
 
 
 def test_a_correction_is_certain_when_the_human_names_a_changed_file(tmp_path: Path) -> None:
     named = _corrected("you broke b.py")  # the session ends here
     (fix,) = detect(named, tmp_path)
-    assert fix.weight == signals.CORRECTION_STRONG and fix.detail["corroborated"] == "named"
+    assert fix.signal == signals.USER_CORRECTION and fix.detail["corroborated"] == "named"
     assert keys(fix) == [("file", "src/b.py")]
 
     # naming a file the agent only read proves nothing about its changes
     s = Session().user("add it")
     s.read("/repo/src/c.py").edit(A).say("Done.").user("No, c.py is the wrong place to look")
     (fix,) = detect(s, tmp_path)
-    assert fix.weight == signals.CORRECTION_PROBABLE and keys(fix) == [("file", "src/c.py")]
+    assert fix.signal == signals.PROBABLE_CORRECTION and keys(fix) == [("file", "src/c.py")]
 
 
 def test_a_question_anywhere_in_the_final_paragraph_makes_no_an_answer(tmp_path: Path) -> None:
@@ -1399,7 +1405,7 @@ def test_a_question_anywhere_in_the_final_paragraph_makes_no_an_answer(tmp_path:
     earlier = "Why was this failing? A typo.\n\nI fixed it in src/a.py."
     told = _corrected("No, that's the wrong fix", earlier).edit(A, "new", "newer")
     (fix,) = detect(told, tmp_path)
-    assert fix.weight == signals.CORRECTION_STRONG
+    assert fix.signal == signals.USER_CORRECTION
 
 
 def test_a_question_tool_makes_the_reply_an_answer(tmp_path: Path) -> None:
@@ -1560,3 +1566,195 @@ def test_inspection_steps_never_win_a_denied_or_declined_chain(tmp_path: Path) -
     denied, declined = detect(s, tmp_path)
     assert denied.signal == signals.PERMISSION_DENIED and keys(denied) == [("command", "rm")]
     assert declined.signal == signals.TOOL_REJECTED and keys(declined) == [("command", "rm")]
+
+
+# ---- round 6 ------------------------------------------------------------------------------
+
+
+def test_a_wish_is_not_a_reproach() -> None:
+    confidence, cues = correction_confidence("We should have a retry here, can you add it?")
+    assert (confidence, cues) == (0.0, [])
+    assert "shouldn't" in correction_confidence("You should have used the client instead")[1]
+
+
+def test_probable_corrections_are_a_signal_of_their_own(tmp_path: Path) -> None:
+    s = Session().user("implement the step")
+    s.edit(A).bash("pytest", "1 passed").say("Done.")
+    s.user("Actually we should have a retry here instead, can you add it")
+    s.write("/repo/src/helper.py", "x = 1\n")
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.PROBABLE_CORRECTION and found.weight == 1.0
+    assert found.summary.startswith("Probable correction (confidence 0.4; matched ")
+    assert signals.SEVERITY[signals.PROBABLE_CORRECTION] < signals.SEVERITY[signals.EDIT_MISS]
+
+
+def test_a_productive_sitting_is_not_thrash(tmp_path: Path) -> None:
+    s = Session().user("implement the feature")
+    s.grep("feature_x", "/repo/src").grep("FeatureXHandler", "/repo/src").read(A)
+    for k in range(8):
+        s.edit(A, f"a{k}", f"b{k}")
+    s.bash("pytest", "8 passed").user("great, thanks")
+    assert {f.signal for f in detect(s, tmp_path)} == {signals.SEARCH_MISS}
+
+
+def test_a_search_that_finds_the_thing_elsewhere_in_the_turn_is_not_a_miss(
+    tmp_path: Path,
+) -> None:
+    s = Session().user("where is the refund policy?")
+    s.grep("RefundPolicy", "/repo/src/api").grep("refundpolicy", "/repo/src/models")
+    s.grep("RefundPolicy", "/repo/src", found=True)
+    assert detect(s, tmp_path) == []
+    later = Session().user("where is it?").grep("RefundPolicy", "/repo/src/api")
+    later.user("try again").grep("RefundPolicy", "/repo/src", found=True)
+    assert len(detect(later, tmp_path)) == 1  # found only after the human stepped in
+
+
+PYTEST_TEST_ERROR = """=== FAILURES ===
+    def test_x():
+>       import_module("plugin_x")
+E       ModuleNotFoundError: No module named 'plugin_x'
+tests/test_app.py:5: ModuleNotFoundError
+FAILED tests/test_app.py::test_x - ModuleNotFoundError: No module named 'plugin_x'
+1 failed in 0.1s"""
+PYTEST_COLLECTION_ERROR = """==== ERRORS ====
+____ ERROR collecting tests/test_app.py ____
+ImportError while importing test module '/repo/tests/test_app.py'.
+tests/test_app.py:1: in <module>
+    from src.utlis import helper
+E   ModuleNotFoundError: No module named '{module}'
+=========== short test summary info ===========
+ERROR tests/test_app.py
+!!!!!!! Interrupted: 1 error during collection !!!!!!!
+1 error in 0.10s"""
+
+
+def test_errors_quoted_from_inside_a_test_are_not_setup_errors() -> None:
+    assert not signals.is_invocation_error(PYTEST_TEST_ERROR, 1)
+    quoted = "E   AssertionError: assert 'bash: x: command not found' in out\n1 failed"
+    assert not signals.is_invocation_error(quoted, 1)
+    traceback = 'Traceback (most recent call last):\n  File "curl: (7) x"\nValueError: bad'
+    assert not signals.is_invocation_error(traceback, 1)
+    typo, dependency = (PYTEST_COLLECTION_ERROR.format(module=m) for m in ("src.utlis", "yaml"))
+    assert signals.is_invocation_error(typo, 2)  # nothing known about the repo: a guess
+    assert not signals.is_invocation_error(typo, 2, lambda top: top == "src")
+    assert signals.is_invocation_error(dependency, 2, lambda top: top == "src")
+    script = "Traceback (most recent call last):\nModuleNotFoundError: No module named 'src.x'"
+    assert signals.is_invocation_error(script, 1)
+    assert not signals.is_invocation_error(script, 1, lambda top: top == "src")
+
+
+def test_a_typo_in_a_first_party_import_is_red_fix_green(tmp_path: Path) -> None:
+    typo = PYTEST_COLLECTION_ERROR.format(module="src.utlis")
+    s = Session().user("fix the test")
+    s.read(A).bash("pytest", typo, exit_code=2).edit(A, "utlis", "utils").bash("pytest", "1 passed")
+    assert detect(s, tmp_path) == []
+    s = Session().user("fix the test")
+    s.read(A).bash("pytest tests/test_app.py", PYTEST_TEST_ERROR, exit_code=1)
+    s.edit(A).bash("pytest tests/test_app.py", "1 passed")
+    assert detect(s, tmp_path) == []
+    dep = Session().user("run the tests")
+    dep.read(A).bash("pytest", PYTEST_COLLECTION_ERROR.format(module="yaml"), exit_code=2)
+    (failure,) = detect(dep, tmp_path)
+    assert failure.detail["variant"] == "invocation"
+
+
+def test_calls_the_harness_never_started_are_not_failures(tmp_path: Path) -> None:
+    def error(text: str) -> str:
+        return f"<tool_use_error>{text}</tool_use_error>"
+
+    s = Session().user("go")
+    s.tool(
+        "Bash",
+        {"command": "npm test"},
+        error("Cancelled: parallel tool call Read(src/nope.py) errored"),
+        is_error=True,
+    )
+    s.tool(
+        "Bash",
+        {"command": "npm run lint"},
+        error("InputValidationError: Bash failed due to the following issue:\nmissing"),
+        is_error=True,
+    )
+    s.tool("Bash", {"command": "npm run build"}, error("Something else went wrong"), is_error=True)
+    s.tool("Read", {"file_path": A}, error("Cancelled: parallel tool call errored"), is_error=True)
+    assert detect(s, tmp_path) == []
+
+    blocked = Session().user("go")
+    blocked.tool(
+        "Bash",
+        {"command": "sleep 30 && gh run view"},
+        error("Blocked: sleep 30 followed by: gh run view. To wait for a condition, use Monitor"),
+        is_error=True,
+    )
+    (denied,) = detect(blocked, tmp_path)
+    assert denied.signal == signals.PERMISSION_DENIED and denied.detail["variant"] == "blocked"
+    assert denied.summary == "Bash on `gh run view` was denied by the harness; it did not run"
+
+    # a command that really ran and printed the same words did fail
+    ran = Session().user("go").bash("npm test", "Cancelled: parallel tool call", exit_code=1)
+    assert [f.signal for f in detect(ran, tmp_path)] == [signals.COMMAND_FAILURE]
+
+
+def test_hook_feedback_is_not_the_human_speaking(tmp_path: Path) -> None:
+    for text in (
+        "Stop hook feedback:\n- No, you forgot to run the linter. Revert that.",
+        "PostToolUse:Edit hook blocking error from command: No, that is wrong, revert that",
+        "PreToolUse:Bash hook error: you broke a.py",
+    ):
+        s = Session().user("go").edit(A).user(text).edit(A, "new", "newer")
+        assert detect(s, tmp_path) == [], text
+    human = Session().user("go").edit(A).user("Stop the hook, you broke a.py")
+    assert [f.signal for f in detect(human, tmp_path)] == [signals.USER_CORRECTION]
+
+
+def test_a_read_refused_as_too_large_is_evidence(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.tool(
+        "Read",
+        {"file_path": A},
+        "<tool_use_error>File content (31245 tokens) exceeds maximum allowed tokens (25000). "
+        "Use offset and limit parameters.</tool_use_error>",
+        is_error=True,
+    )
+    (big,) = detect(s, tmp_path)
+    assert big.signal == signals.FILE_TOO_LARGE and keys(big) == [("file", "src/a.py")]
+
+
+TIMED_OUT = "Command timed out after 2m 0s\n> dev\n> vite\n  Local: http://localhost:5173/"
+
+
+@pytest.mark.parametrize(
+    ("command", "server"),
+    [
+        ("npm run dev", True),
+        ("cd web && pnpm dev", True),
+        ("uvicorn app.main:app --reload", True),
+        ("flask run", True),
+        ("bin/rails s", True),
+        ("python manage.py runserver", True),
+        ("npx vite", True),
+        ("docker compose up", True),
+        ("docker compose up -d", False),
+        ("npm test", False),
+        ("npm run devtools-check", False),
+        ("pytest tests/test_server.py", False),
+    ],
+)
+def test_a_foreground_server_that_times_out_is_marked(
+    tmp_path: Path, command: str, server: bool
+) -> None:
+    s = Session().user("start it")
+    s.tool("Bash", {"command": command}, TIMED_OUT, is_error=True)
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["timeout"] == "1" and ("server" in failure.detail) is server
+    assert ("never exits" in failure.summary) is server
+
+
+def test_a_pipeline_is_keyed_to_the_stage_the_shell_could_not_find(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.bash("pnpm test 2>&1 | tee out.log | tail -20", "bash: pnpm: command not found", exit_code=1)
+    s.bash("cat data.json | jqq . | sort", "bash: jqq: command not found", exit_code=127)
+    s.bash("make build && frob --x", "sh: 1: frob: not found", exit_code=127)
+    first, second, third = detect(s, tmp_path)
+    assert keys(first) == [("command", "pnpm test")]
+    assert keys(second) == [("command", "jqq")] and keys(third) == [("command", "frob")]

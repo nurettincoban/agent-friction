@@ -14,7 +14,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_friction import model, signals
+from agent_friction import model, scoring, signals
 from agent_friction.model import Finding
 
 #: A file with at least this many lines is called "large" in recommendations.
@@ -65,6 +65,7 @@ RULE_IDS: tuple[str, ...] = (
     "document-the-setup-step",
     "document-the-command",
     "make-the-failure-actionable",
+    "run-it-in-the-background",
 )
 
 
@@ -156,20 +157,26 @@ class _Rules:
     # ---- shared rules ----------------------------------------------------------------
 
     def corrections(self) -> None:
+        # Corroborated corrections only: a "probable" one is a separate, weak signal and
+        # never the basis of a claim that a human corrected anything.
         found = self.get(signals.USER_CORRECTION)
         if sum(self.shares.get(f.fid, 1.0) for f in found) < CORRECTION_MIN_SHARE:
             return  # nothing, or only thin slices of corrections spread over many files
+        repeated = len(found) >= MIN_EVENTS
         detail = (
             f"A human corrected the agent here {_in_sessions(found)}. Put the rule in "
             "AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read "
             "before the next attempt."
         )
+        if not repeated:
+            detail = (
+                "A human corrected the agent here once. If what they said is a standing "
+                "rule rather than a one-off, put it in AGENTS.md / CLAUDE.md (or a comment "
+                "at the top of the file)."
+            )
         if self.quote is not None:
             # Only unambiguous corrections are quoted: a "probable" one may be small talk.
-            ranked = sorted(
-                (f for f in found if f.weight >= signals.CORRECTION_STRONG),
-                key=lambda f: (f.source, f.line),
-            )
+            ranked = sorted(found, key=lambda f: (f.source, f.line))
             quotes: list[str] = []
             for finding in ranked:
                 text = self.quote(finding.detail.get("quote", ""), QUOTE_CHARS)
@@ -179,7 +186,9 @@ class _Rules:
                 detail += " In their words: " + " / ".join(f'"{q}"' for q in quotes[:MAX_QUOTES])
         self.add(
             "write-down-the-rule",
-            "Write down the rule the human keeps repeating",
+            "Write down the rule the human keeps repeating"
+            if repeated
+            else "Check whether this correction is a standing rule",
             detail,
             [signals.USER_CORRECTION],
         )
@@ -239,8 +248,10 @@ class _Rules:
         misses = self.get(signals.EDIT_MISS)
         ambiguous = self.get(signals.EDIT_MISS, "ambiguous")
         stale = self.get(signals.STALE_EDIT)
-        thrash = self.get(signals.EDIT_THRASH)
+        # A sitting of many edits that ended on a green command did converge.
+        thrash = [f for f in self.get(signals.EDIT_THRASH) if not f.detail.get("ended_green")]
         reverts = self.get(signals.EDIT_REVERT)
+        too_large = self.get(signals.FILE_TOO_LARGE)
         rework = self.get(signals.HUMAN_REWORK)
         edit_trouble = [*misses, *stale, *thrash, *reverts]
         generated = facts is not None and facts.generated
@@ -269,7 +280,18 @@ class _Rules:
                 "an edit can be targeted.",
                 [signals.EDIT_MISS],
             )
-        elif len(misses) >= MIN_EVENTS and not generated:
+        elif len(too_large) >= MIN_EVENTS and not generated:
+            size = f" ({_n(facts.lines, 'line')})" if facts is not None and facts.lines else ""
+            self.add(
+                "split-or-anchor-large-file",
+                "Large file: agents cannot read it in one piece",
+                f"Reads of this file{size} were refused as too large {_in_sessions(too_large)}"
+                ", so agents page through it or search it blind. Split it, or say in "
+                "AGENTS.md which parts matter and how to find them (section names to search "
+                "for).",
+                [signals.FILE_TOO_LARGE],
+            )
+        if len(misses) >= MIN_EVENTS and not generated and not large:
             if len(ambiguous) * 2 >= len(misses):
                 detail = (
                     f"{len(ambiguous)} of {len(misses)} failed edits matched several places: "
@@ -351,7 +373,7 @@ class _Rules:
 
         loops = self.get(signals.READ_LOOP)
         if len(loops) >= MIN_EVENTS:
-            size = f" ({facts.lines} lines)" if facts is not None and facts.lines else ""
+            size = f" ({_n(facts.lines, 'line')})" if facts is not None and facts.lines else ""
             self.add(
                 "summarize-this-file",
                 "Agents keep re-reading this file",
@@ -366,6 +388,17 @@ class _Rules:
         if len(denied) < MIN_EVENTS:
             return
         hooks = sum(f.detail.get("variant") == "hook" for f in denied)
+        blocked = sum(f.detail.get("variant") == "blocked" for f in denied)
+        if blocked * 2 > len(denied):
+            self.add(
+                "allow-or-document-the-boundary",
+                "Tell agents what the harness wants instead",
+                f"Agents tried {what} {_in_sessions(denied)} in a form the harness itself "
+                "refuses to run (see the cited lines for what it suggests instead). Put that "
+                "alternative in AGENTS.md so the first attempt is the right one.",
+                [signals.PERMISSION_DENIED],
+            )
+            return
         by = "a hook" if hooks * 2 > len(denied) else "permission settings"
         self.add(
             "allow-or-document-the-boundary",
@@ -383,6 +416,18 @@ class _Rules:
         failures = self.get(signals.COMMAND_FAILURE)
         invocation = self.get(signals.COMMAND_FAILURE, "invocation")
         retries = self.get(signals.RETRY_LOOP)
+        servers = [f for f in invocation if f.detail.get("server")]
+        invocation = [f for f in invocation if not f.detail.get("server")]
+        if len(servers) >= MIN_EVENTS:
+            self.add(
+                "run-it-in-the-background",
+                f"Tell agents to run `{key}` in the background",
+                f"`{key}` is a server or watcher that never exits; run in the foreground it "
+                f"sat until the harness timed it out {_in_sessions(servers)}. Say in "
+                "AGENTS.md to start it in the background (and how to check that it is up "
+                "and how to stop it), or provide a script that does so.",
+                [signals.COMMAND_FAILURE],
+            )
         fixes = _top([f.detail.get("recovered_by", "") for f in failures], 1)
         setups = _top([f.detail.get("fixed_by_setup", "") for f in failures], 1)
         if fixes and fixes[0][1] >= MIN_EVENTS:
@@ -477,6 +522,8 @@ def recommend(
     finding's ``fid`` to the fraction of it attributed to this hotspot
     (default 1).
     """
+    if scoring.weak_only(findings):
+        return []  # nothing here that productive work does not also produce
     rules = _Rules(findings, quote, shares or {})
     if kind == model.FILE:
         rules.file(facts)

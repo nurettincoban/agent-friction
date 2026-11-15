@@ -21,6 +21,8 @@ All thresholds are named constants in `src/agent_friction/signals.py`.
 | `edit-thrash` | 1.5 | transcript |
 | `permission-denied` | 1.5 | transcript |
 | `stale-edit` | 1.0 | transcript |
+| `probable-correction` | 1.5 | transcript |
+| `file-too-large` | 1.0 | transcript |
 | `path-miss` | 1.0 | transcript |
 | `search-miss` | 1.0 | transcript |
 | `read-loop` | 0.5 | transcript |
@@ -28,6 +30,13 @@ All thresholds are named constants in `src/agent_friction/signals.py`.
 Severities are ordered by one principle: a human having to step in costs more
 than the agent wasting its own round trips, and a failure that provably
 repeats costs more than one that might be routine.
+
+**Weak signals.** `edit-thrash`, `read-loop`, `search-miss` and
+`probable-correction` also show up in perfectly productive sessions. A file,
+command or directory whose *only* evidence is of these kinds has its score
+capped (see methodology), gets no recommendation and never "high" confidence.
+The one exception: a search for the *same* pattern that misses in two or more
+sessions is treated as real evidence.
 
 Paths are attributed only if they resolve inside the repository; everything
 else is dropped. "Turn" means the agent's work between two human prompts.
@@ -57,10 +66,12 @@ below makes a message a *candidate*. It becomes a correction with confidence
    `git stash`).
 
 A candidate without corroboration (nothing was changed before it, the agent
-went on to other things, or the session ends there) is a *probable*
-correction (confidence 0.4): it is listed as evidence, never quoted in a
-recommendation, and not counted in `totals.corrections` (it is counted in
-`totals.probable_corrections`). The decision is made when the next human
+went on to other things, or the session ends there) is not a
+`user-correction` at all. It is recorded under a separate signal,
+[`probable-correction`](#probable-correction--probable-correction), a
+"probable" correction (confidence 0.4): listed as evidence, never quoted,
+never the basis of a recommendation, and counted in
+`totals.probable_corrections`, not in `totals.corrections`. The decision is made when the next human
 message arrives or the session ends; the evidence summary says which of the
 two it was ("the user names ...", "the agent then changed ... again", "not
 corroborated: ...").
@@ -140,15 +151,20 @@ corroborated: ...").
     moved on to something else.
 - **Weaker cues:** a leading "actually"; "don't <verb>" (not "don't forget /
   worry / bother / need", not "don't ... yet"); "stop <doing>"; "instead";
-  "wrong / incorrect / mistake"; "shouldn't / should have / supposed to";
+  "wrong / incorrect / mistake"; "shouldn't / you should have / supposed to"
+  (not "we should have a retry here", which is a wish);
   "you ... again"; "deprecated / not allowed". **Two or more distinct cues**
   make a *probable* correction (confidence 0.4). **One cue alone is not an
   event**: "don't forget the tests", "actually, can you also ...", "use X
   instead" are normal conversation. A message that contains thanks, praise or
   a dismissal is never a probable correction.
 
-The confidence multiplies the severity (a probable correction is worth 1.6,
-less than an edit miss). Recommendations quote only corroborated corrections.
+A `user-correction` always has confidence 1.0; a probable correction weighs 1.5,
+less than an edit miss. Recommendations are based on, and quote, corroborated
+corrections only: one of them yields "check whether this is a standing rule",
+two or more "write down the rule the human keeps repeating". Hook output that
+the harness puts into a user turn ("Stop hook feedback: ...", "PostToolUse:Edit
+hook ...") is not read as a human message.
 Slash commands, harness-generated messages, tool results and prompts inside
 subagents are never corrections. Blocks that the harness or an IDE extension
 adds to a user turn (`<ide_opened_file>`, `<ide_selection>`,
@@ -193,6 +209,20 @@ we use X?"); single-cue corrections ("use pnpm instead", "use PaymentClient,
 not legacy");
 corrections softened with praise; corrections in other languages. The count of
 corrections is a lower bound.
+
+## `probable-correction` — Probable correction
+
+**What:** a human prompt that is worded like a correction (see
+[`user-correction`](#user-correction--user-correction)) but is not
+corroborated by behaviour, or that only contains two or more weaker cues
+("Actually, use dataclasses instead"). Often it is simply the next request.
+
+**Why it is kept at all:** several of them on one file are a lead worth a
+look. They are kept apart so that a guess can never inflate the number of
+corrections, put words in a human's mouth, or trigger "write down the rule".
+
+**Attribution:** split evenly over the files edited in the preceding turn (the
+5 most recent). Weak signal: alone it is capped and recommends nothing.
 
 ## `retry-loop` — Retry loop
 
@@ -372,6 +402,28 @@ successfully once before being removed (read as debugging).
   the result. Words such as "timed out" or "permission denied" elsewhere in
   the output (a failing test about timeouts, a test runner printing that
   sentence) do not qualify.
+- *Errors quoted from inside a test are the test's business:* pytest's `E
+  ...` lines, its `FAILED path::test - reason` summary lines and traceback
+  frames are ignored when looking for those shapes. A test that fails with
+  `E   ModuleNotFoundError: No module named 'plugin_x'` is a red test.
+- *A module that cannot be imported* is a setup error only if it is not the
+  repository's own. If the top-level package exists in the repo (`src/`,
+  `app/`, `shop.py`, ...), `No module named 'src.utlis'` is a typo to fix: an
+  ordinary failure, and gone entirely once an edit turns the run green. A
+  missing third-party module (`No module named 'yaml'`) at collection time is
+  a setup error.
+- *A foreground server is not a failed command:* when the harness timeout hits
+  a command that never exits by design (`npm run dev`, `vite`, `uvicorn`,
+  `flask run`, `rails s`, `manage.py runserver`, `docker compose up` without
+  `-d`, ...; `DEV_SERVER_RE`), the event says so, and the recommendation is to
+  run it in the background, not to document how to invoke it.
+- *Calls that never ran are not failures:* a result that is the harness's own
+  error message (`<tool_use_error>` without an exit code: "Cancelled: parallel
+  tool call ... errored", "InputValidationError: ...") is dropped. "Blocked:
+  ..." is a [`permission-denied`](#permission-denied--permission-denied).
+- *"command not found" names its program:* if the shell says which program
+  it could not find and that program is a step or pipeline stage of the line
+  (`cat x | jqq . | sort`), the event is keyed to that stage.
 - *Ordinary failures* (anything else: a red test, a linter or type checker
   reporting problems, `git diff --exit-code`) count at weight 0.3 and claim no
   lost time. A red test during development is the tool working as intended.
@@ -443,15 +495,35 @@ error.
 
 ## `edit-thrash` — Edit thrash
 
-**What:** 6 or more successful edits to one file within a single turn. One
-event per file and turn.
+**What:** 6 or more successful edits to one file within a single turn **in
+which something also went wrong**: an edit miss, a stale edit, a reverted
+edit, a failed command or a retry loop. One event per file and turn. Eight
+clean edits followed by a green test run are a productive sitting, not thrash,
+and are not recorded. The event notes whether the turn's last command
+succeeded (`ended_green`); if it did, the "edits did not converge"
+recommendation does not count it.
 
-**Why:** many small edits in one go usually mean trial and error.
+**Why:** many small edits in one go, with failures in between, usually mean
+trial and error.
 
 **Attribution:** the file.
 
-**False positives:** legitimately building a large file step by step. This is
-a weak signal: on its own it never produces "high" confidence.
+**False positives:** legitimately building a large file step by step while an
+unrelated command fails in the same turn. This is a weak signal: on its own
+its score is capped, it recommends nothing and never produces "high"
+confidence.
+
+## `file-too-large` — File too large to read
+
+**What:** a read was refused because the file exceeds what the harness
+returns in one piece ("File content (31245 tokens) exceeds maximum allowed
+tokens").
+
+**Why:** the agent has to page through the file or search it blind, and it
+will hit the same wall in every session.
+
+**Attribution:** the file. Two or more such reads recommend splitting the
+file or documenting where its important parts are.
 
 ## `permission-denied` — Permission denied
 
@@ -459,7 +531,10 @@ a weak signal: on its own it never produces "high" confidence.
 a human saying no: a missing permission ("Claude requested permissions to use
 Bash, but you haven't granted it yet"), a deny rule ("Permission to use Bash
 has been denied"), a hook ("PreToolUse:Bash hook error: ..."), or a safety
-check ("Permission for this command was denied by ..."). The wording must
+check ("Permission for this command was denied by ..."), or the harness
+refusing a command pattern outright ("Blocked: sleep 30 followed by: ...";
+variant `blocked`, with advice to document the alternative it suggests rather
+than to add an allow rule). The wording must
 open the tool result, as the harness writes it; a program that *ran* and
 printed "permission denied" is a `command-failure`.
 
@@ -512,15 +587,20 @@ literal directory prefix of the pattern). Directory-scoped misses appear under
 `directories` and in the tree, not under file hotspots. The pattern is kept
 as the excerpt.
 
-**Not counted:** a check that a name is free before creating it. A miss is
+**Not counted:** a miss that the agent resolves itself: when a later search
+*in the same turn* for the same pattern (ignoring case) finds something, in a
+wider or different scope, the earlier misses for it are dropped. Also not
+counted: a check that a name is free before creating it. A miss is
 dropped when, later in the same session, the agent creates or edits a file
 inside the searched scope whose name matches the glob (`src/new_feature*.py`
 then writing `src/new_feature.py`), or writes text that contains the grep
 pattern (`NewFeature` then writing `class NewFeature`).
 
 **False positives:** searching to *confirm absence* for other reasons ("no
-remaining callers") is normal. Recommendations therefore need at least two
-misses.
+remaining callers") is normal. This is therefore a weak signal: a place with
+nothing but search misses has its score capped and gets no recommendation,
+unless the same pattern missed in two or more sessions (agents keep looking
+for a name that is not there).
 
 ## `read-loop` — Read loop
 
@@ -531,4 +611,5 @@ different offsets does not count.
 **Why:** the agent keeps returning to the file without progress (often after
 losing context).
 
-**Attribution:** the file. Weak signal, like `edit-thrash`.
+**Attribution:** the file. Weak signal, like `edit-thrash`: alone it is
+capped and recommends nothing.

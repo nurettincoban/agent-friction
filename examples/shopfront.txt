@@ -3,8 +3,8 @@ agent-friction · shopfront
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals
-  █████▋      56.8 src/shopfront/api/schema_gen.py           4     12     11m  ● edit-miss×6, user-correction×3
-  ████▍       43.5 src/shopfront/checkout/service.py         3      6     19m  ● user-correction×3, edit-revert×2
+  █████▋      56.8 src/shopfront/api/schema_gen.py           4     12     11m  ● edit-miss×6, user-correction×2
+  ████▍       43.4 src/shopfront/checkout/service.py         3      6     19m  ● edit-revert×2, user-correction×2
   █▏          11.4 src/shopfront/payments/refunds.py         1      1     18s  ○ path-miss×1
   █            9.7 api/openapi.yaml                          1      1     24s  ○ search-miss×1
   ▉            8.5 tests/test_refunds.py                     1      1      0s  ○ command-failure×1
@@ -30,7 +30,7 @@ What to fix first
      `make test`, and `pytest` did not work later in those sessions. Add a line to AGENTS.md such
      as: "use `make test`, not `pytest`".
   3. src/shopfront/checkout/service.py: Write down the rule the human keeps repeating
-     A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md
+     A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md
      (or a comment at the top of the file) so it is read before the next attempt. In their words:
      "It's still failing for me on staging, and you used legacy_charge again in
      src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use

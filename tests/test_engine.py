@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -14,7 +15,13 @@ import pytest
 from agent_friction import __version__, signals
 from agent_friction.attribution import public_key
 from agent_friction.discovery import encode_cwd
-from agent_friction.engine import AnalyzeOptions, NoTranscriptsError, analyze, list_transcripts
+from agent_friction.engine import (
+    AnalyzeOptions,
+    NoTranscriptsError,
+    analyze,
+    inspect_transcripts,
+    list_transcripts,
+)
 from agent_friction.errors import AgentFrictionError
 from tests import builders, fixture_story
 from tests.builders import Session
@@ -100,7 +107,8 @@ def test_contract_shape(result: dict[str, Any]) -> None:
 def test_sources_and_totals(result: dict[str, Any]) -> None:
     claude, generic = result["sources"]
     assert (claude["kind"], claude["sessions"], claude["files"]) == ("claude-code", 5, 6)
-    assert claude["path"].endswith("transcripts/-home-dev-shopfront")
+    # the project directory encodes an absolute path (user, client): it is never shown
+    assert claude["path"] == "claude-code:shopfront" and "home-dev" not in json.dumps(result)
     assert (claude["skipped_lines"], claude["ignored_lines"]) == (0, 10)
     assert (generic["kind"], generic["sessions"]) == ("generic", 1)
     totals = result["totals"]
@@ -115,13 +123,13 @@ def test_sources_and_totals(result: dict[str, Any]) -> None:
 def test_story_generated_schema_is_the_top_file(result: dict[str, Any]) -> None:
     top = result["hotspots"][0]
     assert top["path"] == SCHEMA and top["confidence"] == "high" and top["sessions"] == 4
-    assert top["signals"]["edit-miss"] == 6 and top["signals"]["user-correction"] == 3
+    assert top["signals"]["edit-miss"] == 6 and top["signals"]["user-correction"] == 2
     assert top["file"] == {"exists": True, "lines": 1031, "generated": True}
     recs = {r["id"]: r["detail"] for r in top["recommendations"]}
     assert list(recs)[:2] == ["edit-the-source-not-the-output", "split-or-anchor-large-file"]
     assert "stop hand-editing src/shopfront/api/schema_gen.py" in recs["write-down-the-rule"]
     assert top["why"].startswith(
-        "12 friction events in all 4 sessions that touched it (6 edit misses, 3 user corrections"
+        "12 friction events in all 4 sessions that touched it (6 edit misses, 2 user corrections"
     )
     assert (top["exposure_sessions"], top["friction_rate"]) == (4, 1.0)
     detail = top["score_detail"]
@@ -133,7 +141,12 @@ def test_story_generated_schema_is_the_top_file(result: dict[str, Any]) -> None:
 def test_story_deprecated_api_corrections_land_on_the_service(result: dict[str, Any]) -> None:
     service = entry(result["hotspots"], SERVICE)
     assert service["sessions"] == 3 and service["confidence"] == "high"
-    assert service["signals"] == {"user-correction": 3, "edit-revert": 2, "edit-thrash": 1}
+    assert service["signals"] == {
+        "user-correction": 2,
+        "edit-revert": 2,
+        "edit-thrash": 1,
+        "probable-correction": 1,
+    }
     rule = next(r for r in service["recommendations"] if r["id"] == "write-down-the-rule")
     assert "I told you: PaymentClient only" in rule["detail"]
     quotes = [e["excerpt"] for e in service["evidence"] if e["signal"] == "user-correction"]
@@ -356,7 +369,7 @@ def test_only_unambiguous_corrections_are_quoted(result: dict[str, Any]) -> None
         e
         for h in story(max_evidence=50)["hotspots"]
         for e in h["evidence"]
-        if e["signal"] == "user-correction" and "confidence 0.4" in e["summary"]
+        if e["signal"] == "probable-correction" and "confidence 0.4" in e["summary"]
     ]
     assert probable and all("Don't call legacy_charge" in e["excerpt"] for e in probable)
 
@@ -756,3 +769,144 @@ def test_detector_errors_are_counted_per_source(
     )
     assert out["sources"][0]["skipped_events"] == 1
     assert out["totals"]["friction_events"] == 1  # the rest of the session still counts
+
+
+# ---- round 6 ------------------------------------------------------------------------------
+
+
+def _scan(tmp_path: Path, sessions: list[Session], **options: Any) -> dict[str, Any]:
+    for index, session in enumerate(sessions):
+        session.save(tmp_path / "t", f"s{index}")
+    return analyze(
+        AnalyzeOptions(
+            repo=tmp_path / "repo",
+            transcripts=[tmp_path / "t"],
+            include_git=False,
+            now=NOW,
+            **options,
+        )
+    )
+
+
+def test_productive_work_stays_below_the_incident_band(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "util.py").write_text("x = 1\n")
+    sessions = []
+    for i in range(5):
+        s = Session(f"n{i}", cwd=str(repo)).user(f"implement feature {i}")
+        s.grep(f"feature_{i}", f"{repo}/src").grep(f"Feature{i}Handler", f"{repo}/src")
+        s.read(f"{repo}/src/app.py")
+        for k in range(8):
+            s.edit(f"{repo}/src/app.py", f"a{k}", f"b{k}")
+        s.bash("pytest", "8 passed")
+        for _ in range(3):
+            s.read(f"{repo}/src/util.py")
+        s.user("Actually, can you use a dataclass instead").user("great, thanks")
+        sessions.append(s)
+    out = _scan(tmp_path, sessions)
+    rows = [*out["hotspots"], *out["commands"], *out["directories"]]
+    assert rows and out["totals"]["corrections"] == 0
+    assert "edit-thrash" not in json.dumps(out["hotspots"])
+    for row in rows:
+        assert row["score"] <= 19.0, row["path"]
+        assert row["recommendations"] == [] and row["score_detail"]["capped"] is True
+        assert "capped at 19" in row["why"]
+    assert "(1 lines)" not in json.dumps(out)
+
+
+def test_probable_corrections_never_become_a_claim(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sessions = []
+    for i in range(4):
+        s = Session(f"p{i}", cwd=str(repo)).user(f"implement step {i}")
+        s.edit(f"{repo}/src/app.py").bash("pytest", "1 passed").say("Done.")
+        s.user("Actually we should have a retry here instead, can you add it")
+        s.write(f"{repo}/src/helper{i}.py", "x")
+        sessions.append(s)
+    out = _scan(tmp_path, sessions)
+    (row,) = out["hotspots"]
+    assert out["totals"]["corrections"] == 0 and out["totals"]["probable_corrections"] == 4
+    assert row["signals"] == {"probable-correction": 4} and row["score"] <= 19.0
+    assert row["recommendations"] == [] and "corrected" not in json.dumps(out["hotspots"])
+    listed = {s["id"]: s["count"] for s in out["signals"]}
+    assert listed["probable-correction"] == 4 and listed["user-correction"] == 0
+
+
+def test_sources_never_show_the_encoded_project_directory(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    project = tmp_path / "projects" / "-Users-alice-work-acme-repo"
+    s = Session("11111111-aaaa", cwd=str(repo)).user("go")
+    s.edit(f"{repo}/a.py", error=builders.EDIT_NOT_FOUND)
+    s.save(project)
+    options = AnalyzeOptions(repo=repo, transcripts=[project], include_git=False, now=NOW)
+    out = analyze(options)
+    assert "alice" not in json.dumps(out) and "acme" not in json.dumps(out)
+    assert out["sources"][0]["path"] == "claude-code:repo"
+    (evidence,) = out["hotspots"][0]["evidence"]
+    assert evidence["source"] == "claude-code:repo/11111111-aaaa.jsonl" and evidence["line"] > 0
+
+    bare = analyze(dataclasses.replace(options, include_excerpts=False))
+    (evidence,) = bare["hotspots"][0]["evidence"]
+    assert evidence["source"] is None and evidence["session_id"] == "11111111-aaaa"
+    assert evidence["line"] > 0 and bare["sources"][0]["path"] == "claude-code:repo"
+
+
+def test_one_home_rule_for_every_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "home" / "alice"
+    repo = home / "work" / "repo"
+    repo.mkdir(parents=True)
+    for var in ("HOME", "USERPROFILE"):
+        monkeypatch.setenv(var, str(home))
+    rows = [
+        {"session": "g", "kind": "user_message", "text": "go", "cwd": str(repo)},
+        {"session": "g", "kind": "tool_call", "id": 1, "op": "edit", "path": "a.py"},
+        {"session": "g", "kind": "tool_result", "id": 1, "ok": False, "error": "edit_not_found"},
+    ]
+    log = home / "logs" / "agent.jsonl"
+    log.parent.mkdir()
+    log.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    out = analyze(AnalyzeOptions(repo=repo, transcripts=[log], include_git=False, now=NOW))
+    assert out["repo"]["root"] == "~/work/repo"
+    assert out["sources"][0]["path"] == "~/logs/agent.jsonl"
+    assert out["hotspots"][0]["evidence"][0]["source"] == "~/logs/agent.jsonl"
+    assert "alice" not in json.dumps(out)
+
+
+def test_a_resumed_session_is_one_session(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    first = Session("first", cwd=str(repo)).user("go")
+    first.edit(f"{repo}/a.py", error=builders.EDIT_NOT_FOUND)
+    resumed = Session("second", cwd=str(repo))
+    for line in first.lines:  # the new file replays the old lines under a new session id
+        resumed.raw({**json.loads(line), "sessionId": "second"})
+    resumed.tick(3600).user("continue").edit(f"{repo}/a.py", error=builders.EDIT_NOT_FOUND)
+    first.save(tmp_path / "t", "a-first")
+    resumed.save(tmp_path / "t", "b-second")
+    out = analyze(
+        AnalyzeOptions(repo=repo, transcripts=[tmp_path / "t"], include_git=False, now=NOW)
+    )
+    (row,) = out["hotspots"]
+    assert out["totals"]["sessions"] == row["sessions"] == out["sources"][0]["sessions"] == 1
+    assert row["events"] == 2 and out["sources"][0]["files"] == 2
+
+
+def test_inspect_transcripts_reports_what_each_file_held(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    good = Session("good", cwd=str(repo)).user("go").edit(f"{repo}/a.py")
+    good.save(tmp_path / "t")
+    (tmp_path / "t" / "empty.jsonl").write_text("")
+    (tmp_path / "t" / "binary.jsonl").write_bytes(b"\x00\xff\x00{not json\n" * 3)
+    (tmp_path / "t" / "partly.jsonl").write_text(good.text() + "{broken\n")
+    options = AnalyzeOptions(repo=repo, transcripts=[tmp_path / "t"], include_git=False)
+    report = {
+        path.name: (events, skipped) for path, events, skipped in inspect_transcripts(options)
+    }
+    assert report["good.jsonl"] == (3, 0)
+    assert report["empty.jsonl"] == (0, 0)
+    assert report["binary.jsonl"] == (0, 3)
+    assert report["partly.jsonl"][1] == 1

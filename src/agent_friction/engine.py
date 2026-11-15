@@ -8,6 +8,7 @@ schema is documented in docs/schema.md.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -106,7 +107,7 @@ def _apply_window(stream: Stream, since: datetime | None, until: datetime | None
 def _load(
     files: Sequence[Path], since: datetime | None, until: datetime | None
 ) -> list[ParsedFile]:
-    seen: set[str] = set()
+    seen: dict[str, str] = {}
     parsed: list[ParsedFile] = []
     for path in files:
         try:
@@ -151,15 +152,6 @@ def _session_at(
     return None
 
 
-def _tilde(path: Path) -> str:
-    """``path`` with this user's own home directory (and only that) shown as ``~``."""
-    text = str(path).replace("\\", "/")
-    home = str(Path.home()).replace("\\", "/").rstrip("/")
-    if home and (text == home or text.startswith(home + "/")):
-        return "~" + text[len(home) :]
-    return text
-
-
 def _is_git(finding: Finding) -> bool:
     return finding.signal == signals.HUMAN_REWORK
 
@@ -172,6 +164,9 @@ def _score(items: Sequence[Item], exposed: set[str]) -> scoring.Score:
     """
     sessions = exposed | {f.session_id for f, _ in items}
     full = scoring.score_items(items, len(sessions))
+    if scoring.weak_only(f for f, _ in items):
+        # Nothing but signals that also accompany productive work: a lead, never an alarm.
+        return dataclasses.replace(full, score=min(full.score, scoring.WEAK_ONLY_SCORE_CAP))
     transcript_items = [(f, share) for f, share in items if not _is_git(f)]
     if len(transcript_items) == len(items) or not transcript_items:
         return full
@@ -188,6 +183,25 @@ def list_transcripts(options: AnalyzeOptions) -> list[Path]:
     or an explicitly given file that is not a JSONL transcript.
     """
     return _Analysis(options)._transcript_files()
+
+
+def inspect_transcripts(options: AnalyzeOptions) -> list[tuple[Path, int, int]]:
+    """``(file, events, skipped_lines)`` for every transcript ``analyze`` would read.
+
+    ``events`` is what the parser understood of the file (tool calls, results,
+    human messages), before any filtering by repository or time window: 0
+    means the file is empty, binary, or not a transcript.
+    """
+    seen: dict[str, str] = {}
+    report: list[tuple[Path, int, int]] = []
+    for path in list_transcripts(options):
+        try:
+            item = parse_transcript(path, seen)
+        except (OSError, ValueError):
+            report.append((path, 0, 0))
+            continue
+        report.append((path, sum(len(s.events) for s in item.streams), item.skipped_lines))
+    return report
 
 
 def _looks_like_jsonl(path: Path) -> bool:
@@ -237,6 +251,7 @@ class _Analysis:
         self._facts: dict[str, recommend.FileFacts] = {}
         self.outside: dict[Path, set[str]] = {}
         self.skipped_events: dict[str, int] = {}
+        self.source_labels: dict[str, str] = {}
         self.exposure: dict[tuple[str, str], set[str]] = {}
         self.git_used = False
 
@@ -253,6 +268,14 @@ class _Analysis:
             except OSError:
                 self._is_file_cache[rel] = None
         return self._is_file_cache[rel]
+
+    def first_party(self, top: str) -> bool:
+        """Is ``top`` a top-level module or package of this repository?"""
+        candidates = (top, f"{top}.py", f"src/{top}", f"src/{top}.py", f"lib/{top}")
+        if any(self._disk_is_file(rel) is not None for rel in candidates):
+            return True
+        prefixes = (f"{top}/", f"src/{top}/", f"lib/{top}/")
+        return any(rel.startswith(prefixes) or rel in candidates for rel in self.touched)
 
     def is_file(self, rel: str) -> bool:
         on_disk = self._disk_is_file(rel)
@@ -280,6 +303,36 @@ class _Analysis:
         """Home shown as ``~`` and forward slashes on every platform."""
         return redact.redact_home(str(path)).replace("\\", "/")
 
+    def source_group(self, item: ParsedFile) -> str:
+        """How a transcript source is named in the result.
+
+        A Claude Code project directory is named after the absolute path of the
+        working directory (user name, client, project), so it is never shown:
+        the repository's own name stands in for it.
+        """
+        name = self.repo.name or "repo"
+        if item.kind == claude_code.KIND:
+            return f"{claude_code.KIND}:{name}"
+        if not self.options.include_excerpts:
+            return f"{item.kind}:{item.path.name}"
+        return self.display_path(item.path)
+
+    def source_label(self, item: ParsedFile) -> str:
+        """One transcript file, as cited by evidence (with a line number next to it)."""
+        if item.kind != claude_code.KIND:
+            return self.source_group(item)
+        try:
+            inside = item.path.relative_to(_source_root(item)).as_posix()
+        except ValueError:
+            inside = item.path.name
+        return f"{self.source_group(item)}/{inside}"
+
+    def cited_source(self, finding: Finding) -> str | None:
+        """Where a finding can be looked up, or ``None`` when paths are to be left out."""
+        if finding.source not in self.source_labels:
+            return finding.source  # "git"
+        return self.source_labels[finding.source] if self.options.include_excerpts else None
+
     # ---- pipeline --------------------------------------------------------------------
 
     def run(self) -> dict[str, Any]:
@@ -300,6 +353,7 @@ class _Analysis:
             }
             item.streams = relevant
         streams = [s for item in parsed for s in item.streams]
+        self.source_labels = {str(item.path): self.source_label(item) for item in parsed}
         for stream in streams:
             for event in stream.events:
                 if event.kind == model.TOOL_CALL and event.op in (
@@ -317,6 +371,7 @@ class _Analysis:
             self.is_known_file,
             # Without excerpts no project-specific name may survive in a command key.
             command_key=str if options.include_excerpts else public_key,
+            first_party=self.first_party,
         )
         findings: list[Finding] = []
         exposure: dict[tuple[str, str], set[str]] = {}
@@ -440,7 +495,7 @@ class _Analysis:
         sessions: dict[tuple[str, str], set[str]] = {}
         outside: dict[tuple[str, str], set[str]] = {}
         for item in parsed:
-            key = (item.kind, self.display_path(_source_root(item)))
+            key = (item.kind, self.source_group(item))
             entry = grouped.setdefault(
                 key,
                 {
@@ -506,7 +561,7 @@ class _Analysis:
             "schema_version": SCHEMA_VERSION,
             "tool": {"name": TOOL_NAME, "version": __version__},
             "generated_at": _iso(now),
-            "repo": {"root": _tilde(self.repo), "name": self.repo.name or "repo"},
+            "repo": {"root": self.display_path(self.repo), "name": self.repo.name or "repo"},
             # What kind of scan this is; reports made with different settings do not compare.
             "settings": {
                 "excerpts": options.include_excerpts,
@@ -530,16 +585,8 @@ class _Analysis:
                 "friction_events": len(findings),
                 "est_minutes_lost": scoring.lost_minutes(findings),
                 # Corroborated corrections only; "probable" ones are listed as evidence.
-                "corrections": sum(
-                    1
-                    for f in findings
-                    if f.signal == signals.USER_CORRECTION and f.weight >= signals.CORRECTION_STRONG
-                ),
-                "probable_corrections": sum(
-                    1
-                    for f in findings
-                    if f.signal == signals.USER_CORRECTION and f.weight < signals.CORRECTION_STRONG
-                ),
+                "corrections": counts.get(signals.USER_CORRECTION, 0),
+                "probable_corrections": counts.get(signals.PROBABLE_CORRECTION, 0),
                 "files_affected": len(by_kind[model.FILE]),
                 "commands_affected": len(by_kind[model.COMMAND]),
                 "directories_affected": len(by_kind[model.DIR]),
@@ -599,11 +646,17 @@ class _Analysis:
             "signals": dict(ranked),
             "confidence": level,
             "why": scoring.explain(
-                ranked, sessions - commits, result.exposure_sessions - commits, level, commits
+                ranked,
+                sessions - commits,
+                result.exposure_sessions - commits,
+                level,
+                commits,
+                capped=scoring.weak_only(found),
             ),
             "recommendations": [],
             "evidence": [],
             "score_detail": {
+                "capped": scoring.weak_only(found),
                 "severity": result.severity,
                 "recurrence": result.recurrence,
                 "consistency": result.consistency,
@@ -644,7 +697,7 @@ class _Analysis:
             "timestamp": _iso(finding.ts),
             "summary": self.clean(finding.summary),
             "excerpt": text,
-            "source": self.display_path(finding.source),
+            "source": self.cited_source(finding),
             "line": finding.line,
         }
 

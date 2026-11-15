@@ -15,8 +15,10 @@ from agent_friction.signals import (
     COMMAND_FAILURE,
     EDIT_THRASH,
     HUMAN_REWORK,
+    PROBABLE_CORRECTION,
     READ_LOOP,
     RETRY_LOOP,
+    SEARCH_MISS,
     SEVERITY,
 )
 
@@ -33,8 +35,14 @@ MEDIUM_MIN_SESSIONS = 2
 HIGH_MIN_SESSIONS = 3
 #: Distinct signal types needed for "high" confidence.
 HIGH_MIN_SIGNALS = 2
-#: Signals too weak to justify "high" confidence on their own.
-WEAK_SIGNALS = frozenset({READ_LOOP, EDIT_THRASH})
+#: Signals that routinely accompany productive work (many edits in one sitting, re-reading
+#: a file, a search that finds nothing, a follow-up that merely sounds like a correction).
+#: A target with nothing but these is a lead at most: its score is capped, it gets no
+#: recommendation, and it cannot fail a build on its own.
+WEAK_ALONE_SIGNALS = frozenset({READ_LOOP, EDIT_THRASH, SEARCH_MISS, PROBABLE_CORRECTION})
+WEAK_ONLY_SCORE_CAP = 19.0
+#: The same signals are too weak to justify "high" confidence on their own.
+WEAK_SIGNALS = WEAK_ALONE_SIGNALS
 #: Signals computed from other findings. Next to their source they are the same evidence
 #: counted again, so they do not add a distinct signal type for confidence.
 DERIVED_SIGNALS = {RETRY_LOOP: COMMAND_FAILURE}
@@ -188,6 +196,8 @@ SIGNAL_NOUNS: dict[str, str] = {
     "path-miss": "path miss",
     "search-miss": "search miss",
     "read-loop": "read loop",
+    "probable-correction": "probable correction",
+    "file-too-large": "refused read of a too-large file",
 }
 
 
@@ -197,6 +207,7 @@ def explain(
     exposure: int,
     level: str,
     agent_commits: int = 0,
+    capped: bool = False,
 ) -> str:
     """One-sentence reason for a hotspot's score and confidence.
 
@@ -228,7 +239,31 @@ def explain(
     if agent_commits:
         commits = _plural(agent_commits, "agent commit")
         where = f"{where} and {commits}" if where else commits
-    return (
+    text = (
         f"{_plural(events, 'friction event')} in {where} ({top}); "
         f"{level} confidence because {reason}."
     )
+    if capped:
+        text += (
+            f" Only weak signals, which also accompany productive work: the score is capped "
+            f"at {WEAK_ONLY_SCORE_CAP:g} and nothing is recommended."
+        )
+    return text
+
+
+def weak_only(findings: Iterable[Finding]) -> bool:
+    """True if there is evidence and all of it is of the weak-alone kind.
+
+    One thing lifts a search miss out of that class: the *same* pattern missed
+    in two or more sessions. A name that agents keep looking for is not a
+    one-off probe before creating something new.
+    """
+    found = list(findings)
+    if not found or any(f.signal not in WEAK_ALONE_SIGNALS for f in found):
+        return False
+    sessions_by_pattern: dict[str, set[str]] = {}
+    for finding in found:
+        pattern = finding.detail.get("pattern", "").casefold()
+        if finding.signal == SEARCH_MISS and pattern:
+            sessions_by_pattern.setdefault(pattern, set()).add(finding.session_id)
+    return not any(len(s) >= MEDIUM_MIN_SESSIONS for s in sessions_by_pattern.values())

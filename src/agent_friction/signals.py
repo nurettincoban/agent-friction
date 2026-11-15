@@ -57,6 +57,8 @@ TOOL_REJECTED = "tool-rejected"
 USER_INTERRUPT = "user-interrupt"
 USER_CORRECTION = "user-correction"
 HUMAN_REWORK = "human-rework"
+PROBABLE_CORRECTION = "probable-correction"
+FILE_TOO_LARGE = "file-too-large"
 
 # ---- thresholds (see docs/signals.md) -------------------------------------------------
 #: Successful edits to one file within one user turn that count as thrashing.
@@ -207,6 +209,26 @@ CATALOG: tuple[SignalDef, ...] = (
         1.0,
     ),
     SignalDef(
+        PROBABLE_CORRECTION,
+        "Probable correction",
+        "A human prompt that is worded like a correction but is not backed by behaviour "
+        "(no file named, the agent did not go back to what it had changed), or that only "
+        "contains two weaker cues. It may be an ordinary follow-up request.",
+        "Possibly a redirect by a human. Kept apart from corrections so that a guess never "
+        "inflates their count; never quoted, never the basis of a recommendation.",
+        f"Split evenly over the files edited in the preceding turn (the {CORRECTION_MAX_FILES} "
+        "most recent).",
+        1.5,
+    ),
+    SignalDef(
+        FILE_TOO_LARGE,
+        "File too large to read",
+        "A read was refused because the file exceeds what the harness returns in one piece.",
+        "The agent has to page through the file or search it blind, in every session.",
+        "The file.",
+        1.0,
+    ),
+    SignalDef(
         PATH_MISS,
         "Path miss",
         "The agent tried to read or edit a path that does not exist.",
@@ -262,7 +284,7 @@ INVOCATION_ERROR_RE = re.compile(
     r"|(?:[\w./-]+: )?(?:line \d+: )?[^\s:]+: (?:No such file or directory|Permission denied)"
     r"|.*executable file not found in \$PATH.*"
     # the interpreter could not start the program
-    r"|(?:E\s+)?ModuleNotFoundError: No module named .*"
+    r"|ModuleNotFoundError: No module named .*"
     r"|(?:[\w./-]+: )?No module named \S+"
     r"|ImportError while loading conftest .*"
     r"|(?:[\w./-]+: )?can't open file .*"
@@ -399,13 +421,64 @@ INVOCATION_EXIT_CODES = frozenset({126, 127})
 HARNESS_TIMEOUT_RE = re.compile(r"\s*(?:Exit code \d+\s*\n\s*)?Command timed out after \d")
 
 
-def is_invocation_error(output: str, exit_code: int | None) -> bool:
-    """True when a failed command never got to do its job (setup or usage problem)."""
-    return (
-        exit_code in INVOCATION_EXIT_CODES
-        or bool(HARNESS_TIMEOUT_RE.match(output))
-        or bool(INVOCATION_ERROR_RE.search(output))
-    )
+#: Lines of a test report that quote an error raised *inside a test*: pytest's ``E   ...``
+#: lines, its ``FAILED path::test - reason`` summary, and the frames of a traceback.
+_QUOTED_LINE_RE = re.compile(
+    r"^(?:E(?:\s.*)?|(?:FAILED|ERROR) \S+(?:::\S+)? - .*|\s+File \".*|\s+at .*|>\s.*)$", re.M
+)
+#: Signs that tests actually ran: then a quoted import error is a test's own failure. Without
+#: them the run stopped at collection, and the module pytest names is what is missing.
+_TESTS_RAN_RE = re.compile(
+    r"^=+ FAILURES =+|^FAILED \S+::|\b\d+ (?:passed|failed|xfailed|xpassed)\b", re.M
+)
+_COLLECTION_MISSING_RE = re.compile(
+    r"^E\s+ModuleNotFoundError: No module named ['\"]?([\w.]+)", re.M
+)
+
+
+def is_invocation_error(
+    output: str, exit_code: int | None, first_party: Callable[[str], bool] | None = None
+) -> bool:
+    """True when a failed command never got to do its job (setup or usage problem).
+
+    Errors quoted from inside a test (``E   ModuleNotFoundError ...`` in a
+    pytest report, a ``FAILED ... - `` line, traceback frames) are the test's
+    business, not the command's. A module that cannot be imported is a setup
+    problem only if it is not the repository's own (``first_party`` says so for
+    a top-level package name): a typo in an import is a bug to fix, a missing
+    dependency is an environment to set up.
+    """
+    if exit_code in INVOCATION_EXIT_CODES or HARNESS_TIMEOUT_RE.match(output):
+        return True
+    own = first_party or (lambda top: False)
+    direct = _QUOTED_LINE_RE.sub("", output)
+    if INVOCATION_ERROR_RE.search(direct):
+        missing = missing_name(direct)
+        ours = missing is not None and missing[0] == "module" and own(missing[1].split(".")[0])
+        return not ours
+    match = _COLLECTION_MISSING_RE.search(output)
+    if match is not None and not _TESTS_RAN_RE.search(output):
+        return not own(match.group(1).split(".")[0])
+    return False
+
+
+#: Commands that keep running until stopped. Run in the foreground they can only end in
+#: the harness's timeout, which says nothing about how to invoke them.
+DEV_SERVER_RE = re.compile(
+    r"(?:^|[\s;&|(])(?:"
+    r"(?:npm|pnpm|yarn|bun)(?: run)? (?:dev|start|serve|preview|watch|storybook)\b"
+    r"|(?:npx |bunx |pnpm exec |uv run |poetry run |python3? -m )?(?:vite|next dev|nuxt dev"
+    r"|webpack serve|webpack-dev-server|uvicorn|gunicorn|hypercorn|daphne|flask run"
+    r"|http\.server|live-server|nodemon|ng serve|streamlit run|mkdocs serve|hugo server"
+    r"|jekyll serve|php artisan serve|rails s(?:erver)?|bin/rails s(?:erver)?|cargo watch"
+    r"|docker compose up(?! (?:.* )?(?:-d|--detach)\b)|tail -f)(?:\s|$)"
+    r"|python3? (?:\S*/)?manage\.py runserver\b"
+    r")"
+)
+#: "bash: pnpm: command not found" and its variants: the program a shell could not find.
+_NOT_FOUND_PROGRAM_RE = re.compile(
+    r"(?:^|: )([^\s:]+): (?:command )?not found\s*$|command not found: (\S+)\s*$", re.M
+)
 
 
 #: Praise, thanks and dismissals. A correction phrase *followed* by one of these is not a
@@ -593,9 +666,10 @@ _WEAK_CORRECTION: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
         ("stop", r"\bstop (?:\w+ing|that|it|doing)\b"),
         ("instead", r"\binstead\b"),
         ("wrong", r"\b(?:wrong|incorrect|mistake)\b"),
-        ("shouldn't", r"\b(?:shouldn't|should not|should have|supposed to)\b"),
+        # "we should have a retry here" is a wish, not a reproach
+        ("shouldn't", r"\b(?:shouldn't|should not|you should have|supposed to)\b"),
         ("again", r"\byou (?:\w+ )?(?:\w+ed|did|used|put|broke) (?:\S+ ){0,4}again\b"),
-        ("deprecated", r"\b(?:deprecated|not allowed|forbidden|off limits)\b"),
+        ("not allowed", r"\b(?:deprecated|not allowed|forbidden|off limits)\b"),
     )
 )
 
@@ -659,6 +733,8 @@ class DetectContext:
     is_known_file: Callable[[str], bool]
     #: How a command key is shown (identity, or ``attribution.public_key`` without excerpts).
     command_key: Callable[[str], str] = str
+    #: True if a top-level module/package name belongs to the repository itself.
+    first_party: Callable[[str], bool] = lambda top: False
 
 
 @dataclass
@@ -771,6 +847,14 @@ class _State:
     missing_reads: dict[str, list[Finding]] = field(default_factory=dict)
     # a strongly worded correction waiting for the agent to act on it
     unconfirmed: _Unconfirmed | None = None
+    # this turn: did anything go wrong, how did its last command end, which searches missed
+    turn_trouble: bool = False
+    turn_shell_ok: bool | None = None
+    turn_misses: list[tuple[Finding, str]] = field(default_factory=list)
+
+
+#: What makes a run of edits to one file "thrash" rather than a productive sitting.
+_TROUBLE = frozenset({EDIT_MISS, STALE_EDIT, EDIT_REVERT, COMMAND_FAILURE, RETRY_LOOP})
 
 
 class _Detector:
@@ -812,6 +896,8 @@ class _Detector:
         )
         self.findings.append(finding)
         self.exposed.update((t.kind, t.key) for t in targets)
+        if signal in _TROUBLE:
+            self.state.turn_trouble = True
         return finding
 
     def _action_targets(self, action: _Action) -> list[Target]:
@@ -913,7 +999,22 @@ class _Detector:
             except Exception:  # one odd event must never end the scan
                 self.skipped_events += 1
         self._settle_correction()
+        self._end_turn()
         return self.findings
+
+    def _end_turn(self) -> None:
+        """Judge what can only be judged once a turn is over."""
+        state = self.state
+        if state.thrash and not state.turn_trouble:
+            # Many edits, nothing failed, missed or was taken back: that is just writing.
+            self._drop({id(f) for f in state.thrash.values()})
+        elif state.turn_shell_ok:
+            for finding in state.thrash.values():
+                finding.detail["ended_green"] = "1"
+        state.thrash = {}
+        state.turn_trouble = False
+        state.turn_shell_ok = None
+        state.turn_misses = []
 
     def _step(self, item: _Action | Event) -> None:
         state = self.state
@@ -931,10 +1032,10 @@ class _Detector:
                     if state.prompts > 0 and state.turn:
                         self._on_prompt(item)
                 state.prompts += 1
+            self._end_turn()
             state.turn = []
             state.agent_seen = None
             state.turn_edits = {}
-            state.thrash = {}
             state.pending = []
             state.open_edits = {}
 
@@ -947,8 +1048,8 @@ class _Detector:
             self._on_rejected(action, result)
         elif result.error == model.ERR_DENIED:
             self._on_denied(action, result)
-        elif result.error == model.ERR_INTERRUPTED:
-            return
+        elif result.error in (model.ERR_INTERRUPTED, model.ERR_NOT_RUN):
+            return  # it never ran (to the end): nothing to learn from it
         elif op in (model.OP_EDIT, model.OP_WRITE):
             self._on_edit(action, result)
         elif op == model.OP_READ:
@@ -1132,6 +1233,16 @@ class _Detector:
         if not result.ok:
             if result.error == model.ERR_MISSING:
                 self._path_miss(action, result)
+            elif result.error == model.ERR_TOO_LARGE:
+                self._emit(
+                    FILE_TOO_LARGE,
+                    result,
+                    f"{action.call.tool} of {path} was refused: the file is too large to "
+                    "read in one piece",
+                    [Target(model.FILE, path)],
+                    excerpt=result.output,
+                    interval=self._round_trip(action),
+                )
             return
         state = self.state
         key = (path, action.call.read_range)
@@ -1147,9 +1258,19 @@ class _Detector:
             finding.detail["count"] = str(count)
 
     def _on_search(self, action: _Action, result: Event) -> None:
+        call = action.call
+        wanted = (call.pattern or "").casefold()
+        if result.ok and not result.empty and wanted:
+            # Found after all, elsewhere, in the same turn: the misses were the search.
+            found = {id(f) for f, pattern in self.state.turn_misses if pattern == wanted}
+            if found:
+                self._drop(found)
+                self.state.probes = [p for p in self.state.probes if id(p[0]) not in found]
+                self.state.turn_misses = [
+                    m for m in self.state.turn_misses if id(m[0]) not in found
+                ]
         if not (result.ok and result.empty):
             return
-        call = action.call
         scope = _scope(call, self.ctx)
         if scope is None:
             return
@@ -1165,6 +1286,8 @@ class _Detector:
             detail={"pattern": call.pattern or "", "scope": scope or "."},
         )
         self.state.probes.append((finding, call, scope))
+        if wanted:
+            self.state.turn_misses.append((finding, wanted))
 
     # ---- shell -----------------------------------------------------------------------
 
@@ -1178,6 +1301,8 @@ class _Detector:
         state.pending = [(f, k, n - 1) for f, k, n in state.pending if n > 1]
         if result.ok and is_shell_edit(cmd, action.call.command or ""):
             self._on_change()  # `sed -i`, a formatter, `--fix`: a change like any edit
+        if not cmd.inspection and result.error != model.ERR_INTERRUPTED:
+            state.turn_shell_ok = result.ok
         if result.ok:
             if not cmd.inspection:
                 state.ok_commands += 1
@@ -1241,9 +1366,19 @@ class _Detector:
         if code == 1 and cmd.last_program in MATCH_FILTERS and cmd.last_program != cmd.program:
             return  # `... | grep x` with nothing matched
         call = action.call
-        invocation = is_invocation_error(result.output, code)
+        timed_out = HARNESS_TIMEOUT_RE.match(result.output) is not None
+        if result.harness_error and code is None and not timed_out:
+            return  # the harness's own error message: the command was never executed
+        invocation = is_invocation_error(result.output, code, self.ctx.first_party)
         # In `a && b` the output tells which step failed; b may never have run.
         step, certain = failing_step(cmd, result.output)
+        # ... and a shell that could not find a program names it, wherever it stood.
+        unfound = _NOT_FOUND_PROGRAM_RE.search(result.output)
+        if unfound is not None:
+            name = (unfound.group(1) or unfound.group(2)).rsplit("/", 1)[-1]
+            named = next((s for s in cmd.steps if s.key and name in (s.program, s.key)), None)
+            if named is not None:
+                step, certain = named, True
         if step is not None and step.key:
             key = step.key
         hook_fixed = False
@@ -1277,6 +1412,14 @@ class _Detector:
         }
         if not certain:
             detail["ambiguous_step"] = "1"
+        if timed_out:
+            detail["timeout"] = "1"
+            if DEV_SERVER_RE.search(call.command or ""):
+                detail["server"] = "1"
+                summary = (
+                    f"`{shown(key)}` ran until the harness timed it out: it is a server or "
+                    "watcher that never exits on its own"
+                )
         finding = self._emit(
             COMMAND_FAILURE,
             result,
@@ -1346,7 +1489,8 @@ class _Detector:
 
     @staticmethod
     def _correction_summary(confidence: float, matched: str, note: str, how: str) -> str:
-        return f"User correction (confidence {confidence:g}; matched {matched}; {note}); {how}"
+        what = "User correction" if confidence >= CORRECTION_STRONG else "Probable correction"
+        return f"{what} (confidence {confidence:g}; matched {matched}; {note}); {how}"
 
     def _confirm_correction(self, paths: set[str] | frozenset[str], note: str) -> None:
         """The agent acted on files a strongly worded correction was about."""
@@ -1377,7 +1521,7 @@ class _Detector:
             )
             finding.detail["corroborated"] = "followed"
             return
-        finding.weight = CORRECTION_PROBABLE
+        finding.signal = PROBABLE_CORRECTION
         finding.detail["confidence"] = f"{CORRECTION_PROBABLE:g}"
         finding.detail["corroborated"] = "no"
         finding.summary = self._correction_summary(
@@ -1431,7 +1575,7 @@ class _Detector:
             step = objectionable_step(action.cmd, said)
             if step is not None and step.key:
                 targets = [Target(model.COMMAND, self.ctx.command_key(step.key))]
-        by = "a hook" if result.reason == "hook" else "permission settings"
+        by = {"hook": "a hook", "blocked": "the harness"}.get(result.reason, "permission settings")
         what = targets[0].key if targets else call.tool
         what = f"`{what}`" if targets and targets[0].kind == model.COMMAND else what
         excerpt = [f"$ {call.command}"] if call.op == model.OP_SHELL and call.command else []
@@ -1532,12 +1676,11 @@ class _Detector:
             confidence = CORRECTION_PROBABLE
             note = "not corroborated: no file was changed in the preceding turn"
         finding = self._emit(
-            USER_CORRECTION,
+            USER_CORRECTION if confidence >= CORRECTION_STRONG else PROBABLE_CORRECTION,
             event,
             self._correction_summary(confidence, matched, note, how),
             targets,
             excerpt=event.text,
-            weight=confidence,
             interval=_capped_back(start, end),
             detail={"quote": event.text, "confidence": f"{confidence:g}"},
         )

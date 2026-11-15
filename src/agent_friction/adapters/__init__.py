@@ -39,7 +39,7 @@ def detect_format(path: Path) -> str:
     return claude_code.KIND
 
 
-def parse_transcript(path: Path, seen_uuids: set[str] | None = None) -> ParsedFile:
+def parse_transcript(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFile:
     """Parse a transcript file in whichever supported format it is in."""
     if detect_format(path) == generic.KIND:
         return generic.parse_file(path)

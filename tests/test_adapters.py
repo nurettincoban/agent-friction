@@ -194,11 +194,14 @@ def test_claude_duplicate_uuids_are_dropped_across_files(tmp_path: Path) -> None
     resumed = Session("two")
     resumed.lines = list(first.lines)  # a resumed session replays the old lines
     resumed.user("and more")
-    seen: set[str] = set()
+    seen: dict[str, str] = {}
     a = parse_transcript(first.save(tmp_path), seen)
     b = parse_transcript(resumed.save(tmp_path), seen)
     assert len(kinds(a)) == 3
     assert [e.text for s in b.streams for e in s.events] == ["and more"]
+    # the resumed file continues the first session: one piece of work, one session
+    assert [s.session_id for s in b.streams] == ["one"]
+    assert set(seen.values()) == {"one"}
 
 
 def test_format_detection(tmp_path: Path) -> None:

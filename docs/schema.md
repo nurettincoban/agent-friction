@@ -47,6 +47,11 @@ exactly the transcript files `analyze(options)` would read (explicit
 in the same cases: nothing found; a given path that does not exist; a given
 *file* in which none of the first 200 lines is a JSON object.
 
+`agent_friction.engine.inspect_transcripts(options) -> list[tuple[Path, int,
+int]]` parses the same files and returns `(file, events, skipped_lines)` for
+each: `events` is what the parser understood of the file before any filtering
+by repository or time window, so `0` marks an empty, binary or foreign file.
+
 ### Top level
 
 | Field | Type | Meaning |
@@ -80,7 +85,7 @@ in the same cases: nothing found; a given path that does not exist; a given
 | Field | Meaning |
 | --- | --- |
 | `kind` | `"claude-code"`, `"generic"` or `"git"`. |
-| `path` | Claude Code project directory, generic file, or repo root for git (home as `~`). |
+| `path` | `claude-code:<repo name>` for Claude Code transcripts (the project directory encodes an absolute path and is never shown), the file for generic transcripts (home as `~`; only `generic:<file name>` with `include_excerpts=False`), or the repo root for git. |
 | `sessions` | Distinct sessions with activity in the repo (for git: agent commits in the window). |
 | `skipped_lines` | Lines that were not valid JSON objects or lacked required structure. |
 | `skipped_events` | Events on which a detector raised an unexpected error. They are skipped; anything above 0 is a bug worth reporting. |
@@ -97,8 +102,8 @@ in the same cases: nothing found; a given path that does not exist; a given
 | `tool_calls` | Tool calls in those sessions. |
 | `friction_events` | All detected events, equal to the sum of `signals[].count`. |
 | `est_minutes_lost` | Union of all claimed intervals, in minutes (1 decimal). |
-| `corrections` | `user-correction` events with confidence 1.0: clear wording **and** corroborated by what the human named or the agent did next. A lower bound. |
-| `probable_corrections` | `user-correction` events with confidence 0.4 (wording only, or two weak cues). Listed as evidence, never quoted in recommendations. `signals[]` counts both kinds. |
+| `corrections` | `user-correction` events: clear wording **and** corroborated by what the human named or the agent did next. A lower bound. |
+| `probable_corrections` | `probable-correction` events (wording only, or two weak cues): a separate, weak signal. Listed as evidence, never quoted, never the basis of a recommendation. |
 | `files_affected` | File hotspots before `max_hotspots` truncation. |
 | `commands_affected`, `directories_affected` | Likewise. |
 | `unattributed_events` | Events that could not be tied to a path or command. |
@@ -151,7 +156,7 @@ was fixed only if its target still has exposure there.
 | `why` | str | One sentence: counts, friction sessions out of exposure sessions, top signals, reason for the confidence. |
 | `recommendations` | list | `{id, title, detail, signals}`; `signals` lists the signal ids the rule is based on. May be empty. |
 | `evidence` | list | Up to `max_evidence` items, chronological. |
-| `score_detail` | object | The score's factors, each 0-1: `severity`, `recurrence`, `consistency` (`score` is 100 x their product, up to rounding); `mean_session_points`; `intensity` (sum of session points); and `sessions`: per session `session_id`, `weighted_events`, `points`. |
+| `score_detail` | object | The score's factors, each 0-1: `severity`, `recurrence`, `consistency` (`score` is 100 x their product, up to rounding); `mean_session_points`; `intensity` (sum of session points); `capped` (true when all evidence is weak and the score was limited to 19); and `sessions`: per session `session_id`, `weighted_events`, `points`. |
 | `file` | object | File hotspots only: `exists`, `lines` (`null` if missing or over 5 MB), `generated`. |
 
 ### `evidence[]`
@@ -163,7 +168,7 @@ was fixed only if its target still has exposure there.
 | `timestamp` | ISO-8601 UTC; `null` only for generic events without `ts`. |
 | `summary` | What happened, built from structure only: tool name, repo-relative path, normalized command name, counts, commit hashes. Never contains prompts, search patterns, command arguments or output. |
 | `excerpt` | Redacted, truncated transcript text (error output, the command, the human's words, the search pattern), or `null`. Always `null` with `include_excerpts=False`. May contain newlines. |
-| `source` | Transcript file (home as `~`) or `"git"`. |
+| `source` | Where to look the event up: `claude-code:<repo name>/<session file>.jsonl` (never the project directory), a generic transcript file (home as `~`), or `"git"`. `null` for transcript evidence with `include_excerpts=False`. |
 | `line` | 1-based line number in `source`; `0` for git. |
 
 ### `tree`
@@ -215,7 +220,7 @@ Common fields:
 | `id` | Required. The call's id. |
 | `ok` | `false` marks a failure. If omitted, the call failed when `error` is set or `exit_code` is non-zero. |
 | `exit_code` | Shell exit status. |
-| `error` | Optional class: `edit_not_found`, `edit_ambiguous`, `not_read`, `stale`, `missing`, `rejected` (a human declined), `denied` (permission settings or a hook refused; `reason` may be `"hook"`), `interrupted`, `exit`, `error`. If omitted on a failure it is inferred from `output` using Claude Code's error wording. |
+| `error` | Optional class: `edit_not_found`, `edit_ambiguous`, `not_read`, `stale`, `missing`, `rejected` (a human declined), `denied` (permission settings or a hook refused; `reason` may be `"hook"`), `interrupted`, `exit`, `not_run` (the harness never started the call: ignored), `too_large` (a read refused for size), `error`. If omitted on a failure it is inferred from `output` using Claude Code's error wording. |
 | `output` | Tool output or error text (used for excerpts and to classify command failures). |
 | `matches` | Number of search results; `0` marks a search miss (alternatively `"empty": true`). |
 | `reason` | What the human said when declining (`error: "rejected"`). |

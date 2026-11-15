@@ -24,8 +24,8 @@ agent-friction · shopfront
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals
-  █████▋      56.8 src/shopfront/api/schema_gen.py           4     12     11m  ● edit-miss×6, user-correction×3
-  ████▍       43.5 src/shopfront/checkout/service.py         3      6     19m  ● user-correction×3, edit-revert×2
+  █████▋      56.8 src/shopfront/api/schema_gen.py           4     12     11m  ● edit-miss×6, user-correction×2
+  ████▍       43.4 src/shopfront/checkout/service.py         3      6     19m  ● edit-revert×2, user-correction×2
 
 Commands that keep failing
   ████▉       48.6 pytest                                    4      7      7m  ◐ command-failure×7
@@ -123,6 +123,7 @@ attribution rule, and known false positives in [docs/signals.md](https://github.
 | Signal | What happened |
 |---|---|
 | `user-correction` | The human corrected the agent ("no, use X", "I said…", "you broke…") and the agent went back to the work it had just done |
+| `probable-correction` | Words that sound like a correction, without behaviour to back them up (weighted low, never quoted) |
 | `retry-loop` | The same command line, with identical arguments, failed 3+ times with no change in between |
 | `tool-rejected` | The human declined a tool call (and often said why) |
 | `permission-denied` | A permission rule, hook, or safety check refused a tool call before it ran |
@@ -135,6 +136,7 @@ attribution rule, and known false positives in [docs/signals.md](https://github.
 | `stale-edit` | An edit refused because the file changed or was never read |
 | `path-miss` | The agent read or edited a path that does not exist |
 | `search-miss` | A search in a file or directory came back empty |
+| `file-too-large` | The agent could not read a file because it is too large for its context |
 | `read-loop` | The same file re-read many times without being edited |
 
 Scores are 0-100, explainable, and reproducible by hand from three factors: how severe the
@@ -142,7 +144,8 @@ friction is, how often it **recurs** across sessions (one bad afternoon is not a
 **consistently** it happens in the sessions that touch that file or command at all (so a busy
 file is not penalized just for being busy). Roughly: under 20 is an incident, 20-45 a pattern,
 above 45 a reliable struggle. Red-then-green test runs with a fix in between are normal work and
-are not counted. Time lost is a conservative estimate of agent time from timestamps; waiting for
+are not counted, and weak signals on their own (re-reads, many edits, an empty search) never
+rise above the incident band. Time lost is a conservative estimate of agent time from timestamps; waiting for
 a human is never counted. Confidence (low / medium /
 high) depends on how many sessions back a hotspot and whether an independent second kind of
 evidence agrees. All of it is in
@@ -196,6 +199,8 @@ within a schema version.
   never quoted, and excluded from the headline count. It is English-only and still a heuristic,
   so treat the count as a floor.
 - Time lost is a floor, not a measurement of human time.
+- Agents that edit mostly through shell commands (heredocs, scripts) leave fewer traces of
+  edit friction, so edit signals undercount for them.
 
 Reports of wrong or missed hotspots are the most valuable contribution you can make:
 [open one here](https://github.com/nurettincoban/agent-friction/issues/new?template=false_positive.yml).

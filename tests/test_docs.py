@@ -36,9 +36,11 @@ def test_documented_thresholds_match_the_code() -> None:
     assert f"first {signals.CORRECTION_HEAD_CHARS} characters" in catalog
     assert f"weight {signals.ORDINARY_FAILURE_WEIGHT}" in catalog
     assert f"correction (confidence {signals.CORRECTION_PROBABLE})" in catalog
-    worth = signals.CORRECTION_PROBABLE * signals.SEVERITY[signals.USER_CORRECTION]
-    assert f"a probable correction is worth {worth:g}" in catalog
-    assert f"or {signals.CORRECTION_PROBABLE}\n  for a" in method
+    worth = signals.SEVERITY[signals.PROBABLE_CORRECTION]
+    assert f"a probable correction weighs {worth:g}" in catalog
+    assert f"the score is capped at **{scoring.WEAK_ONLY_SCORE_CAP:g}**" in method
+    for weak in scoring.WEAK_ALONE_SIGNALS:
+        assert f"`{weak}`" in method.split("**Weak evidence is capped.**")[1][:200]
     assert f"({gitsignals.DEFAULT_REWORK_WINDOW_DAYS}\ndays by default)" in catalog
     assert f"exp(-mean points / {scoring.SEVERITY_SCALE:g})" in method
     bits = math.log2(1 + scoring.RECURRENCE_FULL_SESSIONS)
@@ -84,7 +86,8 @@ def test_generic_format_example_in_the_docs_parses(tmp_path: Path) -> None:
     parsed = generic.parse_file(path)
     assert parsed.skipped_lines == 0 and len(parsed.streams[0].events) == 6
     found = detect(path, tmp_path, repo="/work/shop")
-    assert [f.signal for f in found] == ["edit-miss", "command-failure", "user-correction"]
+    # the only edit failed, so nothing corroborates the complaint: a probable correction
+    assert [f.signal for f in found] == ["edit-miss", "command-failure", "probable-correction"]
 
 
 def test_score_table_in_the_methodology_is_computed_by_the_code() -> None:

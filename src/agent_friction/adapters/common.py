@@ -109,6 +109,27 @@ def strip_error_tags(text: str) -> str:
     return _TAG_RE.sub("", text).strip()
 
 
+#: The harness refused to start the call: a sibling in a parallel batch failed, or the
+#: arguments did not validate. Nothing ran, so nothing failed.
+_NOT_RUN_RE = re.compile(
+    r"\s*(?:Error: )?(?:Cancelled: |InputValidationError\b|No such tool available\b"
+    r"|Tool \S+ not found\b)",
+    re.I,
+)
+_TOO_LARGE_RE = re.compile(
+    r"exceeds (?:the )?maximum allowed (?:tokens|size)|File content \([^)]*\) exceeds", re.I
+)
+#: The harness's own refusal of a command pattern ("Blocked: sleep 30 followed by ...").
+_BLOCKED_RE = re.compile(r"\s*(?:Error: )?Blocked: ")
+#: User-role lines that carry hook output, not something the human typed.
+HOOK_FEEDBACK_RE = re.compile(
+    r"(?:[\w:.-]+ )?hook (?:feedback|blocking error|error|additional context|output)\b"
+    r"|(?:Pre|Post)ToolUse:|(?:Stop|SubagentStop|SessionStart|UserPromptSubmit|PreCompact"
+    r"|Notification) hook\b",
+    re.I,
+)
+
+
 def classify_error(text: str) -> tuple[str, int | None]:
     """Map a failed tool result's text to an error class and the "N matches" count.
 
@@ -116,6 +137,10 @@ def classify_error(text: str) -> tuple[str, int | None]:
     either reuse them or set ``error`` explicitly in the generic format.
     """
     lowered = text.lower()
+    if _NOT_RUN_RE.match(text):
+        return model.ERR_NOT_RUN, None
+    if _TOO_LARGE_RE.search(text):
+        return model.ERR_TOO_LARGE, None
     if "string to replace not found" in lowered or "string not found in file" in lowered:
         return model.ERR_EDIT_NOT_FOUND, None
     ambiguous = _AMBIGUOUS_RE.search(text)
@@ -163,6 +188,8 @@ _HOOK_RE = re.compile(r"\bhook\b", re.I)
 def denial(text: str) -> str | None:
     """``"hook"`` or ``"permission"`` if ``text`` is a policy denial, else ``None``."""
     stripped = strip_error_tags(text)
+    if _BLOCKED_RE.match(stripped):
+        return "blocked"
     match = _DENIED_RE.match(stripped)
     if match is None:
         return None

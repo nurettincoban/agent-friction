@@ -148,7 +148,9 @@ def _tool_result(
     event = Event(kind=model.TOOL_RESULT, line=line, call_id=call_id, **base)
     # Trust the flag. The error tag only counts when the result starts with it:
     # a successful command may well print "<tool_use_error>" (e.g. from a test file).
-    is_error = block.get("is_error") is True or text.lstrip().startswith("<tool_use_error>")
+    tagged = text.lstrip().startswith("<tool_use_error>")
+    is_error = block.get("is_error") is True or tagged
+    event.harness_error = tagged
     clean = common.strip_error_tags(text) if is_error else text.strip()
     info: dict[str, Any] = structured if isinstance(structured, dict) else {}
     reason = common.rejection_reason(text)
@@ -186,7 +188,7 @@ def _user_text(text: str, line: int, base: dict[str, Any]) -> Event | None:
         return Event(kind=model.INTERRUPT, line=line, text=stripped, **base)
     if stripped.startswith(COMMAND_PREFIXES):
         return Event(kind=model.USER_MESSAGE, line=line, synthetic=True, **base)
-    if stripped.startswith(WRAPPER_PREFIXES):
+    if stripped.startswith(WRAPPER_PREFIXES) or common.HOOK_FEEDBACK_RE.match(stripped):
         return None
     return Event(kind=model.USER_MESSAGE, line=line, text=stripped, **base)
 
@@ -261,13 +263,17 @@ def _asks_question(content: object) -> bool | None:
     return verdict
 
 
-def parse_file(path: Path, seen_uuids: set[str] | None = None) -> ParsedFile:
+def parse_file(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFile:
     """Parse one Claude Code ``.jsonl`` transcript.
 
-    ``seen_uuids`` de-duplicates lines across files: resumed sessions can replay
-    earlier lines (same ``uuid``) into a new file.
+    ``seen_uuids`` (line uuid -> session id) de-duplicates lines across files.
+    A resumed session replays earlier lines (same ``uuid``) into a new file
+    under a new session id: such a file continues the session those lines
+    came from and is given its id, so one piece of work is one session.
     """
-    seen = seen_uuids if seen_uuids is not None else set()
+    seen = seen_uuids if seen_uuids is not None else {}
+    resumed_from: str | None = None
+    added: list[str] = []
     in_subagent_dir = path.parent.name == "subagents"
     session = session_id_for(path)
     main = Stream(session_id=session, source=path, kind=KIND, sidechain=False)
@@ -293,8 +299,11 @@ def parse_file(path: Path, seen_uuids: set[str] | None = None) -> ParsedFile:
             uuid = obj.get("uuid")
             if isinstance(uuid, str) and uuid:
                 if uuid in seen:
+                    if resumed_from is None and seen[uuid] != session:
+                        resumed_from = seen[uuid]
                     continue
-                seen.add(uuid)
+                seen[uuid] = session
+                added.append(uuid)
             events = _line_events(obj, number)
             if events is None:
                 parsed.skipped_lines += 1
@@ -310,5 +319,9 @@ def parse_file(path: Path, seen_uuids: set[str] | None = None) -> ParsedFile:
                         event.after_question = asking[target.sidechain]
                         asking[target.sidechain] = False
             target.events.extend(events)
+    if resumed_from is not None and not in_subagent_dir:
+        main.session_id = side.session_id = resumed_from
+        for uuid in added:
+            seen[uuid] = resumed_from
     parsed.streams = [s for s in (main, side) if s.events]
     return parsed

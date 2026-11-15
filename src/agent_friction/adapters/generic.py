@@ -66,7 +66,7 @@ def _event(obj: dict[str, Any], line: int) -> Event | None:
             elif event.exit_code:
                 event.error = model.ERR_EXIT
             elif common.denial(text) is not None:
-                event.error = model.ERR_DENIED
+                event.error, event.reason = model.ERR_DENIED, common.denial(text) or ""
             else:
                 event.error, event.matches = common.classify_error(text)
         else:
