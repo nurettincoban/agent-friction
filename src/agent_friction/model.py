@@ -72,6 +72,9 @@ class Event:
     read_range: str = ""
     edits: tuple[tuple[str, str], ...] = ()  # (digest(old), digest(new)) pairs
     content_digest: str = ""  # digest of full content for writes
+    #: Text an edit or write put into the file (capped). Held in memory only, to see whether
+    #: an earlier empty search was a check before creating something; never emitted.
+    new_text: str = ""
     # tool_result
     ok: bool = True
     error: str = ""

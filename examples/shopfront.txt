@@ -12,9 +12,9 @@ Files where agents struggle
 
 Commands that keep failing
   score            path                                   sess events    lost  top signals
-  █████       50.5 pytest                                    4      8      6m  ● command-failure×7, retry-loop×1
+  █████       50.5 pytest                                    4      8      7m  ● command-failure×7, retry-loop×1
   █▋          16.3 rm                                        1      1     42s  ○ tool-rejected×1
-  █▌          15.2 curl                                      1      1     24s  ○ command-failure×1
+  █▌          15.2 curl                                      1      1     12s  ○ command-failure×1
   █▌          15.2 python -m pytest                          1      1     30s  ○ command-failure×1
 
 Directories where agents search in vain
@@ -27,8 +27,9 @@ What to fix first
      editing it directly 7 times in 4 sessions. Say in AGENTS.md which source to change and which
      command regenerates it, and consider denying direct edits to it.
   2. pytest: Tell agents to use `make test`
-     `pytest` failed 7 times in 4 sessions; 5 times the next successful command was `make test`.
-     Add a line to AGENTS.md such as: "use `make test`, not `pytest`".
+     `pytest` failed 7 times in 4 sessions; 7 times the agent then got the same job done with
+     `make test`, and `pytest` did not work later in those sessions. Add a line to AGENTS.md such
+     as: "use `make test`, not `pytest`".
   3. src/shopfront/checkout/service.py: Write down the rule the human keeps repeating
      A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md
      (or a comment at the top of the file) so it is read before the next attempt. In their words:

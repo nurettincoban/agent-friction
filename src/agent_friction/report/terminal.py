@@ -42,9 +42,10 @@ class Style:
         return self._wrap("36", text)
 
     def heat(self, score: float, text: str) -> str:
-        if score >= 60:
+        # Bands follow the reading guide: <20 incident, 20-45 pattern, >45 reliable struggle.
+        if score >= 45:
             return self.red(text)
-        if score >= 30:
+        if score >= 20:
             return self.yellow(text)
         return self.green(text)
 

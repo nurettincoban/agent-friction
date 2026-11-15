@@ -182,7 +182,7 @@ def test_explain_sentence() -> None:
     counts = [(signals.EDIT_MISS, 5), (signals.USER_CORRECTION, 1)]
     assert scoring.explain(counts, 3, 4, "high") == (
         "6 friction events in 3 of the 4 sessions that touched it "
-        "(5 edit miss, 1 user correction); "
+        "(5 edit misses, 1 user correction); "
         "high confidence because it recurs across sessions with several kinds of evidence."
     )
     assert scoring.explain(counts, 3, 3, "medium").startswith(
@@ -191,3 +191,11 @@ def test_explain_sentence() -> None:
     assert scoring.explain([(signals.EDIT_MISS, 1)], 1, 1, "low").startswith(
         "1 friction event in the only session that touched it (1 edit miss); low confidence"
     )
+    with_git = scoring.explain([(signals.EDIT_MISS, 1), (signals.HUMAN_REWORK, 3)], 1, 1, "low", 3)
+    assert with_git.startswith(
+        "4 friction events in the only session that touched it and 3 agent commits "
+        "(1 edit miss, 3 human rework commits);"
+    )
+    only_git = scoring.explain([(signals.HUMAN_REWORK, 1)], 0, 0, "low", 1)
+    assert only_git.startswith("1 friction event in 1 agent commit (1 human rework commit);")
+    assert set(scoring.SIGNAL_NOUNS) == set(signals.BY_ID)

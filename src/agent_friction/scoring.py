@@ -153,15 +153,46 @@ def lost_minutes(findings: Iterable[Finding]) -> float:
 
 
 def _plural(count: int, noun: str) -> str:
-    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+    if count == 1:
+        return f"{count} {noun}"
+    return f"{count} {noun}es" if noun.endswith(("s", "sh", "ch", "x")) else f"{count} {noun}s"
+
+
+#: How each signal is counted in a sentence ("6 edit misses", "1 retry loop").
+SIGNAL_NOUNS: dict[str, str] = {
+    "user-correction": "user correction",
+    "retry-loop": "retry loop",
+    "tool-rejected": "declined tool call",
+    "user-interrupt": "user interrupt",
+    "edit-miss": "edit miss",
+    "edit-revert": "reverted edit",
+    "command-failure": "command failure",
+    "human-rework": "human rework commit",
+    "edit-thrash": "edit thrash episode",
+    "stale-edit": "stale edit",
+    "path-miss": "path miss",
+    "search-miss": "search miss",
+    "read-loop": "read loop",
+}
 
 
 def explain(
-    signal_counts: Sequence[tuple[str, int]], sessions: int, exposure: int, level: str
+    signal_counts: Sequence[tuple[str, int]],
+    sessions: int,
+    exposure: int,
+    level: str,
+    agent_commits: int = 0,
 ) -> str:
-    """One-sentence reason for a hotspot's score and confidence."""
+    """One-sentence reason for a hotspot's score and confidence.
+
+    ``sessions`` and ``exposure`` count transcript sessions; ``agent_commits``
+    are git commits with rework that no transcript session accounts for.
+    """
     events = sum(count for _, count in signal_counts)
-    top = ", ".join(f"{count} {BY_ID[sid].title.lower()}" for sid, count in signal_counts[:3])
+    top = ", ".join(
+        _plural(count, SIGNAL_NOUNS.get(sid, BY_ID[sid].title.lower()))
+        for sid, count in signal_counts[:3]
+    )
     more = len(signal_counts) - 3
     if more > 0:
         top += f", {more} more signal type{'s' if more > 1 else ''}"
@@ -171,12 +202,17 @@ def explain(
         reason = "it recurs across sessions"
     else:
         reason = "there is too little independent evidence so far"
-    if exposure <= 1:
+    if exposure <= 0:
+        where = ""
+    elif exposure == 1:
         where = "the only session that touched it"
     elif sessions >= exposure:
         where = f"all {exposure} sessions that touched it"
     else:
         where = f"{sessions} of the {exposure} sessions that touched it"
+    if agent_commits:
+        commits = _plural(agent_commits, "agent commit")
+        where = f"{where} and {commits}" if where else commits
     return (
         f"{_plural(events, 'friction event')} in {where} ({top}); "
         f"{level} confidence because {reason}."

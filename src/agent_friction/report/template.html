@@ -70,6 +70,19 @@ tr.row { cursor: pointer; } tr.row:hover { background: var(--chip); }
 .legend i { width: 18px; height: 10px; display: inline-block; border-radius: 2px; }
 input[type=search] { width: 100%; max-width: 320px; padding: 6px 10px; border: 1px solid var(--line);
   border-radius: 8px; background: var(--panel); color: var(--ink); }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 8px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { background: var(--panel); color: var(--ink); border: 0; padding: 5px 10px; font: inherit; font-size: 12.5px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--chip); font-weight: 600; }
+.seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
+@media print {
+  .controls, input[type=search], .legend { display: none; }
+  body { background: #fff; color: #000; }
+  aside { max-height: none; overflow: visible; }
+  .layout { grid-template-columns: 1fr; }
+}
 footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
 .empty { padding: 40px; text-align: center; color: var(--muted); }
 </style>
@@ -82,11 +95,21 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
 <main>
   <div class="stats" id="stats"></div>
   <h2>Where agents struggle</h2>
+  <div class="controls">
+    <div class="seg" role="group" aria-label="Map shows">
+      <button type="button" data-view="files" aria-pressed="true">Files</button>
+      <button type="button" data-view="commands" aria-pressed="false">Commands</button>
+    </div>
+    <div class="seg" role="group" aria-label="Cell size by">
+      <button type="button" data-size="time" aria-pressed="true">Size: time lost</button>
+      <button type="button" data-size="score" aria-pressed="false">Size: score</button>
+    </div>
+  </div>
   <div id="crumbs"></div>
   <div class="layout">
     <div>
       <div id="map" role="group" aria-label="Treemap of friction by directory and file. Each cell is a button; the table below lists the same data."></div>
-      <div class="legend">less <i style="background:var(--h0)"></i><i style="background:var(--h1)"></i><i style="background:var(--h2)"></i><i style="background:var(--h3)"></i><i style="background:var(--h4)"></i> more friction · area = estimated time lost · click a directory to zoom</div>
+      <div class="legend">less <i style="background:var(--h0)"></i><i style="background:var(--h1)"></i><i style="background:var(--h2)"></i><i style="background:var(--h3)"></i><i style="background:var(--h4)"></i> more friction · <span id="sizelabel">area = estimated time lost</span> · click a directory to zoom</div>
     </div>
     <aside id="detail" aria-live="polite" tabindex="-1"><div class="sub">Select a file or command to see why it scores high, what to change, and the evidence.</div></aside>
   </div>
@@ -124,7 +147,8 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
   }
   function heat(score) {
     var s = Number(score) || 0;
-    var i = s >= 80 ? 4 : s >= 60 ? 3 : s >= 40 ? 2 : s >= 20 ? 1 : 0;
+    // Bands follow the reading guide: <20 incident, 20-45 pattern, >45 reliable struggle.
+    var i = s >= 60 ? 4 : s >= 45 ? 3 : s >= 30 ? 2 : s >= 20 ? 1 : 0;
     return "var(--h" + i + ")";
   }
   function topSignals(h, n) {
@@ -187,7 +211,12 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
   }
 
   // Squarified treemap
-  function weight(n) { return Math.max(Number(n.est_minutes_lost) || 0, 0) + 0.5 * (Number(n.events) || 0) + 0.01; }
+  var sizeBy = "time", view = "files";
+  var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function weight(n) {
+    if (sizeBy === "score") return Math.max(Number(n.score) || 0, 0) + 0.01;
+    return Math.max(Number(n.est_minutes_lost) || 0, 0) + 0.5 * (Number(n.events) || 0) + 0.01;
+  }
   function squarify(nodes, x, y, w, h) {
     var out = [], total = 0;
     nodes.forEach(function (n) { total += weight(n); });
@@ -253,6 +282,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
           Array.prototype.forEach.call(map.querySelectorAll(".sel"), function (s) { s.classList.remove("sel"); });
           c.classList.add("sel");
           if (isDir) { stack.push(r.n); draw(r.n); showDir(r.n); }
+          else if (r.n.kind === "command") { var hc = byPath["command:" + r.n.path]; if (hc) showItem(hc); }
           else { var hs = byPath["file:" + r.n.path]; if (hs) showItem(hs); else showDir(r.n); }
         }
         c.addEventListener("click", activate);
@@ -263,7 +293,28 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     }
     layout(node, 0, 0, W, H, 0);
   }
-  if (R.tree) { stack = [R.tree]; draw(R.tree); }
+  // Commands have no directory structure: show them as a flat map of their own.
+  var commandRoot = { name: "commands", path: "", children: (R.commands || []).map(function (c) {
+    return { name: "$ " + c.path, path: c.path, kind: "command", score: c.score, events: c.events,
+      est_minutes_lost: c.est_minutes_lost, children: [] };
+  }) };
+  function reset() {
+    if (view === "commands") { stack = [commandRoot]; draw(commandRoot); }
+    else if (R.tree) { stack = [R.tree]; draw(R.tree); }
+  }
+  Array.prototype.forEach.call(document.querySelectorAll(".seg button"), function (b) {
+    b.addEventListener("click", function () {
+      var group = b.parentNode;
+      Array.prototype.forEach.call(group.querySelectorAll("button"), function (o) { o.setAttribute("aria-pressed", String(o === b)); });
+      if (b.dataset.view) view = b.dataset.view;
+      if (b.dataset.size) {
+        sizeBy = b.dataset.size;
+        document.getElementById("sizelabel").textContent = sizeBy === "score" ? "area = score" : "area = estimated time lost";
+      }
+      reset();
+    });
+  });
+  reset();
   var resizeTimer;
   window.addEventListener("resize", function () { clearTimeout(resizeTimer); resizeTimer = setTimeout(function () { draw(stack[stack.length - 1]); }, 120); });
 
@@ -285,7 +336,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
         tr.appendChild(el("td", { class: "num" }, mins(h.est_minutes_lost)));
         tr.appendChild(el("td", { class: "hide-sm" }, topSignals(h, 3).map(function (s) { return s[0] + "×" + s[1]; }).join(", ")));
         tr.appendChild(el("td", null, h.confidence));
-        function pick() { showItem(h); detail.scrollIntoView({ block: "nearest", behavior: "smooth" }); }
+        function pick() { showItem(h); detail.scrollIntoView({ block: "nearest", behavior: reduceMotion ? "auto" : "smooth" }); }
         tr.addEventListener("click", function (e) { if (e.target !== btn) pick(); });
         btn.addEventListener("click", function () { pick(); detail.focus({ preventScroll: true }); });
         tbody.appendChild(tr);

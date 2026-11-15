@@ -8,7 +8,7 @@ from typing import Any
 def fmt_minutes(minutes: float) -> str:
     """Render a duration in minutes compactly: ``42s``, ``7m``, ``2h 05m``."""
     if minutes <= 0:
-        return "0m"
+        return "0s"
     if minutes < 1:
         return f"{round(minutes * 60)}s"
     if minutes < 60:

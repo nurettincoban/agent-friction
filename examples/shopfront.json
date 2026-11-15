@@ -1,8 +1,9 @@
 {
   "commands": [
     {
+      "agent_commits": 0,
       "confidence": "high",
-      "est_minutes_lost": 5.9,
+      "est_minutes_lost": 6.8,
       "events": 8,
       "evidence": [
         {
@@ -57,7 +58,7 @@
       "path": "pytest",
       "recommendations": [
         {
-          "detail": "`pytest` failed 7 times in 4 sessions; 5 times the next successful command was `make test`. Add a line to AGENTS.md such as: \"use `make test`, not `pytest`\".",
+          "detail": "`pytest` failed 7 times in 4 sessions; 7 times the agent then got the same job done with `make test`, and `pytest` did not work later in those sessions. Add a line to AGENTS.md such as: \"use `make test`, not `pytest`\".",
           "id": "use-the-working-command",
           "signals": [
             "command-failure"
@@ -65,7 +66,7 @@
           "title": "Tell agents to use `make test`"
         },
         {
-          "detail": "Agents re-ran `pytest` up to 3 times in a row without success (1 retry loop(s) in 1 session(s)). The output did not lead them to a fix: note the known cause in AGENTS.md, or make the command fail fast with a message that says what to do.",
+          "detail": "Agents re-ran `pytest` up to 3 times in a row without success (1 retry loop in 1 session). The output did not lead them to a fix: note the known cause in AGENTS.md, or make the command fail fast with a message that says what to do.",
           "id": "make-the-failure-actionable",
           "signals": [
             "retry-loop"
@@ -108,9 +109,10 @@
         "command-failure": 7,
         "retry-loop": 1
       },
-      "why": "8 friction events in all 4 sessions that touched it (7 command failure, 1 retry loop); high confidence because it recurs across sessions with several kinds of evidence."
+      "why": "8 friction events in all 4 sessions that touched it (7 command failures, 1 retry loop); high confidence because it recurs across sessions with several kinds of evidence."
     },
     {
+      "agent_commits": 0,
       "confidence": "low",
       "est_minutes_lost": 0.7,
       "events": 1,
@@ -158,11 +160,12 @@
       "signals": {
         "tool-rejected": 1
       },
-      "why": "1 friction event in the only session that touched it (1 tool call declined); low confidence because there is too little independent evidence so far."
+      "why": "1 friction event in the only session that touched it (1 declined tool call); low confidence because there is too little independent evidence so far."
     },
     {
+      "agent_commits": 0,
       "confidence": "low",
-      "est_minutes_lost": 0.4,
+      "est_minutes_lost": 0.2,
       "events": 1,
       "evidence": [
         {
@@ -202,6 +205,7 @@
       "why": "1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far."
     },
     {
+      "agent_commits": 0,
       "confidence": "low",
       "est_minutes_lost": 0.5,
       "events": 1,
@@ -245,6 +249,7 @@
   ],
   "directories": [
     {
+      "agent_commits": 0,
       "confidence": "medium",
       "est_minutes_lost": 1.2,
       "events": 5,
@@ -333,7 +338,7 @@
       "signals": {
         "search-miss": 5
       },
-      "why": "5 friction events in all 2 sessions that touched it (5 search miss); medium confidence because it recurs across sessions."
+      "why": "5 friction events in all 2 sessions that touched it (5 search misses); medium confidence because it recurs across sessions."
     }
   ],
   "exposure": {
@@ -363,6 +368,7 @@
   "generated_at": "2026-11-13T09:00:00Z",
   "hotspots": [
     {
+      "agent_commits": 0,
       "confidence": "high",
       "est_minutes_lost": 10.7,
       "events": 12,
@@ -433,7 +439,7 @@
           "title": "Generated file: point agents at its source"
         },
         {
-          "detail": "6 edits failed to locate their target in this 1031-line file (2 matched several places, 4 matched nothing) across 4 session(s). Split it into smaller modules, or give repeated blocks unique nearby text (section comments, distinct names) so an edit can be targeted.",
+          "detail": "6 edits failed to locate the target in this 1031-line file (2 matched several places, 4 matched nothing) across 4 sessions. Split it into smaller modules, or give repeated blocks unique nearby text (section comments, distinct names) so an edit can be targeted.",
           "id": "split-or-anchor-large-file",
           "signals": [
             "edit-miss"
@@ -487,9 +493,10 @@
         "user-correction": 3,
         "user-interrupt": 1
       },
-      "why": "12 friction events in all 4 sessions that touched it (6 edit miss, 3 user correction, 1 read loop, 2 more signal types); high confidence because it recurs across sessions with several kinds of evidence."
+      "why": "12 friction events in all 4 sessions that touched it (6 edit misses, 3 user corrections, 1 read loop, 2 more signal types); high confidence because it recurs across sessions with several kinds of evidence."
     },
     {
+      "agent_commits": 0,
       "confidence": "high",
       "est_minutes_lost": 18.9,
       "events": 6,
@@ -559,7 +566,7 @@
           "title": "Write down the rule the human keeps repeating"
         },
         {
-          "detail": "Edits here did not converge: 1 thrash episode(s) and 2 reverted edit(s) in 1 session(s). Document the quickest command that validates this file (a single test, a type check) so agents can verify instead of iterating blind.",
+          "detail": "Edits here did not converge: 1 thrash episode and 2 reverted edits in 1 session. Document the quickest command that validates this file (a single test, a type check) so agents can verify instead of iterating blind.",
           "id": "add-a-fast-check",
           "signals": [
             "edit-revert",
@@ -599,9 +606,10 @@
         "edit-thrash": 1,
         "user-correction": 3
       },
-      "why": "6 friction events in all 3 sessions that touched it (3 user correction, 2 edit reverted, 1 edit thrash); high confidence because it recurs across sessions with several kinds of evidence."
+      "why": "6 friction events in all 3 sessions that touched it (3 user corrections, 2 reverted edits, 1 edit thrash episode); high confidence because it recurs across sessions with several kinds of evidence."
     },
     {
+      "agent_commits": 0,
       "confidence": "low",
       "est_minutes_lost": 5.0,
       "events": 2,
@@ -658,6 +666,7 @@
       "why": "2 friction events in the only session that touched it (1 command failure, 1 user correction); low confidence because there is too little independent evidence so far."
     },
     {
+      "agent_commits": 0,
       "confidence": "low",
       "est_minutes_lost": 0.3,
       "events": 1,
@@ -704,6 +713,7 @@
       "why": "1 friction event in the only session that touched it (1 path miss); low confidence because there is too little independent evidence so far."
     },
     {
+      "agent_commits": 0,
       "confidence": "low",
       "est_minutes_lost": 5.0,
       "events": 1,
@@ -750,6 +760,7 @@
       "why": "1 friction event in 1 of the 2 sessions that touched it (1 user correction); low confidence because there is too little independent evidence so far."
     },
     {
+      "agent_commits": 0,
       "confidence": "low",
       "est_minutes_lost": 0.4,
       "events": 1,
@@ -948,7 +959,7 @@
     "commands_affected": 4,
     "corrections": 5,
     "directories_affected": 1,
-    "est_minutes_lost": 27.9,
+    "est_minutes_lost": 27.7,
     "files_affected": 6,
     "friction_events": 35,
     "sessions": 6,

@@ -62,6 +62,7 @@ RULE_IDS: tuple[str, ...] = (
     "add-a-pointer",
     "summarize-this-file",
     "use-the-working-command",
+    "document-the-setup-step",
     "document-the-command",
     "make-the-failure-actionable",
 )
@@ -104,13 +105,17 @@ def _sessions(findings: Sequence[Finding]) -> int:
     return len({f.session_id for f in findings})
 
 
+def _n(count: int, noun: str, plural: str | None = None) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {plural or noun + 's'}"
+
+
 def _times(count: int) -> str:
     return "once" if count == 1 else f"{count} times"
 
 
 def _in_sessions(findings: Sequence[Finding]) -> str:
     n = _sessions(findings)
-    return f"{_times(len(findings))} in {n} session{'' if n == 1 else 's'}"
+    return f"{_times(len(findings))} in {_n(n, 'session')}"
 
 
 def _top(values: Sequence[str], limit: int = MAX_QUOTES) -> list[tuple[str, int]]:
@@ -256,10 +261,10 @@ class _Rules:
             self.add(
                 "split-or-anchor-large-file",
                 "Large file: split it or add unique anchors",
-                f"{len(misses)} edits failed to locate their target in this {facts.lines}-line "
+                f"{_n(len(misses), 'edit')} failed to locate the target in this {facts.lines}-line "
                 f"file ({len(ambiguous)} matched several places, "
                 f"{len(misses) - len(ambiguous)} matched nothing) across "
-                f"{_sessions(misses)} session(s). Split it into smaller modules, or give "
+                f"{_n(_sessions(misses), 'session')}. Split it into smaller modules, or give "
                 "repeated blocks unique nearby text (section comments, distinct names) so "
                 "an edit can be targeted.",
                 [signals.EDIT_MISS],
@@ -274,7 +279,8 @@ class _Rules:
                 title = "Repeated blocks: make edit targets unique"
             else:
                 detail = (
-                    f"{len(misses)} edits in {_sessions(misses)} session(s) did not find the "
+                    f"{_n(len(misses), 'edit')} in {_n(_sessions(misses), 'session')} did not "
+                    "find the "
                     "text the agent expected. Usual causes: a formatter or hook rewrites the "
                     "file after edits, unusual whitespace (tabs, CRLF), or the file changes "
                     "under the agent. Document the formatting step, or run it in a hook so "
@@ -314,10 +320,11 @@ class _Rules:
             self.add(
                 "add-a-fast-check",
                 "Give agents a fast way to check changes to this file",
-                f"Edits here did not converge: {len(thrash)} thrash episode(s) and "
-                f"{len(reverts)} reverted edit(s) in {_sessions([*thrash, *reverts])} "
-                "session(s). Document the quickest command that validates this file (a "
-                "single test, a type check) so agents can verify instead of iterating blind.",
+                f"Edits here did not converge: {_n(len(thrash), 'thrash episode')} and "
+                f"{_n(len(reverts), 'reverted edit')} in "
+                f"{_n(_sessions([*thrash, *reverts]), 'session')}. Document the quickest "
+                "command that validates this file (a single test, a type check) so agents "
+                "can verify instead of iterating blind.",
                 [f.signal for f in (*thrash, *reverts)],
             )
 
@@ -378,14 +385,28 @@ class _Rules:
         invocation = self.get(signals.COMMAND_FAILURE, "invocation")
         retries = self.get(signals.RETRY_LOOP)
         fixes = _top([f.detail.get("recovered_by", "") for f in failures], 1)
+        setups = _top([f.detail.get("fixed_by_setup", "") for f in failures], 1)
         if fixes and fixes[0][1] >= MIN_EVENTS:
+            # Only a command doing the same job counts (see signals: is_replacement), and
+            # only in sessions where the failing command never worked afterwards.
             fix, count = fixes[0]
             self.add(
                 "use-the-working-command",
                 f"Tell agents to use `{fix}`",
-                f"`{key}` failed {_in_sessions(failures)}; {_times(count)} the next "
-                f"successful command was `{fix}`. Add a line to AGENTS.md such as: "
+                f"`{key}` failed {_in_sessions(failures)}; {_times(count)} the agent then "
+                f"got the same job done with `{fix}`, and `{key}` did not work later in "
+                f"those sessions. Add a line to AGENTS.md such as: "
                 f'"use `{fix}`, not `{key}`".',
+                [signals.COMMAND_FAILURE],
+            )
+        elif setups and setups[0][1] >= MIN_EVENTS:
+            setup, count = setups[0]
+            self.add(
+                "document-the-setup-step",
+                f"Document the setup `{key}` needs",
+                f"`{key}` failed {_in_sessions(failures)}; {_times(count)} it worked after "
+                f'the agent ran `{setup}`. Say so in AGENTS.md ("run `{setup}` before '
+                f'`{key}`"), or make the environment ready before the agent starts.',
                 [signals.COMMAND_FAILURE],
             )
         elif len(invocation) >= MIN_EVENTS:
@@ -413,7 +434,7 @@ class _Rules:
                 "make-the-failure-actionable",
                 "Make this failure explain itself",
                 f"Agents re-ran `{key}` up to {longest} times in a row without success "
-                f"({len(retries)} retry loop(s) in {_sessions(retries)} session(s)). The "
+                f"({_n(len(retries), 'retry loop')} in {_n(_sessions(retries), 'session')}). The "
                 "output did not lead them to a fix: note the known cause in AGENTS.md, or "
                 "make the command fail fast with a message that says what to do.",
                 [signals.RETRY_LOOP],

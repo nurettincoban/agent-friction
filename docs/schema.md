@@ -25,7 +25,7 @@ fields may be added within a version, never removed or re-typed.
 | `transcripts` | `None` | Files or directories (searched recursively for `*.jsonl`). `None` auto-discovers Claude Code transcripts for the repo, its subdirectories, worktrees and parent directories (see methodology, Discovery). The format of each file is detected from its first lines. |
 | `since`, `until` | `None` | Only events inside this window (naive datetimes are UTC). |
 | `include_git` | `True` | Add `human-rework` from `git log`. Silently unavailable outside a git repo. |
-| `include_excerpts` | `True` | `False` removes everything verbatim: excerpts become `null` and recommendations stop quoting prompts, search patterns, error lines and reasons. Paths and normalized command names remain. |
+| `include_excerpts` | `True` | `False` removes everything verbatim: excerpts become `null` and recommendations stop quoting prompts, search patterns, error lines and reasons. Repo paths remain; command keys keep only publicly known words, and project-specific names in them become hash placeholders such as `make <target:37bd73>` (methodology, Attribution). |
 | `max_evidence` | `5` | Evidence items per hotspot. |
 | `max_hotspots` | `50` | Maximum entries in each of `hotspots`, `commands`, `directories`. |
 | `now` | `None` | Fixed `generated_at`, for reproducible output. |
@@ -39,6 +39,12 @@ fields may be added within a version, never removed or re-typed.
 `agent_friction.errors.AgentFrictionError`) when no transcript file is found.
 `agent_friction.discovery.discover_transcripts(repo)` returns the files that
 auto-discovery would use.
+
+`agent_friction.engine.list_transcripts(options) -> list[Path]` returns
+exactly the transcript files `analyze(options)` would read (explicit
+`transcripts` expanded, or auto-discovery), and raises `NoTranscriptsError`
+in the same cases: nothing found; a given path that does not exist; a given
+*file* in which none of the first 200 lines is a JSON object.
 
 ### Top level
 
@@ -111,7 +117,9 @@ sorted. The list is not truncated by `max_hotspots`. Every hotspot's
 repo-relative paths; `command` keys are normalized command keys (the same
 strings as `commands[].path`, and the only thing derived from command lines
 that is present with `include_excerpts=False`); `dir` keys are directories
-that were the scope of a search. Agent commits from git count for files.
+that were the scope of a search. Agent commits from git do not add exposure
+(only a commit with rework outside every analysed session counts, for the
+file it reworked).
 
 Use it to compare two reports: a hotspot that is missing from the later one
 was fixed only if its target still has exposure there.
@@ -128,8 +136,9 @@ was fixed only if its target still has exposure there.
 | `path` | str | Repo-relative POSIX path, or the normalized command. |
 | `kind` | str | `"file"`, `"command"` or `"dir"`. |
 | `score` | float | 0-100, one decimal. See methodology. |
-| `sessions` | int | Distinct sessions (and agent commits) with an event here. |
-| `exposure_sessions` | int | Distinct sessions (and agent commits) in which the agent touched this target at all; never less than `sessions`. |
+| `sessions` | int | Distinct sessions with an event here, including `agent_commits`. |
+| `agent_commits` | int | How many of `sessions` are agent commits from git whose rework no analysed transcript session accounts for (0 without git). `sessions - agent_commits` is the number of transcript sessions. |
+| `exposure_sessions` | int | Distinct sessions in which the agent touched this target at all, plus `agent_commits`; never less than `sessions`. |
 | `friction_rate` | float | `sessions / exposure_sessions`, two decimals, 0-1. |
 | `events` | int | Friction events attributed here. |
 | `est_minutes_lost` | float | Union of these events' intervals. |
@@ -146,7 +155,7 @@ was fixed only if its target still has exposure there.
 | Field | Meaning |
 | --- | --- |
 | `signal` | Signal id. |
-| `session_id` | Transcript session, or `git:<sha>` of the agent commit. |
+| `session_id` | Transcript session, or `git:<sha>` of the agent commit when no analysed session made it. |
 | `timestamp` | ISO-8601 UTC; `null` only for generic events without `ts`. |
 | `summary` | What happened, built from structure only: tool name, repo-relative path, normalized command name, counts, commit hashes. Never contains prompts, search patterns, command arguments or output. |
 | `excerpt` | Redacted, truncated transcript text (error output, the command, the human's words, the search pattern), or `null`. Always `null` with `include_excerpts=False`. May contain newlines. |

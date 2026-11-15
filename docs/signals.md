@@ -36,44 +36,70 @@ else is dropped. "Turn" means the agent's work between two human prompts.
 ## `user-correction` — User correction
 
 **What:** a human prompt that (a) is not the first prompt of the session,
-(b) follows at least one tool call by the agent, and (c) starts with a
-correction phrase. Only the first 280 characters are inspected, so a pasted
-log that happens to contain "revert" does not count. The rules favour
-precision over recall: ordinary follow-ups must not be counted.
+(b) follows at least one tool call by the agent, and (c) refers to the agent
+or to the work it just finished in one of the ways below. Only the
+first 280 characters are inspected, so a pasted log that happens to contain
+"revert" does not count. The rules favour precision over recall: a new task that
+*describes a bug* ("fix the bug where the app crashes again") must not be
+read as a complaint about the agent.
 
-- **Unambiguous phrases (confidence 1.0):**
-  - a leading "No," / "No." / "Nope -" followed by more text, or a bare "no"
-    (not "No. 3 on the list", "No tests are needed", "no thanks", "no
-    problem", "no worries", "no need", "no, that's fine", "nope, all good");
-  - a leading "wrong." / "incorrect." / "stop." followed by more text;
-  - "that's / this is / it was wrong | incorrect | broken" as a complete
-    statement (not "this is wrong input"), or "... not right | not correct |
-    not working | not how", "that's not what I / we ...";
-  - "that / this / it didn't | doesn't work | help";
-  - "you're editing the wrong file | branch | directory | function ...";
+- **Addressed to the agent (confidence 1.0, anywhere in those 280
+  characters):**
   - "you broke / removed / deleted / forgot / missed / ignored / overwrote"
     (not "you forgot nothing"), "you didn't run | read | follow | use | fix |
-    check ...", "you shouldn't have", "you weren't supposed";
-  - an imperative "revert" / "undo" / "roll back" at the start of the message
-    or of a clause, followed by "that | this | it | your | the last ..." (not
-    "Undo support is the next feature", "Revert button should be added");
-  - "still failing | broken | not working | not fixed | wrong | crashing",
-    "still the same error", "failing | broken again";
-  - said to the agent: "I told you", "I already said", "I asked you to", "I
-    said use / don't / not / only / to use", "I never asked", "I didn't ask"
-    (not "I said to my boss ...");
+    check ...", "you shouldn't have", "you weren't supposed", "you keep
+    <doing>", "you're still <doing>";
+  - "you're editing the wrong file | branch | directory | function ...";
+  - "I told you", "I already said", "I asked you to", "I said use / don't /
+    not / only / to use", "I never asked", "I didn't ask";
   - "not what I asked | wanted | meant | said";
-  - "why did you delete | remove | change | add | use | skip | ignore ...".
-- **Two things void an unambiguous phrase:**
+  - "why did you delete | remove | change | add | use | skip | ignore ...";
+  - an undo of the agent's own change: "revert" / "undo" / "roll back" at the
+    start of the message or of a clause, followed by "that | this | it | your
+    ... | the last edit | the change", or alone ("Revert."); and "put it |
+    that | them back". Not "revert the design doc to draft", "Undo support is
+    the next feature", "roll back the last migration when the check fails".
+- **Verdicts on the work just done (confidence 1.0, only when they open the
+  message,** optionally after an interjection such as "hmm", "ugh", "ok",
+  "no"**):**
+  - a leading "No," / "No." / "Nope -" followed by more text, or a bare "no"
+    (not "No. 3 on the list", "No tests are needed", "no thanks", "no
+    problem", "no need", "no, that's fine", "nope, all good", "nope, nothing
+    else", "no, not yet");
+  - "Not quite", "not exactly", "not like that", "close, but";
+  - "wrong." / "incorrect." followed by more text; "stop" followed by an
+    instruction or by what to stop ("stop. use the other client", "stop
+    editing the generated file"; not "Stop. Hammer time", "stop the server");
+  - "that's / this is / it was wrong | incorrect | broken" as a complete
+    statement, or "... not right | not correct | not working | not how";
+  - "that / this / it didn't | doesn't work | help";
+  - "still failing | broken | not working | not fixed | wrong | crashing",
+    "still the same error", "failing | broken again", with no subject or with
+    "it", "that", "the tests", "the build", "CI" and the like as the subject
+    (`_RESULT_NOUN`).
+
+  The same words later in a message are not counted, because there they
+  usually describe a task: "The customer says it's not working. Investigate
+  ...", "Can you explain why this is not working in prod?", "Fix the bug where
+  the app crashes again". A longer subject ("the login page is still broken")
+  is not counted either.
+- **What voids a phrase:**
   - *Praise or a dismissal after it* in the same message ("thanks", "great",
-    "nailed it", "keep going", "looks good", "that's fine", "never mind",
-    "ignore it", "unrelated", "flaky", ...): "you forgot nothing, great job",
-    "it's still failing in CI but that's flaky, ignore it", "not what I
-    expected but it's great". Praise *before* the phrase does not void it
-    ("Great effort, but you broke the login page").
+    "nailed it", "keep going", "looks good", "that's fine", "... are fine",
+    "never mind", "ignore it", "unrelated", "flaky", ...): "you forgot
+    nothing, great job", "I said use tabs in my last project but here spaces
+    are fine". Praise *before* the phrase does not void it ("Great effort, but
+    you broke the login page").
+  - *Moving on* voids a verdict: "next task", "new task", "another issue",
+    "next: ..." ("It doesn't work on Windows yet; next task: add Windows
+    support").
   - *A leading "No" that answers a question:* if the last thing the agent
     wrote before the message ends with a question mark, "No, ..." is read as
-    an answer, not an objection. The other phrases still count.
+    an answer, not an objection.
+  - *A long pause:* a verdict typed more than 5 minutes after the agent's last
+    activity, with nothing addressed to the agent, is only a *probable*
+    correction (confidence 0.4, never quoted): by then the human has often
+    moved on to something else.
 - **Weaker cues:** a leading "actually"; "don't <verb>" (not "don't forget /
   worry / bother / need", not "don't ... yet"); "stop <doing>"; "instead";
   "wrong / incorrect / mistake"; "shouldn't / should have / supposed to";
@@ -87,9 +113,9 @@ The confidence multiplies the severity (a probable correction is worth 1.6,
 less than an edit miss). Recommendations quote only unambiguous corrections.
 Slash commands, harness-generated messages, tool results and prompts inside
 subagents are never corrections. The phrase lists are English only; the test
-suite pins them against a corpus of 40+ corrections and 60+ benign follow-ups
-(thanks, praise, questions, next-step requests, feature requests that happen
-to contain "undo" or "wrong"; `tests/test_signals.py`).
+suite pins them against a corpus of 50+ corrections and 80+ benign prompts
+(thanks, praise, questions, next-step requests, new tasks that describe bugs,
+feature requests that contain "undo" or "wrong"; `tests/test_signals.py`).
 
 **Why it is friction:** human attention is the scarcest resource in the loop.
 
@@ -100,13 +126,21 @@ none, the correction is split evenly over the files edited in that turn (the
 `totals`, shown on no hotspot). A file the human mentions but the agent never
 touched is not blamed.
 
-**False positives:** a "No, ..." that answers a question the agent asked
-several messages earlier or without a question mark; rhetorical "why did you
-...". **False negatives (many, by design):** polite or indirect corrections
-("hmm, could we use X?"), single-cue corrections ("use pnpm instead", "use
-PaymentClient, not legacy"), a real "No, ..." right after the agent asked
-something, corrections softened with praise, and corrections in other
-languages. The count of corrections is a lower bound.
+**False positives (known):** a "No, ..." that answers a question the agent
+asked several messages earlier or without a question mark; a message that
+opens with a verdict about something other than the agent's work ("It doesn't
+work on Safari either, can you check the polyfill?"); second-person phrases
+about the past ("you forgot the migration last week, and I fixed it");
+rhetorical "why did you ...". A correction is attributed to the files of the
+preceding turn even if the human meant something else.
+
+**False negatives (many, by design):** corrections that do not open the
+message ("I ran it. It's still failing."); a verdict with a long subject ("the
+checkout page is still broken"); polite or indirect corrections ("hmm, could
+we use X?"); single-cue corrections ("use pnpm instead", "use PaymentClient,
+not legacy"); a real "No, ..." right after the agent asked something;
+corrections softened with praise; corrections in other languages. The count of
+corrections is a lower bound.
 
 ## `retry-loop` — Retry loop
 
@@ -117,7 +151,11 @@ between. One event per loop; its summary carries the final count.
 Edit, run the tests, see red, edit again, run again is the normal development
 loop, not a retry loop: every successful edit starts the count again. What is
 counted is re-running a failing command with nothing changed on disk (other
-flags, another working directory, the same thing again).
+flags, another working directory, the same thing again). Any successful edit
+counts as a change, whichever file it touches; we do not try to judge whether
+the edit was relevant. Once a loop is recorded it stays, together with its
+failures, even if the command goes green after a later edit: the three runs
+with nothing changed already happened.
 
 **Why:** the failure output did not lead the agent to a fix.
 
@@ -179,8 +217,13 @@ Windsurf; "Generated with Claude Code"; an `aider: ` subject prefix; an
 
 **Why:** agent output here needed a human follow-up soon after it landed.
 
-**Attribution:** the file. Each agent commit counts as its own "session" for
-the score.
+**Attribution:** the file. If the agent commit was made during a transcript
+session that is being analysed (between its first event and
+10 minutes after its last), the event belongs to that session. Otherwise the agent commit
+counts as a friction "session" of its own, reported separately as
+`agent_commits` ("1 session and 2 agent commits"). Agent commits without
+rework are not counted anywhere, and a hotspot's score with git evidence is
+never lower than without it.
 
 **Corroborating evidence only.** Git cannot show *why* a human changed the
 lines, so this signal weighs less than an edit miss (1.5), and it never raises
@@ -230,7 +273,10 @@ in a later session.
   `ModuleNotFoundError: No module named ...`, `ImportError while loading
   conftest`, `can't open file`, `Cannot find module`, `error: unrecognized
   arguments`, `make: *** No rule to make target`, `npm error Missing script`,
-  `fatal: not a git repository`, `curl: (N) ...`. The full list is
+  `fatal: not a git repository`, `curl: (N) ...`, and install/build failures
+  (`npm error code E401 | ERESOLVE | ...`, `Failed to build ...`, `error:
+  subprocess-exited-with-error`, `ERROR: Failed building wheel`, `No solution
+  found when resolving dependencies`). The full list is
   `INVOCATION_ERROR_RE`. The harness's own `Command timed out after ...`
   notice counts too, but only where the harness puts it: at the very start of
   the result. Words such as "timed out" or "permission denied" elsewhere in
@@ -243,8 +289,19 @@ in a later session.
   followed by a successful file edit and then by a success of the same
   command is dropped. That is the development loop doing its job. An ordinary
   failure stays on the record when the command goes green with no edit in
-  between (flaky, or fixed by something other than code), or never goes green
-  in the session. Setup/invocation errors are never dropped.
+  between (flaky, or fixed by something other than code), never goes green
+  in the session, or was part of a [retry loop](#retry-loop--retry-loop).
+  Setup/invocation errors are never dropped.
+- *Which step of a chain failed:* for `a && b` the exit status does not say
+  whether `b` ever ran. The output is matched against what each kind of step
+  prints (`STEP_SIGNATURES`: `npm error code E401`, `Failed to build`,
+  `error: subprocess-exited-with-error`, `make: *** [`, `error[E0308]:`,
+  `fatal:`, a pytest/jest summary line, ...), and the first step whose own
+  kind of error is present gets the event: `uv pip install -e . && python -m
+  pytest tests/` failing with "Failed to build" is an `uv pip install` setup
+  error, not a pytest failure. If no step can be confirmed, the event stays on
+  the last significant command, **no file is blamed**, and the summary says
+  that the step is unknown (`ambiguous_step`).
 - *Ignored:* read-only inspection commands (`ls`, `cat`, `head`, `tail`, `wc`,
   `grep`, `rg`, `find`, `sed` without `-i`, `awk`, `jq`, `diff`, `test`,
   `which`, `git diff | status | log | show | blame`, ...); pipelines ending in
@@ -263,8 +320,17 @@ Ordinary failures are also attributed to repo files named in the arguments
 **of that command** (not files that `cp`, `cat` or `cd` earlier in the line
 mention); setup errors are not, because the files are not the cause.
 
-**False positives / limits:** in `a && b` we cannot see which step failed and
-name the last one. A program that prints one of the anchored shapes itself
+**What happened next** is recorded for recommendations, conservatively:
+`recovered_by` only if a command *doing the same job* then succeeded (same
+role: test, build, lint, type-check or format; or a wrapper of the same tool,
+such as `uv run pytest` or `make test` for `pytest`) and the failing command
+did not succeed later in the session; `fixed_by_setup` if the same command
+succeeded after an install/setup command (`pip install`, `npm ci`, `uv sync`,
+`docker compose up`, ...). A `git commit` or `rm` that happens to succeed
+next is neither.
+
+**False positives / limits:** when the output of a chain matches no known
+step signature the step is a guess (and marked as such). A program that prints one of the anchored shapes itself
 (a test runner echoing a shell error on its own line) is misread as a setup
 error.
 
@@ -311,8 +377,15 @@ literal directory prefix of the pattern). Directory-scoped misses appear under
 `directories` and in the tree, not under file hotspots. The pattern is kept
 as the excerpt.
 
-**False positives:** searching to *confirm absence* ("no remaining callers")
-is normal. Recommendations therefore need at least two misses.
+**Not counted:** a check that a name is free before creating it. A miss is
+dropped when, later in the same session, the agent creates or edits a file
+inside the searched scope whose name matches the glob (`src/new_feature*.py`
+then writing `src/new_feature.py`), or writes text that contains the grep
+pattern (`NewFeature` then writing `class NewFeature`).
+
+**False positives:** searching to *confirm absence* for other reasons ("no
+remaining callers") is normal. Recommendations therefore need at least two
+misses.
 
 ## `read-loop` — Read loop
 

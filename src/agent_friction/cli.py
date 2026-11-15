@@ -224,6 +224,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     src = sub.add_parser("sources", help="list the transcripts that would be analysed")
     src.add_argument("repo", nargs="?", type=Path, default=Path(), help="repo root (default .)")
+    src.add_argument(
+        "-t",
+        "--transcripts",
+        action="append",
+        type=Path,
+        metavar="PATH",
+        help="transcript file or directory (repeatable), as for `scan`",
+    )
+    src.add_argument(
+        "--repo-alias",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="another absolute path where this repo lived, as for `scan`",
+    )
     return parser
 
 
@@ -287,8 +302,30 @@ def _write(text: str, output: Path | None, stdout: TextIO) -> None:
     if output is None:
         stdout.write(text)
         return
-    output.parent.mkdir(parents=True, exist_ok=True)
+    if not output.parent.is_dir():
+        raise AgentFrictionError(f"{output.parent}: directory does not exist")
     output.write_text(text, encoding="utf-8")
+
+
+def _utf8_safe(stream: TextIO) -> TextIO:
+    """Make a text stream able to print the report's box-drawing glyphs.
+
+    Redirected output on Windows defaults to cp1252, which cannot encode them. A
+    file or pipe is switched to UTF-8; an interactive console that cannot show a
+    glyph gets a replacement character instead of a crash.
+    """
+    encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+    reconfigure = getattr(stream, "reconfigure", None)
+    if encoding in ("utf8", "utf8sig") or reconfigure is None:
+        return stream
+    try:
+        if getattr(stream, "isatty", lambda: False)():
+            reconfigure(errors="replace")
+        else:
+            reconfigure(encoding="utf-8")
+    except (ValueError, OSError):  # pragma: no cover - stream already written to
+        reconfigure(errors="replace")
+    return stream
 
 
 def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
@@ -390,16 +427,18 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
 
 
 def _cmd_sources(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
-    from agent_friction.discovery import discover_transcripts
+    from agent_friction.engine import AnalyzeOptions, list_transcripts
 
-    found = discover_transcripts(args.repo)
-    if not found:
-        stderr.write(
-            f"agent-friction: no Claude Code transcripts found for {args.repo.resolve()}. "
-            "Run this from the repository you use the agent in, set CLAUDE_CONFIG_DIR if your "
-            "config lives elsewhere, or pass transcript paths to `scan --transcripts`.\n"
+    if not args.repo.is_dir():
+        raise AgentFrictionError(f"{args.repo}: not a directory (pass the repository root)")
+    found = list_transcripts(
+        AnalyzeOptions(
+            repo=args.repo,
+            transcripts=args.transcripts,
+            repo_aliases=tuple(args.repo_alias),
+            include_git=False,
         )
-        return EXIT_ERROR
+    )
     for path in found:
         stdout.write(f"{path}\n")
     return EXIT_OK
@@ -408,8 +447,8 @@ def _cmd_sources(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
 def main(
     argv: Sequence[str] | None = None, *, stdout: TextIO | None = None, stderr: TextIO | None = None
 ) -> int:
-    out = stdout or sys.stdout
-    err = stderr or sys.stderr
+    out = _utf8_safe(stdout or sys.stdout)
+    err = _utf8_safe(stderr or sys.stderr)
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
@@ -417,6 +456,13 @@ def main(
         return int(exc.code) if isinstance(exc.code, int) else EXIT_USAGE
     if args.command is None:
         parser.print_help(out)
+        return EXIT_USAGE
+    since, until = getattr(args, "since", None), getattr(args, "until", None)
+    if since is not None and until is not None and since >= until:
+        err.write(
+            f"agent-friction: --since ({since:%Y-%m-%d %H:%M}) must be before "
+            f"--until ({until:%Y-%m-%d %H:%M})\n"
+        )
         return EXIT_USAGE
     handlers = {
         "scan": _cmd_scan,

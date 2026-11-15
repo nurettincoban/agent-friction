@@ -35,7 +35,8 @@ What to fix first
      ...agents ran into trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md
      which source to change and which command regenerates it...
   2. pytest: Tell agents to use `make test`
-     `pytest` failed 7 times in 4 sessions; 5 times the next successful command was `make test`.
+     `pytest` failed 7 times in 4 sessions; 7 times the agent then got the same job done with
+     `make test`, and `pytest` did not work later in those sessions.
   3. src/shopfront/checkout/service.py: Write down the rule the human keeps repeating
      ...In their words: "No, I said use PaymentClient, not the legacy module. [...]"
 ```
@@ -155,8 +156,10 @@ Transcripts contain your code and sometimes your secrets, so:
   directory) and truncated. Thinking blocks and assistant prose are never included.
 - `--no-excerpts` removes all transcript text: prompts, quoted corrections, search patterns,
   command lines, and output. What remains is paths, counts, timestamps, and normalized command
-  names: the executable, plus a subcommand only for a fixed list of well-known tools (`git commit`,
-  `npm run build`, `make test`, `python -m pytest`). Free-form arguments never survive.
+  names built only from publicly known words (`git commit`, `npm test`, `python -m pytest`).
+  Project-specific names (your own scripts, make targets, tools) become short hashes such as
+  `make <target:37bd73>`: stable, so grouping still works, but a pseudonym rather than
+  anonymous, since someone who guesses the name can confirm it.
 
 Redaction is pattern-based: it catches secrets that look like secrets, not an opaque password
 typed as a bare argument. Skim a report before you share it outside your team, or use

@@ -15,7 +15,7 @@ from tests.sample_result import sample_result
 
 
 def test_fmt_minutes() -> None:
-    assert fmt_minutes(0) == "0m"
+    assert fmt_minutes(0) == "0s"
     assert fmt_minutes(0.5) == "30s"
     assert fmt_minutes(7.4) == "7m"
     assert fmt_minutes(125) == "2h 05m"

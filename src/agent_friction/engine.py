@@ -8,15 +8,16 @@ schema is documented in docs/schema.md.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from agent_friction import __version__, gitsignals, model, recommend, redact, scoring, signals
 from agent_friction.adapters import claude_code, parse_transcript
-from agent_friction.attribution import PathResolver
+from agent_friction.attribution import PathResolver, public_key
 from agent_friction.discovery import (
     claude_config_dirs,
     discover_repo_transcripts,
@@ -32,6 +33,7 @@ __all__ = [
     "AnalyzeOptions",
     "NoTranscriptsError",
     "analyze",
+    "list_transcripts",
 ]
 
 SCHEMA_VERSION = 1
@@ -113,6 +115,89 @@ def _load(
         item.streams = [s for s in item.streams if s.events]
         parsed.append(item)
     return parsed
+
+
+#: A commit up to this long after a session's last event still belongs to that session.
+COMMIT_SESSION_SLACK = timedelta(minutes=10)
+
+
+def _session_spans(streams: Sequence[Stream]) -> list[tuple[datetime, datetime, str]]:
+    """First and last timestamp of every transcript session, sorted by start."""
+    spans: dict[str, tuple[datetime, datetime]] = {}
+    for stream in streams:
+        stamps = [e.ts for e in stream.events if e.ts is not None]
+        if not stamps:
+            continue
+        low, high = min(stamps), max(stamps)
+        if stream.session_id in spans:
+            low = min(low, spans[stream.session_id][0])
+            high = max(high, spans[stream.session_id][1])
+        spans[stream.session_id] = (low, high)
+    return sorted((low, high, sid) for sid, (low, high) in spans.items())
+
+
+def _session_at(
+    spans: Sequence[tuple[datetime, datetime, str]], when: datetime | None
+) -> str | None:
+    """The transcript session during which (or just after which) ``when`` falls."""
+    if when is None:
+        return None
+    for low, high, session_id in spans:
+        if low <= when <= high + COMMIT_SESSION_SLACK:
+            return session_id
+    return None
+
+
+def _is_git(finding: Finding) -> bool:
+    return finding.signal == signals.HUMAN_REWORK
+
+
+def _score(items: Sequence[Item], exposed: set[str]) -> scoring.Score:
+    """Score a target. Git evidence may raise a score, never lower it.
+
+    A rework finding adds a friction "session" (the agent commit) that can pull
+    the mean down, so the score from transcripts alone is the floor.
+    """
+    sessions = exposed | {f.session_id for f, _ in items}
+    full = scoring.score_items(items, len(sessions))
+    transcript_items = [(f, share) for f, share in items if not _is_git(f)]
+    if len(transcript_items) == len(items) or not transcript_items:
+        return full
+    floor = scoring.score_items(
+        transcript_items, len(exposed | {f.session_id for f, _ in transcript_items})
+    )
+    return full if full.score >= floor.score else floor
+
+
+def list_transcripts(options: AnalyzeOptions) -> list[Path]:
+    """The transcript files ``analyze(options)`` would read, in the order it reads them.
+
+    Raises ``NoTranscriptsError`` exactly when ``analyze`` would: nothing found,
+    or an explicitly given file that is not a JSONL transcript.
+    """
+    return _Analysis(options)._transcript_files()
+
+
+def _looks_like_jsonl(path: Path) -> bool:
+    """True if one of the first lines of ``path`` is a JSON object."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for _, line in zip(range(JSONL_PROBE_LINES), handle, strict=False):
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    if isinstance(json.loads(line), dict):
+                        return True
+                except ValueError:
+                    continue
+    except OSError:
+        return False
+    return False
+
+
+#: Lines of an explicitly given file that are checked for a JSON object.
+JSONL_PROBE_LINES = 200
 
 
 def _source_root(item: ParsedFile) -> Path:
@@ -206,7 +291,13 @@ class _Analysis:
                     if rel:
                         self.touched.add(rel)
 
-        ctx = signals.DetectContext(self.resolver, self.is_file, self.is_known_file)
+        ctx = signals.DetectContext(
+            self.resolver,
+            self.is_file,
+            self.is_known_file,
+            # Without excerpts no project-specific name may survive in a command key.
+            command_key=str if options.include_excerpts else public_key,
+        )
         findings: list[Finding] = []
         exposure: dict[tuple[str, str], set[str]] = {}
         for stream in streams:
@@ -238,11 +329,16 @@ class _Analysis:
                     )
                     if _in_window(f.ts, self.since, self.until)
                 ]
+                # A commit made during a transcript session is that session's work, not a
+                # separate one. Agent commits never add exposure on their own.
+                committed = {c.session_id: c.date for c in history.commits if c.is_agent}
+                spans = _session_spans(streams)
+                for finding in rework:
+                    owner = _session_at(spans, committed.get(finding.session_id))
+                    if owner is not None:
+                        finding.detail["agent_commit_session"] = finding.session_id
+                        finding.session_id = owner
                 findings.extend(rework)
-                for commit in history.commits:
-                    if commit.is_agent and _in_window(commit.date, self.since, self.until):
-                        for path in commit.files:
-                            self._expose(exposure, model.FILE, path, commit.session_id)
                 source["sessions"] = sum(
                     1
                     for c in history.commits
@@ -278,6 +374,17 @@ class _Analysis:
     def _transcript_files(self) -> list[Path]:
         options = self.options
         if options.transcripts is not None:
+            for given in options.transcripts:
+                path = Path(given).expanduser()
+                if not path.exists():
+                    raise NoTranscriptsError(f"Transcript path does not exist: {given}")
+                if path.is_file() and not _looks_like_jsonl(path):
+                    raise NoTranscriptsError(
+                        f"{given} is not a JSONL transcript: none of its first "
+                        f"{JSONL_PROBE_LINES} lines is a JSON object. Pass Claude Code "
+                        "session files (*.jsonl), directories that contain them, or files in "
+                        "the generic format described in docs/schema.md."
+                    )
             files = expand_transcript_paths(options.transcripts)
             if not files:
                 listed = ", ".join(str(p) for p in options.transcripts) or "(none given)"
@@ -425,26 +532,29 @@ class _Analysis:
     def _entry(self, kind: str, key: str, items: Sequence[Item]) -> dict[str, Any]:
         """The cheap part of a hotspot (everything needed for ranking)."""
         found = [f for f, _ in items]
-        exposed = self.exposure.get((kind, key), set()) | {f.session_id for f in found}
-        result = scoring.score_items(items, len(exposed))
+        result = _score(items, self.exposure.get((kind, key), set()))
         signal_counts: dict[str, int] = {}
         for finding in found:
             signal_counts[finding.signal] = signal_counts.get(finding.signal, 0) + 1
         ranked = sorted(signal_counts.items(), key=lambda kv: (-kv[1], kv[0]))
         sessions = len(result.sessions)
+        commits = sum(s.session_id.startswith(scoring.GIT_SESSION_PREFIX) for s in result.sessions)
         level = scoring.confidence((s.session_id for s in result.sessions), signal_counts)
         return {
             "path": key,
             "kind": kind,
             "score": result.score,
             "sessions": sessions,
+            "agent_commits": commits,
             "exposure_sessions": result.exposure_sessions,
             "friction_rate": result.friction_rate,
             "events": len(found),
             "est_minutes_lost": scoring.lost_minutes(found),
             "signals": dict(ranked),
             "confidence": level,
-            "why": scoring.explain(ranked, sessions, result.exposure_sessions, level),
+            "why": scoring.explain(
+                ranked, sessions - commits, result.exposure_sessions - commits, level, commits
+            ),
             "recommendations": [],
             "evidence": [],
             "score_detail": {
@@ -537,8 +647,7 @@ class _Analysis:
             nodes.sort(key=lambda n: (-n["score"], n["path"]))
             found = [f for f, _ in merged.values()]
             is_dir = bool(nodes) or path in dir_keys or path == ""
-            exposed = beneath.get(path, set()) | {f.session_id for f in found}
-            result = scoring.score_items(merged.values(), len(exposed))
+            result = _score(list(merged.values()), beneath.get(path, set()))
             node = {
                 "name": path.rsplit("/", 1)[-1] if path else (self.repo.name or "repo"),
                 "path": path,

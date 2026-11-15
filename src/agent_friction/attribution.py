@@ -12,12 +12,15 @@ were recorded on another machine.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import posixpath
 import re
 import shlex
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+from agent_friction.redact import redact
 
 _DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _MAX_PATH_CHARS = 1024
@@ -138,7 +141,24 @@ SETUP_PROGRAMS = frozenset(
 #: Prefixes stripped in front of the real program.
 WRAPPER_PROGRAMS = frozenset(
     {"sudo", "time", "env", "nohup", "command", "exec", "nice", "xargs", "watch", "stdbuf"}
+    | {"timeout", "ionice", "doas", "caffeinate", "setsid", "chronic", "unbuffer"}
 )
+#: Options of those wrappers that take a separate value (``sudo -u alice pytest``).
+WRAPPER_VALUE_OPTIONS: dict[str, frozenset[str]] = {
+    "sudo": frozenset({"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-T", "-U", "--user"})
+    | {"--group", "--chdir", "--host", "--prompt", "--role", "--type", "--other-user"},
+    "doas": frozenset({"-u", "-C"}),
+    "xargs": frozenset({"-n", "-I", "-P", "-L", "-d", "-s", "-a", "-E", "-J", "-R"})
+    | {"--max-args", "--max-procs", "--max-lines", "--delimiter", "--arg-file", "--replace"},
+    "env": frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}),
+    "timeout": frozenset({"-s", "-k", "--signal", "--kill-after"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "ionice": frozenset({"-c", "-n", "-p"}),
+    "watch": frozenset({"-n", "-d", "--interval"}),
+    "stdbuf": frozenset({"-i", "-o", "-e"}),
+    "time": frozenset({"-f", "-o", "--format", "--output"}),
+    "exec": frozenset({"-a"}),
+}
 #: Shell keywords that may precede a command; stripped (``if ! make lint`` is ``make lint``).
 _KEYWORD_PREFIXES = frozenset({"if", "elif", "then", "else", "do", "while", "until", "!", "{"})
 #: Shell keywords that head a segment with no command in it (``for x in a b``, ``done``).
@@ -194,13 +214,32 @@ VALUE_OPTIONS: dict[str, frozenset[str]] = {
     "make": frozenset({"-I", "-o", "-W", "--file", "--makefile", "-j", "--jobs", "-l"}),
     "npm": frozenset({"--workspace", "-w", "--userconfig"}),
     "pnpm": frozenset({"--filter", "-F", "--dir", "--workspace-dir"}),
-    "yarn": frozenset({"--cwd"}),
     "kubectl": frozenset({"-n", "--namespace", "--context", "--kubeconfig", "--cluster", "-s"}),
     "helm": frozenset({"-n", "--namespace", "--kube-context", "--kubeconfig"}),
-    "docker": frozenset({"--context", "-H", "--host", "-c", "-l", "--log-level"}),
     "podman": frozenset({"--connection", "--root", "--log-level"}),
     "cargo": frozenset({"--manifest-path", "--color", "-Z"}),
-    "uv": frozenset({"--python", "-p", "--cache-dir", "--color"}),
+    "uv": frozenset({"--python", "-p", "--cache-dir", "--color", "--group", "--only-group"})
+    | {"--no-group", "--with", "--with-editable", "--with-requirements", "--extra", "--env-file"}
+    | {"--package", "--index", "--default-index", "--index-url", "--extra-index-url", "--from"}
+    | {"--script", "--python-preference", "--resolution", "--config-file", "--refresh-package"},
+    "uvx": frozenset({"--python", "-p", "--from", "--with", "--index", "--index-url"}),
+    "npx": frozenset({"-p", "--package", "-c", "--call", "-w", "--workspace"}),
+    "bun": frozenset({"--cwd", "--config", "-c", "--env-file", "--filter"}),
+    "pipx": frozenset({"--python", "--spec", "--pip-args", "--index-url"}),
+    "hatch": frozenset({"-e", "--env", "-p", "--project", "--data-dir", "--cache-dir"}),
+    "nox": frozenset({"-s", "--session", "-f", "--noxfile", "-p", "--python"}),
+    "bundle": frozenset({"--gemfile"}),
+    "bazel": frozenset({"--output_base", "--bazelrc"}),
+    "gradle": frozenset({"-p", "--project-dir", "-b", "--build-file", "-c", "-I", "-g"}),
+    "gradlew": frozenset({"-p", "--project-dir", "-b", "--build-file", "-c", "-I", "-g"}),
+    "mvn": frozenset({"-f", "--file", "-pl", "--projects", "-s", "--settings", "-P", "-T"}),
+    "dotnet": frozenset({"--project", "-p", "-c", "--configuration", "-f", "--framework"}),
+    "docker": frozenset({"--context", "-H", "--host", "-c", "-l", "--log-level", "--config"})
+    | {"--project-name", "--project-directory", "--env-file", "--profile", "--file"},
+    "nx": frozenset({"--project", "--configuration", "-c"}),
+    "turbo": frozenset({"--filter", "-F", "--cwd"}),
+    "yarn": frozenset({"--cwd", "--mode"}),
+    "deno": frozenset({"-c", "--config", "--import-map", "--lock"}),
     "poetry": frozenset({"-P"}),
     "gh": frozenset({"-R", "--repo"}),
     "aws": frozenset({"--profile", "--region", "--output", "--endpoint-url"}),
@@ -247,6 +286,7 @@ DESTRUCTIVE_KEYS = frozenset(
 
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _SUBCOMMAND_RE = re.compile(r"^[a-z][a-z0-9:_-]*$")
+_NUMERIC_RE = re.compile(r"^[-+]?[\d.,:]+[a-z%]{0,2}$", re.I)
 _PYTHON_RE = re.compile(r"^(python|pypy)[\d.]*$")
 _SEPARATORS = frozenset({";", "&&", "||", "&", "|", "|&", "(", ")", ";;"})
 _VENDOR_DIRS = frozenset({"bin", "node_modules", "venv", ".venv", "Scripts", ".bin"})
@@ -352,16 +392,27 @@ def _strip_prefixes(words: Sequence[str]) -> list[str]:
         if head in _KEYWORD_PREFIXES or _ENV_ASSIGN_RE.match(head):
             out.pop(0)
         elif head in WRAPPER_PROGRAMS:
-            out.pop(0)
-            while out and out[0].startswith("-"):  # the wrapper's own flags
-                out.pop(0)
-        elif head == "timeout" and len(out) > 2:
-            out = out[1:]
-            while out and out[0].startswith("-"):
-                out.pop(0)
-            out = out[1:]
+            out = _strip_wrapper(head, out[1:])
         else:
             break
+    return out
+
+
+def _strip_wrapper(wrapper: str, rest: list[str]) -> list[str]:
+    """Drop a wrapper's own options (with their values) and positional arguments."""
+    takes_value = WRAPPER_VALUE_OPTIONS.get(wrapper, frozenset())
+    out = rest
+    while out and out[0].startswith("-") and out[0] != "-":
+        option = out.pop(0)
+        if option == "--":
+            break
+        if option in takes_value and out:
+            out.pop(0)  # ``sudo -u alice``, ``xargs -n 1``: the value is not the command
+    if wrapper == "timeout" and out:
+        out.pop(0)  # the duration
+    if wrapper == "env":
+        while out and _ENV_ASSIGN_RE.match(out[0]):
+            out.pop(0)
     return out
 
 
@@ -400,6 +451,29 @@ def _skip_options(tool: str, rest: Sequence[str]) -> list[str]:
 
 def _key(words: Sequence[str]) -> str:
     """Normalized identity of one simple command (documented in docs/methodology.md)."""
+    return _sanitize(_raw_key(words))
+
+
+def _sanitize(key: str) -> str:
+    """A key never contains a number-only word or anything the redactor would mask.
+
+    The key is cut at the first such word; if the executable itself is one,
+    there is no key.
+    """
+    kept: list[str] = []
+    for word in key.split(" "):
+        if word in ("-m", "-c"):
+            kept.append(word)
+            continue
+        if not word or _NUMERIC_RE.match(word) or redact(word) != word:
+            break
+        kept.append(word)
+    while kept and kept[-1] == "-m":
+        kept.pop()
+    return " ".join(kept)
+
+
+def _raw_key(words: Sequence[str]) -> str:
     if not words:
         return ""
     program = _program_name(words[0])
@@ -548,3 +622,170 @@ def path_candidates(tokens: Iterable[str]) -> list[str]:
         if word not in seen:
             seen.append(word)
     return seen
+
+
+# ---- what a command is for ---------------------------------------------------------------
+
+#: Words of a key that say what job a command does. ``pytest``, ``make test`` and
+#: ``npm run test:unit`` are all test runners; one can stand in for another.
+ROLE_WORDS: dict[str, frozenset[str]] = {
+    "test": frozenset(
+        {"test", "tests", "pytest", "jest", "vitest", "mocha", "rspec", "unittest", "tox", "nox"}
+        | {"phpunit", "ctest", "e2e", "spec", "playwright", "cypress", "karma", "ava", "nextest"}
+    ),
+    "build": frozenset({"build", "compile", "webpack", "assemble", "dist", "bundle", "package"}),
+    "lint": frozenset(
+        {"lint", "eslint", "ruff", "flake8", "pylint", "clippy", "rubocop", "vet", "stylelint"}
+        | {"shellcheck", "golangci-lint", "biome"}
+    ),
+    "typecheck": frozenset({"mypy", "pyright", "tsc", "typecheck", "type-check", "types", "ty"}),
+    "format": frozenset({"format", "fmt", "prettier", "black", "gofmt", "rustfmt", "isort"}),
+}
+#: Subcommands and targets that prepare the environment rather than do the job.
+_SETUP_WORDS = frozenset(
+    {"install", "ci", "sync", "add", "bootstrap", "setup", "deps", "restore", "fetch", "venv"}
+    | {"download", "init", "migrate", "upgrade", "update", "i", "up", "login", "generate"}
+)
+_SETUP_PROGRAMS = frozenset({"pip", "pip3", "apt", "apt-get", "brew", "conda", "mamba", "rustup"})
+
+
+def _key_words(key: str) -> list[str]:
+    return [part for word in key.split() for part in re.split(r"[:/]", word) if part]
+
+
+def command_role(key: str) -> str | None:
+    """``test``, ``build``, ``lint``, ``typecheck`` or ``format``; ``None`` if unknown."""
+    for word in reversed(_key_words(key)):
+        stem = word.rsplit(".", 1)[0] if _SCRIPT_RE.search(word) else word
+        for role, names in ROLE_WORDS.items():
+            if stem in names:
+                return role
+    return None
+
+
+def is_setup_command(key: str) -> bool:
+    """Installing dependencies, creating environments, starting services, migrating."""
+    words = key.split()
+    if not words:
+        return False
+    if words[0] in _SETUP_PROGRAMS or words[:3] == ["python", "-m", "pip"]:
+        return True
+    if words[:3] == ["python", "-m", "venv"]:
+        return True
+    if words[0] in ("git", "gh", "glab"):
+        return False
+    return words[0] in SUBCOMMAND_TOOLS and any(w in _SETUP_WORDS for w in words[1:])
+
+
+def is_replacement(failed: str, other: str) -> bool:
+    """Can ``other`` stand in for ``failed``? (``make test`` for ``pytest``.)
+
+    True when both do the same job (same role) or one wraps the other's tool
+    (``uv run pytest`` for ``pytest``). Never for setup, version-control,
+    housekeeping or inspection commands.
+    """
+    if not failed or not other or failed == other or is_setup_command(other):
+        return False
+    program = other.split()[0]
+    if program in ("git", "gh", "glab") or program in HOUSEKEEPING_PROGRAMS | SETUP_PROGRAMS:
+        return False
+    role = command_role(failed)
+    if role is not None and role == command_role(other):
+        return True
+    return failed.split()[-1] == other.split()[-1] and failed.split()[-1] not in ("run", "-c")
+
+
+# ---- keys without free-form names (include_excerpts=False) -------------------------------
+
+#: Subcommands and target names that say nothing about a particular project.
+_PUBLIC_WORDS = frozenset(
+    {"commit", "push", "pull", "status", "diff", "log", "show", "checkout", "switch", "branch"}
+    | {"merge", "rebase", "reset", "clone", "tag", "restore", "clean", "blame", "grep", "apply"}
+    | {"cherry-pick", "revert", "bisect", "mv", "rm", "pop", "list", "drop", "save", "prune"}
+    | {"start", "dev", "serve", "preview", "watch", "check", "doc", "docs", "bench", "publish"}
+    | {"remove", "uninstall", "new", "create", "lock", "export", "version", "info", "view"}
+    | {"down", "logs", "ps", "images", "rmi", "stop", "restart", "kill", "inspect", "cp", "top"}
+    | {"get", "describe", "delete", "rollout", "scale", "plan", "destroy", "validate", "output"}
+    | {"mod", "tidy", "work", "tool", "all", "release", "coverage", "cov", "unit", "integration"}
+    | {"debug", "prod", "production", "staging", "local", "s3", "ec2", "iam", "sts", "lambda"}
+    | {"auth", "config", "configure", "cache", "audit", "outdated", "prepare", "typegen"}
+    | {"codegen", "seed", "shell", "console", "routes", "db", "storage", "deploy", "help", "why"}
+    | {"exec", "run", "run-script", "dlx", "x", "pip", "compose", "buildx", "pr", "issue", "repo"}
+    | {"workflow", "mr", "stash", "remote", "worktree", "submodule", "task", "workspace"}
+    | {"revision", "downgrade", "history", "current", "makemigrations", "runserver", "head"}
+    | {"-m", "-c", "http.server", "json.tool", "pdb", "timeit", "ensurepip", "django"}
+    | {"twine", "pre_commit", "compileall"}
+)
+#: Well-known executables (beyond the tables above) that may open a key.
+_PUBLIC_PROGRAMS = frozenset(
+    {"python", "coverage", "uvicorn", "gunicorn", "flask", "sh"}
+    | {"node", "ruby", "perl", "php", "java", "javac", "gcc", "g++", "clang", "cc", "ld", "ar"}
+    | {"curl", "wget", "ssh", "scp", "rsync", "tar", "zip", "unzip", "gzip", "psql", "mysql"}
+    | {"sqlite3", "redis-cli", "mongosh", "open", "xdg-open", "code", "vim", "nano", "ed"}
+    | {"ts-node", "tsx", "esbuild", "rollup", "vite", "next", "nuxt", "ng", "expo", "storybook"}
+    | {"tsc", "babel", "sass", "pre-commit", "husky", "lint-staged", "codespell", "bandit"}
+    | {"sphinx-build", "mkdocs", "jupyter", "ipython", "celery", "streamlit", "scrapy", "dbt"}
+    | {"ansible", "ansible-playbook", "vagrant", "packer", "pulumi", "skaffold", "minikube"}
+    | {"kind", "k3d", "act", "jq", "yq", "xargs", "tee", "date", "git-lfs", "ctest", "cmake"}
+)
+#: Role words that are job names, not executables (``make test``, never a bare ``test``).
+_JOB_NAMES = frozenset(
+    {"test", "tests", "build", "lint", "format", "fmt", "types", "spec", "dist", "package"}
+    | {"bundle", "compile", "e2e", "typecheck", "type-check", "assemble"}
+)
+PUBLIC_PROGRAMS = (
+    _PUBLIC_PROGRAMS
+    | SUBCOMMAND_TOOLS
+    | INTERPRETERS
+    | INSPECTION_PROGRAMS
+    | HOUSEKEEPING_PROGRAMS
+    | DESTRUCTIVE_PROGRAMS
+    | SETUP_PROGRAMS
+    | WRAPPER_PROGRAMS
+    | _SETUP_PROGRAMS
+    | (frozenset(word for names in ROLE_WORDS.values() for word in names) - _JOB_NAMES)
+)
+PUBLIC_VOCABULARY = PUBLIC_PROGRAMS | _PUBLIC_WORDS | _SETUP_WORDS | _JOB_NAMES
+
+
+#: Hex digits of the SHA-256 shown in a placeholder.
+PUBLIC_HASH_DIGITS = 6
+
+
+def _placeholder(word: str, position: int, previous: str) -> str:
+    if position == 0:
+        kind = "tool"
+    elif previous == "-m":
+        kind = "module"
+    elif "/" in word or _SCRIPT_RE.search(word):
+        kind = "script"
+    else:
+        kind = "target"
+    return f"<{kind}:{hashlib.sha256(word.encode()).hexdigest()[:PUBLIC_HASH_DIGITS]}>"
+
+
+def public_key(key: str) -> str:
+    """``key`` with every project-specific name replaced by a short stable hash.
+
+    Words from a fixed public vocabulary (well-known programs, subcommands and
+    target names such as ``test`` or ``build``) are kept; any other word (a
+    script path, a make target, an npm script, an unknown executable) becomes
+    ``<kind:hash>``. The same name always gives the same placeholder, so
+    grouping across sessions and reports still works.
+    """
+    out: list[str] = []
+    previous = ""
+    for position, word in enumerate(key.split()):
+        parts = [p for p in word.split(":") if p]
+        if position == 0:
+            known = word in PUBLIC_PROGRAMS
+        else:
+            known = word in PUBLIC_VOCABULARY or (
+                bool(parts) and all(p in PUBLIC_VOCABULARY for p in parts)
+            )
+        if known:
+            out.append(word)
+        else:
+            out.append(_placeholder(word, position, previous))
+        previous = word
+    return " ".join(out)

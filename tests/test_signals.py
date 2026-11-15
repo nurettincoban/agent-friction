@@ -610,13 +610,22 @@ STRONG_CORRECTIONS = [
     "NO!!! not like that",
     "no",
     "No, I meant the other module",
+    "stop editing the generated file, change the template instead",
+    "Not quite, the header should stay",
+    "not exactly - the total excludes tax",
+    "you keep editing the generated file",
+    "bad idea. put it back",
+    "You're still editing the wrong branch",
+    "ok that's wrong, the total excludes tax",
+    "the build is still broken",
+    "undo your change to the lockfile",
+    "Fix it properly this time, you broke the build",
 ]
 
 PROBABLE_CORRECTIONS = [
     "Don't use requests here, use httpx instead",
     "Don't call legacy_charge() here, it's deprecated. Use PaymentClient.charge() instead.",
     "Actually, use the factory instead",
-    "stop editing the generated file, change the template instead",
     "the result is wrong, it shouldn't include drafts",
     "that helper is deprecated, don't import it",
     "you used the old client again, that's a mistake",
@@ -689,16 +698,36 @@ BENIGN_FOLLOW_UPS = [
     # one weak cue is an instruction, not a correction
     "Don't commit yet, instead show me the diff",
     "use PaymentClient, not legacy",
+    # a new task that describes a bug is not a verdict on the agent's work
+    "Fix the bug where the app crashes again after login",
+    "The customer says it's not working. Investigate the billing module.",
+    "It doesn't work on Windows yet; next task: add Windows support",
+    "Can you explain why this is not working in prod? New task.",
+    "The login page is still broken on Safari, can you look at that next?",
+    "Users report that it doesn't work offline. Add a cache.",
+    "Investigate why the nightly job is failing again",
+    "We broke the build yesterday, that's fixed now. Add a changelog entry",
+    "Write a test that proves this is not working for empty input",
+    "The docs are wrong. Update them to mention pnpm",
+    # undo/revert/stop as part of a task, not aimed at the agent's change
+    "revert the migration tool design doc to draft status",
+    "Add an undo button; revert should restore the last saved state",
+    "Implement rollback: roll back the last migration when the health check fails",
+    "Stop the server and restart it with DEBUG=1",
+    "Stop. Hammer time",
+    "Nope, nothing else!",
+    "No, not yet",
+    "I said use tabs in my last project but here spaces are fine",
     # languages other than English are not recognised (documented limitation)
     "Nein, das ist falsch",
 ]
 
 #: Replies that open with "no" answer a question when the agent has just asked one.
 ANSWERS_TO_A_QUESTION = [
-    "No, I meant the other feature next: can you also add pagination?",
+    "No, I meant the other feature; can you also add pagination?",
     "No, keep the old name",
     "no",
-    "Nope, leave it",
+    "Nope, the old one",
     "No. Just the unit tests",
 ]
 
@@ -723,6 +752,39 @@ def test_ordinary_follow_ups_are_not_corrections(text: str) -> None:
 def test_no_after_an_agent_question_is_an_answer(text: str) -> None:
     assert correction_confidence(text)[0] == signals.CORRECTION_STRONG, text
     assert correction_confidence(text, after_question=True) == (0.0, []), text
+
+
+def test_a_verdict_after_a_long_pause_is_only_probable() -> None:
+    late = signals.CORRECTION_STALE_SECONDS + 1
+    for text in ("No, that's wrong", "Not quite, the header should stay", "Still broken on CI"):
+        assert correction_confidence(text, idle_seconds=60)[0] == signals.CORRECTION_STRONG
+        confidence, cues = correction_confidence(text, idle_seconds=late)
+        assert confidence == signals.CORRECTION_PROBABLE and cues[-1] == "long pause", text
+    # words addressed to the agent do not go stale
+    for text in ("you broke the build", "please revert that change", "I told you to use pnpm"):
+        assert correction_confidence(text, idle_seconds=late)[0] == signals.CORRECTION_STRONG
+
+
+def test_new_task_prompts_long_after_the_agent_finished(tmp_path: Path) -> None:
+    """Three sessions: edit, "Done.", and ten minutes later a new task that describes a bug."""
+    prompts = (
+        "Fix the bug where the app crashes again after login",
+        "The customer says it's not working. Investigate the billing module.",
+        "It doesn't work on Windows yet; next task: add Windows support",
+        "Can you explain why this is not working in prod? New task.",
+        "revert the migration tool design doc to draft status",
+        "I said use tabs in my last project but here spaces are fine",
+        "Nope, nothing else!",
+        "Stop. Hammer time",
+    )
+    for text in prompts:
+        s = Session().user("add the feature")
+        s.edit(A).say("Done.").tick(600).user(text)
+        assert detect(s, tmp_path) == [], text
+    late = Session().user("add the feature")
+    late.edit(A).say("Done.").tick(600).user("No, the other module")
+    (fix,) = detect(late, tmp_path)
+    assert fix.weight == signals.CORRECTION_PROBABLE and '"long pause"' in fix.summary
 
 
 def test_other_strong_phrases_still_count_after_a_question() -> None:
@@ -842,3 +904,183 @@ def test_generic_stream_goes_through_the_same_detectors(tmp_path: Path) -> None:
     ]
     assert found[1].detail["recovered_by"] == "make test"
     assert keys(found[2]) == [("file", "src/shopfront/api/schema_gen.py")]
+
+
+# ---- round 3: replacements, failing steps, probes ------------------------------------------
+
+
+def test_only_a_command_doing_the_same_job_is_a_replacement(tmp_path: Path) -> None:
+    not_found = "bash: pytest: command not found"
+    install = Session().user("go")
+    install.bash("pytest", not_found, exit_code=127)
+    install.bash("pip install pytest", "Successfully installed pytest")
+    install.bash("pytest", "1 passed")
+    (failure,) = detect(install, tmp_path)
+    assert "recovered_by" not in failure.detail
+    assert failure.detail["fixed_by_setup"] == "pip install"
+
+    vcs = Session().user("go")
+    vcs.bash("npm test", "sh: 1: jest: not found", exit_code=127)
+    vcs.bash("git add -A && git commit -m wip", "[main 1a2b3c4] wip")
+    vcs.bash("rm -rf dist", "").bash("make codegen", "ok")
+    (failure,) = detect(vcs, tmp_path)
+    assert "recovered_by" not in failure.detail and "fixed_by_setup" not in failure.detail
+
+    same_job = Session().user("go")
+    same_job.bash("pytest", not_found, exit_code=127)
+    same_job.bash("git status", "clean").bash("uv run pytest", "1 passed")
+    same_job.bash("npm run build", 'npm error Missing script: "build"', exit_code=1)
+    same_job.bash("make build", "ok")
+    first, second = detect(same_job, tmp_path)
+    assert first.detail["recovered_by"] == "uv run pytest"
+    assert second.detail["recovered_by"] == "make build"
+
+    works_later = Session().user("go")
+    works_later.bash("pytest", not_found, exit_code=127)
+    works_later.bash("make test", "ok")
+    works_later.user("again").bash("pytest", "1 passed")  # it was not the command's fault
+    (failure,) = detect(works_later, tmp_path)
+    assert "recovered_by" not in failure.detail
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "code", "key", "variant"),
+    [
+        (
+            "touch x && uv pip install -e . && python -m pytest tests/test_a.py | tail -5",
+            "  x Failed to build shop @ file:///repo\n  Readme file does not exist: README.md",
+            1,
+            "uv pip install",
+            "invocation",
+        ),
+        (
+            "npm install && pytest tests/",
+            "npm error code E401\nnpm error Incorrect or missing password.",
+            1,
+            "npm install",
+            "invocation",
+        ),
+        (
+            "pip install -r requirements.txt && pytest tests/test_a.py",
+            "  error: subprocess-exited-with-error\n  x python setup.py egg_info did not run",
+            1,
+            "pip install",
+            "invocation",
+        ),
+        (
+            "make build && pytest tests/test_a.py",
+            "cc -c x.c\nmake: *** [Makefile:3: build] Error 1",
+            2,
+            "make build",
+            "ordinary",
+        ),
+        (
+            "npm ci && pytest tests/test_a.py",
+            "added 3 packages\n===== 1 failed, 2 passed in 0.31s =====",
+            1,
+            "pytest",
+            "ordinary",
+        ),
+    ],
+)
+def test_the_output_decides_which_step_of_a_chain_failed(
+    tmp_path: Path, command: str, output: str, code: int, key: str, variant: str
+) -> None:
+    s = Session().user("go")
+    s.bash(command, output, exit_code=code)
+    (failure,) = detect(s, tmp_path, known=("tests/test_a.py",))
+    assert keys(failure)[0] == ("command", key)
+    assert failure.detail["variant"] == variant and "ambiguous_step" not in failure.detail
+    # test files are blamed only when the test step is the one that failed
+    assert (("file", "tests/test_a.py") in keys(failure)) == (key == "pytest")
+
+
+def test_an_undecidable_chain_blames_no_file_and_says_so(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.bash("./gen.sh && mytool check tests/test_a.py", "something went wrong", exit_code=1)
+    (failure,) = detect(s, tmp_path, known=("tests/test_a.py",))
+    assert keys(failure) == [("command", "mytool")]
+    assert failure.detail["ambiguous_step"] == "1"
+    assert "does not show which step" in failure.summary
+    # a single real command is never ambiguous
+    one = Session().user("go")
+    one.bash("cd api && mytool check tests/test_a.py | tail -3", "bad", exit_code=1)
+    (failure,) = detect(one, tmp_path, known=("tests/test_a.py",))
+    assert "ambiguous_step" not in failure.detail and ("file", "tests/test_a.py") in keys(failure)
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "npm error code ERESOLVE\nnpm error ERESOLVE unable to resolve dependency tree",
+        "  x Failed to build `shop @ file:///repo`",
+        "error: subprocess-exited-with-error",
+        "ERROR: Failed building wheel for cryptography",
+        "  x No solution found when resolving dependencies:",
+        "ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with frozen-lockfile",
+    ],
+)
+def test_install_and_build_failures_are_setup_errors(output: str) -> None:
+    assert signals.is_invocation_error(f"preamble\n{output}\ntrailer", 1), output
+
+
+def test_existence_probes_before_creating_something_are_not_misses(tmp_path: Path) -> None:
+    s = Session().user("add the feature")
+    s.glob("src/new_feature*.py").grep("NewFeature", "/repo/src")
+    s.grep("OldHelper", "/repo/src")  # looked for something that really is not there
+    s.write("/repo/src/new_feature.py", "class NewFeature:\n    pass\n")
+    (miss,) = detect(s, tmp_path)
+    assert miss.signal == signals.SEARCH_MISS and miss.detail["pattern"] == "OldHelper"
+
+    edit = Session().user("add the helper")
+    edit.grep("def parse_sku", "/repo/src").edit(A, "x = 1", "def parse_sku(raw):\n    return raw")
+    assert detect(edit, tmp_path) == []
+
+    elsewhere = Session().user("go")
+    elsewhere.glob("src/new_feature*.py").grep("NewFeature", "/repo/src")
+    elsewhere.write("/repo/docs/new_feature.py", "class NewFeature: ...")  # outside the scope
+    elsewhere.write("/repo/src/other.py", "x = 1")  # neither the name nor the text
+    assert len(detect(elsewhere, tmp_path)) == 2
+
+
+def test_a_retry_loop_keeps_its_failures_even_if_the_run_ends_green(tmp_path: Path) -> None:
+    s = Session().user("go")
+    for _ in range(12):
+        s.bash("pytest", "1 failed", exit_code=1)  # re-run with nothing changed
+    s.edit("/repo/notes.md").bash("pytest", "1 passed")
+    found = detect(s, tmp_path)
+    assert len(by_signal(found, signals.RETRY_LOOP)) == 1
+    assert len(by_signal(found, signals.COMMAND_FAILURE)) == 12
+    # fewer than three in a row is the ordinary loop and is forgiven by edit -> green
+    short = Session().user("go")
+    short.bash("pytest", "1 failed", exit_code=1).bash("pytest", "1 failed", exit_code=1)
+    short.edit(A).bash("pytest", "1 passed")
+    assert detect(short, tmp_path) == []
+
+
+def test_command_keys_can_be_made_public(tmp_path: Path) -> None:
+    from agent_friction.adapters import parse_transcript
+    from agent_friction.attribution import PathResolver, public_key
+
+    s = Session().user("go")
+    s.bash("make deploy-customer-acme", "boom", exit_code=2)
+    s.bash("python deploy_acme_customer.py", "boom", exit_code=1)
+    s.bash("pytest", "bash: pytest: command not found", exit_code=127)
+    s.bash("make test", "ok")
+    s.reject("Bash", {"command": "uvx internal-tool-acme --prod"})
+    ctx = signals.DetectContext(
+        PathResolver(Path("/repo")), lambda rel: True, lambda rel: False, command_key=public_key
+    )
+    stream = parse_transcript(s.save(tmp_path)).streams[0]
+    found, exposed = signals.detect_with_exposure(stream, ctx)
+    text = " ".join([f.summary for f in found] + [k for _, k in exposed])
+    text += " ".join(t.key for f in found for t in f.targets)
+    text += " ".join(v for f in found for k, v in f.detail.items() if k != "command")
+    assert "acme" not in text
+    assert [keys(f)[0][1] for f in found] == [
+        public_key("make deploy-customer-acme"),
+        public_key("python deploy_acme_customer.py"),
+        "pytest",
+        public_key("uvx internal-tool-acme"),
+    ]
+    assert found[2].detail["recovered_by"] == "make test"

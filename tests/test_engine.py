@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -11,8 +12,9 @@ from typing import Any
 import pytest
 
 from agent_friction import __version__, signals
+from agent_friction.attribution import public_key
 from agent_friction.discovery import encode_cwd
-from agent_friction.engine import AnalyzeOptions, NoTranscriptsError, analyze
+from agent_friction.engine import AnalyzeOptions, NoTranscriptsError, analyze, list_transcripts
 from agent_friction.errors import AgentFrictionError
 from tests import builders, fixture_story
 from tests.builders import Session
@@ -117,7 +119,7 @@ def test_story_generated_schema_is_the_top_file(result: dict[str, Any]) -> None:
     assert list(recs)[:2] == ["edit-the-source-not-the-output", "split-or-anchor-large-file"]
     assert "stop hand-editing src/shopfront/api/schema_gen.py" in recs["write-down-the-rule"]
     assert top["why"].startswith(
-        "12 friction events in all 4 sessions that touched it (6 edit miss, 3 user correction"
+        "12 friction events in all 4 sessions that touched it (6 edit misses, 3 user corrections"
     )
     assert (top["exposure_sessions"], top["friction_rate"]) == (4, 1.0)
     detail = top["score_detail"]
@@ -144,7 +146,9 @@ def test_story_pytest_should_be_make_test(result: dict[str, Any]) -> None:
     assert top["signals"] == {"command-failure": 7, "retry-loop": 1} and top["sessions"] == 4
     first = top["recommendations"][0]
     assert first["id"] == "use-the-working-command"
-    assert "5 times the next successful command was `make test`" in first["detail"]
+    assert "7 times the agent then got the same job done with `make test`" in first["detail"]
+    assert top["why"].startswith("8 friction events in all 4 sessions that touched it (7 command")
+    assert "7 command failures, 1 retry loop)" in top["why"]
     assert any("No module named 'shopfront'" in (e["excerpt"] or "") for e in top["evidence"])
     # `make test` failed once on a real test failure that the agent then fixed: that is the
     # normal red/green loop and it is not reported at all
@@ -278,12 +282,27 @@ def test_no_excerpts_keeps_no_argument_of_an_unknown_tool(tmp_path: Path) -> Non
         )
     )
     keys = {c["path"] for c in bare["commands"]}
-    assert keys == {"run", "mytool", "deployctl", "docker run", "scripts/release.sh", "ssh"}
+    # well-known programs keep their name; every project-specific name is a stable hash
+    assert {k for k in keys if not k.startswith("<")} == {"docker run", "ssh"}
+    hashed = sorted(k for k in keys if k.startswith("<"))
+    assert len(hashed) == 4 and all(re.fullmatch(r"<tool:[0-9a-f]{6}>", k) for k in hashed)
+    assert public_key("mytool") in hashed and public_key("scripts/release.sh") in hashed
+    for word in ("mytool", "deployctl", "release", "scripts"):
+        assert word not in json.dumps(bare), word
     assert set(bare["exposure"]["command"]) >= keys
     text = json.dumps(bare)
     for secret in secrets:
         assert secret not in text, secret
-    full = json.dumps(analyze(AnalyzeOptions(repo=Path("/repo"), transcripts=[out], now=NOW)))
+    with_excerpts = analyze(AnalyzeOptions(repo=Path("/repo"), transcripts=[out], now=NOW))
+    assert {c["path"] for c in with_excerpts["commands"]} == {
+        "run",
+        "mytool",
+        "deployctl",
+        "docker run",
+        "scripts/release.sh",
+        "ssh",
+    }
+    full = json.dumps(with_excerpts)
     assert "acmecorp-merger-codename" in full  # with excerpts the command line is evidence
     assert "hunter2pass" in full  # (an opaque argument is not something redaction can spot)
 
@@ -387,7 +406,7 @@ def test_no_transcripts_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     with pytest.raises(NoTranscriptsError, match="No Claude Code transcripts found") as info:
         analyze(AnalyzeOptions(repo=tmp_path))
     assert isinstance(info.value, AgentFrictionError) and "CLAUDE_CONFIG_DIR" in str(info.value)
-    with pytest.raises(NoTranscriptsError, match=r"No \.jsonl transcript files"):
+    with pytest.raises(NoTranscriptsError, match="Transcript path does not exist"):
         analyze(AnalyzeOptions(repo=tmp_path, transcripts=[tmp_path / "missing"]))
 
 
@@ -485,3 +504,101 @@ def test_sessions_from_other_repositories_are_left_out(tmp_path: Path) -> None:
     assert out["sources"][0]["sessions"] == 2 and out["sources"][0]["sessions_outside_repo"] == 1
     assert [(c["path"], c["events"]) for c in out["commands"]] == [("make test", 1)]
     assert [h["path"] for h in out["hotspots"]] == ["a.py"]
+
+
+def test_misleading_replacements_are_not_recommended(tmp_path: Path) -> None:
+    out = tmp_path / "t"
+    for n in range(3):
+        s = Session(f"i{n}", cwd="/repo").user("run the tests")
+        s.bash("pytest", "bash: pytest: command not found", exit_code=127)
+        s.bash("pip install pytest", "Successfully installed pytest-8")
+        s.bash("pytest", "3 passed")
+        s.bash("npm test", "sh: 1: jest: not found", exit_code=127)
+        s.bash("git add -A && git commit -m wip", "[main 1a2b3c4] wip")
+        s.save(out)
+    result = analyze(AnalyzeOptions(repo=Path("/repo"), transcripts=[out], include_git=False))
+    recs = {c["path"]: c["recommendations"] for c in result["commands"]}
+    assert [r["id"] for r in recs["pytest"]] == ["document-the-setup-step"]
+    assert "3 times it worked after the agent ran `pip install`" in recs["pytest"][0]["detail"]
+    assert [r["id"] for r in recs["npm test"]] == ["document-the-command"]
+    assert "use `" not in json.dumps(recs)
+
+
+def test_new_task_prompts_do_not_make_a_hotspot(tmp_path: Path) -> None:
+    out = tmp_path / "t"
+    prompts = (
+        "Fix the bug where the app crashes again after login",
+        "The customer says it's not working. Investigate the billing module.",
+        "revert the migration tool design doc to draft status",
+    )
+    for n, text in enumerate(prompts):
+        s = Session(f"n{n}", cwd="/repo").user("add the feature")
+        s.edit("/repo/src/a.py").say("Done.").tick(600).user(text)
+        s.save(out)
+    result = analyze(AnalyzeOptions(repo=Path("/repo"), transcripts=[out], include_git=False))
+    assert result["totals"]["friction_events"] == 0 and result["hotspots"] == []
+
+
+def test_list_transcripts_matches_what_analyze_reads(tmp_path: Path) -> None:
+    out = tmp_path / "t"
+    first = Session("a", cwd="/repo").user("go").edit("/repo/a.py").save(out)
+    second = Session("b", cwd="/repo").user("go").edit("/repo/a.py").save(out / "nested")
+    (out / "notes.txt").write_text("not a transcript")
+    options = AnalyzeOptions(repo=Path("/repo"), transcripts=[out], include_git=False)
+    assert list_transcripts(options) == sorted([first, second])
+    assert sum(src["files"] for src in analyze(options)["sources"]) == 2
+
+    prose = tmp_path / "notes.md"
+    prose.write_text("# notes\n\nnothing to see\n")
+    for bad, message in ((prose, "is not a JSONL transcript"), (tmp_path / "nope", "not exist")):
+        options = AnalyzeOptions(repo=Path("/repo"), transcripts=[first, bad])
+        with pytest.raises(NoTranscriptsError, match=message):
+            list_transcripts(options)
+        with pytest.raises(NoTranscriptsError, match=message):
+            analyze(options)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(NoTranscriptsError, match=r"No \.jsonl transcript files"):
+        list_transcripts(AnalyzeOptions(repo=Path("/repo"), transcripts=[empty]))
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_commits_made_during_a_session_are_not_extra_sessions(tmp_path: Path) -> None:
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+
+    def commit(stamp: str, message: str, files: dict[str, str]) -> None:
+        for name, content in files.items():
+            (repo / name).write_text(content)
+        dated = {**env, "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
+        identity = ["-c", "user.name=Dana", "-c", "user.email=dana@corp.test"]
+        for args in (["add", "-A"], ["commit", "-q", "-m", message]):
+            subprocess.run(["git", "-C", str(repo), *identity, *args], check=True, env=dated)
+
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True, env=env)
+    agent = "wip\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
+    # three agent commits made while the session below was running, one long before it
+    commit("2026-10-01T12:00:00+00:00", agent, {"a.py": "v0\n", "b.py": "v0\n"})
+    for minute in (1, 2, 3):
+        commit(f"2026-11-03T00:0{minute}:00+00:00", agent, {"a.py": f"v{minute}\n"})
+    commit("2026-11-04T12:00:00+00:00", "fix the agent's change", {"a.py": "human\n"})
+
+    s = Session("t", cwd=str(repo), start=datetime(2026, 11, 3, tzinfo=timezone.utc)).user("go")
+    s.edit(str(repo / "a.py"), error=builders.EDIT_NOT_FOUND).read(str(repo / "b.py"))
+    s.tick(240).edit(str(repo / "a.py"))
+    options = AnalyzeOptions(repo=repo, transcripts=[s.save(tmp_path / "t")], now=NOW)
+    with_git = analyze(options)
+    (hotspot,) = with_git["hotspots"]
+    # the rework is on the commit this very session made: still one session, no commits
+    assert hotspot["signals"] == {"edit-miss": 1, "human-rework": 1}
+    assert (hotspot["sessions"], hotspot["agent_commits"], hotspot["exposure_sessions"]) == (
+        1,
+        0,
+        1,
+    )
+    assert "in the only session that touched it (" in hotspot["why"]
+    assert with_git["exposure"]["file"] == {"a.py": 1, "b.py": 1}  # commits add no exposure
+    options.include_git = False
+    without_git = analyze(options)
+    assert hotspot["score"] >= without_git["hotspots"][0]["score"]  # git never dilutes

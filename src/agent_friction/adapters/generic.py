@@ -49,6 +49,7 @@ def _event(obj: dict[str, Any], line: int) -> Event | None:
         content = obj.get("content")
         if isinstance(content, str):
             event.content_digest = common.digest(content)
+        event.new_text = common.new_text(new, content)
     elif kind == model.TOOL_RESULT:
         output = obj.get("output")
         text = output if isinstance(output, str) else ""

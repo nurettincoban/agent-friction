@@ -102,6 +102,7 @@ def _tool_call(block: dict[str, Any], line: int, base: dict[str, Any]) -> Event 
         old, new = inp.get("old_string"), inp.get("new_string")
         if isinstance(old, str) and isinstance(new, str):
             event.edits = ((common.digest(old), common.digest(new)),)
+            event.new_text = common.new_text(new)
     elif name == "MultiEdit":
         edits = inp.get("edits")
         if isinstance(edits, list):
@@ -112,10 +113,14 @@ def _tool_call(block: dict[str, Any], line: int, base: dict[str, Any]) -> Event 
                 and isinstance(e.get("old_string"), str)
                 and isinstance(e.get("new_string"), str)
             )
+            event.new_text = common.new_text(
+                *(e.get("new_string") for e in edits if isinstance(e, dict))
+            )
     elif name == "Write":
         content = inp.get("content")
         if isinstance(content, str):
             event.content_digest = common.digest(content)
+            event.new_text = common.new_text(content)
     elif name == "Bash":
         event.command = _str(inp.get("command"))
     elif event.op == model.OP_SEARCH:

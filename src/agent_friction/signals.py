@@ -7,6 +7,7 @@ constant here and is explained in docs/signals.md.
 
 from __future__ import annotations
 
+import fnmatch
 import posixpath
 import re
 from collections.abc import Callable
@@ -14,9 +15,15 @@ from dataclasses import dataclass, field
 
 from agent_friction import model
 from agent_friction.attribution import (
+    HOUSEKEEPING_PROGRAMS,
     MATCH_FILTERS,
+    SETUP_PROGRAMS,
     ParsedCommand,
     PathResolver,
+    Step,
+    command_role,
+    is_replacement,
+    is_setup_command,
     objectionable_step,
     parse_command,
     path_candidates,
@@ -75,6 +82,9 @@ CORRECTION_STRONG = 1.0
 CORRECTION_PROBABLE = 0.4
 #: Weaker cues needed for a "probable" correction.
 CORRECTION_MIN_CUES = 2
+#: A verdict ("No, ...", "that's wrong") typed longer than this after the agent finished
+#: is only a probable correction: the human has probably moved on to something else.
+CORRECTION_STALE_SECONDS = 300
 
 CATALOG: tuple[SignalDef, ...] = (
     SignalDef(
@@ -210,6 +220,19 @@ CATALOG: tuple[SignalDef, ...] = (
 BY_ID: dict[str, SignalDef] = {s.id: s for s in CATALOG}
 SEVERITY: dict[str, float] = {s.id: s.severity for s in CATALOG}
 
+#: Lines printed when dependencies cannot be installed or a package cannot be built.
+_INSTALL_SHAPES = (
+    r"npm (?:ERR!|error) code E(?:40\d|5\d\d|RESOLVE|NOTFOUND|TARGET|ACCES|INTEGRITY|JSONPARSE"
+    r"|CONNRESET|TIMEDOUT|NOENT).*"
+    r"|ERR_PNPM_\S+.*"
+    r"|error (?:Couldn't find package|An unexpected error occurred:).*"
+    r"|\s*(?:[×x] |error: |ERROR: )?Failed to build .*"
+    r"|\s*(?:[×x] )?(?:error: )?subprocess-exited-with-error.*"
+    r"|ERROR: (?:Could not (?:build|install)|Failed building wheel|Cannot install).*"
+    r"|\s*[×x] No solution found when resolving .*"
+    r"|error: (?:failed to (?:select a version|download|get|load manifest)|no matching package)"
+    r"\b.*"
+)
 #: Output shapes that mark a command failure as a setup/invocation problem. Each is
 #: anchored to a whole line as the shell, the interpreter or the tool itself prints it,
 #: so words like "timed out" or "permission denied" inside test output do not qualify.
@@ -244,11 +267,65 @@ INVOCATION_ERROR_RE = re.compile(
     r"|(?:ERROR|error): (?:Could not find a version|No matching distribution|"
     r"externally-managed-environment).*"
     r"|go: (?:cannot find main module|go\.mod file not found).*"
+    # dependencies could not be installed or built
+    r"|" + _INSTALL_SHAPES +
     # the network was not there
     r"|curl: \(\d+\) .*"
     r")$",
     re.M,
 )
+#: The same install/build shapes on their own: they identify the failing step of a chain.
+INSTALL_FAILURE_RE = re.compile(r"^(?:" + _INSTALL_SHAPES + r")$", re.M)
+#: Output that only the named kind of step prints, used to tell which step of
+#: ``a && b`` failed. Keyed by role or program; a step with no entry cannot be confirmed.
+STEP_SIGNATURES: dict[str, re.Pattern[str]] = {
+    "test": re.compile(
+        r"^=+ .* in [\d.]+s|^(?:FAILED|ERROR) \S+::|^=+ (?:FAILURES|ERRORS|test session starts) =+"
+        r"|^collected \d+ items?|no tests ran|^(?:FAIL|Tests:|Test Suites:)\s|^--- FAIL"
+        r"|test result: FAILED|^\s*\d+ (?:failed|failing)\b|^FAILED \(",
+        re.M,
+    ),
+    "lint": re.compile(r"^Found \d+ errors?\b|\d+ problems? \(|^\S+:\d+:\d+: [A-Z]+\d+ ", re.M),
+    "typecheck": re.compile(
+        r"error TS\d+|^Found \d+ errors? in \d+ files?|^\S+:\d+: error: ", re.M
+    ),
+    "make": re.compile(r"^make(?:\[\d+\])?: \*\*\* ", re.M),
+    "cargo": re.compile(r"^error(?:\[E\d+\])?: |could not compile", re.M),
+    "git": re.compile(r"^fatal: |^error: (?:pathspec|failed to push|Your local changes)", re.M),
+    "docker": re.compile(r"^docker: |Error response from daemon|failed to solve", re.M),
+    "go": re.compile(r"^FAIL\b|^--- FAIL|cannot find package", re.M),
+}
+
+
+def _step_signature(step: Step) -> list[re.Pattern[str]]:
+    if is_setup_command(step.key):
+        return [INSTALL_FAILURE_RE]
+    names = (command_role(step.key), step.program)
+    return [STEP_SIGNATURES[name] for name in names if name in STEP_SIGNATURES]
+
+
+def failing_step(cmd: ParsedCommand, output: str) -> tuple[Step | None, bool]:
+    """Which command of a chain failed, judged by what the output looks like.
+
+    Returns ``(step, certain)``. With a single real command there is nothing
+    to decide. Otherwise the first step whose own kind of error output is
+    present is the one; if no step can be confirmed, the result is the step
+    the line is named after, marked uncertain.
+    """
+    primary = next((s for s in cmd.steps if s.key == cmd.key), None)
+    candidates = [
+        s
+        for s in cmd.steps
+        if not s.inspection and s.program not in SETUP_PROGRAMS | HOUSEKEEPING_PROGRAMS
+    ]
+    if len({s.key for s in candidates}) <= 1:
+        return primary, True
+    for step in candidates:
+        if any(pattern.search(output) for pattern in _step_signature(step)):
+            return step, True
+    return primary, False
+
+
 #: Exit codes the shell itself uses for "cannot execute" and "not found".
 INVOCATION_EXIT_CODES = frozenset({126, 127})
 
@@ -274,8 +351,20 @@ _SOFTENER_RE = re.compile(
     r"\b(?:thanks|thank you|thx|great|good job|nice(?:ly)?|perfect|awesome|excellent|well done"
     r"|love it|like it|nailed it|keep going|looks good|lgtm|all good|amazing|wonderful"
     r"|no worries|never ?mind|ignore (?:it|that|this)|unrelated|not your fault|flaky"
-    r"|(?:that's|it's|that is|it is) (?:fine|ok|okay))\b",
+    r"|(?:that's|it's|that is|it is|is|are) (?:fine|ok|okay))\b",
     re.I,
+)
+#: The human is moving on to something else: a description of a bug ("it doesn't work on
+#: Windows yet; next task: ...") is then a task, not a verdict on the agent's work.
+_NEW_TASK_RE = re.compile(
+    r"\b(?:next|new|another|separate|different|unrelated) (?:task|topic|thing|issue|ticket|bug)\b"
+    r"|\bnext(?: up)?:|\bmoving on\b|\bnext,? (?:please )?(?:add|fix|implement|do|let's)\b",
+    re.I,
+)
+#: Interjections that may precede a verdict at the start of a message ("hmm, that's wrong").
+_OPEN = (
+    r"^(?:(?:hmm+|ugh+|argh+|wtf|ok(?:ay)?|well|so|sorry|oh|hey|no+|nope|nah|but|and|damn|sigh"
+    r"|um+|uh+|eh|again|man|dude|wait|still)[,.!…:;—-]*\s+)*"
 )
 _YOU_DID = (
     r"\byou (?:broke|removed|deleted|forgot|missed|ignored|misunderstood|overwrote)\b"
@@ -283,62 +372,104 @@ _YOU_DID = (
     r"|\byou (?:didn't|did not) (?:\w+ )?(?:run|read|follow|do|use|update|fix|check|add|listen"
     r"|test|change|remove|answer)\b"
     r"|\byou (?:shouldn't|should not) have\b|\byou (?:weren't|were not) supposed\b"
+    r"|\byou keep \w+ing\b|\byou(?:'re| are) still \w+ing\b"
 )
 _THING = (
     r"file|branch|directory|dir|folder|function|module|place|repo|path|approach|way|one|test"
     r"|package|version|line|class|method|command"
 )
 _UNDO = r"(?:revert|undo|roll ?back)"
+#: What an undo must refer to: the agent's own change, by pronoun or as "the last edit".
 _UNDO_OBJECT = (
-    r"(?:that|this|it|your|those|these|all|everything|what you"
-    r"|the (?:last|previous|change|changes|edit|edits|commit|commits))\b"
+    r"(?:that|this|it|your|those|these|all (?:of )?(?:that|this|your)|everything|what you"
+    r"|(?:the|my) (?:last|previous|latest) (?:change|changes|edit|edits|commit|commits|one"
+    r"|thing|step|two|three|few|\d+)"
+    r"|the (?:change|changes|edit|edits|commit|commits))\b"
+)
+_STILL = (
+    r"still (?:failing|fails|broken|not working|not fixed|doesn't work|does not work"
+    r"|wrong|the same (?:error|problem|issue|bug)|crash(?:es|ing)?)\b"
+    r"|(?:failing|fails|broken|crashing|crashes) again\b"
+)
+
+#: Subjects that stand for the outcome of the agent's work in "the tests are still failing".
+#: A longer noun phrase ("the login page is still broken") more often describes a task.
+_RESULT_NOUN = (
+    r"tests?|build|ci|pipeline|lint|linter|type ?check|compile|app|server|page|command|script"
+    r"|error|bug|issue|problem|output|result|check|checks|job|deploy|import"
 )
 
 #: Label of the one pattern that is void when the agent had just asked a question.
 _ANSWER_LABEL = "no, …"
 
-_STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
-    (label, re.compile(pattern, re.I))
-    for label, pattern in (
+#: (label, pattern, addressed). *Addressed* phrases speak to the agent in the second person
+#: or about what the human had asked for, and count wherever they stand in the head of the
+#: message. The others are verdicts ("that's wrong", "still failing") that only refer to the
+#: agent's work when they open the message: the same words later in a prompt usually
+#: describe a bug to work on ("the customer says it's not working").
+_STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
+    (label, re.compile(pattern, re.I), addressed)
+    for label, pattern, addressed in (
         (
             # "No, ..." / "No. ..." / "Nope - ..." / a bare "no"; not "No. 3 ...", "no thanks",
-            # "no problem", "no way", "No tests are needed".
+            # "no problem", "no way", "No tests are needed", "Nope, nothing else".
             _ANSWER_LABEL,
             r"^(?:no|nope|nah)(?:[.!]*$|\s*[,.;:!—-]+\s*(?!\d)"
-            r"(?!(?:thanks|thank you|problem|worries|rush|need|that's (?:fine|ok|okay|great|all)"
-            r"|it's (?:fine|ok|okay)|all good|go ahead|way)\b)\S)",
+            r"(?!(?:thanks|thank you|problem|worries|rush|need|that's (?:fine|ok|okay|great|all|it)"
+            r"|it's (?:fine|ok|okay)|all (?:good|set|done)|go ahead|way|nothing|none"
+            r"|not (?:yet|now|really|necessary|needed|today)|i'm (?:good|fine|done)"
+            r"|we're (?:good|fine|done)|just (?:that|this)|leave it|keep it)\b)\S)",
+            False,
         ),
-        ("wrong. / stop.", r"^(?:wrong|incorrect|stop)(?:[.!]*$|\s*[.,;:!—-]+\s*\S)"),
+        (
+            "not quite",
+            r"^(?:not quite|not exactly|not like that|close,? but|almost,? but)\b",
+            False,
+        ),
+        (
+            # "wrong. use pnpm" / "stop. use the other client"; not "Stop. Hammer time".
+            "wrong. / stop.",
+            r"^(?:wrong|incorrect)(?:[.!]*$|\s*[.,;:!—-]+\s*\S)"
+            r"|^stop(?:[.!]*$|\s*[.,;:!—-]+\s*(?:use|don't|do not|you|that|this|it\b|revert|undo"
+            r"|wait|i |we |not |wrong|go back|put|leave|keep|read|look|check|ask|please|just)"
+            r"|\s+(?:that|it|this|doing|right there|\w+ing)\b)",
+            False,
+        ),
         (
             "that's wrong",
-            r"\b(?:that|this|it)(?:'s| is| was) (?:"
+            _OPEN + r"(?:that|this|it)(?:'s| is| was) (?:"
             r"(?:still |just |simply |completely |totally |plain )?(?:wrong|incorrect|broken)"
             r"(?: again)?(?=\s*(?:[.,;:!?—-]|$|and\b|but\b))"
             r"|not (?:right|correct|working|true|how)\b"
             r"|not what (?:i|we)\b)",
+            False,
         ),
         (
             "that didn't work",
-            r"\b(?:that|this|it) (?:didn't|doesn't|does not|did not) (?:work|help)\b",
+            _OPEN + r"(?:that|this|it) (?:didn't|doesn't|does not|did not) (?:work|help)\b",
+            False,
         ),
         (
             "the wrong file",
             r"\b(?:you(?:'re| are| were)?|that's|that is|this is|it's|it is) (?:\w+ ){0,3}"
             rf"the wrong (?:{_THING})\b",
+            True,
         ),
-        ("you broke/forgot/…", _YOU_DID),
+        ("you broke/forgot/…", _YOU_DID, True),
         (
-            # An imperative addressed to the agent, not "Undo support is the next feature".
+            # An imperative about the agent's own change: "revert that", "undo your change",
+            # "put it back". Not "Undo support is the next feature", "revert the design doc".
             "revert/undo",
-            rf"^(?:(?:please|pls|just|now|ok|okay|so)[, ]+)*{_UNDO}(?:[.!,]|$|\s+{_UNDO_OBJECT}"
-            rf"|\s+(?:the|my)\b)"
-            rf"|(?:[.,;:!?]|\b(?:please|just|and|then|so))\s+{_UNDO}\s+{_UNDO_OBJECT}",
+            rf"^(?:(?:please|pls|just|now|ok|okay|so)[, ]+)*{_UNDO}(?:[.!,]|$|\s+{_UNDO_OBJECT})"
+            rf"|(?:[.,;:!?]|\b(?:please|just|and|then|so))\s+{_UNDO}\s+{_UNDO_OBJECT}"
+            r"|\bput (?:it|that|this|them|those|everything) (?:all )?back\b",
+            True,
         ),
         (
             "still failing",
-            r"\bstill (?:failing|fails|broken|not working|not fixed|doesn't work|does not work"
-            r"|wrong|the same (?:error|problem|issue|bug)|crash(?:es|ing)?)\b"
-            r"|\b(?:failing|fails|broken|crashing|crashes) again\b",
+            _OPEN + r"(?:(?:it|that|this|(?:the |my |our )?(?:" + _RESULT_NOUN + r"))"
+            r"(?:'s| is| are| was| were| keeps?)? )?(?:" + _STILL + ")",
+            False,
         ),
         (
             # Said *to the agent*: "I told you", "I asked you to", "I said use X".
@@ -348,12 +479,14 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
             r"|asked you (?:not )?to\b"
             r"|said (?:not to\b|to (?:use|keep|leave|run|stop|add|remove|put)\b|use\b|don't"
             r"|do not|no\b|not\b|only\b))",
+            True,
         ),
-        ("not what I asked", r"\bnot what i (?:asked|wanted|meant|said)\b"),
+        ("not what I asked", r"\bnot what i (?:asked|wanted|meant|said)\b", True),
         (
             "why did you",
             r"\bwhy did you (?:delete|remove|change|edit|touch|rewrite|revert|add|create|skip"
             r"|ignore|use|modify|disable|comment out|run|do that|not|drop|rename|move|replace)\b",
+            True,
         ),
     )
 )
@@ -377,12 +510,20 @@ _WEAK_CORRECTION: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 )
 
 
-def correction_confidence(text: str, after_question: bool = False) -> tuple[float, list[str]]:
-    """Confidence in [0, 1] that ``text`` is a correction, and the matched phrase labels.
+def correction_confidence(
+    text: str, after_question: bool = False, idle_seconds: float | None = None
+) -> tuple[float, list[str]]:
+    """Confidence in [0, 1] that ``text`` corrects the agent's last turn, and why.
 
-    * An unambiguous phrase gives 1.0, unless praise or a dismissal follows it,
-      or it is a leading "No, ..." answering a question the agent just asked
-      (``after_question``).
+    * An *addressed* phrase ("you broke ...", "I told you ...", "revert that")
+      gives 1.0 wherever it stands in the head of the message.
+    * A *verdict* ("No, ...", "that's wrong", "still failing") gives 1.0 only
+      when it opens the message, the message does not move on to a new task,
+      and it is not a "No" answering a question the agent just asked
+      (``after_question``). If the human replied more than
+      ``CORRECTION_STALE_SECONDS`` after the agent finished (``idle_seconds``),
+      a verdict alone is only a probable correction (0.4).
+    * Praise or a dismissal after a phrase voids it.
     * Otherwise two or more distinct weaker cues give 0.4, unless the message
       contains thanks, praise or a dismissal.
     * A single weaker cue ("don't forget ...", "actually, can you also ...")
@@ -391,15 +532,23 @@ def correction_confidence(text: str, after_question: bool = False) -> tuple[floa
     head = text.strip()[:CORRECTION_HEAD_CHARS].replace("’", "'")
     softeners = [m.start() for m in _SOFTENER_RE.finditer(head)]
     last_softener = max(softeners) if softeners else -1
+    new_task = bool(_NEW_TASK_RE.search(head))
     strong: list[str] = []
-    for label, pattern in _STRONG_CORRECTION:
+    addressed_any = False
+    for label, pattern, addressed in _STRONG_CORRECTION:
         match = pattern.search(head)
         if match is None or match.start() < last_softener:
+            continue
+        if not addressed and new_task:
             continue
         if label == _ANSWER_LABEL and after_question:
             continue
         strong.append(label)
+        addressed_any = addressed_any or addressed
     if strong:
+        stale = idle_seconds is not None and idle_seconds > CORRECTION_STALE_SECONDS
+        if stale and not addressed_any:
+            return CORRECTION_PROBABLE, [*strong, "long pause"]
         return CORRECTION_STRONG, strong
     if softeners:
         return 0.0, []
@@ -418,6 +567,8 @@ class DetectContext:
     is_file: Callable[[str], bool]
     #: True if a repo-relative path is a file known from disk or from any transcript.
     is_known_file: Callable[[str], bool]
+    #: How a command key is shown (identity, or ``attribution.public_key`` without excerpts).
+    command_key: Callable[[str], str] = str
 
 
 @dataclass
@@ -431,6 +582,18 @@ class _Action:
 
 def _epoch(event: Event | None) -> float | None:
     return event.ts.timestamp() if event is not None and event.ts is not None else None
+
+
+def _text_matches(pattern: str, text: str) -> bool:
+    """Does written ``text`` contain what an earlier search looked for?"""
+    if not text:
+        return False
+    if pattern in text:
+        return True
+    try:
+        return re.search(pattern, text) is not None
+    except re.error:
+        return False
 
 
 def _capped(start: float | None, end: float | None) -> tuple[float, float] | None:
@@ -486,6 +649,12 @@ class _State:
     # ordinary failures per command that are still red, and those an edit has followed
     red: dict[str, list[Finding]] = field(default_factory=dict)
     red_then_edited: dict[str, list[Finding]] = field(default_factory=dict)
+    # failures for which another command stood in, per failed command
+    replaced: dict[str, list[Finding]] = field(default_factory=dict)
+    # setup command that succeeded after a failure that is still pending, by finding id
+    setup_after: dict[int, str] = field(default_factory=dict)
+    # empty searches that a later created file or written text may explain
+    probes: list[tuple[Finding, Event, str]] = field(default_factory=list)
 
 
 class _Detector:
@@ -532,7 +701,7 @@ class _Detector:
         if action.file is not None:
             return [Target(model.FILE, action.file)]
         if action.cmd is not None and action.cmd.key:
-            return [Target(model.COMMAND, action.cmd.key)]
+            return [Target(model.COMMAND, self.ctx.command_key(action.cmd.key))]
         return []
 
     def _round_trip(self, action: _Action) -> tuple[float, float] | None:
@@ -568,7 +737,7 @@ class _Detector:
                     if parsed.key:
                         action.cmd = parsed
                         if not parsed.inspection:
-                            self.exposed.add((model.COMMAND, parsed.key))
+                            self.exposed.add((model.COMMAND, self.ctx.command_key(parsed.key)))
                 elif event.op == model.OP_SEARCH:
                     scope = _scope(event, self.ctx)
                     if scope is not None:
@@ -694,13 +863,17 @@ class _Detector:
         call = action.call
         now = _epoch(call)
         targets = [Target(model.FILE, path)]
-        # A change ends every "same command, nothing changed" streak ...
+        # A change turns the red runs so far into red -> edit -> (maybe) green, unless they
+        # were a retry loop: re-running a failing command three times with nothing changed
+        # is friction whatever happens afterwards.
+        for failed_key, findings in state.red.items():
+            if failed_key not in state.retry:
+                state.red_then_edited.setdefault(failed_key, []).extend(findings)
+        state.red = {}
+        # A change ends every "same command, nothing changed" streak.
         state.fail_runs.clear()
         state.retry.clear()
-        # ... and turns the red runs so far into red -> edit -> (maybe) green.
-        for failed_key, findings in state.red.items():
-            state.red_then_edited.setdefault(failed_key, []).extend(findings)
-        state.red = {}
+        self._explain_probes(path, call)
         # Any successful change resets read-loop tracking for the file.
         for key in [k for k in state.reads if k[0] == path]:
             del state.reads[key]
@@ -740,6 +913,24 @@ class _Detector:
                 targets,
                 interval=_capped_back(reverted_at, now),
             )
+
+    def _explain_probes(self, path: str, call: Event) -> None:
+        """Drop earlier empty searches that only checked a name was free before creating it."""
+        explained: set[int] = set()
+        for finding, search, scope in self.state.probes:
+            if scope and path != scope and not path.startswith(scope + "/"):
+                continue
+            pattern = search.pattern or ""
+            if search.tool.lower() == "glob":
+                name = pattern.replace("\\", "/").rsplit("/", 1)[-1]
+                hit = bool(name) and fnmatch.fnmatchcase(path.rsplit("/", 1)[-1], name)
+            else:
+                hit = bool(pattern) and _text_matches(pattern, call.new_text)
+            if hit:
+                explained.add(id(finding))
+        if explained:
+            self.findings = [f for f in self.findings if id(f) not in explained]
+            self.state.probes = [p for p in self.state.probes if id(p[0]) not in explained]
 
     def _path_miss(self, action: _Action, result: Event) -> None:
         if action.file is None:
@@ -783,7 +974,7 @@ class _Detector:
             return
         is_file = bool(scope) and self.ctx.is_file(scope)
         where = scope or "the repo root"
-        self._emit(
+        finding = self._emit(
             SEARCH_MISS,
             result,
             f"{call.tool} search in {where} returned nothing",
@@ -792,6 +983,7 @@ class _Detector:
             interval=self._round_trip(action),
             detail={"pattern": call.pattern or "", "scope": scope or "."},
         )
+        self.state.probes.append((finding, call, scope))
 
     # ---- shell -----------------------------------------------------------------------
 
@@ -801,6 +993,7 @@ class _Detector:
             return
         state = self.state
         key = cmd.key
+        shown = self.ctx.command_key
         state.pending = [(f, k, n - 1) for f, k, n in state.pending if n > 1]
         if result.ok:
             state.fail_runs[key] = 0
@@ -811,12 +1004,28 @@ class _Detector:
             if fixed:
                 self.findings = [f for f in self.findings if id(f) not in fixed]
                 state.pending = [p for p in state.pending if id(p[0]) not in fixed]
-            if not cmd.inspection:
-                for finding, failed_key, _ in state.pending:
-                    if failed_key != key:
-                        finding.detail["recovered_by"] = key
+            # The command works after all, so nothing "replaced" it earlier in the session.
+            for finding in state.replaced.pop(key, []):
+                finding.detail.pop("recovered_by", None)
+            if cmd.inspection:
+                return
+            waiting: list[tuple[Finding, str, int]] = []
+            for finding, failed_key, left in state.pending:
+                if failed_key == key:
+                    setup = state.setup_after.pop(id(finding), "")
+                    if setup:
+                        finding.detail["fixed_by_setup"] = setup
                     self._recover(finding, action)
-                state.pending = []
+                elif is_setup_command(key):
+                    state.setup_after[id(finding)] = shown(key)
+                    waiting.append((finding, failed_key, left))
+                elif is_replacement(failed_key, key):
+                    finding.detail["recovered_by"] = shown(key)
+                    state.replaced.setdefault(failed_key, []).append(finding)
+                    self._recover(finding, action)
+                else:  # an unrelated command (git, housekeeping, another job) fixes nothing
+                    waiting.append((finding, failed_key, left))
+            state.pending = waiting
             return
         code = result.exit_code
         if cmd.inspection:
@@ -825,9 +1034,15 @@ class _Detector:
             return  # `... | grep x` with nothing matched
         call = action.call
         invocation = is_invocation_error(result.output, code)
-        targets = [Target(model.COMMAND, key)]
-        # A setup/invocation error says nothing about the files on the command line.
-        for candidate in () if invocation else path_candidates(cmd.tokens):
+        # In `a && b` the output tells which step failed; b may never have run.
+        step, certain = failing_step(cmd, result.output)
+        if step is not None and step.key:
+            key = step.key
+        tokens = step.args if step is not None else cmd.tokens
+        targets = [Target(model.COMMAND, shown(key))]
+        # A setup/invocation error says nothing about the files on the command line, and
+        # neither does a failure we cannot pin on one step.
+        for candidate in () if invocation or not certain else path_candidates(tokens):
             rel = self.ctx.resolver.resolve(candidate, call.cwd)
             if rel and self.ctx.is_known_file(rel) and Target(model.FILE, rel) not in targets:
                 targets.append(Target(model.FILE, rel))
@@ -835,19 +1050,28 @@ class _Detector:
                 break
         status = f"exit {code}" if code is not None else "error"
         kind = "setup/invocation error" if invocation else "ordinary failure"
+        summary = f"`{shown(key)}` failed ({status}; {kind})"
+        if not certain:
+            summary = (
+                f"A chain of commands ending in `{shown(key)}` failed ({status}; {kind}); "
+                "the output does not show which step, so no file is blamed"
+            )
+        detail = {
+            "variant": "invocation" if invocation else "ordinary",
+            "command": call.command or "",
+        }
+        if not certain:
+            detail["ambiguous_step"] = "1"
         finding = self._emit(
             COMMAND_FAILURE,
             result,
-            f"`{key}` failed ({status}; {kind})",
+            summary,
             targets,
             excerpt=f"$ {call.command}\n{result.output}",
             weight=1.0 if invocation else ORDINARY_FAILURE_WEIGHT,
             # An ordinary failure (a red test) is information, not lost time.
             interval=self._round_trip(action) if invocation else None,
-            detail={
-                "variant": "invocation" if invocation else "ordinary",
-                "command": call.command or "",
-            },
+            detail=detail,
         )
         state.pending.append((finding, key, RECOVERY_LOOKAHEAD))
         if not invocation:
@@ -855,9 +1079,11 @@ class _Detector:
         run = state.fail_runs.get(key, 0) + 1
         state.fail_runs[key] = run
         if run == RETRY_LOOP_MIN_FAILURES:
-            state.retry[key] = self._emit(RETRY_LOOP, result, "", [Target(model.COMMAND, key)])
+            state.retry[key] = self._emit(
+                RETRY_LOOP, result, "", [Target(model.COMMAND, shown(key))]
+            )
         if key in state.retry:
-            state.retry[key].summary = f"`{key}` failed {run} times in a row"
+            state.retry[key].summary = f"`{shown(key)}` failed {run} times in a row"
             state.retry[key].detail["count"] = str(run)
 
     # ---- human signals ---------------------------------------------------------------
@@ -873,7 +1099,7 @@ class _Detector:
             # Name the step the human objected to (`rm`, `git push`), not the last one.
             step = objectionable_step(action.cmd, result.reason)
             if step is not None and step.key:
-                targets = [Target(model.COMMAND, step.key)]
+                targets = [Target(model.COMMAND, self.ctx.command_key(step.key))]
         what = targets[0].key if targets else call.tool
         what = f"`{what}`" if targets and targets[0].kind == model.COMMAND else what
         excerpt_parts = []
@@ -923,7 +1149,10 @@ class _Detector:
         )
 
     def _on_prompt(self, event: Event) -> None:
-        confidence, labels = correction_confidence(event.text, event.after_question)
+        _, finished = self._turn_bounds()
+        asked = _epoch(event)
+        idle = asked - finished if asked is not None and finished is not None else None
+        confidence, labels = correction_confidence(event.text, event.after_question, idle)
         if confidence <= 0:
             return
         touched: list[str] = []  # most recent first

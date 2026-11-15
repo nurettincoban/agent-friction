@@ -45,9 +45,12 @@ directory) if set, otherwise `~/.claude` and `~/.config/claude`.
 - A session with no activity in the repo (no working directory inside it and
   no path that resolves into it) is left out and reported as
   `sessions_outside_repo`.
-- For `human-rework`, each agent commit acts as a session (`git:<sha>`). These
-  count towards a hotspot's `sessions` and `exposure_sessions`, but not
-  towards `totals.sessions` and not towards confidence.
+- For `human-rework`, an agent commit made during an analysed transcript
+  session (first event to 10 minutes after the last) belongs to that session.
+  Any other agent commit with rework acts as a session of its own
+  (`git:<sha>`): it counts towards a hotspot's `sessions` and
+  `exposure_sessions` and is reported as `agent_commits`, but not towards
+  `totals.sessions` and not towards confidence.
 
 ## Attribution
 
@@ -66,7 +69,9 @@ together, and so that the key can be shown even when excerpts are off:
    `done`, `fi`, ...) are looked through, and `bash -c '<script>'` is replaced
    by the commands of its script. Redirections, leading `VAR=value`
    assignments and wrappers (`sudo`, `env`, `time`, `timeout N`, `nohup`,
-   `xargs`, ...) are stripped from each command.
+   `xargs`, `nice`, `watch`, ...) are stripped from each command, together
+   with the wrapper's own options and their values (`WRAPPER_VALUE_OPTIONS`:
+   `sudo -u alice pytest` -> `pytest`, `xargs -n 1 pytest` -> `pytest`).
 2. **Pick the command that names the line:** the **last significant** one.
    Setup (`cd`, `export`, `source`, `echo`, ...), housekeeping (`mkdir`,
    `touch`, `rm`, `cp`, `mv`, ...) and read-only inspection (`cat`, `tail`,
@@ -87,7 +92,8 @@ together, and so that the key can be shown even when excerpts are off:
      subcommand word. Options in front of it are skipped, together with their
      value where the tool defines one (`make -j4 test` -> `make test`, `git -C
      /repo commit` -> `git commit`, `pnpm --filter web test` -> `pnpm test`,
-     `kubectl -n prod get pods` -> `kubectl get`);
+     `kubectl -n prod get pods` -> `kubectl get`, `uv run --group dev pytest`
+     -> `uv run pytest`);
    - one further word is kept only after a script runner or command group of
      that tool (`CONTINUING_SUBCOMMANDS`: `npm run build`, `uv run pytest`,
      `poetry run python -m pytest`, `docker compose up`, `gh pr create`);
@@ -95,10 +101,33 @@ together, and so that the key can be shown even when excerpts are off:
      `run`, `mytool acme-codename --x` is `mytool`, `ssh host cmd` is `ssh`,
      `docker run <image>` is `docker run`.
 
+5. **Sanitize.** A key is cut at the first word that is a number or that the
+   redactor would change (`make 2` is `make`; a key that would start with
+   such a word is discarded). Every key passes through the redactor.
+
 A key therefore consists of an executable name plus, at most, a subcommand of
 an allowlisted tool, a `make`/`npm run`-style target or script name, or an
 interpreter's script path or module. Free-form arguments, option values, host
 names, URLs and environment assignments are never part of a key.
+
+**Keys without excerpts.** Executable, script, target and module names are
+still chosen by the project (`python deploy_acme_customer.py`, `make
+deploy-customer-acme`). With `include_excerpts=False` every word of a key
+that is not in a fixed public vocabulary (well-known programs, their common
+subcommands, and generic target names such as `test`, `build`, `lint`;
+`PUBLIC_VOCABULARY` in `attribution.py`) is replaced by a placeholder with
+the first 6 hex digits of its SHA-256: `python <script:93d162>`, `make
+<target:37bd73>`, `<tool:373279>`. The same name always maps to the same
+placeholder, so hotspots still group and two reports can still be compared;
+`pytest`, `npm test`, `git commit` stay readable. With excerpts on, keys are
+shown as they are.
+
+**Roles.** For recommendations a key has a role if one of its words says what
+job it does (`ROLE_WORDS`): test (`pytest`, `make test`, `npm run
+test:unit`), build, lint, type-check, format. Install and environment
+commands (`pip install`, `npm ci`, `uv sync`, `docker compose up`, ...) are
+*setup commands*. A command can stand in for another only if it has the same
+role or wraps the same tool.
 
 More examples: `CI=1 npm test -- foo` -> `npm test`;
 `cat <<EOF > x.py ... EOF` + `python x.py` -> `python x.py`;
@@ -117,13 +146,16 @@ Friction only means something relative to how often the agent goes somewhere.
 For every target the engine records its **exposure**: the set of sessions in
 which the agent touched it at all, with or without friction.
 
-- **file:** a read, edit or write of the file, a search scoped to it, a
-  failed command or correction attributed to it, or an agent commit that
-  changed it (git);
+- **file:** a read, edit or write of the file, a search scoped to it, or a
+  failed command or correction attributed to it;
 - **command:** the command ran (read-only inspection such as `ls`, `cat`,
   `git status` is not tracked);
 - **directory:** a search scoped to the directory. Tree nodes use every
   session that touched anything beneath the directory.
+
+Agent commits from git never add exposure by themselves. Only an agent commit
+with rework that falls outside every analysed session counts, as one friction
+"session" on the file it reworked.
 
 `exposure_sessions` is the size of that set and
 `friction_rate = sessions with friction / exposure_sessions`. The report's
@@ -180,6 +212,11 @@ score       = 100 x severity x recurrence x consistency
   read loop scores about 32, and it approaches 100 only as *every* visit goes
   *badly*. It is comparable across runs and across repositories of different
   size.
+
+**Git can only add.** `human-rework` events take part in the formula like any
+other event, but the score of a hotspot is never lower than the score computed
+from its transcript events alone: adding a mildly-weighted rework "session"
+would otherwise pull the mean down.
 
 The output includes `exposure_sessions`, `friction_rate` and `score_detail`
 (the three factors, the mean and the per-session values) so the arithmetic can
@@ -264,8 +301,9 @@ the evidence that triggered them.
 | `document-how-to-run` | 2+ ordinary command failures naming the file |
 | `add-a-pointer` | 2+ `search-miss` in the file or directory; lists the patterns |
 | `summarize-this-file` | 2+ `read-loop` |
-| `use-the-working-command` | 2+ failures of a command were followed by the same successful other command |
-| `document-the-command` | 2+ setup/invocation failures of a command (and no clear working alternative) |
+| `use-the-working-command` | 2+ failures of a command were followed by the same successful command *doing the same job* (same role, or a wrapper of the same tool), in sessions where the failing command never worked afterwards. Never an install, version-control or housekeeping command |
+| `document-the-setup-step` | 2+ failures of a command that then worked after the same setup command (`pip install`, `npm ci`, ...) |
+| `document-the-command` | 2+ setup/invocation failures of a command (and neither of the above) |
 | `make-the-failure-actionable` | 1+ `retry-loop` on a command |
 
 ## Privacy and redaction
@@ -278,14 +316,15 @@ Transcripts contain secrets. The engine therefore:
   commit subjects) in exactly two places: `excerpt` and the quotes inside
   recommendation details. Both disappear with `include_excerpts=False`.
   What remains then is structural: tool names, repo-relative paths, counts,
-  commit hashes and **command keys** such as `pytest` or `npm run build`. A
-  key is an executable name plus, at most, a subcommand of an allowlisted
-  tool, a script or target name after a runner (`make <target>`, `npm run
-  <script>`) or an interpreter's script path or module (see
-  [Attribution](#attribution)). No other word of a command line survives: the
-  arguments of a tool that is not on the allowlist are never part of a key
-  (`./run s3cret` is `run`). The same holds for the keys of the top-level
-  `exposure` object;
+  commit hashes and **command keys**. Without excerpts a key contains only
+  words from a fixed public vocabulary (`pytest`, `npm run build`, `git
+  commit`); every project-specific name in it (an unknown executable, a
+  script path, a make target, an npm script, a module) is replaced by a short
+  hash placeholder such as `<target:37bd73>` (see
+  [Attribution](#attribution)). Arguments are never part of a key in either
+  mode. The same holds for the keys of the top-level `exposure` object. A
+  6-digit hash of a guessable name can be confirmed by someone who already
+  suspects the name; it is a pseudonym, not encryption;
 - redacts **before** truncating (default 240 characters), so a secret cannot
   be cut in half and slip through;
 - applies these rules, in order: private-key blocks; AWS access keys; vendor
@@ -325,6 +364,12 @@ a user name) and appear in `sources[].path` and `evidence[].source`.
 - **Exposure is per session, not per call.** A file read once and a file
   edited fifty times in a session both count as one exposure. Exposure of a
   command hotspot ignores read-only inspection commands.
+- **Chains of commands.** Which step of `a && b` failed is inferred from the
+  output. If nothing recognisable is printed the event is marked ambiguous
+  and blames no file.
+- **Replacement commands are inferred from names.** `make test` is taken to
+  do the job of `pytest` because both are test runners by name; a target
+  called `make check` is not recognised as one.
 - **Git rework is circumstantial.** Overlapping line ranges show that a human
   changed what the agent wrote, not why. It weighs little and never raises
   confidence.
@@ -336,7 +381,7 @@ a user name) and appear in `sources[].path` and `evidence[].source`.
   are one hotspot; `pytest` and `python -m pytest` are two; every use of a
   tool that is not on the subcommand allowlist is one hotspot (`mytool build`
   and `mytool deploy` are both `mytool`). When `a && b` fails we cannot tell
-  which step failed and name the last significant one. The shell is tokenized,
+  which step failed unless the output shows it. The shell is tokenized,
   not interpreted: aliases, functions, `eval` and command substitution are not
   followed.
 - **Corrections are under-counted on purpose.** Only unambiguous phrasing, or

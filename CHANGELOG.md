@@ -4,8 +4,6 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/). The JSON output has its own `schema_version`.
 
-## [Unreleased]
-
 ## [0.1.0] - Unreleased
 
 ### Added
@@ -19,6 +17,3 @@ All notable changes to this project are documented here. The format follows
 - `agent-friction sources`: list the transcripts that would be analysed.
 - Generic JSONL transcript format for other agents.
 - Redaction of secrets in evidence excerpts, and `--no-excerpts`.
-
-[Unreleased]: https://github.com/nurettincoban/agent-friction/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/nurettincoban/agent-friction/releases/tag/v0.1.0

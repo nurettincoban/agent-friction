@@ -123,7 +123,7 @@ def test_no_transcripts_is_a_clean_error(tmp_path: Path, monkeypatch: pytest.Mon
     assert code == EXIT_ERROR
     assert err.startswith("agent-friction: ") and "Traceback" not in err
     code, _, err = run("sources", str(tmp_path))
-    assert code == EXIT_ERROR and "--transcripts" in err
+    assert code == EXIT_ERROR and "No Claude Code transcripts found" in err
 
 
 def test_sources_lists_discovered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -214,3 +214,34 @@ def test_show_accepts_a_raw_command_line(tmp_path: Path) -> None:
     run("scan", *INPUT, "-o", str(saved))
     code, out, _ = run("show", "PYTEST -x tests/test_refunds.py", "--from", str(saved))
     assert code == EXIT_OK and "command: pytest" in out
+
+
+def test_non_utf8_stdout_does_not_crash() -> None:
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252")
+    code = main(["scan", *INPUT, "--color", "never"], stdout=stream, stderr=io.StringIO())
+    stream.flush()
+    assert code == EXIT_OK
+    assert "█" in raw.getvalue().decode("utf-8")
+
+
+def test_inverted_window_is_a_usage_error() -> None:
+    code, _, err = run("scan", *INPUT, "--since", "2026-11-01", "--until", "2026-10-01")
+    assert code == EXIT_USAGE and "must be before" in err
+
+
+def test_output_into_missing_directory_is_an_error(tmp_path: Path) -> None:
+    code, _, err = run("scan", *INPUT, "-o", str(tmp_path / "missing" / "x.html"))
+    assert code == EXIT_ERROR and "does not exist" in err
+
+
+def test_sources_with_explicit_transcripts() -> None:
+    code, out, _ = run("sources", *INPUT[:-1])  # drop --no-git, not a `sources` flag
+    assert code == EXIT_OK and ".jsonl" in out
+
+
+def test_sources_rejects_non_transcript_file(tmp_path: Path) -> None:
+    bogus = tmp_path / "notes.md"
+    bogus.write_text("# just markdown\n", encoding="utf-8")
+    code, _, err = run("sources", str(tmp_path), "-t", str(bogus))
+    assert code == EXIT_ERROR and "not a JSONL transcript" in err

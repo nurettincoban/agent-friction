@@ -44,6 +44,14 @@ def parse_ts(value: object) -> datetime | None:
         return None
 
 
+#: Characters of written text kept in memory per call (see ``Event.new_text``).
+NEW_TEXT_LIMIT = 200_000
+
+
+def new_text(*parts: object) -> str:
+    return "\n".join(p for p in parts if isinstance(p, str))[:NEW_TEXT_LIMIT]
+
+
 def digest(text: str) -> str:
     """Short stable fingerprint used to compare edit strings without storing them."""
     return hashlib.sha1(text.encode("utf-8", "replace"), usedforsecurity=False).hexdigest()[:16]

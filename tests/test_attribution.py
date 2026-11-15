@@ -7,10 +7,14 @@ import pytest
 
 from agent_friction.attribution import (
     PathResolver,
+    command_role,
+    is_replacement,
+    is_setup_command,
     normalize_command,
     objectionable_step,
     parse_command,
     path_candidates,
+    public_key,
 )
 
 needs_symlinks = pytest.mark.skipif(sys.platform == "win32", reason="needs symlink privileges")
@@ -200,6 +204,23 @@ def test_symlinked_repo_root_matches_both_spellings(tmp_path: Path) -> None:
         ("mysql -uroot -phunter2 shop", "mysql"),
         ("curl -H 'Cookie: sid=abc' https://x.test", "curl"),
         ("scripts/release.sh v1.2.3-internal", "scripts/release.sh"),
+        # a wrapper's own options and their values are not the command
+        ("sudo -u alice pytest", "pytest"),
+        ("xargs -n 1 pytest", "pytest"),
+        ("find . -name '*.py' | xargs -n 1 -P 4 pytest", "pytest"),
+        ("timeout -s KILL 30 make test", "make test"),
+        ("env -u FOO BAR=1 npm test", "npm test"),
+        ("nice -n 10 cargo build", "cargo build"),
+        ("watch -n 5 make test", "make test"),
+        ("uv run --group dev pytest", "uv run pytest"),
+        ("uv run --with rich --python 3.12 python -m pytest", "uv run python -m pytest"),
+        ("npx -p typescript tsc", "npx tsc"),
+        ("docker compose -f ci.yml up", "docker compose up"),
+        # a key never holds a number or anything the redactor would mask
+        ("make 2", "make"),
+        ("python 0123456789abcdef0123456789abcdef0123.py", "python"),
+        ("npm run sk-ant-" + "api03-" + "a" * 36, "npm run"),
+        ("bob@corp.test --help", ""),
     ],
 )
 def test_normalize_command(command: str, key: str) -> None:
@@ -251,3 +272,63 @@ def test_objectionable_step() -> None:
     assert pick("ls && cat x") == "cat"  # nothing but inspection: the line's own key
     assert pick("cd api && make test", "wrong directory, cd elsewhere") == "make test"
     assert pick("") == ""
+
+
+@pytest.mark.parametrize(
+    ("key", "public"),
+    [
+        ("pytest", "pytest"),
+        ("python -m pytest", "python -m pytest"),
+        ("npm run test:unit", "npm run test:unit"),
+        ("make test", "make test"),
+        ("uv run pytest", "uv run pytest"),
+        ("git commit", "git commit"),
+        ("docker compose up", "docker compose up"),
+        ("python deploy_acme_customer.py", "python <script:93d162>"),
+        ("make deploy-customer-acme", "make <target:37bd73>"),
+        ("npm run deploy:acme-prod", "npm run <target:f16a85>"),
+        ("uvx internal-tool-acme", "uvx <target:b0d558>"),
+        ("python -m acme.jobs", "python -m <module:3a8a44>"),
+        ("mytool", "<tool:373279>"),
+        ("run", "<tool:acba25>"),  # a subcommand word is not a public program name
+        ("", ""),
+    ],
+)
+def test_public_key_hashes_project_specific_names(key: str, public: str) -> None:
+    assert public_key(key) == public
+    assert public_key(public_key(key)) == public or "<" in public
+
+
+@pytest.mark.parametrize(
+    ("failed", "other", "expected"),
+    [
+        ("pytest", "make test", True),
+        ("pytest", "uv run pytest", True),
+        ("pytest", "python -m pytest", True),
+        ("npm run build", "pnpm build", True),
+        ("mypy", "pyright", True),
+        ("pytest", "pip install", False),
+        ("pytest", "uv sync", False),
+        ("npm test", "git commit", False),
+        ("pytest", "rm", False),
+        ("pytest", "make codegen", False),
+        ("ruff check", "ruff format", False),
+        ("pytest", "pytest", False),
+    ],
+)
+def test_is_replacement(failed: str, other: str, expected: bool) -> None:
+    assert is_replacement(failed, other) is expected
+
+
+def test_roles_and_setup_commands() -> None:
+    assert [command_role(k) for k in ("pytest", "npm run test:unit", "cargo clippy", "tsc")] == [
+        "test",
+        "test",
+        "lint",
+        "typecheck",
+    ]
+    assert command_role("git commit") is None and command_role("mytool") is None
+    for key in ("pip install", "uv sync", "npm ci", "docker compose up", "python -m venv"):
+        assert is_setup_command(key), key
+    for key in ("pytest", "git add", "make test", "mytool", ""):
+        assert not is_setup_command(key), key

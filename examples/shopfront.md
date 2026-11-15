@@ -5,7 +5,7 @@
 ## What to fix first
 
 1. `src/shopfront/api/schema_gen.py`: **Generated file: point agents at its source** This file looks generated (judging by a "code generated" marker), yet agents ran into trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md which source to change and which command regenerates it, and consider denying direct edits to it.
-2. `pytest`: **Tell agents to use `make test`** `pytest` failed 7 times in 4 sessions; 5 times the next successful command was `make test`. Add a line to AGENTS.md such as: "use `make test`, not `pytest`".
+2. `pytest`: **Tell agents to use `make test`** `pytest` failed 7 times in 4 sessions; 7 times the agent then got the same job done with `make test`, and `pytest` did not work later in those sessions. Add a line to AGENTS.md such as: "use `make test`, not `pytest`".
 3. `src/shopfront/checkout/service.py`: **Write down the rule the human keeps repeating** A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint."
 4. `src/shopfront`: **Point agents to what they are searching for** Agents searched under src/shopfront/ and found nothing 5 times in 2 sessions. They looked for `RefundPolicy` (2x), `**/*policy*.py`, `DiscountPolicy`. If the concept exists under another name or elsewhere, add a pointer in AGENTS.md (or a comment/alias where agents look). If it does not exist, say so.
 5. `rm`: **State the boundary** A human declined the agent's action once in 1 session. State the boundary explicitly (what must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a permission rule. Reasons given: "never delete existing migrations, add a new revision on top"
@@ -25,9 +25,9 @@
 
 | # | Command | Score | Sessions | Events | Est. time lost | Top signals | Confidence |
 |---:|---|---:|---:|---:|---:|---|---|
-| 1 | `pytest` | 50.5 | 4 | 8 | 6m | `command-failure`×7, `retry-loop`×1 | high |
+| 1 | `pytest` | 50.5 | 4 | 8 | 7m | `command-failure`×7, `retry-loop`×1 | high |
 | 2 | `rm` | 16.3 | 1 | 1 | 42s | `tool-rejected`×1 | low |
-| 3 | `curl` | 15.2 | 1 | 1 | 24s | `command-failure`×1 | low |
+| 3 | `curl` | 15.2 | 1 | 1 | 12s | `command-failure`×1 | low |
 | 4 | `python -m pytest` | 15.2 | 1 | 1 | 30s | `command-failure`×1 | low |
 
 ## Directories where agents search in vain
@@ -41,12 +41,12 @@
 <details>
 <summary><code>src/shopfront/api/schema_gen.py</code> · score 56.8 · 4 sessions</summary>
 
-12 friction events in all 4 sessions that touched it (6 edit miss, 3 user correction, 1 read loop, 2 more signal types); high confidence because it recurs across sessions with several kinds of evidence.
+12 friction events in all 4 sessions that touched it (6 edit misses, 3 user corrections, 1 read loop, 2 more signal types); high confidence because it recurs across sessions with several kinds of evidence.
 
 **Recommendations**
 
 - **Generated file: point agents at its source** This file looks generated (judging by a "code generated" marker), yet agents ran into trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md which source to change and which command regenerates it, and consider denying direct edits to it.
-- **Large file: split it or add unique anchors** 6 edits failed to locate their target in this 1031-line file (2 matched several places, 4 matched nothing) across 4 session(s). Split it into smaller modules, or give repeated blocks unique nearby text (section comments, distinct names) so an edit can be targeted.
+- **Large file: split it or add unique anchors** 6 edits failed to locate the target in this 1031-line file (2 matched several places, 4 matched nothing) across 4 sessions. Split it into smaller modules, or give repeated blocks unique nearby text (section comments, distinct names) so an edit can be targeted.
 - **Write down the rule the human keeps repeating** A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "No, stop hand-editing src/shopfront/api/schema_gen.py. It is generated: change api/openapi.yaml and run make codegen." / "That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml."
 
 **Evidence**
@@ -65,12 +65,12 @@
 <details>
 <summary><code>src/shopfront/checkout/service.py</code> · score 39.8 · 3 sessions</summary>
 
-6 friction events in all 3 sessions that touched it (3 user correction, 2 edit reverted, 1 edit thrash); high confidence because it recurs across sessions with several kinds of evidence.
+6 friction events in all 3 sessions that touched it (3 user corrections, 2 reverted edits, 1 edit thrash episode); high confidence because it recurs across sessions with several kinds of evidence.
 
 **Recommendations**
 
 - **Write down the rule the human keeps repeating** A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint."
-- **Give agents a fast way to check changes to this file** Edits here did not converge: 1 thrash episode(s) and 2 reverted edit(s) in 1 session(s). Document the quickest command that validates this file (a single test, a type check) so agents can verify instead of iterating blind.
+- **Give agents a fast way to check changes to this file** Edits here did not converge: 1 thrash episode and 2 reverted edits in 1 session. Document the quickest command that validates this file (a single test, a type check) so agents can verify instead of iterating blind.
 
 **Evidence**
 
@@ -137,12 +137,12 @@
 <details>
 <summary><code>pytest</code> · score 50.5 · 4 sessions</summary>
 
-8 friction events in all 4 sessions that touched it (7 command failure, 1 retry loop); high confidence because it recurs across sessions with several kinds of evidence.
+8 friction events in all 4 sessions that touched it (7 command failures, 1 retry loop); high confidence because it recurs across sessions with several kinds of evidence.
 
 **Recommendations**
 
-- **Tell agents to use `make test`** `pytest` failed 7 times in 4 sessions; 5 times the next successful command was `make test`. Add a line to AGENTS.md such as: "use `make test`, not `pytest`".
-- **Make this failure explain itself** Agents re-ran `pytest` up to 3 times in a row without success (1 retry loop(s) in 1 session(s)). The output did not lead them to a fix: note the known cause in AGENTS.md, or make the command fail fast with a message that says what to do.
+- **Tell agents to use `make test`** `pytest` failed 7 times in 4 sessions; 7 times the agent then got the same job done with `make test`, and `pytest` did not work later in those sessions. Add a line to AGENTS.md such as: "use `make test`, not `pytest`".
+- **Make this failure explain itself** Agents re-ran `pytest` up to 3 times in a row without success (1 retry loop in 1 session). The output did not lead them to a fix: note the known cause in AGENTS.md, or make the command fail fast with a message that says what to do.
 
 **Evidence**
 
@@ -161,7 +161,7 @@
 <details>
 <summary><code>rm</code> · score 16.3 · 1 session</summary>
 
-1 friction event in the only session that touched it (1 tool call declined); low confidence because there is too little independent evidence so far.
+1 friction event in the only session that touched it (1 declined tool call); low confidence because there is too little independent evidence so far.
 
 **Recommendations**
 
@@ -201,7 +201,7 @@
 <details>
 <summary><code>src/shopfront</code> · score 29.5 · 2 sessions</summary>
 
-5 friction events in all 2 sessions that touched it (5 search miss); medium confidence because it recurs across sessions.
+5 friction events in all 2 sessions that touched it (5 search misses); medium confidence because it recurs across sessions.
 
 **Recommendations**
 

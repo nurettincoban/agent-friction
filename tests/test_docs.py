@@ -7,7 +7,7 @@ import math
 import re
 from pathlib import Path
 
-from agent_friction import gitsignals, recommend, redact, scoring, signals
+from agent_friction import attribution, engine, gitsignals, recommend, redact, scoring, signals
 from agent_friction.adapters import generic
 from tests.builders import detect
 
@@ -52,6 +52,12 @@ def test_documented_thresholds_match_the_code() -> None:
     assert f"only the newest {gitsignals.MAX_PATCH_COMMITS} candidate commits" in catalog
     rework, miss = signals.SEVERITY[signals.HUMAN_REWORK], signals.SEVERITY[signals.EDIT_MISS]
     assert rework < miss and f"weighs less than an edit miss ({rework:g})" in catalog
+    stale = signals.CORRECTION_STALE_SECONDS / 60
+    assert f"typed more than {stale:g} minutes after the agent's last" in catalog
+    assert f"first {attribution.PUBLIC_HASH_DIGITS} hex digits of its SHA-256" in method
+    minutes = engine.COMMIT_SESSION_SLACK.total_seconds() / 60
+    assert f"{minutes:g} minutes after its last" in catalog
+    assert f"first {engine.JSONL_PROBE_LINES} lines is a JSON object" in read("schema.md")
     assert f"capped at **{signals.TIME_CAP_SECONDS / 60:g} minutes**" in method
     assert f"next {signals.RECOVERY_LOOKAHEAD} shell calls" in method
     assert f"has {recommend.LARGE_FILE_LINES}+ lines" in method
@@ -109,3 +115,13 @@ def test_documented_command_examples_match_the_code() -> None:
     for command, key in examples:
         if "..." not in command:
             assert normalize_command(command) == key, command
+
+
+def test_documented_placeholders_are_computed_by_the_code() -> None:
+    method = re.sub(r"\s+", " ", read("methodology.md"))
+    for name, shown in (
+        ("python deploy_acme_customer.py", "python <script:93d162>"),
+        ("make deploy-customer-acme", "make <target:37bd73>"),
+        ("mytool", "<tool:373279>"),
+    ):
+        assert attribution.public_key(name) == shown and shown in method
