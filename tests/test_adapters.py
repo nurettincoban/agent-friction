@@ -352,9 +352,13 @@ def test_absurdly_nested_json_is_a_skipped_line(tmp_path: Path) -> None:
     path = tmp_path / "deep.jsonl"
     path.write_text(s.text() + deep + "\n")
     parsed = parse_transcript(path)
-    assert parsed.skipped_lines == 1 and sum(len(st.events) for st in parsed.streams) == 3
+    # Python 3.14 can parse it (then it is a line of no known type, ignored); older
+    # versions raise RecursionError, which must count as a skipped line, not a crash.
+    assert parsed.skipped_lines + parsed.ignored_lines == 1
+    assert sum(len(st.events) for st in parsed.streams) == 3
     generic_file = tmp_path / "g.jsonl"
     generic_file.write_text(
         json.dumps({"session": "s", "kind": "user_message", "text": "go"}) + "\n" + deep + "\n"
     )
-    assert generic.parse_file(generic_file).skipped_lines == 1
+    g = generic.parse_file(generic_file)
+    assert g.skipped_lines + g.ignored_lines == 1
