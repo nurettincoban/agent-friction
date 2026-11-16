@@ -13,6 +13,7 @@ from agent_friction.report._common import (
     plural,
     signal_titles,
     top_signals,
+    unattributed_heading,
 )
 
 
@@ -63,6 +64,30 @@ def bar(score: float, width: int = 10) -> str:
 
 def _truncate(text: str, width: int) -> str:
     return text if len(text) <= width else "…" + text[-(width - 1) :]
+
+
+def _unattributed_rows(result: dict[str, Any], st: Style, width: int, limit: int = 5) -> list[str]:
+    heading = unattributed_heading(result)
+    if heading is None:
+        return []
+    lines = (
+        ["", st.bold(heading)]
+        if not result.get("hotspots") and not result.get("commands")
+        else [st.bold(heading)]
+    )
+    items = list(result.get("unattributed") or [])
+    for ev in items[:limit]:
+        when = str(ev.get("timestamp") or "")[:16].replace("T", " ")
+        text = f"{ev.get('signal', '?')} · {ev.get('summary', '')}"
+        room = max(40, width - 20)
+        text = text if len(text) <= room else text[: room - 1] + "…"
+        lines.append(f"  {st.dim(when)} {text}")
+        if ev.get("source"):
+            lines.append(st.dim(f"      ↳ {ev['source']}:{ev.get('line', '?')}"))
+    if len(items) > limit:
+        lines.append(st.dim(f"  … {len(items) - limit} more in --format json (unattributed)"))
+    lines.append("")
+    return lines
 
 
 def _hotspot_rows(
@@ -129,10 +154,14 @@ def render_terminal(
     commands = list(result.get("commands", []))[:top]
     if not hotspots and not commands and not result.get("directories"):
         calls = int(totals.get("tool_calls", 0))
-        out.append(
-            st.green(f"No recurring friction found in {plural(calls, 'tool call')}.")
-            + (st.dim(" That is a small sample; check again later.") if calls < 50 else "")
-        )
+        if int(totals.get("friction_events", 0)):
+            out.append(st.green("No hotspot: no file, directory, or command collected friction."))
+        else:
+            out.append(
+                st.green(f"No recurring friction found in {plural(calls, 'tool call')}.")
+                + (st.dim(" That is a small sample; check again later.") if calls < 50 else "")
+            )
+        out.extend(_unattributed_rows(result, st, width))
         note = dropped_note(result)
         if note:
             out.append(st.dim(note))
@@ -151,6 +180,8 @@ def render_terminal(
         out.append(st.bold("Directories where agents search in vain"))
         out.extend(_hotspot_rows(directories, st, titles, width, "directory"))
         out.append("")
+
+    out.extend(_unattributed_rows(result, st, width))
 
     recs = collect_recommendations(result, limit=5)
     if recs:

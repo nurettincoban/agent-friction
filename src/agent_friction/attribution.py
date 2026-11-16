@@ -778,7 +778,29 @@ def _status_masked(command: str, program: str, depth: int = 0) -> bool:
     return after[0] in _MASKING or any(op in (";", "||") for op in after[:-1])
 
 
-def parse_command(command: str) -> ParsedCommand:
+_DRIVE_PATH_RE = re.compile(r"(?:^|[\s\"'=(])[A-Za-z]:\\")
+_WINDOWS_SEPARATOR_RE = re.compile(r"\\(?=[^\s\"'\\])")
+
+
+def is_windows_path(path: str | None) -> bool:
+    """``C:\\Users\\dev\\proj`` or ``C:/Users/dev/proj``: a path with a drive letter."""
+    return bool(path) and re.match(r"^[A-Za-z]:[\\/]", path or "") is not None
+
+
+def posix_separators(command: str, windows: bool | None = None) -> str:
+    """``python scripts\\gen.py`` as a POSIX shell would need it: ``python scripts/gen.py``.
+
+    In PowerShell and cmd a backslash separates path components; read as POSIX it
+    escapes the next character and the path collapses to ``scriptsgen.py``. Applied
+    when the session runs on Windows (``windows``), or, if that is unknown, when the
+    line itself contains a drive-letter path.
+    """
+    if windows is None:
+        windows = _DRIVE_PATH_RE.search(command) is not None
+    return _WINDOWS_SEPARATOR_RE.sub("/", command) if windows else command
+
+
+def parse_command(command: str, windows: bool | None = None) -> ParsedCommand:
     """Normalize a shell command line. Rules are documented in docs/methodology.md.
 
     The line is split into simple commands (across ``;``, ``&&``, ``||``, pipes,
@@ -788,6 +810,7 @@ def parse_command(command: str) -> ParsedCommand:
     and read-only inspection (``cat``, ``tail``, ``grep``) are passed over, so
     ``mkdir -p out && pytest | tail -5`` is ``pytest``.
     """
+    command = posix_separators(command, windows)
     try:
         steps = _steps(command)
     except (IndexError, ValueError, RecursionError):  # never let one odd line stop a scan

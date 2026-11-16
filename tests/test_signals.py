@@ -2762,3 +2762,86 @@ def test_the_excerpt_of_a_line_of_commands_ends_at_the_step_that_failed(tmp_path
     (found,) = detect(s, tmp_path)
     assert keys(found) == [("command", "ruff check")]
     assert found.excerpt.endswith("Found 3 errors.")
+
+
+# ---- round 14 ------------------------------------------------------------------------
+
+
+def test_one_stall_is_not_both_thrash_and_no_convergence(tmp_path: Path) -> None:
+    found = detect(stuck(7), tmp_path)
+    assert len(by_signal(found, signals.NO_CONVERGENCE)) == 1
+    assert by_signal(found, signals.EDIT_THRASH) == []  # the seven edits are the seven rounds
+    # ... but a file thrashed in a turn that did not get that far is still thrash
+    s = Session().user("go")
+    for i in range(7):
+        s.edit(A, f"a{i}", f"b{i}")
+    s.bash("python scripts/gen.py", "Traceback\nValueError: x", exit_code=1)
+    (thrash,) = by_signal(detect(s, tmp_path), signals.EDIT_THRASH)
+    assert "checked" not in thrash.detail
+    # ... and the event says whether the turn ran a check
+    s = Session().user("go")
+    for i in range(7):
+        s.edit(A, f"a{i}", f"b{i}")
+    s.bash("pytest", "1 failed", exit_code=1)
+    (thrash,) = by_signal(detect(s, tmp_path), signals.EDIT_THRASH)
+    assert thrash.detail["checked"] == "1"
+
+
+QUOTED_FROM_OTHERS = [
+    "Here's the reviewer's comment: 'No, I said to keep the old name'. Do you agree?",
+    'Bob wrote: "no, that is wrong, revert it"',
+    "The ticket says “this is still broken, undo the change” - can you look into it?",
+]
+
+
+@pytest.mark.parametrize("text", QUOTED_FROM_OTHERS)
+def test_a_correction_quoted_from_someone_else_is_not_one(text: str) -> None:
+    assert correction_confidence(text) == (0.0, []), text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "No, I said to keep the old name",
+        'As I said: "no emojis". Wrong again, revert it',
+        "No, the reviewer's comment was about the tests, don't touch them",
+        "No - the review said nothing about the tests, revert that",
+    ],
+)
+def test_the_humans_own_words_still_count(text: str) -> None:
+    assert correction_confidence(text)[0] == signals.CORRECTION_STRONG, text
+
+
+def test_a_screenshot_with_still_not_right_is_a_correction(tmp_path: Path) -> None:
+    text = "[Image #1] still not aligned, wrong color"
+    assert correction_confidence(text)[0] == signals.CORRECTION_STRONG
+    assert correction_confidence("[Image #1] here is the design") == (0.0, [])
+    assert correction_confidence("the sidebar is off by default, add a toggle") == (0.0, [])
+    s = Session().user("fix the header").edit(A).user(text).edit(A, "x", "y")
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", "src/a.py")]
+    # the agent did not go back to the file: only a probable correction
+    s = Session().user("fix the header").edit(A).user(text).read(B)
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.PROBABLE_CORRECTION]
+
+
+def test_an_inline_snippet_run_outside_the_repo_is_not_about_it(tmp_path: Path) -> None:
+    snippet = "python - <<'EOF'\nimport app\nEOF"
+    output = 'Traceback (most recent call last):\n  File "<stdin>", line 1\nValueError: x'
+    outside = Session(cwd="/tmp/scratch").user("go").bash(snippet, output, exit_code=1).edit(A)
+    assert detect(outside, tmp_path) == []
+    inside = Session(cwd="/repo").user("go").bash(snippet, output, exit_code=1).edit(A)
+    (found,) = detect(inside, tmp_path)
+    assert keys(found) == [("command", "python <stdin>")]
+
+
+def test_windows_commands_keep_their_paths(tmp_path: Path) -> None:
+    home = "C:\\Users\\dev\\shop"
+    error = "python: can't open file 'scripts\\gen.py': [Errno 2] No such file or directory"
+    s = Session(cwd=home).user("go").bash("python scripts\\gen.py", error, exit_code=2)
+    (found,) = detect(s, tmp_path, repo=home)
+    assert keys(found) == [("command", "python scripts/gen.py")]
+    # a POSIX session keeps POSIX escapes
+    s = Session().user("go").bash("python my\\ script.py", error, exit_code=2)
+    (found,) = detect(s, tmp_path)
+    assert keys(found) == [("command", "python my script.py")]

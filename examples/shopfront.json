@@ -587,7 +587,7 @@
           "title": "Write down the rule the human keeps repeating"
         },
         {
-          "detail": "Edits here did not converge: 0 thrash episodes and 2 reverted edits in 1 session. Document the quickest command that validates this file (a single test, a type check) so agents can verify instead of iterating blind.",
+          "detail": "Edits here did not converge: 2 reverted edits in 1 session. Document the quickest command that validates this file (a single test, a type check) so agents can verify instead of iterating blind.",
           "id": "add-a-fast-check",
           "signals": [
             "edit-revert"
@@ -873,7 +873,7 @@
     {
       "attribution": "The file being edited.",
       "count": 1,
-      "description": "One file received 6 or more successful edits within a single turn in which something also went wrong: an edit miss, a stale edit or a reverted edit on that file, or a failed command or retry loop in the turn.",
+      "description": "One file received 6 or more successful edits within a single turn in which something also went wrong: an edit miss, a stale edit or a reverted edit on that file, or a failed command or retry loop in the turn. Not recorded next to a no-convergence event of the same turn that names the file.",
       "id": "edit-thrash",
       "severity": 1.5,
       "title": "Edit thrash",
@@ -1147,6 +1147,7 @@
     "score": 74.2,
     "sessions": 6
   },
+  "unattributed": [],
   "window": {
     "end": "2026-11-12T11:02:58Z",
     "first_event": "2026-10-26T10:00:00Z",

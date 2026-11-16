@@ -32,6 +32,7 @@ from agent_friction.attribution import (
     is_setup_command,
     is_setup_step,
     is_shell_edit,
+    is_windows_path,
     may_change_files,
     normalize_argv,
     objectionable_step,
@@ -258,7 +259,8 @@ CATALOG: tuple[SignalDef, ...] = (
         "Edit thrash",
         f"One file received {EDIT_THRASH_MIN_EDITS} or more successful edits within a single "
         "turn in which something also went wrong: an edit miss, a stale edit or a reverted "
-        "edit on that file, or a failed command or retry loop in the turn.",
+        "edit on that file, or a failed command or retry loop in the turn. Not recorded next "
+        "to a no-convergence event of the same turn that names the file.",
         "Many small edits to one file in one go usually means trial and error rather than "
         "a plan. Weak signal on its own.",
         "The file being edited.",
@@ -935,6 +937,8 @@ _UNDO_OBJECT = (
 )
 _STILL = (
     r"still (?:failing|fails|broken|not working|not fixed|doesn't work|does not work"
+    r"|not (?:right|correct|aligned|centered|centred|showing|rendering|rendered|visible"
+    r"|resolved|there)|misaligned|incorrect|off\b(?! (?:the|by default))"
     r"|wrong|the same (?:error|problem|issue|bug)|crash(?:es|ing)?"
     r"|(?:getting|seeing|hitting) (?:the|that|this|an?) (?:same |exact same )?"
     r"(?:error|errors|failure|failures|exception|problem|issue|bug|crash|traceback))\b"
@@ -1101,6 +1105,21 @@ _WEAK_CORRECTION: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 )
 
 
+#: ``[Image #1]``, ``[Pasted text #2 +14 lines]``: markers the harness puts where the
+#: human attached something.
+_ATTACHMENT_RE = re.compile(r"^(?:\s*\[(?:Image|Pasted text|File)[^\]\n]{0,40}\]\s*)+", re.I)
+#: A reporting phrase and the quotation it introduces: "the reviewer's comment: 'No, I
+#: said ...'", "Bob wrote: \"that's wrong\"".
+_REPORTED_SPEECH_RE = re.compile(
+    r"\b(?:comments?|feedback|review|reviewer|message|reply|note|quote|email|ticket|issue"
+    r"|(?<!\byou )(?<!\bi )(?:said|says|wrote|writes|written|commented|replied|asked|asks"
+    r"|complained|reported))\b"
+    r"[^\n\"“”']{0,40}?[:,]?\s*"
+    r"(?:\"[^\"\n]{1,300}\"|“[^”\n]{1,300}”|(?<![A-Za-z])'[^\n]{1,300}?'(?![A-Za-z]))",
+    re.I,
+)
+
+
 def correction_confidence(
     text: str, after_question: bool = False, idle_seconds: float | None = None
 ) -> tuple[float, list[str]]:
@@ -1120,7 +1139,10 @@ def correction_confidence(
     * A single weaker cue ("don't forget ...", "actually, can you also ...")
       is ordinary conversation and gives 0.
     """
-    head = text.strip()[:CORRECTION_HEAD_CHARS].replace("’", "'")
+    # A pasted screenshot comes first in the message; the words after it are the reply.
+    head = _ATTACHMENT_RE.sub("", text.strip())[:CORRECTION_HEAD_CHARS].replace("’", "'")
+    # Somebody else's words, quoted for discussion, are not the human correcting the agent.
+    head = _REPORTED_SPEECH_RE.sub(" ", head)
     softeners = [m.start() for m in _SOFTENER_RE.finditer(head)]
     last_softener = max(softeners) if softeners else -1
     new_task = bool(_NEW_TASK_RE.search(head))
@@ -1485,6 +1507,8 @@ class _Detector:
             if there is not None and not resolver.contains(there):
                 return True
             cwd = there or cwd
+        if is_inline_code(step.key) and cwd and not resolver.contains(cwd):
+            return True  # an ad-hoc snippet run from somewhere else is about somewhere else
         words = [step.program, *step.args]
         for index, word in enumerate(words[:-1]):
             name = word.rsplit("/", 1)[-1]
@@ -1510,7 +1534,7 @@ class _Detector:
             if action.file:
                 self.exposed.add((model.FILE, action.file))
         elif event.op == model.OP_SHELL and event.command:
-            parsed = parse_command(event.command)
+            parsed = parse_command(event.command, is_windows_path(event.cwd) or None)
             primary = next((s for s in parsed.steps if s.key == parsed.key), None)
             # ``cd /abs/repo && make`` from a session started in a parent directory runs
             # in the repo: what counts is where the step runs, not where the shell began.
@@ -1589,6 +1613,9 @@ class _Detector:
         if state.turn_shell_ok:
             for finding in state.thrash.values():
                 finding.detail["ended_green"] = "1"
+        if state.turn_check_ok is not None:
+            for finding in state.thrash.values():
+                finding.detail["checked"] = "1"  # a test, lint or type check ran in the turn
         for key, cycle in state.cycles.items():
             # If the last check of the turn was green and nothing went red after it, the
             # turn converged, whatever name the passing command went by.
@@ -1641,6 +1668,13 @@ class _Detector:
         finding.intervals = tuple(sorted(spans))
         if uncertain:
             finding.detail["uncertain"] = "1"
+            return
+        # The many edits to these files *are* the rounds just reported: one stall, said once.
+        state = self.state
+        same = {path: state.thrash[path] for path in files if path in state.thrash}
+        self._drop({id(found) for found in same.values()})
+        for path in same:
+            del state.thrash[path]
 
     def _mention(self, text: str) -> None:
         """Remember optional files that a prompt or a tool's output named."""
@@ -2759,7 +2793,7 @@ def runs_inside(resolver: PathResolver, event: Event) -> bool:
     """
     if not event.command:
         return False
-    parsed = parse_command(event.command)
+    parsed = parse_command(event.command, is_windows_path(event.cwd) or None)
     primary = next((s for s in parsed.steps if s.key == parsed.key), None)
     if primary is None or not primary.moves:
         return resolver.contains(event.cwd)

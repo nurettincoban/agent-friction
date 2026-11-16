@@ -106,6 +106,17 @@ def file_facts(repo: Path, rel: str) -> FileFacts:
     return FileFacts(True, lines, by_path, "its path" if by_path else "")
 
 
+_IN_DIRECTORY_RE = re.compile(r"^(.+) \((.+/)\)$")
+
+
+def _located(key: str) -> str:
+    """``pytest (src/)`` in a sentence: "`pytest` in `src/`"."""
+    match = _IN_DIRECTORY_RE.match(key)
+    if match is None:
+        return code(key)
+    return f"{code(match.group(1))} in {code(match.group(2))}"
+
+
 def _sessions(findings: Sequence[Finding]) -> int:
     return len({f.session_id for f in findings})
 
@@ -303,12 +314,14 @@ class _Rules:
         reverts = self.get(signals.EDIT_REVERT)
         too_large = self.get(signals.FILE_TOO_LARGE)
         rework = self.get(signals.HUMAN_REWORK)
-        edit_trouble = [*misses, *stale, *thrash, *reverts]
         generated = facts is not None and facts.generated
         large = facts is not None and facts.lines is not None and facts.lines >= LARGE_FILE_LINES
 
-        if generated and facts is not None and (edit_trouble or rework):
-            involved = [*edit_trouble, *rework]
+        # Only what a transcript shows: a human bumping a lockfile after an agent commit
+        # says nothing about anybody having had trouble with the file.
+        # A correction alone is enough to fire; the count is of edits that went wrong.
+        involved = [*misses, *stale, *reverts] or self.get(signals.USER_CORRECTION)
+        if generated and facts is not None and involved:
             self.add(
                 "edit-the-source-not-the-output",
                 "Generated file: point agents at its source",
@@ -389,12 +402,20 @@ class _Rules:
         self.denials("to change this file")
         self.interrupts()
 
-        if len(thrash) + len(reverts) >= MIN_EVENTS:
+        # Thrash in a turn that ran a check was not for want of one, and where the check
+        # itself would not pass, `explain-the-failing-check` says what is needed.
+        blind = [f for f in thrash if not f.detail.get("checked")]
+        stuck = len(self.get(signals.NO_CONVERGENCE)) >= MIN_EVENTS
+        if len(blind) + len(reverts) >= MIN_EVENTS and not stuck:
+            thrash = blind
+            parts = [
+                _n(len(thrash), "thrash episode") if thrash else "",
+                _n(len(reverts), "reverted edit") if reverts else "",
+            ]
             self.add(
                 "add-a-fast-check",
                 "Give agents a fast way to check changes to this file",
-                f"Edits here did not converge: {_n(len(thrash), 'thrash episode')} and "
-                f"{_n(len(reverts), 'reverted edit')} in "
+                f"Edits here did not converge: {' and '.join(p for p in parts if p)} in "
                 f"{_n(_sessions([*thrash, *reverts]), 'session')}. Document the quickest "
                 "command that validates this file (a single test, a type check) so agents "
                 "can verify instead of iterating blind.",
@@ -594,7 +615,8 @@ class _Rules:
             self.environment(key, environment)
         elif len(invocation) >= MIN_EVENTS:
             detail = (
-                f"{code(key)} failed {_in_sessions(invocation)} with setup or invocation errors."
+                f"{_located(key)} failed {_in_sessions(invocation)} with setup or invocation "
+                "errors."
             )
             if self.quote is not None:
                 lines = _top([_error_line(f) for f in invocation], 2)
@@ -609,7 +631,7 @@ class _Rules:
             )
             self.add(
                 "document-the-command",
-                f"Document how to run {code(key)}",
+                f"Document how to run {_located(key)}",
                 detail,
                 [signals.COMMAND_FAILURE],
             )

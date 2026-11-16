@@ -122,6 +122,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
   <div class="tablewrap" style="margin-top:8px"><table id="table"><thead><tr>
     <th scope="col">Path or command</th><th scope="col" class="num">Score</th><th scope="col" class="num hide-sm">Sessions</th><th scope="col" class="num hide-sm">Events</th><th scope="col" class="num">Time lost</th><th scope="col" class="hide-sm">Top signals</th><th scope="col">Confidence</th>
   </tr></thead><tbody></tbody></table></div>
+  <section id="unattr" hidden><h2 id="unattr-h"></h2><div id="unattr-list"></div></section>
   <footer id="footer"></footer>
 </main>
 <script id="data" type="application/json">__DATA__</script>
@@ -328,6 +329,23 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
       reset();
     });
   });
+  // Friction no file, directory or command could own: listed so the headline stays traceable.
+  (function () {
+    var items = R.unattributed || [], count = Math.max(Number(t.unattributed_events) || 0, items.length);
+    if (!count) return;
+    var sec = document.getElementById("unattr"), list = document.getElementById("unattr-list");
+    document.getElementById("unattr-h").textContent = "Not tied to a file or command (" + plural(count, "event") +
+      (items.length && items.length < count ? ", " + items.length + " shown" : "") + ")";
+    items.forEach(function (e) {
+      var d = el("div", { class: "ev" });
+      d.appendChild(el("div", { class: "meta" }, String(e.timestamp || "").slice(0, 16).replace("T", " ") + " · session " + String(e.session_id || "").slice(0, 8) + " · " + (titles[e.signal] || e.signal)));
+      d.appendChild(el("div", null, e.summary));
+      if (e.excerpt) d.appendChild(el("blockquote", null, e.excerpt));
+      if (e.source) d.appendChild(el("div", { class: "meta mono" }, e.source + ":" + (e.line || "?")));
+      list.appendChild(d);
+    });
+    sec.hidden = false;
+  })();
   // With no time lost anywhere, areas by time would only reflect event counts: size by score.
   var anyTime = (R.hotspots || []).concat(R.commands || []).some(function (h) { return Number(h.est_minutes_lost) > 0; });
   if (!anyTime) {

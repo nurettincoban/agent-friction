@@ -52,6 +52,7 @@ def test_terminal_respects_top() -> None:
 def test_terminal_empty() -> None:
     r = sample_result()
     r["hotspots"], r["commands"] = [], []
+    r["totals"]["friction_events"] = 0
     assert "No recurring friction" in render_terminal(r)
 
 
@@ -154,3 +155,36 @@ def test_header_without_sessions_says_whether_git_was_read() -> None:
     with_git = render_terminal({**empty, "settings": {"git": True}}, color=False)
     without = render_terminal({**empty, "settings": {"git": False}}, color=False)
     assert "git history only" in with_git and "git history only" not in without
+
+
+def test_unattributed_events_are_listed_in_every_report() -> None:
+    from agent_friction.report.html import render_html
+    from agent_friction.report.markdown import render_markdown
+    from agent_friction.report.terminal import render_terminal
+
+    ev = {
+        "signal": "user-interrupt",
+        "summary": "the human interrupted `pytest`",
+        "session_id": "abcdef1234",
+        "source": "claude-code:shop/s1.jsonl",
+        "line": 12,
+        "timestamp": "2026-11-05T16:00:00Z",
+        "excerpt": None,
+        "est_seconds_lost": 50.0,
+    }
+    result = {
+        "totals": {"sessions": 3, "friction_events": 3, "unattributed_events": 3},
+        "repo": {"name": "shop"},
+        "hotspots": [],
+        "commands": [],
+        "unattributed": [ev],
+    }
+    text = render_terminal(result, color=False)
+    assert "No recurring friction" not in text
+    assert "Not tied to a file or command (3 events, 1 shown)" in text
+    assert "s1.jsonl:12" in text
+    md = render_markdown(result)
+    assert "## Not tied to a file or command" in md and "s1.jsonl:12" in md
+    assert '"unattributed"' in render_html(result)
+    quiet = {**result, "totals": {"sessions": 3}, "unattributed": []}
+    assert "Not tied" not in render_terminal(quiet, color=False)

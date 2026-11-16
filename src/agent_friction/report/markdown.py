@@ -12,6 +12,7 @@ from agent_friction.report._common import (
     plural,
     signal_titles,
     top_signals,
+    unattributed_heading,
 )
 
 
@@ -86,6 +87,24 @@ def _details(h: dict[str, Any], titles: dict[str, str]) -> list[str]:
     return out
 
 
+def _unattributed(result: dict[str, Any]) -> list[str]:
+    heading = unattributed_heading(result)
+    if heading is None:
+        return []
+    lines = [f"## {heading}", ""]
+    for ev in result.get("unattributed") or []:
+        when = str(ev.get("timestamp") or "")[:16].replace("T", " ")
+        where = ""
+        if ev.get("source"):
+            where = " · " + _code(f"{ev['source']}:{ev.get('line', '?')}")
+        lines.append(
+            f"- `{when}` {_code(ev.get('signal', '?'))}: "
+            f"{_html_escape(str(ev.get('summary', '')))}{where}"
+        )
+    lines.append("")
+    return lines
+
+
 def _html_escape(s: str) -> str:
     """Escape HTML in prose, leaving `code spans` alone (GitHub shows them literally)."""
     out: list[str] = []
@@ -122,7 +141,11 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
     hotspots = list(result.get("hotspots", []))[:top]
     commands = list(result.get("commands", []))[:top]
     if not hotspots and not commands and not result.get("directories"):
-        out += ["No recurring friction found.", ""]
+        if int(totals.get("friction_events", 0)):
+            out += ["No hotspot: no file, directory, or command collected friction.", ""]
+        else:
+            out += ["No recurring friction found.", ""]
+        out += _unattributed(result)
         note = dropped_note(result)
         if note:
             out += [f"_{note}_", ""]
@@ -156,6 +179,7 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
     out += ["## Evidence", ""]
     for h in [*hotspots, *commands, *directories]:
         out += _details(h, titles)
+    out += _unattributed(result)
 
     used = [s for s in result.get("signals", []) if s.get("count")]
     if used:

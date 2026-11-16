@@ -79,6 +79,7 @@ by repository or time window, so `0` marks an empty, binary or foreign file.
 | `commands` | list | Command hotspots, same shape, `kind: "command"`, `path` is the normalized command ([forms](#forms-of-a-command-key)). |
 | `directories` | list | Directories that events were attributed to directly (searches scoped to a directory), same shape, `kind: "dir"`, `path` without trailing slash, `"."` for the repo root. *Addition to the base contract.* |
 | `tree` | object | Directory roll-up of all file and directory events. |
+| `unattributed` | list | Evidence for the events counted in `totals.unattributed_events`: events that are in `friction_events` and the lost time but in no hotspot (an interrupt with no tool call to pin it on, a declined tool without a path, a correction with no file in reach). Items have the [`evidence[]`](#evidence) shape; at most 20 (`engine.MAX_UNATTRIBUTED_EVIDENCE`), chosen like a hotspot's evidence and listed chronologically, so the list can be shorter than the count. Empty when every event has a target. *Addition to the base contract.* |
 | `exposure` | object | How many sessions touched each target, friction or not. See below. *Addition to the base contract.* |
 
 ### `window`
@@ -118,7 +119,7 @@ by repository or time window, so `0` marks an empty, binary or foreign file.
 | `probable_corrections` | `probable-correction` events (wording only, or two weak cues): a separate, weak signal. Listed as evidence, never quoted, never the basis of a recommendation. |
 | `files_affected` | File hotspots before `max_hotspots` truncation. |
 | `commands_affected`, `directories_affected` | Likewise. |
-| `unattributed_events` | Events that could not be tied to a path or command. |
+| `unattributed_events` | Events that could not be tied to a path or command. Their evidence is the top-level `unattributed` list. |
 
 ### `exposure`
 

@@ -60,7 +60,10 @@ else is dropped. "Turn" means the agent's work between two human prompts.
 (b) follows at least one tool call by the agent, and (c) refers to the agent
 or to the work it just finished in one of the ways below. Only the
 first 280 characters are inspected, so a pasted log that happens to contain
-"revert" does not count. The rules favour precision over recall: a new task that
+"revert" does not count. Attachment markers at the start of the message
+(`[Image #1]`, `[Pasted text #2 +14 lines]`) are skipped first, so a
+screenshot followed by "still not aligned, wrong color" is read like the
+sentence alone. The rules favour precision over recall: a new task that
 *describes a bug* ("fix the bug where the app crashes again") must not be
 read as a complaint about the agent.
 
@@ -163,6 +166,13 @@ corroborated: ...").
     but fine", "... but it works", "... but good enough") and an afterthought
     that only adds to the request ("no, wait, also add a --verbose flag",
     "oh, one more thing").
+  - *Somebody else's words:* a quotation introduced by a reporting phrase
+    ("Here's the reviewer's comment: 'No, I said to keep the old name'. Do
+    you agree?", "Bob wrote: \"that is wrong, revert it\"", "the ticket says
+    “...”") is taken out before anything is matched: the human is passing a
+    remark on for discussion, not correcting the agent. "I said" and "you
+    said" do not introduce somebody else's words ("No, I said to keep the old
+    name" is a correction).
   - *Moving on* voids a verdict: "next task", "new task", "another issue",
     "let's move on", "next: ..." ("It doesn't work on Windows yet; next task: add Windows
     support").
@@ -519,6 +529,14 @@ auto-formatter that rewrites the agent's lines is not rework, and the human
 commit after it is still compared with the agent commit. Add your own with
 `--bot-author REGEX` (`bot_commit_patterns`; matched against `Name <email>`).
 
+**Generated files and lockfiles are skipped.** A human commit that changes
+`package-lock.json`, `Cargo.lock`, `*_pb2.py`, a file under `dist/` or a file
+that says "DO NOT EDIT" after an agent commit touched it is a tool being
+re-run (a dependency bump, a regenerated client), not a human repairing the
+agent's lines. Files that look generated (the same test as for the
+`edit-the-source-not-the-output` recommendation: the path patterns and the
+marker in the first 2 KB) get no `human-rework` events.
+
 **Why:** agent output here needed a human follow-up soon after it landed.
 
 **Attribution:** the file. If the agent commit was made during a transcript
@@ -750,6 +768,16 @@ successfully once before being removed (read as debugging).
   ad-hoc snippet does is the snippet's business, so its failures are ordinary
   whatever they print; only a missing or non-executable interpreter (exit
   126/127) is a setup error. Inline code never gets "document the command".
+  A snippet run from a working directory outside the repository (`cd /tmp &&
+  python - <<EOF`, or a session whose directory is elsewhere) is not about
+  the repository at all and is not recorded, like a script that lives
+  outside it.
+- *Windows shells:* the Claude Code `PowerShell` tool is a shell like `Bash`.
+  When the session's working directory is a Windows path (`C:\...`), or the
+  command line itself contains one, a backslash before a name is read as a
+  path separator, not as a POSIX escape: `python scripts\gen.py` is `python
+  scripts/gen.py`, not `python scriptsgen.py`. Escaped quotes and spaces
+  stay escapes.
 - *Red, fix, green is not counted at all:* an ordinary or environment
   failure that is followed by an **edit** (Edit/Write, or a shell command
   that rewrites files: kinds 1 and 2 of ["What counts as a
@@ -890,6 +918,8 @@ error.
 > **In short:** One file received 6 or more successful edits within a single
 > turn in which something also went wrong: an edit miss, a stale edit or a
 > reverted edit on that file, or a failed command or retry loop in the turn.
+> Not recorded next to a no-convergence event of the same turn that names the
+> file.
 
 **What:** 6 or more successful edits to one file within a single turn **in
 which something also went wrong**: an edit miss, a stale edit or a reverted
@@ -898,7 +928,15 @@ another file does not count. One event per file and turn. Eight
 clean edits followed by a green test run are a productive sitting, not thrash,
 and are not recorded. The event notes whether the turn's last command
 succeeded (`ended_green`); if it did, the "edits did not converge"
-recommendation does not count it.
+recommendation does not count it. It also notes whether a test, lint or type
+check ran in the turn (`checked`): thrash next to a check was not for want of
+one, so that recommendation does not count it either.
+
+When the same turn also produced a [`no-convergence`](#no-convergence--no-convergence)
+event that names the file, no `edit-thrash` is recorded for it: the many
+edits *are* the rounds of that stall, and one stall is one event, not two
+kinds of evidence. (A `no-convergence` event whose last run showed no
+verdict claims nothing, and leaves the thrash in place.)
 
 **Why:** many small edits in one go, with failures in between, usually mean
 trial and error.

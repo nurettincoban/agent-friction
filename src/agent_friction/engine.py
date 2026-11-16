@@ -191,6 +191,9 @@ def _unclaim_single_session_stretches(findings: Sequence[Finding]) -> None:
             finding.intervals = ()
 
 
+#: Evidence items listed for events that belong to no hotspot (``unattributed``).
+MAX_UNATTRIBUTED_EVIDENCE = 20
+
 #: Sessions in which the same command must stay red for its failures to count in full,
 #: and how often it must have failed in each. One red run when a session ends is routine.
 RECURRING_RED_MIN_SESSIONS = 3
@@ -567,6 +570,9 @@ class _Analysis:
                         gitsignals.HunkReader(self.repo),
                     )
                     if _in_window(f.ts, self.since, self.until)
+                    # A lockfile or generated file is rewritten by tools as a matter of
+                    # course: a human `chore: bump` after an agent commit is not rework.
+                    and not any(self.facts(t.key).generated for t in f.targets)
                 ]
                 # A commit made during a transcript session is that session's work, not a
                 # separate one. Agent commits never add exposure on their own.
@@ -792,6 +798,15 @@ class _Analysis:
                 )
             },
             "tree": self._tree(groups),
+            # Events that count in the totals but belong to no file, command or
+            # directory (an interrupt with no tool call to pin it on, a declined tool
+            # without a path): shown, so that no headline number is without evidence.
+            "unattributed": [
+                self._evidence(f)
+                for f in _pick_evidence(
+                    [f for f in findings if not f.targets], MAX_UNATTRIBUTED_EVIDENCE
+                )
+            ],
         }
 
     def _entry(self, kind: str, key: str, items: Sequence[Item]) -> dict[str, Any]:

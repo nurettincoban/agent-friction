@@ -301,3 +301,58 @@ def test_a_typo_is_not_a_command_to_document() -> None:
         for i in range(3)
     ]
     assert recommend.recommend(model.COMMAND, "npm run biuld", typos) == []
+
+
+# ---- round 14 -----------------------------------------------------------------------------
+
+
+def test_a_lockfile_bump_is_not_trouble_editing_a_generated_file() -> None:
+    facts = FileFacts(True, 900, True, "its path")
+    rework = [finding(signals.HUMAN_REWORK, f"git:{i}", human_commit=f"abc{i}") for i in range(3)]
+    recs = recommend.recommend(model.FILE, "package-lock.json", rework, facts)
+    assert "edit-the-source-not-the-output" not in ids(recs)
+    for rec in recs:  # git evidence is commits, never sessions or attempts to edit
+        assert "session" not in str(rec["detail"]) and "editing it directly" not in str(rec)
+    thrash = [finding(signals.EDIT_THRASH, f"s{i}") for i in range(3)]
+    assert "edit-the-source-not-the-output" not in ids(
+        recommend.recommend(model.FILE, "package-lock.json", thrash, facts)
+    )
+    for signal in (signals.EDIT_MISS, signals.STALE_EDIT, signals.EDIT_REVERT):
+        (first, *_) = recommend.recommend(model.FILE, "gen.py", [finding(signal)], facts)
+        assert first["id"] == "edit-the-source-not-the-output"
+        assert "once in 1 session" in str(first["detail"])
+
+
+def test_a_fast_check_is_not_what_a_failing_check_needs() -> None:
+    plain = FileFacts(True, 100, False, "")
+    thrash = [finding(signals.EDIT_THRASH, f"s{i}") for i in range(2)]
+    reverts = [finding(signals.EDIT_REVERT, f"s{i}") for i in range(2)]
+    (only,) = recommend.recommend(model.FILE, "a.py", reverts, plain)
+    assert only["id"] == "add-a-fast-check"
+    assert "converge: 2 reverted edits in 2 sessions" in str(only["detail"])
+    assert "0 thrash" not in str(only["detail"])
+    (both,) = recommend.recommend(model.FILE, "a.py", [*thrash, *reverts], plain)
+    assert "2 thrash episodes and 2 reverted edits in 2 sessions" in str(both["detail"])
+    # the turn ran its checks: iterating was not for want of one
+    checked = [finding(signals.EDIT_THRASH, f"s{i}", checked="1") for i in range(2)]
+    assert recommend.recommend(model.FILE, "a.py", [*checked, reverts[0]], plain) == []
+    (mixed,) = recommend.recommend(model.FILE, "a.py", [*checked, *reverts], plain)
+    assert "converge: 2 reverted edits in" in str(mixed["detail"])
+    assert mixed["signals"] == [signals.EDIT_REVERT]
+    # ... and where the check itself would not pass, that is the advice
+    stuck = [finding(signals.NO_CONVERGENCE, f"s{i}", count="5") for i in range(2)]
+    assert ids(recommend.recommend(model.FILE, "a.py", [*thrash, *reverts, *stuck], plain)) == [
+        "explain-the-failing-check"
+    ]
+
+
+def test_a_command_in_a_subdirectory_is_named_as_such() -> None:
+    failures = [
+        finding(signals.COMMAND_FAILURE, f"s{i}", variant="invocation", command="pytest")
+        for i in range(2)
+    ]
+    (rec,) = recommend.recommend(model.COMMAND, "pytest (src/)", failures, None)
+    assert rec["title"] == "Document how to run `pytest` in `src/`"
+    assert str(rec["detail"]).startswith("`pytest` in `src/` failed 2 times in 2 sessions")
+    (root,) = recommend.recommend(model.COMMAND, "pytest", failures, None)
+    assert root["title"] == "Document how to run `pytest`"

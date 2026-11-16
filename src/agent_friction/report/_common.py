@@ -133,3 +133,14 @@ def dropped_note(result: dict[str, Any]) -> str | None:
         f"Not counted: {plural(runs, 'failed run')} the agent then fixed, or that passed on a "
         f"re-run (normal work, ~{fmt_minutes(minutes)} of run time)."
     )
+
+
+def unattributed_heading(result: dict[str, Any]) -> str | None:
+    """Heading for friction events that no file, directory, or command could own."""
+    count = int(result.get("totals", {}).get("unattributed_events", 0) or 0)
+    items = result.get("unattributed") or []
+    if count <= 0 and not items:
+        return None
+    count = max(count, len(items))
+    shown = f", {len(items)} shown" if 0 < len(items) < count else ""
+    return f"Not tied to a file or command ({plural(count, 'event')}{shown})"

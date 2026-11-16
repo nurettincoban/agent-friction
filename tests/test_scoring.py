@@ -149,7 +149,10 @@ def test_score_ignores_input_order() -> None:
         (5, [signals.EDIT_MISS], "medium"),
         (3, [signals.EDIT_MISS, signals.USER_CORRECTION], "high"),
         (9, [signals.READ_LOOP, signals.EDIT_THRASH], "medium"),
-        (3, [signals.READ_LOOP, signals.EDIT_MISS], "high"),
+        # weak kinds never corroborate: one strong kind plus a weak one is still one kind
+        (3, [signals.READ_LOOP, signals.EDIT_MISS], "medium"),
+        (3, [signals.EDIT_THRASH, signals.NO_CONVERGENCE], "medium"),
+        (3, [signals.EDIT_THRASH, signals.EDIT_MISS, signals.EDIT_REVERT], "high"),
         # git evidence corroborates, it never raises confidence on its own
         (3, [signals.EDIT_MISS, signals.HUMAN_REWORK], "medium"),
         (9, [signals.HUMAN_REWORK], "low"),
@@ -239,3 +242,21 @@ def test_ordinary_command_failures_are_weak_on_their_own() -> None:
     assert scoring.weak_only([failure("ordinary", f"s{i}") for i in range(10)])
     assert not scoring.weak_only([failure("ordinary"), failure("invocation")])
     assert not scoring.weak_only([failure("ordinary"), finding(signals.RETRY_LOOP)])
+
+
+@pytest.mark.parametrize("definition", signals.CATALOG, ids=lambda d: d.id)
+def test_every_signal_can_be_counted_in_words(definition: signals.SignalDef) -> None:
+    one, several = scoring.SIGNAL_NOUNS[definition.id]
+    assert scoring.count_signal(definition.id, 1) == f"1 {one}"
+    assert scoring.count_signal(definition.id, 2) == f"2 {several}"
+    # the noun of the phrase carries the plural, not its last word
+    assert not several.endswith(("greens", "files"))
+    why = scoring.explain([(definition.id, 2)], 2, 2, "medium")
+    assert f"(2 {several})" in why
+
+
+def test_set_of_labelled_signals_is_the_catalog() -> None:
+    assert set(scoring.SIGNAL_NOUNS) == {s.id for s in signals.CATALOG}
+    assert scoring.count_signal("no-convergence", 3) == (
+        "3 edit-and-run stretches that never went green"
+    )

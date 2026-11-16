@@ -381,3 +381,17 @@ def test_lone_surrogates_are_replaced_at_the_boundary(tmp_path: Path) -> None:
         (stream,) = parse_transcript(path).streams
         assert [e.text for e in stream.events] == ["go \ufffd"]
         stream.events[0].text.encode("utf-8")
+
+
+def test_powershell_is_a_shell(tmp_path: Path) -> None:
+    s = Session(cwd="C:\\Users\\dev\\shop").user("go")
+    s.tool("PowerShell", {"command": "npm run build"}, "Exit code 1\nerror TS2304", is_error=True)
+    s.tool("Bash", {"command": "npm test"}, "ok")
+    s.tool("TodoWrite", {"command": "not a shell"}, "ok")
+    (stream,) = parse_transcript(s.save(tmp_path)).streams
+    calls = [e for e in stream.events if e.kind == model.TOOL_CALL]
+    assert [(e.op, e.command) for e in calls[:2]] == [
+        (model.OP_SHELL, "npm run build"),
+        (model.OP_SHELL, "npm test"),
+    ]
+    assert calls[2].op != model.OP_SHELL and not calls[2].command

@@ -11,7 +11,6 @@ from dataclasses import dataclass
 
 from agent_friction.model import Finding
 from agent_friction.signals import (
-    BY_ID,
     COMMAND_FAILURE,
     EDIT_THRASH,
     HUMAN_REWORK,
@@ -130,7 +129,7 @@ def score_items(items: Iterable[Item], exposure_sessions: int | None = None) -> 
 
 
 def confidence(session_ids: Iterable[str], signal_ids: Iterable[str]) -> str:
-    """``high``: 3+ transcript sessions and 2+ signal types (not only weak ones).
+    """``high``: 3+ transcript sessions and 2+ signal types, weak ones not counted.
     ``medium``: 2+ transcript sessions. ``low``: otherwise.
 
     Git evidence never raises confidence: agent commits are not counted as
@@ -141,11 +140,9 @@ def confidence(session_ids: Iterable[str], signal_ids: Iterable[str]) -> str:
     for derived, source in DERIVED_SIGNALS.items():
         if source in kinds:
             kinds.discard(derived)  # one phenomenon, not two kinds of evidence
-    if (
-        sessions >= HIGH_MIN_SESSIONS
-        and len(kinds) >= HIGH_MIN_SIGNALS
-        and not kinds <= WEAK_SIGNALS
-    ):
+    # Weak kinds never corroborate: many edits next to a check that will not pass are
+    # one stall seen twice, not two kinds of evidence.
+    if sessions >= HIGH_MIN_SESSIONS and len(kinds - WEAK_SIGNALS) >= HIGH_MIN_SIGNALS:
         return "high"
     if sessions >= MEDIUM_MIN_SESSIONS and kinds:
         return "medium"
@@ -188,26 +185,39 @@ def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}es" if noun.endswith(("s", "sh", "ch", "x")) else f"{count} {noun}s"
 
 
-#: How each signal is counted in a sentence ("6 edit misses", "1 retry loop").
-SIGNAL_NOUNS: dict[str, str] = {
-    "user-correction": "user correction",
-    "retry-loop": "retry loop",
-    "tool-rejected": "declined tool call",
-    "user-interrupt": "user interrupt",
-    "edit-miss": "edit miss",
-    "edit-revert": "reverted edit",
-    "command-failure": "command failure",
-    "human-rework": "human rework commit",
-    "edit-thrash": "edit thrash episode",
-    "permission-denied": "permission denial",
-    "stale-edit": "stale edit",
-    "path-miss": "path miss",
-    "search-miss": "search miss",
-    "read-loop": "read loop",
-    "probable-correction": "probable correction",
-    "file-too-large": "refused read of a too-large file",
-    "no-convergence": "edit-and-run stretch that never went green",
+#: How each signal is counted in a sentence: (one, several). Written out, because a
+#: phrase cannot be pluralized by rule ("stretches that never went green").
+SIGNAL_NOUNS: dict[str, tuple[str, str]] = {
+    "user-correction": ("user correction", "user corrections"),
+    "retry-loop": ("retry loop", "retry loops"),
+    "tool-rejected": ("declined tool call", "declined tool calls"),
+    "user-interrupt": ("user interrupt", "user interrupts"),
+    "edit-miss": ("edit miss", "edit misses"),
+    "edit-revert": ("reverted edit", "reverted edits"),
+    "command-failure": ("command failure", "command failures"),
+    "human-rework": ("human rework commit", "human rework commits"),
+    "edit-thrash": ("edit thrash episode", "edit thrash episodes"),
+    "permission-denied": ("permission denial", "permission denials"),
+    "stale-edit": ("stale edit", "stale edits"),
+    "path-miss": ("path miss", "path misses"),
+    "search-miss": ("search miss", "search misses"),
+    "read-loop": ("read loop", "read loops"),
+    "probable-correction": ("probable correction", "probable corrections"),
+    "file-too-large": (
+        "refused read of a too-large file",
+        "refused reads of a too-large file",
+    ),
+    "no-convergence": (
+        "edit-and-run stretch that never went green",
+        "edit-and-run stretches that never went green",
+    ),
 }
+
+
+def count_signal(signal_id: str, count: int) -> str:
+    """``"3 edit misses"``: a signal counted in words."""
+    one, several = SIGNAL_NOUNS[signal_id]
+    return f"{count} {one if count == 1 else several}"
 
 
 def explain(
@@ -224,10 +234,7 @@ def explain(
     are git commits with rework that no transcript session accounts for.
     """
     events = sum(count for _, count in signal_counts)
-    top = ", ".join(
-        _plural(count, SIGNAL_NOUNS.get(sid, BY_ID[sid].title.lower()))
-        for sid, count in signal_counts[:3]
-    )
+    top = ", ".join(count_signal(sid, count) for sid, count in signal_counts[:3])
     more = len(signal_counts) - 3
     if more > 0:
         top += f", {more} more signal type{'s' if more > 1 else ''}"

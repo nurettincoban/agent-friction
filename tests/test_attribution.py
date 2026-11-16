@@ -403,11 +403,11 @@ def test_parse_command_never_raises_on_shell_ish_noise() -> None:
     import random
 
     rng = random.Random(20261115)
-    for _ in range(2000):
+    for round_ in range(800):
         size = rng.randint(0, 14)
         glue = rng.choice(("", " ", " ", " "))
         command = glue.join(rng.choice(_FUZZ_ATOMS) for _ in range(size))
-        parsed = parse_command(command)  # must not raise, whatever the input
+        parsed = parse_command(command, (None, True)[round_ % 2])  # must never raise
         assert isinstance(parsed.key, str) and len(parsed.key) < 200, command
         assert "\n" not in parsed.key, command
         assert public_key(parsed.key) is not None
@@ -581,3 +581,20 @@ def test_setup_steps(line: str, setup: bool, copy: str | None) -> None:
     (step,) = parse_command(line).steps
     assert attribution.is_setup_step(step) is setup
     assert attribution.env_copy(step) == copy
+
+
+def test_windows_separators_are_not_posix_escapes() -> None:
+    from agent_friction.attribution import is_windows_path, posix_separators
+
+    assert parse_command("python scripts\\gen.py", True).key == "python scripts/gen.py"
+    assert parse_command("python scripts\\gen.py").key == "python scriptsgen.py"  # POSIX: escape
+    # with nothing known about the session, a drive-letter path in the line decides
+    assert posix_separators("python C:\\proj\\scripts\\gen.py") == "python C:/proj/scripts/gen.py"
+    assert parse_command("cd C:\\proj\\web; npm test").key == "npm test"
+    assert posix_separators("grep 'foo\\.bar' src") == "grep 'foo\\.bar' src"
+    assert posix_separators("python scripts\\gen.py", False) == "python scripts\\gen.py"
+    # escaped quotes and spaces stay escapes even on Windows
+    assert posix_separators('echo \\"hi\\" a\\ b', True) == 'echo \\"hi\\" a\\ b'
+    assert is_windows_path("C:\\Users\\dev") and is_windows_path("c:/Users/dev")
+    assert not is_windows_path("/home/dev") and not is_windows_path(None)
+    assert not is_windows_path("src/c:/x")

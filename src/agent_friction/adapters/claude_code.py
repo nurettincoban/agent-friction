@@ -49,6 +49,8 @@ _TOOL_OPS = {
     "NotebookEdit": model.OP_EDIT,
     "Write": model.OP_WRITE,
     "Bash": model.OP_SHELL,
+    "PowerShell": model.OP_SHELL,  # Claude Code on Windows
+    "Shell": model.OP_SHELL,
     "Grep": model.OP_SEARCH,
     "Glob": model.OP_SEARCH,
 }
@@ -133,7 +135,7 @@ def _tool_call(block: dict[str, Any], line: int, base: dict[str, Any]) -> Event 
         if isinstance(content, str):
             event.content_digest = common.digest(content)
             event.new_text = common.new_text(content)
-    elif name == "Bash":
+    elif event.op == model.OP_SHELL:
         event.command = _str(inp.get("command"))
     elif event.op == model.OP_SEARCH:
         event.pattern = _str(inp.get("pattern"))
