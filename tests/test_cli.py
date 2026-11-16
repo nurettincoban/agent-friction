@@ -579,7 +579,7 @@ def test_show_json_and_output_file(tmp_path: Path) -> None:
     assert code == EXIT_OK and doc["hotspot"]["path"] == "pytest" and doc["directory"] is None
     target = tmp_path / "detail.txt"
     code, out, _ = run("show", "src/shopfront", "--from", str(saved), "-o", str(target))
-    assert code == EXIT_OK and out == "" and "directory: src/shopfront" in target.read_text()
+    assert code == EXIT_OK and out == "" and "directory: src/shopfront" in target.read_text(encoding="utf-8")
 
 
 def test_compare_accepts_color(tmp_path: Path) -> None:

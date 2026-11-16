@@ -571,7 +571,9 @@ def session_directories(
             # a session is named after the directory it spent most of its events in
             common = max(dict.fromkeys(cwds), key=cwds.count)
             folded = posixpath.normpath(to_posix(common))
-            shown = analysis.display_path(folded) if mask_home else folded
+            # Mask the home in the recorded spelling: a Windows path folded to
+            # C:/Users/... first would come out as "C:~/...".
+            shown = posixpath.normpath(analysis.display_path(common)) if mask_home else folded
             sessions.setdefault(shown, set()).add(stream.session_id)
     ranked = sorted(sessions.items(), key=lambda pair: (-len(pair[1]), pair[0]))
     return [(directory, len(ids)) for directory, ids in ranked[:limit]]
