@@ -234,15 +234,17 @@ def test_a_removed_worktree_inside_the_repository_is_still_the_repository(
 def test_nested_worktree_paths_resolve_lexically(tmp_path: Path) -> None:
     from agent_friction.attribution import PathResolver
 
-    resolver = PathResolver(Path("/r"))
-    assert resolver.resolve("/r/.claude/worktrees/feat-a/src/app.py") == "src/app.py"
-    assert resolver.resolve("src/app.py", "/r/.worktrees/x") == "src/app.py"
-    assert resolver.resolve("/r/.claude/worktrees/feat-a") == ""
-    assert resolver.contains("/r/.claude/worktrees/feat-a/web")
+    root = tmp_path / "r"  # a real absolute path on every OS
+    r = root.as_posix()
+    resolver = PathResolver(root)
+    assert resolver.resolve(f"{r}/.claude/worktrees/feat-a/src/app.py") == "src/app.py"
+    assert resolver.resolve("src/app.py", f"{r}/.worktrees/x") == "src/app.py"
+    assert resolver.resolve(f"{r}/.claude/worktrees/feat-a") == ""
+    assert resolver.contains(f"{r}/.claude/worktrees/feat-a/web")
     # the directories that hold worktrees, and other things under .claude, are themselves
-    assert resolver.resolve("/r/.claude/worktrees") == ".claude/worktrees"
-    assert resolver.resolve("/r/.claude/settings.json") == ".claude/settings.json"
-    assert resolver.resolve("/r/src/.worktrees/x/a.py") == "src/.worktrees/x/a.py"
+    assert resolver.resolve(f"{r}/.claude/worktrees") == ".claude/worktrees"
+    assert resolver.resolve(f"{r}/.claude/settings.json") == ".claude/settings.json"
+    assert resolver.resolve(f"{r}/src/.worktrees/x/a.py") == "src/.worktrees/x/a.py"
 
 
 def test_a_prunable_worktree_is_still_a_root_and_a_removed_sibling_is_named(
