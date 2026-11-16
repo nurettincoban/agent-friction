@@ -612,3 +612,23 @@ def test_same_line_assignments_are_followed_and_nothing_else() -> None:
     assert parse_command("$TOOL lint").key == VARIABLE == public_key(VARIABLE)
     assert parse_command("cd web && $A/run.sh --all").key == "<variable>/run.sh"
     assert parse_command("echo $HOME; make test").key == "make test"
+
+
+@pytest.mark.parametrize(
+    ("command", "label"),
+    [
+        ("npx playwright install chromium", "npx playwright install"),
+        ("npx prisma generate --schema db/schema.prisma", "npx prisma generate"),
+        ("go mod download", "go mod download"),
+        ("docker compose up -d db", "docker compose up -d"),
+        ("docker compose up", "docker compose up"),
+        ("pip install -r requirements.txt", "pip install"),
+        ("uv sync --all-extras", "uv sync"),
+        ("./scripts/reset-db.sh staging", "scripts/reset-db.sh"),
+        ("npx tsc src/a.ts", "npx tsc"),
+    ],
+)
+def test_setup_labels_can_be_run_as_written(command: str, label: str) -> None:
+    from agent_friction.attribution import parse_command, setup_label
+
+    assert setup_label(parse_command(command).steps[0]) == label

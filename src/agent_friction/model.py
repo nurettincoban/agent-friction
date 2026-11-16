@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 # Event kinds
 TOOL_CALL = "tool_call"
@@ -145,6 +145,7 @@ class ParsedFile:
     streams: list[Stream]
     skipped_lines: int = 0  # malformed or structurally invalid lines
     ignored_lines: int = 0  # well-formed lines of a type we do not analyse
+    duplicate_lines: int = 0  # lines an earlier file had already contributed
 
 
 @dataclass(frozen=True)
@@ -198,6 +199,41 @@ def _whole(value: Any) -> Any:
     if isinstance(value, dict):
         return {_whole(key): _whole(item) for key, item in value.items()}
     return value
+
+
+def text_encoding(path: Path) -> str:
+    """The encoding a transcript file is in, judged by its first bytes.
+
+    UTF-8 unless the file starts with a byte-order mark (PowerShell's ``Out-File
+    -Encoding utf8`` writes one, and its ``>`` writes UTF-16), or its first
+    characters are ASCII spread over two or four bytes (UTF-16/32 without a mark).
+    """
+    with path.open("rb") as handle:
+        head = handle.read(4)
+    if head.startswith(b"\xef\xbb\xbf"):
+        return "utf-8-sig"
+    if head.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        return "utf-32"
+    if head.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return "utf-16"
+    # No mark: a JSON line starts with ASCII, which UTF-16/32 spread over 2 or 4 bytes.
+    starts = b"{[ \t\r\n"
+    if len(head) == 4 and head[0] in starts:
+        if head[1:] == b"\x00\x00\x00":
+            return "utf-32-le"
+        if not head[1] and 0 < head[2] < 0x80 and not head[3]:
+            return "utf-16-le"
+    if len(head) == 4 and not head[0]:
+        if head[:3] == b"\x00\x00\x00" and head[3] in starts:
+            return "utf-32-be"
+        if head[1] in starts and not head[2] and 0 < head[3] < 0x80:
+            return "utf-16-be"
+    return "utf-8"
+
+
+def open_transcript(path: Path) -> TextIO:
+    """Open a transcript for reading as text, in whichever Unicode encoding it is in."""
+    return path.open(encoding=text_encoding(path), errors="replace")
 
 
 def load_json_line(raw: str) -> Any:

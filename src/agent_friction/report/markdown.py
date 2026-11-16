@@ -180,6 +180,9 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
         out += [
             "## Directories where agents search in vain",
             "",
+            "Only friction in the directory itself (searches that found nothing there); "
+            "`agent-friction show <dir>` rolls up everything inside it.",
+            "",
             *_table(directories, "Directory"),
             "",
         ]

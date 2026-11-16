@@ -335,7 +335,7 @@ def parse_file(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFi
     side = Stream(session_id=session, source=path, kind=KIND, sidechain=True)
     parsed = ParsedFile(path=path, kind=KIND, streams=[])
     asking = {False: False, True: False}  # per stream: did the agent just ask something?
-    with path.open(encoding="utf-8", errors="replace") as handle:
+    with model.open_transcript(path) as handle:
         for number, raw in enumerate(handle, 1):
             raw = raw.strip()
             if not raw:
@@ -356,6 +356,7 @@ def parse_file(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFi
                 if uuid in seen:
                     if resumed_from is None and seen[uuid] != session:
                         resumed_from = seen[uuid]
+                    parsed.duplicate_lines += 1
                     continue
                 seen[uuid] = session
                 added.append(uuid)

@@ -134,6 +134,14 @@ corroborated: ...").
     committing, guessing; not "Stop. Hammer time", "stop the server", "stop.
     I need to go to lunch", and not "Stop showing the banner after the user
     dismisses it", which says what the product should stop doing);
+  - a rule of the house stated in reply: "we don't / never use ..." ("we
+    don't use moment in this codebase, use date-fns"), "don't use X, use Y"
+    ("don't use any here, use unknown"), "never" plus something an agent does
+    ("never commit directly to main"; a fixed list of verbs; not "never
+    mind", "never seen this"), and a leading "again:" ("again: never ...").
+    Like every verdict they make a correction only if the human names a file
+    the agent changed or the agent goes back to one; otherwise they are a
+    probable correction;
   - "that's / this is / it was wrong | incorrect | broken" as a complete
     statement, or "... not right | not correct | not working | not how";
   - "that / this / it didn't | doesn't work | help", or a bare "doesn't
@@ -563,6 +571,13 @@ days by default), **and** that human commit either
   `fixed`, `revert`, `undo`, `rollback`, `hotfix`, `regression`, `broke`,
   `broken`, `oops`, `mistake` (`FIX_SUBJECT_RE`).
 
+A human commit whose subject announces new work (`feat: ...`, `add ...`,
+`implement ...`, `introduce ...`, `support ...`, `new ...`;
+`FEATURE_SUBJECT_RE`) and does not call itself a fix counts only if it
+follows the agent commit within 2 days (`FEATURE_REWORK_WINDOW`), whatever
+the window: "feat: add pagination" a week later that touches lines the agent
+wrote is the project moving on, not a repair.
+
 A human who continues work elsewhere in the file, or appends after the agent's
 lines, with an ordinary subject is **not** rework. One event per (human
 commit, file). A human commit that follows another human commit is not rework.
@@ -819,6 +834,10 @@ successfully once before being removed (read as debugging).
     in use`, `port is already allocated`), usually by one left running
     earlier;
   - `disk`: the disk is full (`ENOSPC`, `No space left on device`);
+  - `network`: a host name could not be resolved (`curl: (6) Could not
+    resolve host`, wget's `unable to resolve host address`, `Temporary
+    failure in name resolution`, `getaddrinfo ENOTFOUND`): there is no
+    network where the agent runs, or that host is not allowed;
   - `variable`: an environment variable is not set. `Missing required
     environment variable X`, `X: unbound variable`, `X is not set`, a bare
     `KeyError: 'X'` (upper-case names only). The name is shown only where
@@ -930,7 +949,22 @@ successfully once before being removed (read as debugging).
     .env.example .env`): the failure is kept at full weight with
     `fixed_by_setup` (several steps joined with ` && `), blames no file,
     claims its run time, and from two such events on leads to
-    `document-the-setup-step`: "run `docker compose up` before `pytest`";
+    `document-the-setup-step`: "run `docker compose up -d` before `pytest`".
+    *Which failure a step belongs to:* the steps run between a failure and
+    the next run of the same command. `pytest` red (no `django`), `pip
+    install`, `pytest` red (database down), `docker compose up -d db`,
+    `pytest` green: the first failure is bound to `pip install`, the second
+    to `docker compose up -d`, and the advice lists both, in that order, each
+    with its own count ("run `pip install`, then `docker compose up -d`
+    before `pytest`"). A failure with no step before the next run carries on
+    to the steps after it. A step is listed once it helped twice.
+    *How a step is named:* by its key, continued through its subcommand words
+    up to and including the one that says what it does, so that the advice
+    can be run as written: `npx playwright install` (not `npx playwright`),
+    `npx prisma generate`, `go mod download`. File arguments and options are
+    left out, except `-d` on `docker compose up`, without which the command
+    stays in the foreground. Without excerpts the label is pseudonymized
+    like any command key;
   - an **environment activated on the green line itself**: `pytest` fails
     with a setup/invocation error and `source .venv/bin/activate && pytest`
     (or `. venv/bin/activate && ...`, `poetry shell && ...`, `conda activate
@@ -956,6 +990,21 @@ successfully once before being removed (read as debugging).
   what fixed it, and the failure is dropped.
   *False positives:* a flaky test that happens to pass after an unrelated
   `npm install`; one event at full weight in that session.
+- *The same test, red in session after session:* an ordinary failure of a
+  test command records which tests its output names (pytest's `FAILED
+  tests/test_a.py::test_x` and `ERROR ...`, go's `--- FAIL: TestX`; at most
+  10). When the same test is red in 3 or more episodes of work
+  (`STANDING_TEST_MIN_SESSIONS`) and none of them made it pass (a failure
+  that an edit turned green is the development loop and is dropped as
+  always), it is a standing failure, not "a red test during development":
+  those failures count in full, claim their run time, are attributed to the
+  test file too if it exists, and lead to `say-if-it-is-known-broken` ("fix
+  it, or mark it as a known failure and say so"). The test is named only
+  with excerpts: its name comes from command output.
+- *A program that is only there by its path:* `zebractl: command not found`
+  followed by `./bin/zebractl ...` succeeding records `works_as:
+  ./bin/zebractl`, and the advice is "use `./bin/zebractl`, not `zebractl`"
+  (without excerpts the directory is kept and the name pseudonymized).
 - *The wrong runner:* an ordinary failure followed, with nothing changed in
   between, by a green run of **another command for the same job** (`pnpm
   test` after a red `yarn test`, `make test` after `go test ./...`), where

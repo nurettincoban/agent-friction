@@ -102,6 +102,7 @@ by repository or time window, so `0` marks an empty, binary or foreign file.
 | `skipped_lines` | Lines that were not valid JSON objects or lacked required structure. |
 | `skipped_events` | Events on which a detector raised an unexpected error. They are skipped; anything above 0 is a bug worth reporting. |
 | `ignored_lines` | Valid lines of a type that is not analysed (attachments, summaries, ...). |
+| `duplicate_lines` | Lines that an earlier file had already contributed (the same line uuid, or for generic files the same session, timestamp, kind and payload) and that were therefore not read again: a copied or re-exported log. Not for git. *Addition within schema version 1.* |
 | `files` | Transcript files read (not for git). |
 | `sessions_outside_repo` | Sessions dropped because they never touched this repo (not for git). |
 | `available`, `note` | git only: whether history could be read, and why not. |
@@ -250,7 +251,10 @@ Each `changes[]` entry:
 
 To analyse sessions from another agent (Codex, Cursor, Aider, your own
 harness), convert its logs to this format: UTF-8 JSONL, one event per line, in
-chronological order. Pass the file with `--transcripts FILE` on the command
+chronological order. A byte-order mark is accepted, and so are UTF-16 and
+UTF-32 (with a mark, or recognisable by their first bytes), because that is
+what PowerShell's `>` and `Out-File` write; the same holds for Claude Code
+files. Anything else is read as UTF-8 with undecodable bytes replaced. Pass the file with `--transcripts FILE` on the command
 line or `transcripts=[...]` in `AnalyzeOptions`; it is recognised by the
 presence of `session` and a string `kind`. One file may hold several
 sessions. There is no dedicated adapter for other agents yet.

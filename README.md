@@ -116,7 +116,8 @@ agent-friction compare before.json after.json
 `pytest`, so `compare` checks the recommended command instead: if it ran cleanly afterwards, the
 old one is reported as "replaced". A fix that keeps agents away from a file (a denied edit) can
 only show as "not touched"; that is the expected outcome, not proof. It ignores changes too small to mean anything, warns when either side has too few
-sessions, and refuses to compare scans of different repositories. Both scans must use the
+sessions, refuses to compare scans of different repositories, and refuses scans whose time windows overlap
+(a later scan without `--since` contains the earlier one, which would only dilute it). Both scans must use the
 same privacy mode: compare two `--no-excerpts` scans, or two scans without it.
 
 ### In CI

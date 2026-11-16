@@ -16,7 +16,7 @@ Commands that keep failing
   █▌          15.2 curl                                      1      1     12s  ○ command-failure×1
   █▌          15.2 python -m pytest                          1      1     30s  ○ command-failure×1
 
-Directories where agents search in vain
+Directories where agents search in vain (the directory itself; show <dir> rolls up everything inside)
   score            directory                              sess events    lost  top signals
   ███         29.5 src/shopfront                             2      5     n/a  ◐ search-miss×5
 

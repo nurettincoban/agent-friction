@@ -117,7 +117,7 @@ def parse_file(path: Path, seen: dict[str, str] | None = None) -> ParsedFile:
     streams: dict[tuple[str, bool], Stream] = {}
     parsed = ParsedFile(path=path, kind=KIND, streams=[])
     asking: dict[tuple[str, bool], bool] = {}
-    with path.open(encoding="utf-8", errors="replace") as handle:
+    with model.open_transcript(path) as handle:
         for number, raw in enumerate(handle, 1):
             raw = raw.strip()
             if not raw:
@@ -137,6 +137,7 @@ def parse_file(path: Path, seen: dict[str, str] | None = None) -> ParsedFile:
                 continue
             fingerprint = "generic:" + common.digest(canonical)
             if earlier.get(fingerprint, str(path)) != str(path):
+                parsed.duplicate_lines += 1
                 continue  # the same event, already read from another file
             mine.add(fingerprint)
             session = obj.get("session")

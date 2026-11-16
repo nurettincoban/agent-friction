@@ -7,7 +7,7 @@ from itertools import islice
 from pathlib import Path
 
 from agent_friction.adapters import claude_code, generic
-from agent_friction.model import ParsedFile
+from agent_friction.model import ParsedFile, open_transcript
 
 #: Lines inspected when sniffing a file's format.
 SNIFF_LINES = 25
@@ -22,7 +22,7 @@ def detect_format(path: Path) -> str:
     Anything else is treated as Claude Code, whose parser ignores unknown lines.
     """
     try:
-        with path.open(encoding="utf-8", errors="replace") as handle:
+        with open_transcript(path) as handle:
             for raw in islice(handle, SNIFF_LINES):
                 try:
                     obj = json.loads(raw)

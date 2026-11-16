@@ -293,3 +293,21 @@ def test_a_repo_wide_reformat_is_not_rework(repo: Repo) -> None:
     repo.commit(6, "fix: broken imports everywhere", {n: lines(BASE, l3="fixed") for n in names})
     history = gitsignals.read_history(repo.path)
     assert not gitsignals.is_sweep(history.commits[-1])
+
+
+def test_a_commit_that_announces_new_work_is_rework_only_right_away(repo: Repo) -> None:
+    by_agent = lines(BASE, l3="agent 3")
+    repo.commit(1, "init", {"a.py": BASE, "b.py": BASE, "c.py": BASE})
+    repo.commit(
+        2, f"agent work\n\n{CLAUDE}", {"a.py": by_agent, "b.py": by_agent, "c.py": by_agent}
+    )
+    repo.commit(3, "feat: add sorting", {"a.py": lines(by_agent, l3="human 3")})  # next day
+    repo.commit(9, "feat: add pagination", {"b.py": lines(by_agent, l3="human 3")})  # a week on
+    repo.commit(9, "fix pagination of agent output", {"c.py": lines(by_agent, l3="human 3")})
+    history = gitsignals.read_history(repo.path)
+    found = gitsignals.find_rework(history.commits, hunks=gitsignals.HunkReader(repo.path))
+    assert sorted(f.targets[0].key for f in found) == ["a.py", "c.py"]
+    for subject in ("feat(api): x", "Add pagination", "implements paging", "new endpoint"):
+        assert gitsignals.FEATURE_SUBJECT_RE.search(subject), subject
+    for subject in ("more human work", "address review", "tidy the adapter"):
+        assert not gitsignals.FEATURE_SUBJECT_RE.search(subject), subject

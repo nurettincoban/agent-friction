@@ -1343,7 +1343,7 @@ def test_fail_setup_pass_in_every_session_is_the_headline(tmp_path: Path) -> Non
     assert row["score_detail"]["capped"] is False and row["est_minutes_lost"] > 0
     (rule,) = row["recommendations"]
     assert rule["id"] == "document-the-setup-step"
-    assert "run `docker compose up` before `pytest`" in rule["detail"]
+    assert "run `docker compose up -d` before `pytest`" in rule["detail"]
     assert out["hotspots"] == []  # the test file is not blamed for a database that is down
 
 
@@ -2045,7 +2045,8 @@ def test_a_subset_passing_is_not_flakiness(tmp_path: Path) -> None:
         tmp_path,
         lambda s: s.bash("pytest", red, exit_code=1).bash("pytest tests/test_cart.py", "5 passed"),
     )
-    assert row["recommendations"] == [] and row["score"] < 20
+    # not flaky; but the same test red in session after session is worth saying
+    assert [r["id"] for r in row["recommendations"]] == ["say-if-it-is-known-broken"]
     assert all("re-run" not in e["summary"] for e in row["evidence"])
     (flaky,) = _commands(
         tmp_path / "again",
@@ -2138,3 +2139,172 @@ def test_error_messages_point_at_the_published_schema(tmp_path: Path) -> None:
     assert "https://github.com/nurettincoban/agent-friction/blob/main/docs/schema.md" in str(
         raised.value
     )
+
+
+# ---- round 20 ----------------------------------------------------------------------------
+
+
+def test_each_failure_is_bound_to_the_setup_step_that_followed_it(tmp_path: Path) -> None:
+    def build(s: Session) -> None:
+        s.bash("pytest", "ModuleNotFoundError: No module named 'django'", exit_code=1)
+        s.bash("pip install -r requirements.txt", "Successfully installed")
+        s.bash("pytest", PG_DOWN, exit_code=1)
+        s.bash("docker compose up -d db", "Started")
+        s.bash("pytest", "5 passed in 1s")
+
+    for bare in (False, True):
+        sessions = [Session(f"s{i}").user("go") for i in range(4)]
+        for s in sessions:
+            build(s)
+        out = scan(tmp_path / str(bare), sessions, include_excerpts=not bare)
+        (row,) = out["commands"]
+        (advice,) = row["recommendations"]
+        assert advice["id"] == "document-the-setup-step" and row["events"] == 8
+        assert advice["setup"] == "pip install && docker compose up -d"
+        assert (
+            "it worked after the agent ran `pip install` (4 times) and "
+            "`docker compose up -d` (4 times)" in advice["detail"]
+        )
+        assert (
+            '"run `pip install`, then `docker compose up -d` before `pytest`"' in advice["detail"]
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "step", "named"),
+    [
+        (
+            "npm run e2e",
+            "Executable doesn't exist",
+            "npx playwright install chromium",
+            "npx playwright install",
+        ),
+        (
+            "npm test",
+            "@prisma/client did not initialize yet",
+            "npx prisma generate",
+            "npx prisma generate",
+        ),
+        (
+            "go test ./...",
+            "no required module provides package x\nFAIL",
+            "go mod download",
+            "go mod download",
+        ),
+    ],
+)
+def test_a_setup_step_is_named_so_that_it_can_be_run(
+    tmp_path: Path, command: str, output: str, step: str, named: str
+) -> None:
+    (row,) = _commands(
+        tmp_path,
+        lambda s: s.bash(command, output, exit_code=1).bash(step, "done").bash(command, "ok"),
+    )
+    (advice,) = row["recommendations"]
+    assert advice["id"] == "document-the-setup-step" and advice["setup"] == named
+    assert f"run `{named}` before " in advice["detail"]
+
+
+def test_utf16_and_bom_transcripts_are_analysed_like_utf8(tmp_path: Path) -> None:
+    rows = [
+        {"session": "g", "kind": "tool_call", "id": 1, "op": "edit", "path": "src/a.py"},
+        {"session": "g", "kind": "tool_result", "id": 1, "error": "edit_not_found"},
+    ]
+    text = "".join(json.dumps({**row, "cwd": "/repo"}) + "\n" for row in rows)
+    totals = []
+    for encoding in ("utf-8", "utf-8-sig", "utf-16"):
+        path = tmp_path / f"{encoding}.jsonl"
+        path.write_bytes(text.encode(encoding))
+        options = AnalyzeOptions(repo=Path("/repo"), transcripts=[path], include_git=False)
+        out = analyze(options)
+        totals.append((out["totals"]["friction_events"], out["sources"][0]["skipped_lines"]))
+    assert totals == [(1, 0)] * 3
+    # a file in which nothing can be read says what it was read as
+    odd = tmp_path / "odd.jsonl"
+    odd.write_bytes("not json at all\n".encode("utf-16"))
+    with pytest.raises(AgentFrictionError, match="read as UTF-16"):
+        analyze(AnalyzeOptions(repo=Path("/repo"), transcripts=[odd], include_git=False))
+    odd.write_bytes(b"\x00\x01\x02 binary \x00\n")
+    with pytest.raises(AgentFrictionError, match="NUL bytes"):
+        analyze(AnalyzeOptions(repo=Path("/repo"), transcripts=[odd], include_git=False))
+
+
+def test_a_copy_of_a_transcript_is_listed_as_duplicates_not_as_empty(tmp_path: Path) -> None:
+    from agent_friction.engine import inspect_sources
+
+    s = Session("s0").user("go").edit("/repo/src/a.py", error=builders.EDIT_NOT_FOUND)
+    original = s.save(tmp_path / "t", "a")
+    (tmp_path / "t" / "b.jsonl").write_bytes(original.read_bytes())
+    options = AnalyzeOptions(repo=Path("/repo"), transcripts=[tmp_path / "t"], include_git=False)
+    first, copy = inspect_sources(options)
+    assert (first["events"], first["duplicate_lines"]) == (3, 0)
+    assert (copy["events"], copy["duplicate_lines"], copy["encoding"]) == (0, 3, "utf-8")
+    (source,) = analyze(options)["sources"]
+    assert source["files"] == 2 and source["duplicate_lines"] == 3
+
+
+def test_the_same_red_test_in_three_sessions_is_a_standing_failure(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "test_legacy.py").write_text("def test_old(): assert False\n")
+    red = "FAILED tests/test_legacy.py::test_old - AssertionError\n1 failed, 40 passed in 2.0s"
+
+    def sessions(count: int) -> list[Session]:
+        made = []
+        for i in range(count):
+            s = Session(f"s{i}", cwd=str(repo)).user(f"task {i}")
+            made.append(s.bash("pytest", red, exit_code=1).read(f"{repo}/tests/test_legacy.py"))
+        return made
+
+    out = scan(tmp_path / "five", sessions(5), repo)
+    (command,) = out["commands"]
+    (advice,) = command["recommendations"]
+    assert command["score"] > 19 and advice["id"] == "say-if-it-is-known-broken"
+    assert advice["title"] == "`tests/test_legacy.py::test_old` is red session after session"
+    (row,) = out["hotspots"]
+    assert row["path"] == "tests/test_legacy.py" and row["signals"] == {"command-failure": 5}
+    assert [r["id"] for r in row["recommendations"]] == ["say-if-it-is-known-broken"]
+    # without excerpts the test is not named, the file (a repo path) still is
+    bare = scan(tmp_path / "bare", sessions(5), repo, include_excerpts=False)
+    assert "test_old" not in json.dumps(bare)
+    assert bare["commands"][0]["recommendations"][0]["title"] == (
+        "The same test is red session after session"
+    )
+    # twice is not a pattern, and a test the session fixed is the development loop
+    twice = scan(tmp_path / "two", sessions(2), repo)
+    assert twice["commands"][0]["score"] <= 19 and twice["hotspots"] == []
+    fixed = []
+    for i in range(5):
+        s = Session(f"s{i}", cwd=str(repo)).user("go").bash("pytest", red, exit_code=1)
+        fixed.append(s.edit(f"{repo}/tests/test_legacy.py").bash("pytest", "41 passed"))
+    assert scan(tmp_path / "fixed", fixed, repo)["commands"] == []
+
+
+def test_a_missing_program_that_works_by_its_path(tmp_path: Path) -> None:
+    def build(s: Session) -> None:
+        s.bash("zebractl status", "bash: zebractl: command not found", exit_code=127)
+        s.bash("./bin/zebractl status", "ok")
+
+    (row,) = _commands(tmp_path, build)
+    assert "use `./bin/zebractl`, not `zebractl`" in row["recommendations"][0]["detail"]
+    sessions = [Session(f"s{i}").user("go") for i in range(4)]
+    for s in sessions:
+        build(s)
+    bare = scan(tmp_path / "bare", sessions, include_excerpts=False)
+    assert "zebractl" not in json.dumps(bare)
+    tool = public_key("zebractl")
+    detail = bare["commands"][0]["recommendations"][0]["detail"]
+    assert f"use `./bin/{tool}`, not `{tool}`" in detail
+
+
+def test_a_host_that_cannot_be_resolved_is_the_environment(tmp_path: Path) -> None:
+    refused = "curl: (6) Could not resolve host: registry.example"
+    (row,) = _commands(
+        tmp_path,
+        lambda s: s.bash("curl -s https://registry.example/x", refused, exit_code=6).read(
+            "/repo/a"
+        ),
+    )
+    (advice,) = row["recommendations"]
+    assert advice["id"] == "document-the-environment"
+    assert advice["title"] == "Say what `curl` can reach from where agents work"

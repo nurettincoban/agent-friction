@@ -33,6 +33,8 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 
 ## Directories where agents search in vain
 
+Only friction in the directory itself (searches that found nothing there); `agent-friction show <dir>` rolls up everything inside it.
+
 | # | Directory | Score | Sessions | Events | Est. time lost | Top signals | Confidence |
 |---:|---|---:|---:|---:|---:|---|---|
 | 1 | `src/shopfront` | 29.5 | 2 | 5 | n/a | `search-miss`×5 | medium |

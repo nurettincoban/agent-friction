@@ -196,7 +196,10 @@ def render_terminal(
         out.append("")
     directories = list(result.get("directories", []))[:top]
     if directories:
-        out.append(st.bold("Directories where agents search in vain"))
+        out.append(
+            st.bold("Directories where agents search in vain")
+            + st.dim(" (the directory itself; show <dir> rolls up everything inside)")
+        )
         out.extend(_hotspot_rows(directories, st, titles, width, "directory"))
         out.append("")
 

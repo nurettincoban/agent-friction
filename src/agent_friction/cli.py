@@ -152,9 +152,12 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
         "--since",
         type=parse_when,
         metavar="WHEN",
-        help="only events after WHEN (30d, 2026-01-31); a session that straddles it is cut",
+        help="only events from WHEN on (30d, 2026-01-31; dates and times without a zone are UTC); "
+        "a session that straddles it is cut",
     )
-    g.add_argument("--until", type=parse_when, metavar="WHEN", help="only events before WHEN")
+    g.add_argument(
+        "--until", type=parse_when, metavar="WHEN", help="only events before WHEN (same forms, UTC)"
+    )
     g.add_argument("--no-git", action="store_true", help="skip git history (human-rework signal)")
     g.add_argument(
         "--repo-alias",
@@ -313,6 +316,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-repo-mismatch",
         action="store_true",
         help="compare scans whose repository names differ (e.g. after a rename)",
+    )
+    cmp_.add_argument(
+        "--allow-overlap",
+        action="store_true",
+        help="compare scans whose time windows overlap (the same sessions on both sides "
+        "dilute or hide any change)",
     )
     cmp_.add_argument(
         "--fail-on-regression", action="store_true", help="exit 3 if anything regressed or is new"
@@ -571,6 +580,45 @@ def _cmd_show(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     return EXIT_ERROR
 
 
+def _event_span(result: dict[str, Any]) -> tuple[datetime | None, datetime | None]:
+    """The first and last event a scan saw, from its ``window``."""
+    window = result.get("window") or {}
+
+    def when(*keys: str) -> datetime | None:
+        for key in keys:
+            value = window.get(key)
+            if isinstance(value, str):
+                try:
+                    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        return None
+
+    return when("first_event", "start"), when("last_event", "end")
+
+
+def _check_windows(before: dict[str, Any], after: dict[str, Any]) -> None:
+    """Refuse scans whose windows overlap or are swapped: the verdicts would be wrong."""
+    (b_first, b_last), (a_first, a_last) = _event_span(before), _event_span(after)
+    if None in (b_first, b_last, a_first, a_last):
+        return
+    assert b_first and b_last and a_first and a_last
+    if a_last < b_first:
+        raise AgentFrictionError(
+            "the 'after' scan ends before the 'before' scan starts: the arguments look "
+            "swapped. Pass the older scan first: compare BEFORE.json AFTER.json"
+        )
+    if a_first <= b_last:
+        cut = (b_last + timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        raise AgentFrictionError(
+            f"the scans overlap: 'after' starts at {a_first:%Y-%m-%d %H:%M} UTC, before "
+            f"'before' ends at {b_last:%Y-%m-%d %H:%M} UTC, so the same sessions are on "
+            f"both sides. Re-run the later scan with --since {cut} (or both with a shared "
+            "--until/--since date), or pass --allow-overlap."
+        )
+
+
 def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     before, after = _load_json(args.before), _load_json(args.after)
     if not 0 < args.threshold < 10:
@@ -589,6 +637,8 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
             f"these scans are of different repositories ({names[0]!r} vs {names[1]!r}). "
             "Pass --allow-repo-mismatch if the repository was renamed."
         )
+    if not args.allow_overlap:
+        _check_windows(before, after)
     roots = (before.get("repo", {}).get("root"), after.get("repo", {}).get("root"))
     if roots[0] != roots[1] and None not in roots:
         stderr.write(
@@ -647,11 +697,11 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
 
 
 def _cmd_sources(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
-    from agent_friction.engine import AnalyzeOptions, inspect_transcripts
+    from agent_friction.engine import AnalyzeOptions, inspect_sources
 
     if not args.repo.is_dir():
         raise AgentFrictionError(f"{args.repo}: not a directory (pass the repository root)")
-    report = inspect_transcripts(
+    report = inspect_sources(
         AnalyzeOptions(
             repo=args.repo,
             transcripts=args.transcripts,
@@ -660,16 +710,28 @@ def _cmd_sources(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         )
     )
     unreadable = 0
-    for path, events, skipped in report:
-        if events == 0:
+    for entry in report:
+        path = entry["path"]
+        events = int(entry.get("events", 0))
+        skipped = int(entry.get("skipped_lines", 0))
+        dupes = int(entry.get("duplicate_lines", 0))
+        encoding = str(entry.get("encoding") or "")
+        extra = [] if encoding in ("", "utf-8") else [f"read as {encoding}"]
+        if entry.get("error") or (Path(path).is_file() and not os.access(path, os.R_OK)):
+            unreadable += 1
+            note = f"  (unreadable: {entry.get('error') or 'permission denied'})"
+        elif events == 0 and dupes:
+            note = f"  (nothing new: all {plural(dupes, 'line')} repeat an earlier file)"
+        elif events == 0:
             unreadable += 1
             note = "  (no events: empty, binary, or not a transcript)"
-            if Path(path).is_file() and not os.access(path, os.R_OK):
-                note = "  (unreadable: permission denied)"
-        elif skipped:
-            note = f"  ({events} events, {plural(skipped, 'line')} skipped)"
         else:
-            note = f"  ({events} events)"
+            parts = [plural(events, "event")]
+            if skipped:
+                parts.append(f"{plural(skipped, 'line')} skipped")
+            if dupes:
+                parts.append(f"{plural(dupes, 'line')} already read from an earlier file")
+            note = f"  ({', '.join(parts + extra)})"
         stdout.write(f"{path}{note}\n")
     if unreadable:
         stderr.write(f"agent-friction: {plural(unreadable, 'file')} contained nothing to analyse\n")

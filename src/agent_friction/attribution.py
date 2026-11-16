@@ -1047,6 +1047,10 @@ def is_replacement(failed: str, other: str) -> bool:
     role = command_role(failed)
     if role is not None and role == command_role(other):
         return True
+    # the same program by another path: `./bin/zebractl` for `zebractl`
+    was, now = failed.split(), other.split()
+    if was[1:] == now[1:] and "/" in now[0] and now[0].rsplit("/", 1)[-1] == was[0]:
+        return True
     return failed.split()[-1] == other.split()[-1] and failed.split()[-1] not in (
         "run",
         INLINE,
@@ -1350,7 +1354,52 @@ _SCRATCH_RE = re.compile(r"\.(?:log|out|txt|tmp|pid|err)$|^&|^/dev/|^/tmp/|^/var
 
 
 #: Words that make a command a setup step wherever they stand (`npx playwright install`).
-_SETUP_ARGS = frozenset({"install", "ci", "bootstrap", "setup", "migrate", "up", "login", "sync"})
+_SETUP_ARGS = frozenset(
+    {"install", "ci", "bootstrap", "setup", "migrate", "up", "login", "sync", "download"}
+)
+#: Words at which the name of a preparing step is complete (`npx prisma generate`).
+_STEP_WORDS = _SETUP_ARGS | frozenset(
+    {"generate", "upgrade", "restore", "pull", "tidy", "vendor", "seed", "reset", "prepare"}
+    | {"build", "start", "init", "fetch", "deploy", "create", "db:setup", "db:migrate"}
+)
+_SUBCOMMAND_WORD_RE = re.compile(r"^[a-z][a-z0-9:_-]*$")
+
+
+def setup_label(step: Step) -> str:
+    """How a preparing step is named in advice: enough of it to be run as written.
+
+    The key of ``npx playwright install chromium`` is ``npx playwright``, which
+    installs nothing. The label goes on through the subcommand words up to and
+    including the one that says what the step does (``npx playwright install``,
+    ``npx prisma generate``, ``go mod download``); file arguments and other
+    options are left out. ``docker compose up`` keeps ``-d``: without it the
+    command stays in the foreground.
+    """
+    key = step.key
+    known = key.split()
+    if not known or is_inline_code(key):
+        return key
+    words = [arg for arg in step.args if arg[:1] != "-"]
+    # the subcommand words the key already covers
+    rest = list(words)
+    for word in known[1:]:
+        if word in rest:
+            rest = rest[rest.index(word) + 1 :]
+    label = key
+    if not _STEP_WORDS & set(known):
+        more: list[str] = []
+        for word in rest[:3]:
+            if not _SUBCOMMAND_WORD_RE.match(word):
+                break
+            more.append(word)
+            if word in _STEP_WORDS:
+                label = " ".join([key, *more])
+                break
+    if label.split()[-1] == "up" and {"-d", "--detach"} & set(step.args):
+        label += " -d"
+    return label
+
+
 _ENV_FILE_RE = re.compile(r"^\.env(?:\..+)?$|\.local(?:\.\w+)?$")
 _TEMPLATE_FILE_RE = re.compile(r"[._-](?:example|sample|template|dist|defaults?)(?:\.\w+)?$", re.I)
 

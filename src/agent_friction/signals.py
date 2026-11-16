@@ -39,6 +39,7 @@ from agent_friction.attribution import (
     objectionable_step,
     parse_command,
     path_candidates,
+    setup_label,
 )
 from agent_friction.model import Event, Finding, Stream, Target
 
@@ -402,7 +403,7 @@ INVOCATION_ERROR_RE = re.compile(
     # dependencies could not be installed or built
     r"|" + _INSTALL_SHAPES +
     # the network was not there
-    r"|curl: \((?!(?:7|28|52|56)\))\d+\) .*"
+    r"|curl: \((?!(?:6|7|28|52|56)\))\d+\) .*"
     r")$",
     re.M,
 )
@@ -900,6 +901,13 @@ _PORT_IN_USE_RE = re.compile(
     r"EADDRINUSE|address already in use|port (?:\d+ )?is already (?:in use|allocated)", re.I
 )
 #: The disk is full.
+#: A host name that could not be resolved: no network, or no access to that host.
+_NO_NETWORK_RE = re.compile(
+    r"curl: \(6\) |Could not resolve host|unable to resolve host address"
+    r"|Temporary failure in name resolution|Name or service not known"
+    r"|getaddrinfo (?:ENOTFOUND|EAI_AGAIN)|nodename nor servname provided",
+    re.I,
+)
 _DISK_FULL_RE = re.compile(r"\bENOSPC\b|No space left on device", re.I)
 _VAR = r"[`'\"]?([A-Z][A-Z0-9_]{2,})[`'\"]?"
 _ENV_VAR_RE = re.compile(
@@ -936,6 +944,7 @@ ENV_AUTH = "auth"
 ENV_VARIABLE = "variable"
 ENV_PORT = "port"
 ENV_DISK = "disk"
+ENV_NETWORK = "network"
 
 
 def environment_error(output: str) -> tuple[str, str] | None:
@@ -952,6 +961,8 @@ def environment_error(output: str) -> tuple[str, str] | None:
         return ENV_DISK, ""
     if _PORT_IN_USE_RE.search(output):
         return ENV_PORT, ""
+    if _NO_NETWORK_RE.search(output):
+        return ENV_NETWORK, ""
     down = _SERVICE_DOWN_RE.search(output)
     if down is not None:
         port = _PORT_RE.search(output)
@@ -1000,6 +1011,12 @@ def _unfound_program(output: str) -> str:
         return ""
     name = next(g for g in match.groups() if g).replace("\\", "/").rsplit("/", 1)[-1]
     return re.sub(r"\.(?:exe|cmd|bat|ps1)$", "", name, flags=re.I)
+
+
+#: The tests a red run names: pytest's ``FAILED tests/test_a.py::test_x`` (and ``ERROR``),
+#: go's ``--- FAIL: TestX``.
+FAILED_TEST_RE = re.compile(r"^(?:(?:FAILED|ERROR) ([\w./-]+::[\w.:\[\]-]+)|--- FAIL: (\w+))", re.M)
+MAX_FAILED_TESTS = 10
 
 
 #: Praise, thanks and dismissals. A correction phrase *followed* by one of these is not a
@@ -1081,6 +1098,12 @@ _AGENT_DOING = (
     r"|hallucinating|repeating|reading|searching|looping|wasting|overthinking|overengineering"
     r"|over-engineering|fiddling|tweaking|formatting|reformatting|commenting|working"
 )
+#: What an agent can be told never to do.
+_NEVER_DO = (
+    r"commit|push|edit|change|touch|delete|remove|use|run|add|write|rewrite|modify|skip"
+    r"|mock|import|install|force|merge|rebase|disable|hardcode|hard-code|ignore|create|call"
+    r"|put|store|log|catch|swallow|do"
+)
 _UNDO = r"(?:revert|undo|roll ?back)"
 #: What an undo must refer to: the agent's own change, by pronoun or as "the last edit".
 _UNDO_OBJECT = (
@@ -1139,6 +1162,27 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
             False,
         ),
         ("no no", r"^(?:no|nope)[\s,.!]+(?:no|nope)\b", False),
+        (
+            # A rule of the house, stated in reply to the agent's work: "we don't use
+            # moment in this codebase, use date-fns", "again: never commit to main".
+            "we don't use …",
+            _OPEN + r"(?:again\s*[:,—-]*\s*)?we (?:don't|do not|never) use\b",
+            False,
+        ),
+        (
+            "don't use X, use Y",
+            _OPEN + r"(?:please )?(?:don't|do not) use [^.,;:!?\n]{1,40}[,;.:—-]+\s*"
+            r"(?:use|prefer|we use|it's|it is|always)\b",
+            False,
+        ),
+        (
+            # not "never mind" (a dismissal), "never seen this before"
+            "never …",
+            _OPEN + r"(?:again\s*[:,—-]*\s*)?never (?!mind\b|seen\b|heard\b|been\b|had\b)"
+            rf"(?:{_NEVER_DO})\b",
+            False,
+        ),
+        ("again: …", r"^again\s*[:—-]+\s*\S", False),
         (
             # "same error", "I'm getting the exact same failure"; not "same error handling
             # as in util.py, please"
@@ -1547,6 +1591,8 @@ class _State:
     replaced: dict[str, list[Finding]] = field(default_factory=dict)
     # setup command that succeeded after a failure that is still pending, by finding id
     setup_after: dict[int, str] = field(default_factory=dict)
+    # failures whose setup steps are settled: the same command has run again since
+    bound: set[int] = field(default_factory=set)
     # empty searches that a later created file or written text may explain
     probes: list[tuple[Finding, Event, str]] = field(default_factory=list)
     # failures of one exact command line since the last change or setup step
@@ -1667,7 +1713,8 @@ class _Detector:
         ``npm test`` in ``web/`` and in ``api/`` of a monorepo are different commands:
         ``npm test (web/)``. At the repo root the key stands alone.
         """
-        name = self.ctx.command_key(key)
+        detached = key.endswith(" -d")  # a setup label: `docker compose up -d`
+        name = self.ctx.command_key(key[:-3] if detached else key) + (" -d" if detached else "")
         if key.split(" ", 1)[0] not in DIRECTORY_TOOLS and command_role(key) is None:
             return name  # `git push`, `curl`, `docker ps`: the same thing wherever it runs
         here = self._where(step, cwd)
@@ -2181,7 +2228,8 @@ class _Detector:
             if by is not None:
                 for findings in state.red_then_ran.values():
                     for finding in findings:
-                        state.ran_after.setdefault(id(finding), []).append(by)
+                        if id(finding) not in state.bound:
+                            state.ran_after.setdefault(id(finding), []).append(by)
         state.red = {}
         # A change ends every "same command, nothing changed" streak.
         state.fail_runs.clear()
@@ -2381,7 +2429,7 @@ class _Detector:
         # Version control records work, it does not make a failing command pass.
         named = step.program not in ("git", "gh", "glab")
         label = copied if copied and self.ctx.command_key is str else None
-        label = label or self._label(step.key, step, cwd)
+        label = label or self._label(setup_label(step), step, cwd)
         self._on_change(certain=False, by=(label, setup) if named else None)
 
     def _judge_shell(self, action: _Action, cmd: ParsedCommand, result: Event, edit: bool) -> None:
@@ -2516,6 +2564,15 @@ class _Detector:
                         finding.detail["works_as"] = unfound + other.group(1)
                     elif launcher:
                         finding.detail["works_as"] = "py"  # the Windows launcher
+                    elif unfound:
+                        # ... or by its path: `./bin/zebractl` for `zebractl`
+                        by_path = re.search(
+                            rf"(?:^|[\s;&|(])((?:\.{{1,2}}/)?(?:[\w.-]+/)+){re.escape(unfound)}(?=\s|$)",
+                            action.call.command or "",
+                        )
+                        if by_path is not None:
+                            shown_name = self.ctx.command_key(unfound)
+                            finding.detail["works_as"] = by_path.group(1) + shown_name
                     # ... or with a variable in front: `PYTHONPATH=src pytest`
                     prefix = _env_prefix(action.call.command or "", self.ctx.command_key is str)
                     unchanged = state.changes_at.get(id(finding)) == state.changes
@@ -2549,12 +2606,23 @@ class _Detector:
                     finding.detail["typo_of"] = shown(key)
                     finding.summary += f"; a mistyped `{shown(key)}`, which then ran"
                 elif is_setup_command(key):
-                    state.setup_after[id(finding)] = shown(key)
+                    if id(finding) not in state.bound:
+                        step_name = shown(setup_label(located) if located else key)
+                        steps = state.setup_after.get(id(finding), "").split(" && ")
+                        steps = [s for s in steps if s and s != step_name] + [step_name]
+                        state.setup_after[id(finding)] = " && ".join(steps)
                     waiting.append((finding, failed_key, left))
                 elif is_replacement(failed_key, key) and finding.detail["variant"] != "ordinary":
                     # Only a command that could not run can be "replaced". A red test
                     # followed by another green test command is just a test going green.
-                    finding.detail["recovered_by"] = shown(key)
+                    better = shown(key)
+                    local = re.search(
+                        rf"(?:^|[\s;&|(])\./{re.escape(key.split()[0])}(?=\s|$)",
+                        action.call.command or "",
+                    )
+                    if local is not None and not better.startswith("<"):
+                        better = "./" + better  # as it must be typed: `./bin/zebractl`
+                    finding.detail["recovered_by"] = better
                     state.replaced.setdefault(failed_key, []).append(finding)
                     self._recover(finding, action)
                 else:  # an unrelated command (git, housekeeping, another job) fixes nothing
@@ -2638,6 +2706,7 @@ class _Detector:
                 ENV_VARIABLE: "an environment variable was not set",
                 ENV_PORT: "the port it needs was already in use",
                 ENV_DISK: "the disk was full",
+                ENV_NETWORK: "a host name could not be resolved",
             }[environment[0]]
         summary = f"`{shown(key)}` failed ({status}; {kind})"
         if not certain:
@@ -2670,12 +2739,26 @@ class _Detector:
             )
             if name == step.program or (typed is not None and step.program == "python"):
                 detail["not_found"] = name
+                detail["not_found_shown"] = self.ctx.command_key(name)
         if not certain:
             detail["ambiguous_step"] = "1"
         if hidden:
             detail["status"] = "hidden"
         if inline:
             detail["inline"] = "1"
+        elif detail["variant"] == "ordinary" and command_role(key) == "test":
+            # Which tests were red: the same one, session after session, is a standing
+            # failure, whatever each session was about.
+            failed: list[tuple[str, str]] = []
+            names = [m.group(1) or m.group(2) for m in FAILED_TEST_RE.finditer(result.output)]
+            for test in dict.fromkeys(names):
+                rel = self.ctx.resolver.resolve(test.split("::", 1)[0], call.cwd) or ""
+                known = bool(rel) and "::" in test and self.ctx.is_known_file(rel)
+                failed.append((test, rel if known else ""))
+            failed = failed[:MAX_FAILED_TESTS]
+            if failed:
+                detail["failed_tests"] = "\n".join(test for test, _ in failed)
+                detail["failed_test_files"] = "\n".join(rel for _, rel in failed)
         if timed_out:
             detail["timeout"] = "1"
             if DEV_SERVER_RE.search(call.command or ""):
@@ -2703,6 +2786,15 @@ class _Detector:
             trip = self._round_trip(action)
             if trip is not None:
                 state.trips[id(finding)] = trip
+        # The command has run again: what was set up before this run belongs to the
+        # failures before it, and what is set up from here on does not.
+        for earlier, earlier_key, _ in state.pending:
+            if earlier_key == key and id(earlier) in state.setup_after:
+                state.bound.add(id(earlier))
+        for table in (state.red, state.red_then_ran):
+            for earlier in table.get(key, ()):
+                if any(setup for _, setup in state.ran_after.get(id(earlier), ())):
+                    state.bound.add(id(earlier))
         state.pending.append((finding, key, RECOVERY_LOOKAHEAD))
         if hook_fixed:
             state.red_then_edited.setdefault(key, []).append(finding)

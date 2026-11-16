@@ -282,6 +282,8 @@ BUILD_DIRS = frozenset({"target", "dist", "build"})
 FLAKY_MIN_SESSIONS = 3
 #: Sessions in which another runner must pass, untouched, after a command went red.
 RUNNER_MIN_SESSIONS = 3
+#: Episodes in which the same test must be red, unresolved, to be a standing failure.
+STANDING_TEST_MIN_SESSIONS = 3
 #: A command the human stops in this many sessions is a row of its own.
 INTERRUPTED_COMMAND_MIN_SESSIONS = 3
 #: The share of an interrupt that goes to the command that was stopped.
@@ -375,6 +377,38 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
         finding.summary = finding.summary.replace(
             "ordinary failure", f"`{other}` then passed, with nothing changed"
         )
+    # The same test red in ``STANDING_TEST_MIN_SESSIONS`` episodes or more, none of which
+    # made it pass: a standing failure. It is no longer "a red test during development".
+    red_tests: dict[tuple[str, str], set[str]] = {}
+    naming = [
+        f
+        for f in findings
+        if f.signal == signals.COMMAND_FAILURE
+        and "failed_tests" in f.detail
+        and f.detail.get("variant") == "ordinary"
+    ]
+    for finding in naming:
+        for key in _command_keys(finding):
+            for test in finding.detail["failed_tests"].split("\n"):
+                red_tests.setdefault((key, test), set()).add(finding.unit)
+    for finding in naming:
+        tests = finding.detail["failed_tests"].split("\n")
+        files = finding.detail.get("failed_test_files", "").split("\n")
+        for test, rel in zip(tests, files, strict=False):
+            if not any(
+                len(red_tests.get((key, test), ())) >= STANDING_TEST_MIN_SESSIONS
+                for key in _command_keys(finding)
+            ):
+                continue
+            finding.detail.setdefault("standing_test", test)
+            finding.weight = 1.0
+            finding.interval = finding.interval or finding.run
+            if rel and all(t.key != rel for t in finding.targets):
+                finding.targets.append(Target(model.FILE, rel))
+        if "standing_test" in finding.detail:
+            finding.summary = finding.summary.replace(
+                "ordinary failure", "a test that is red session after session"
+            )
     dropped: list[Finding] = []
     for finding in pending:
         fix = finding.detail.pop("fixed_by_command")
@@ -473,6 +507,38 @@ def list_transcripts(options: AnalyzeOptions) -> list[Path]:
     return _Analysis(options)._transcript_files()
 
 
+def inspect_sources(options: AnalyzeOptions) -> list[dict[str, Any]]:
+    """What each transcript file ``analyze`` would read held, one entry per file.
+
+    ``path``, ``events`` (what the parser understood, before any filtering by
+    repository or time window), ``skipped_lines``, ``duplicate_lines`` (lines
+    that an earlier file had already contributed: a copy or a re-export of a
+    log adds nothing, and is not "empty") and ``encoding``. A file that could
+    not be read has ``error``.
+    """
+    seen: dict[str, str] = {}
+    report: list[dict[str, Any]] = []
+    for path in list_transcripts(options):
+        entry: dict[str, Any] = {
+            "path": path,
+            "events": 0,
+            "skipped_lines": 0,
+            "duplicate_lines": 0,
+            "encoding": "utf-8",
+        }
+        try:
+            entry["encoding"] = model.text_encoding(path)
+            item = parse_transcript(path, seen)
+        except (OSError, ValueError) as exc:
+            entry["error"] = read_error(exc) if isinstance(exc, OSError) else "not readable"
+        else:
+            entry["events"] = sum(len(s.events) for s in item.streams)
+            entry["skipped_lines"] = item.skipped_lines
+            entry["duplicate_lines"] = item.duplicate_lines
+        report.append(entry)
+    return report
+
+
 def inspect_transcripts(options: AnalyzeOptions) -> list[tuple[Path, int, int]]:
     """``(file, events, skipped_lines)`` for every transcript ``analyze`` would read.
 
@@ -492,10 +558,28 @@ def inspect_transcripts(options: AnalyzeOptions) -> list[tuple[Path, int, int]]:
     return report
 
 
+def _encoding_note(path: Path) -> str:
+    """What to say about the encoding of a file in which no JSON was found."""
+    try:
+        encoding = model.text_encoding(path)
+        with path.open("rb") as handle:
+            binary = b"\x00" in handle.read(4096)
+    except OSError:
+        return ""
+    if encoding != "utf-8":
+        return f" (it was read as {encoding.upper()}, judging by its first bytes)"
+    if binary:
+        return (
+            " (it contains NUL bytes: it is binary, or in an encoding other than UTF-8, "
+            "UTF-16 or UTF-32, which are the ones that are read)"
+        )
+    return ""
+
+
 def _looks_like_jsonl(path: Path) -> bool:
     """True if one of the first lines of ``path`` is a JSON object."""
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
+        with model.open_transcript(path) as handle:
             for _, line in zip(range(JSONL_PROBE_LINES), handle, strict=False):
                 line = line.strip()
                 if not line.startswith("{"):
@@ -938,7 +1022,8 @@ class _Analysis:
                 if path.is_file() and os.access(path, os.R_OK) and not _looks_like_jsonl(path):
                     raise NoTranscriptsError(
                         f"{given} is not a JSONL transcript: none of its first "
-                        f"{JSONL_PROBE_LINES} lines is a JSON object. Pass Claude Code "
+                        f"{JSONL_PROBE_LINES} lines is a JSON object{_encoding_note(path)}. "
+                        "Pass Claude Code "
                         "session files (*.jsonl), directories that contain them, or files in "
                         f"the generic format described in {SCHEMA_URL}"
                     )
@@ -979,10 +1064,12 @@ class _Analysis:
                     "skipped_lines": 0,
                     "skipped_events": 0,
                     "ignored_lines": 0,
+                    "duplicate_lines": 0,
                     "files": 0,
                     "sessions_outside_repo": 0,
                 },
             )
+            entry["duplicate_lines"] += item.duplicate_lines
             entry["skipped_lines"] += item.skipped_lines
             entry["skipped_events"] += self.skipped_events.get(str(item.path), 0)
             entry["ignored_lines"] += item.ignored_lines
@@ -1004,6 +1091,7 @@ class _Analysis:
                     "skipped_lines": 0,
                     "skipped_events": 0,
                     "ignored_lines": 0,
+                    "duplicate_lines": 0,
                     "files": 1,
                     "sessions_outside_repo": 0,
                     "error": reason,

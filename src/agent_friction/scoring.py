@@ -281,7 +281,7 @@ def is_weak(finding: Finding) -> bool:
     """
     if finding.signal == COMMAND_FAILURE:
         detail = finding.detail
-        if "fixed_by_setup" in detail or "recurring_red" in detail:
+        if "fixed_by_setup" in detail or "recurring_red" in detail or "standing_test" in detail:
             # it took a setup step to pass, or it stays red session after session
             return False
         # an ordinary failure, or a mistyped name that the agent then spelled correctly

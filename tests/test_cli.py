@@ -92,9 +92,11 @@ def test_compare(tmp_path: Path) -> None:
     data["hotspots"][0]["events"] = 1
     after = tmp_path / "after.json"
     after.write_text(json.dumps(data), encoding="utf-8")
-    code, out, _ = run("compare", str(before), str(after))
+    code, out, _ = run("compare", "--allow-overlap", str(before), str(after))
     assert code == EXIT_OK and "Improved (1 target)" in out
-    code, out, _ = run("compare", str(after), str(before), "-f", "json", "--fail-on-regression")
+    code, out, _ = run(
+        "compare", "--allow-overlap", str(after), str(before), "-f", "json", "--fail-on-regression"
+    )
     assert code == EXIT_GATE
     assert json.loads(out)["changes"][0]["status"] == "regressed"
 
@@ -110,9 +112,9 @@ def test_compare(tmp_path: Path) -> None:
 def test_compare_rejects_bad_input(tmp_path: Path, content: str, message: str) -> None:
     bad = tmp_path / "bad.json"
     bad.write_text(content, encoding="utf-8")
-    code, _, err = run("compare", str(bad), str(bad))
+    code, _, err = run("compare", "--allow-overlap", str(bad), str(bad))
     assert code == EXIT_ERROR and message in err
-    code, _, err = run("compare", str(tmp_path / "missing.json"), str(bad))
+    code, _, err = run("compare", "--allow-overlap", str(tmp_path / "missing.json"), str(bad))
     assert code == EXIT_ERROR and "no such file" in err
 
 
@@ -185,10 +187,18 @@ def test_compare_low_sample_does_not_trip_gate(tmp_path: Path) -> None:
     data["totals"]["sessions"] = 2
     after = tmp_path / "after.json"
     after.write_text(json.dumps(data), encoding="utf-8")
-    code, _, err = run("compare", str(before), str(after), "--fail-on-regression")
+    code, _, err = run(
+        "compare", "--allow-overlap", str(before), str(after), "--fail-on-regression"
+    )
     assert code == EXIT_OK and "low sample" in err
     code, _, _ = run(
-        "compare", str(before), str(after), "--fail-on-regression", "--min-sessions", "1"
+        "compare",
+        "--allow-overlap",
+        str(before),
+        str(after),
+        "--fail-on-regression",
+        "--min-sessions",
+        "1",
     )
     assert code == EXIT_GATE
 
@@ -196,7 +206,7 @@ def test_compare_low_sample_does_not_trip_gate(tmp_path: Path) -> None:
 def test_compare_rejects_hollow_result(tmp_path: Path) -> None:
     hollow = tmp_path / "hollow.json"
     hollow.write_text('{"schema_version": 1}', encoding="utf-8")
-    code, _, err = run("compare", str(hollow), str(hollow))
+    code, _, err = run("compare", "--allow-overlap", str(hollow), str(hollow))
     assert code == EXIT_ERROR and "not an agent-friction result" in err
 
 
@@ -207,9 +217,12 @@ def test_compare_refuses_different_repos(tmp_path: Path) -> None:
     data["repo"]["name"] = "something-else"
     other = tmp_path / "other.json"
     other.write_text(json.dumps(data), encoding="utf-8")
-    code, _, err = run("compare", str(before), str(other))
+    code, _, err = run("compare", "--allow-overlap", str(before), str(other))
     assert code == EXIT_ERROR and "different repositories" in err
-    assert run("compare", str(before), str(other), "--allow-repo-mismatch")[0] == EXIT_OK
+    assert (
+        run("compare", "--allow-overlap", str(before), str(other), "--allow-repo-mismatch")[0]
+        == EXIT_OK
+    )
 
 
 def test_show_accepts_a_raw_command_line(tmp_path: Path) -> None:
@@ -277,16 +290,16 @@ def test_git_only_scan_with_allow_empty(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_bad_json_inputs_are_clean_errors(tmp_path: Path) -> None:
-    code, _, err = run("compare", str(tmp_path), str(tmp_path))
+    code, _, err = run("compare", "--allow-overlap", str(tmp_path), str(tmp_path))
     assert code == EXIT_ERROR and "is a directory" in err
     good = tmp_path / "r.json"
     run("scan", *INPUT, "-o", str(good))
     utf16 = tmp_path / "ps.json"
     utf16.write_text(good.read_text(encoding="utf-8"), encoding="utf-16")
-    assert run("compare", str(good), str(utf16))[0] == EXIT_OK
+    assert run("compare", "--allow-overlap", str(good), str(utf16))[0] == EXIT_OK
     garbage = tmp_path / "bin.json"
     garbage.write_bytes(b"\x80\x81\x82{")
-    code, _, err = run("compare", str(good), str(garbage))
+    code, _, err = run("compare", "--allow-overlap", str(good), str(garbage))
     assert code == EXIT_ERROR and "Traceback" not in err
 
 
@@ -355,7 +368,7 @@ def test_compare_writes_to_a_file_with_format_from_extension(tmp_path: Path) -> 
     saved = tmp_path / "scan.json"
     assert run("scan", *INPUT, "-o", str(saved))[0] == EXIT_OK
     report = tmp_path / "cmp.md"
-    code, out, _ = run("compare", str(saved), str(saved), "-o", str(report))
+    code, out, _ = run("compare", "--allow-overlap", str(saved), str(saved), "-o", str(report))
     assert code == EXIT_OK and out == ""
     assert report.read_text(encoding="utf-8").startswith("# Friction comparison")
 
@@ -388,7 +401,7 @@ def test_compare_rejects_damaged_entries(tmp_path: Path) -> None:
     data["commands"] = [1, 2]
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps(data), encoding="utf-8")
-    code, _, err = run("compare", str(saved), str(bad))
+    code, _, err = run("compare", "--allow-overlap", str(saved), str(bad))
     assert code == EXIT_ERROR and "not an agent-friction result" in err
 
 
@@ -463,7 +476,7 @@ def test_more_than_fifty_hotspots_are_all_kept(tmp_path: Path) -> None:
     assert code == EXIT_OK and "m59.py" in out
     saved = tmp_path / "a.json"
     run("scan", *args, "-o", str(saved))
-    code, out, _ = run("compare", str(saved), str(saved), "-f", "json")
+    code, out, _ = run("compare", "--allow-overlap", str(saved), str(saved), "-f", "json")
     assert code == EXIT_OK
     assert len(json.loads(out)["changes"]) == 60
 
@@ -490,7 +503,7 @@ def test_missing_transcript_path_is_an_error_even_with_allow_empty(tmp_path: Pat
 def test_compare_json_is_a_versioned_document(tmp_path: Path) -> None:
     saved = tmp_path / "a.json"
     run("scan", *INPUT, "-o", str(saved))
-    code, out, _ = run("compare", str(saved), str(saved), "-f", "json")
+    code, out, _ = run("compare", "--allow-overlap", str(saved), str(saved), "-f", "json")
     doc = json.loads(out)
     assert code == EXIT_OK and doc["schema_version"] == 1
     assert doc["tool"]["version"] == __version__ and doc["before"]["sessions"] == 6
@@ -500,3 +513,37 @@ def test_compare_json_is_a_versioned_document(tmp_path: Path) -> None:
 def test_show_with_an_empty_target_is_a_usage_error() -> None:
     code, _, err = run("show", "  ", "--repo", *INPUT)
     assert code == EXIT_USAGE and "needs a target" in err
+
+
+def _windowed(tmp_path: Path, name: str, first: str, last: str) -> Path:
+    saved = tmp_path / "base.json"
+    if not saved.exists():
+        run("scan", *INPUT, "-o", str(saved))
+    data = json.loads(saved.read_text(encoding="utf-8"))
+    data["window"].update(first_event=first, last_event=last, start=first, end=last)
+    out = tmp_path / name
+    out.write_text(json.dumps(data), encoding="utf-8")
+    return out
+
+
+def test_compare_refuses_overlapping_or_swapped_windows(tmp_path: Path) -> None:
+    before = _windowed(tmp_path, "b.json", "2026-10-01T00:00:00Z", "2026-10-31T12:00:00Z")
+    overlapping = _windowed(tmp_path, "o.json", "2026-10-01T00:00:00Z", "2026-11-30T00:00:00Z")
+    later = _windowed(tmp_path, "l.json", "2026-11-01T00:00:00Z", "2026-11-30T00:00:00Z")
+    code, _, err = run("compare", str(before), str(overlapping))
+    assert code == EXIT_ERROR and "overlap" in err and "--since 2026-10-31T12:00:01Z" in err
+    code, _, err = run("compare", str(later), str(before), "--fail-on-regression")
+    assert code == EXIT_ERROR and "swapped" in err
+    assert run("compare", str(before), str(later))[0] == EXIT_OK
+    assert run("compare", "--allow-overlap", str(before), str(overlapping))[0] == EXIT_OK
+
+
+def test_sources_names_copies_and_encodings(tmp_path: Path) -> None:
+    line = {"session": "s", "ts": "2026-11-05T10:00:00Z", "kind": "user_message", "text": "go"}
+    (tmp_path / "a.jsonl").write_text(json.dumps(line) + "\n", encoding="utf-8")
+    (tmp_path / "b.jsonl").write_text(json.dumps(line) + "\n", encoding="utf-8")
+    other = {**line, "session": "t"}
+    (tmp_path / "c.jsonl").write_text(json.dumps(other) + "\n", encoding="utf-16")
+    code, out, _ = run("sources", str(tmp_path), "-t", str(tmp_path))
+    assert code == EXIT_OK
+    assert "repeat an earlier file" in out and "read as utf-16" in out

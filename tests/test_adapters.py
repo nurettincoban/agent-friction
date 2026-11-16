@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from agent_friction import model
 from agent_friction.adapters import claude_code, common, detect_format, generic, parse_transcript
 from agent_friction.adapters.common import classify_error, parse_ts, rejection_reason
@@ -162,7 +164,7 @@ def test_claude_binary_garbage_file(tmp_path: Path) -> None:
     path = tmp_path / "garbage.jsonl"
     path.write_bytes(b"\xff\xfe\x00\x01not json\n\x80\x81\n")
     parsed = parse_transcript(path)
-    assert parsed.streams == [] and parsed.skipped_lines == 2
+    assert parsed.streams == [] and parsed.skipped_lines >= 1  # FF FE reads as UTF-16
 
 
 def test_claude_sidechains_and_subagent_files(tmp_path: Path) -> None:
@@ -508,3 +510,60 @@ def test_generic_background_commands(tmp_path: Path) -> None:
         ("make watch", True, False),
         (None, False, False),
     ]
+
+
+# ---- round 20: encodings -----------------------------------------------------------------
+
+GENERIC_ROWS = [
+    {
+        "session": "g",
+        "kind": "tool_call",
+        "id": 1,
+        "op": "edit",
+        "path": "src/a.py",
+        "cwd": "/repo",
+    },
+    {"session": "g", "kind": "tool_result", "id": 1, "error": "edit_not_found"},
+    {"session": "g", "kind": "user_message", "text": "naïve café ✓"},
+]
+
+
+@pytest.mark.parametrize(
+    "encoding", ["utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-32"]
+)
+def test_transcripts_are_read_in_any_unicode_encoding(tmp_path: Path, encoding: str) -> None:
+    from agent_friction.model import text_encoding
+
+    text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in GENERIC_ROWS)
+    path = tmp_path / "g.jsonl"
+    path.write_bytes(text.encode(encoding))
+    assert text_encoding(path).replace("-sig", "") in (encoding.replace("-sig", ""), "utf-8")
+    assert detect_format(path) == "generic"
+    parsed = parse_transcript(path)
+    (stream,) = parsed.streams
+    assert parsed.skipped_lines == 0 and [e.line for e in stream.events] == [1, 2, 3]
+    assert stream.events[-1].text == "naïve café ✓"
+
+
+def test_a_claude_code_file_with_a_bom_keeps_its_first_line(tmp_path: Path) -> None:
+    s = Session().user("go").edit("/repo/src/a.py")
+    path = tmp_path / "s1.jsonl"
+    path.write_bytes(b"\xef\xbb\xbf" + s.text().encode())
+    parsed = parse_transcript(path)
+    assert parsed.skipped_lines == 0 and len(parsed.streams[0].events) == 3
+
+
+def test_lines_another_file_already_gave_are_counted(tmp_path: Path) -> None:
+    text = "".join(json.dumps(row) + "\n" for row in GENERIC_ROWS)
+    first, copy = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    first.write_text(text)
+    copy.write_text(text)
+    seen: dict[str, str] = {}
+    assert parse_transcript(first, seen).duplicate_lines == 0
+    again = parse_transcript(copy, seen)
+    assert again.duplicate_lines == 3 and again.streams == []
+    s = Session().user("go").edit("/repo/src/a.py")
+    one, two = s.save(tmp_path / "x"), s.save(tmp_path / "y")
+    seen = {}
+    assert parse_transcript(one, seen).duplicate_lines == 0
+    assert parse_transcript(two, seen).duplicate_lines == 3

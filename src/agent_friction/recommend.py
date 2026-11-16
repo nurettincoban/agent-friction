@@ -189,9 +189,12 @@ Already = tuple[Sequence[str], str, str]
 AFFIRMED_RULES = frozenset({"use-the-working-command", "document-the-setup-step"})
 
 
+def _and(items: Sequence[str]) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
 def _refs(mentions: Sequence[Mention]) -> str:
-    cited = [code(str(m)) for m in mentions]
-    return cited[0] if len(cited) == 1 else ", ".join(cited[:-1]) + " and " + cited[-1]
+    return _and([code(str(m)) for m in mentions])
 
 
 class _Rules:
@@ -394,7 +397,30 @@ class _Rules:
 
     # ---- file rules ------------------------------------------------------------------
 
+    def standing_test(self, when: str) -> bool:
+        """The same test is red in session after session and nothing makes it pass."""
+        known = [f for f in self.get(signals.COMMAND_FAILURE) if f.detail.get("standing_test")]
+        if not known:
+            return False
+        tests = _top([f.detail["standing_test"] for f in known], 3)
+        if self.quote is not None:
+            named = _and([code(self.quote(test, QUOTE_CHARS)) for test, _ in tests])
+            title = f"{code(self.quote(tests[0][0], QUOTE_CHARS))} is red session after session"
+        else:
+            named = "The same test" if len(tests) == 1 else "The same tests"
+            title = "The same test is red session after session"
+        self.add(
+            "say-if-it-is-known-broken",
+            title,
+            f"{named} failed {when} ({_in_sessions(known)}), and nothing in those sessions "
+            "made it pass. Fix it, or mark it as a known failure (skip, xfail) and say so in "
+            "AGENTS.md, so that agents neither chase it nor learn to ignore a red run.",
+            [signals.COMMAND_FAILURE],
+        )
+        return True
+
     def file(self, facts: FileFacts | None) -> None:
+        self.standing_test("in this file")
         misses = self.get(signals.EDIT_MISS)
         ambiguous = self.get(signals.EDIT_MISS, "ambiguous")
         stale = self.get(signals.STALE_EDIT)
@@ -610,6 +636,14 @@ class _Rules:
                 "use, usually by a server left running earlier. Say in AGENTS.md how to check "
                 "for and stop it, or let the command pick a free port."
             )
+        elif kind == signals.ENV_NETWORK:
+            title = f"Say what {code(key)} can reach from where agents work"
+            detail = (
+                f"{code(key)} failed {often} because a host name could not be resolved: "
+                "there is no network where agents run, or that host is not allowed. Say in "
+                "AGENTS.md what is reachable and what to do instead (a mirror, a cached "
+                "copy, skipping the step), or allow the host."
+            )
         elif kind == signals.ENV_DISK:
             title = f"Free disk space where agents run {code(key)}"
             detail = (
@@ -673,7 +707,9 @@ class _Rules:
                 [signals.COMMAND_FAILURE],
             )
         fixes = _top([f.detail.get("recovered_by", "") for f in failures], 1)
-        setups = _top([f.detail.get("fixed_by_setup", "") for f in failures], 1)
+        # every step that helped twice or more, in the order agents ran them
+        ran = [s for f in failures for s in f.detail.get("fixed_by_setup", "").split(" && ") if s]
+        setups = [(s, ran.count(s)) for s in dict.fromkeys(ran) if ran.count(s) >= MIN_EVENTS]
         names = _top([f.detail.get("works_as", "") for f in invocation], 1)
         places = _top([f.detail.get("works_in", "") for f in invocation], 1)
         forms = _top([f.detail.get("works_with", "") for f in invocation], 1)
@@ -681,7 +717,10 @@ class _Rules:
         if names and names[0][1] >= MIN_EVENTS:
             # `python: command not found`, then the same line with `python3`
             name, count = names[0]
-            old = _top([f.detail.get("not_found", "") for f in invocation], 1)[0][0]
+            shown = [
+                f.detail.get("not_found_shown") or f.detail.get("not_found", "") for f in invocation
+            ]
+            old = _top(shown, 1)[0][0]
             self.add(
                 "use-the-working-command",
                 f"Tell agents to use {code(name)}",
@@ -732,25 +771,35 @@ class _Rules:
                 self._use_instead(fix, key, failures),
                 replacement=fix,
             )
-        elif setups and setups[0][1] >= MIN_EVENTS:
+        elif setups:
             setup, count = setups[0]
+            steps = [name for name, _ in setups]
+            if len(setups) == 1:
+                helped = f"{_times(count)} it worked after the agent ran {code(setup)}"
+                line = f"run {code(setup)} before {code(key)}"
+            else:
+                each = [f"{code(name)} ({_times(n)})" for name, n in setups]
+                helped = "it worked after the agent ran " + _and(each)
+                line = f"run {', then '.join(code(name) for name in steps)} before {code(key)}"
+            named = _and([code(name) for name in steps])
             self.add(
                 "document-the-setup-step",
                 f"Document the setup {code(key)} needs",
-                f"{code(key)} failed {_in_sessions(failures)}; {_times(count)} it worked after "
-                f'the agent ran {code(setup)}. Say so in AGENTS.md ("run {code(setup)} before '
-                f'{code(key)}"), or make the environment ready before the agent starts.',
+                f"{code(key)} failed {_in_sessions(failures)}; {helped}. "
+                f'Say so in AGENTS.md ("{line}"), or make the environment ready before the '
+                "agent starts.",
                 [signals.COMMAND_FAILURE],
                 (
-                    [setup],
-                    f"{code(setup)} is documented, yet agents start without it",
-                    f"names {code(setup)}; {code(key)} still failed {_in_sessions(failures)} "
+                    steps,
+                    f"{named} {'is' if len(steps) == 1 else 'are'} documented, yet agents "
+                    "start without it",
+                    f"names {named}; {code(key)} still failed {_in_sessions(failures)} "
                     "until the agent ran it. Another line will not help: make the environment "
                     "ready before the agent starts (a setup script or a session-start hook), "
                     f"or have {code(key)} run the step itself. (If that line is newer than "
                     "these sessions, give it time first.)",
                 ),
-                setup=setup,
+                setup=" && ".join(steps),
             )
         elif len(environment) >= MIN_EVENTS:
             self.environment(key, environment)
@@ -788,7 +837,9 @@ class _Rules:
                 [signals.RETRY_LOOP],
             )
         standing = [f for f in failures if f.detail.get("recurring_red")]
-        if standing and not self.get(signals.NO_CONVERGENCE):
+        if self.standing_test(f"when agents ran {code(key)}"):
+            pass  # the test is named: that says more than "keeps ending red"
+        elif standing and not self.get(signals.NO_CONVERGENCE):
             self.add(
                 "say-if-it-is-known-broken",
                 f"{code(key)} keeps ending red",

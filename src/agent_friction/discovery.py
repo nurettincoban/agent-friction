@@ -18,7 +18,7 @@ from itertools import islice
 from pathlib import Path
 
 from agent_friction.attribution import PathResolver
-from agent_friction.model import load_json_line
+from agent_friction.model import load_json_line, open_transcript
 
 _ENCODE_RE = re.compile(r"[^A-Za-z0-9]")
 #: Lines read from a transcript when checking which cwd a project dir belongs to.
@@ -88,7 +88,7 @@ def repo_roots(repo: Path, include_worktrees: bool = True) -> list[Path]:
 def _file_cwd(path: Path) -> str | None:
     """First ``cwd`` recorded near the top of a transcript, if any."""
     try:
-        with path.open(encoding="utf-8", errors="replace") as handle:
+        with open_transcript(path) as handle:
             for raw in islice(handle, CWD_PROBE_LINES):
                 try:
                     obj = load_json_line(raw)

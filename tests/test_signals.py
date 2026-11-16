@@ -317,7 +317,7 @@ def test_linters_and_exit_code_checks_are_ordinary_failures(tmp_path: Path) -> N
         ('npm error Missing script: "tset"', 1),
         ("fatal: not a git repository (or any of the parent directories): .git", 128),
         ("error: could not find `Cargo.toml` in `/r` or any parent directory", 101),
-        ("curl: (6) Could not resolve host: registry.example", 6),
+        ("curl: (3) URL using bad/illegal format or missing URL", 3),
     ],
 )
 def test_invocation_error_shapes(output: str, code: int) -> None:
@@ -596,6 +596,12 @@ def test_interrupt_negative_cases(tmp_path: Path) -> None:
 
 
 STRONG_CORRECTIONS = [
+    "Don't use requests here, use httpx instead",
+    "Please don't use mocks here; use the real db instead",
+    "we don't use moment in this codebase, use date-fns",
+    "don't use any here, use unknown",
+    "again: never commit directly to main",
+    "Never edit the generated client by hand",
     "No, that's the wrong file",
     "no. use the other one",
     "Nope, try again",
@@ -652,13 +658,11 @@ STRONG_CORRECTIONS = [
 ]
 
 PROBABLE_CORRECTIONS = [
-    "Don't use requests here, use httpx instead",
     "Don't call legacy_charge() here, it's deprecated. Use PaymentClient.charge() instead.",
     "Actually, use the factory instead",
     "the result is wrong, it shouldn't include drafts",
     "that helper is deprecated, don't import it",
     "you used the old client again, that's a mistake",
-    "Please don't use mocks here; use the real db instead",
 ]
 
 BENIGN_FOLLOW_UPS = [
@@ -2534,9 +2538,9 @@ PG_DOWN = (
 )
 PLAYWRIGHT = "Error: browserType.launch: Executable doesn't exist at /root/.cache/chrome"
 SETUP_FIXES = [
-    ("pytest tests/test_a.py", PG_DOWN, "docker compose up -d db", "docker compose up"),
+    ("pytest tests/test_a.py", PG_DOWN, "docker compose up -d db", "docker compose up -d"),
     ("npm run build", "Error: boom", "cp .env.example .env", "cp .env.example .env"),
-    ("npm run e2e", PLAYWRIGHT, "npx playwright install", "npx playwright"),
+    ("npm run e2e", PLAYWRIGHT, "npx playwright install chromium", "npx playwright install"),
     ("npm run e2e", PLAYWRIGHT, "pip install -r requirements.txt", "pip install"),
     ("pytest", "1 failed in 1s", "make bootstrap", "make bootstrap"),
 ]
@@ -3448,3 +3452,72 @@ def test_the_matched_label_names_what_was_said(tmp_path: Path) -> None:
     assert fix.summary.startswith(
         'The user corrected the agent (confidence 1; matched "that\'s not what I …", '
     )
+
+
+# ---- round 20 ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "label"),
+    [
+        ("we don't use moment in this codebase, use date-fns", "we don't use …"),
+        ("don't use any here, use unknown", "don't use X, use Y"),
+        ("again: never commit directly to main", "never …"),
+        ("Again, we never use default exports", "we don't use …"),
+        ("again: the header goes on top", "again: …"),
+    ],
+)
+def test_a_rule_stated_in_reply_is_a_correction_once_the_agent_goes_back(
+    tmp_path: Path, text: str, label: str
+) -> None:
+    confidence, labels = correction_confidence(text)
+    assert confidence == signals.CORRECTION_STRONG and labels[0] == label
+    s = Session().user("add the feature").edit(A).say("Done.").user(text).edit(A, "p", "q")
+    (fix,) = detect(s, tmp_path)
+    assert fix.signal == signals.USER_CORRECTION and keys(fix) == [("file", "src/a.py")]
+    # the agent moves on to something else: wording alone is not a correction
+    s = Session().user("add the feature").edit(A).say("Done.").user(text).edit(B)
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.PROBABLE_CORRECTION]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "never mind, it works now",
+        "I have never seen this error before, can you explain it?",
+        "Again, thanks for the help!",
+        "we don't have a staging environment yet, can you add one?",
+        "don't forget to update the changelog",
+        "use date-fns for the new picker",
+        "Can we never show the banner to admins?",
+        "once again, great work",
+        "Again, can you also add a --verbose flag?",
+    ],
+)
+def test_rule_cues_leave_ordinary_follow_ups_alone(text: str) -> None:
+    assert correction_confidence(text) == (0.0, []), text
+
+
+def test_network_and_path_forms_of_a_missing_program(tmp_path: Path) -> None:
+    for output in (
+        "curl: (6) Could not resolve host: registry.example",
+        "wget: unable to resolve host address ‘registry.example’",
+    ):
+        assert not signals.is_invocation_error(output, 6)
+        assert signals.environment_error(output) == (signals.ENV_NETWORK, "")
+    s = Session().user("go")
+    s.bash("zebractl status", "bash: zebractl: command not found", exit_code=127)
+    s.bash("./bin/zebractl status", "ok")
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["works_as"] == "./bin/zebractl"
+
+
+def test_the_tests_a_red_run_names_are_kept(tmp_path: Path) -> None:
+    red = "FAILED tests/test_legacy.py::test_old - AssertionError\n1 failed, 40 passed in 2.0s"
+    s = Session().user("go").bash("pytest", red, exit_code=1)
+    (failure,) = detect(s, tmp_path, known=("tests/test_legacy.py",))
+    assert failure.detail["failed_tests"] == "tests/test_legacy.py::test_old"
+    assert failure.detail["failed_test_files"] == "tests/test_legacy.py"
+    go = Session().user("go").bash("go test ./...", "--- FAIL: TestOld (0.00s)\nFAIL", exit_code=1)
+    (failure,) = detect(go, tmp_path)
+    assert failure.detail["failed_tests"] == "TestOld" and failure.detail["failed_test_files"] == ""

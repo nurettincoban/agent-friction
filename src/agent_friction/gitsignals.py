@@ -21,6 +21,14 @@ from agent_friction.model import Finding, Target
 from agent_friction.signals import HUMAN_REWORK
 
 DEFAULT_REWORK_WINDOW_DAYS = 14
+#: A human commit whose subject announces new work ("feat: ...", "add ...", "implement
+#: ..."), and how soon after the agent's commit it must come to count as rework at all.
+FEATURE_SUBJECT_RE = re.compile(
+    r"^\s*(?:feat(?:ure)?(?:\([^)]*\))?!?:|(?:add|adds|added|adding|implement\w*|introduc\w+"
+    r"|support|new)\b)",
+    re.I,
+)
+FEATURE_REWORK_WINDOW = timedelta(days=2)
 DEFAULT_MAX_COMMITS = 5000
 GIT_TIMEOUT_SECONDS = 60
 
@@ -376,6 +384,12 @@ def find_rework(
             overlap = reworked_lines(agent_new, human_old)
         by_subject = bool(FIX_SUBJECT_RE.search(commit.subject))
         if not overlap and not by_subject:
+            continue
+        new_work = not by_subject and FEATURE_SUBJECT_RE.search(commit.subject) is not None
+        if new_work and commit.date - previous.date > FEATURE_REWORK_WINDOW:
+            # "feat: add pagination" a week later, touching lines the agent wrote, is the
+            # project moving on. A commit that announces new work counts only if it
+            # follows the agent's commit closely.
             continue
         added, deleted = commit.files[path]
         gap = commit.date - previous.date

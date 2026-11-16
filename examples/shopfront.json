@@ -993,6 +993,7 @@
   ],
   "sources": [
     {
+      "duplicate_lines": 0,
       "files": 6,
       "ignored_lines": 10,
       "kind": "claude-code",
@@ -1003,6 +1004,7 @@
       "skipped_lines": 0
     },
     {
+      "duplicate_lines": 0,
       "files": 1,
       "ignored_lines": 0,
       "kind": "generic",
