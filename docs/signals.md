@@ -128,9 +128,12 @@ corroborated: ...").
     works"; "almost, but ..." and "close, but ..." are not cues: they usually
     introduce one more request);
   - "wrong." / "incorrect." followed by more text; "stop" followed by an
-    instruction or by what to stop ("stop. use the other client", "stop
-    editing the generated file"; not "Stop. Hammer time", "stop the server",
-    "stop. I need to go to lunch");
+    instruction or by something an agent does ("stop. use the other client",
+    "stop editing the generated file", "stop guessing": a fixed list of verbs
+    such as editing, changing, adding, removing, running, creating, using,
+    committing, guessing; not "Stop. Hammer time", "stop the server", "stop.
+    I need to go to lunch", and not "Stop showing the banner after the user
+    dismisses it", which says what the product should stop doing);
   - "that's / this is / it was wrong | incorrect | broken" as a complete
     statement, or "... not right | not correct | not working | not how";
   - "that / this / it didn't | doesn't work | help", or a bare "doesn't
@@ -236,6 +239,14 @@ suite pins them against a corpus of 50+ corrections and 80+ benign prompts
 feature requests that contain "undo" or "wrong"; `tests/test_signals.py`).
 
 **Why it is friction:** human attention is the scarcest resource in the loop.
+
+**What the evidence says:** the summary reads "The user corrected the agent
+(confidence 1; matched "that's not what I …"; ...)" or, for a probable
+correction, "Wording that could be a correction (...)". The `matched` labels
+come from a fixed vocabulary that names the kind of phrase ("that's wrong",
+"that's not right", "that's not what I …", "wrong.", "stop.", "revert that",
+"roll it back", "still failing", "failing again", "you broke/forgot/…", ...),
+never the human's own words: the summary is also shown without excerpts.
 
 **Attribution:** files the agent touched in the preceding turn that the
 message names (by path, or by bare file name if unambiguous). If it names
@@ -369,7 +380,13 @@ between, the agent was waiting for something outside the session: `gh pr
 checks` until CI is done, `curl -sf localhost:8000/health` until a server is
 up. The loop and its failures are dropped. (For a test command only the loop
 is dropped: nobody polls a test suite, and its red runs are kept as possible
-flakiness, see `command-failure`.) Looking around while waiting (`cat
+flakiness, see `command-failure`.) A leading `sleep N &&` or `sleep N;` is
+not part of the line: `sleep 3 && curl ...` is `curl ...` again. For a
+connection probe (`curl`, `wget`, `nc`, `http`, `pg_isready`, `wait-on`) that
+could not reach its server (see environment failures: connection refused,
+curl's exit codes 7, 28, 52 and 56), **one** such failure is enough: `curl
+localhost:3000/health` refused right after `npm run dev` was started, then
+answered, is a server starting, not friction. Looking around while waiting (`cat
 server.log`, `git status`) keeps it a wait. A loop that never passes, or that
 passes only after a change or a command that may have changed something,
 stays: then something was done about it.
@@ -480,6 +497,11 @@ The reason, if the human typed one, is kept as the excerpt.
 (`ExitPlanMode`, `AskUserQuestion`, `ask_followup_question` and their like in
 other harnesses; `QUESTION_TOOL_RE`). "Not yet, look at B first" is an answer,
 not a veto of an action. These are in no total.
+
+**Time:** the time between the call and its result is a human reading a
+permission prompt, and is never counted, however long it took. What is
+claimed is the time from the human's answer to the next thing in the
+transcript (at most the usual cap); nothing if nothing follows.
 
 **Attribution:** the file the tool targeted, or the normalized shell command.
 For a chain of commands it is the step the human most plausibly objected to,
@@ -717,6 +739,16 @@ successfully once before being removed (read as debugging).
   error message (`<tool_use_error>` without an exit code: "Cancelled: parallel
   tool call ... errored", "InputValidationError: ...") is dropped. "Blocked:
   ..." is a [`permission-denied`](#permission-denied--permission-denied).
+- *"command not found" in every shell:* `bash: x: command not found`, `zsh:
+  command not found: x`, cmd.exe's `'x' is not recognized as an internal or
+  external command` and PowerShell's `The term 'x' is not recognized as the
+  name of a cmdlet, function, script file, or operable program`
+  (`CommandNotFoundException`) are the same setup/invocation error and
+  record the program (`not_found`). If the same command then runs under a
+  versioned name (`python3` for `python`) or, on Windows, with the launcher
+  (`py -m pytest` for `python -m pytest`; `py` and `python` share a command
+  key), that name is recorded as `works_as` and the advice is "use `py`, not
+  `python`".
 - *"command not found" names its program:* if the shell says which program
   it could not find and that program is a step or pipeline stage of the line
   (`cat x | jqq . | sort`), the event is keyed to that stage.
@@ -801,7 +833,12 @@ successfully once before being removed (read as debugging).
   `npm test`, `make test`, ...: role "test") that is followed by a green run
   of the same command with **nothing changed in between** (no edit, no
   command that changes files, no setup step, no other spelling of the
-  command) is at first an ordinary failure like any other. When that happens
+  command) is at first an ordinary failure like any other. "The same
+  command" is the same command line (whitespace, leading variables and a
+  leading `sleep` aside): `pytest tests/test_cart.py` passing after a red
+  `pytest`, or `npm test -- src/cart.test.js` after `npm test`, is a narrower
+  selection that leaves the failing test out. It says nothing about
+  flakiness, and the red run stays an ordinary failure. When that happens
   in 3 or more episodes of work (`FLAKY_MIN_SESSIONS`), it is no longer
   chance: those failures become variant `flaky`, count fully (weight 1.0),
   claim their run time, are attributed to the command alone, and the command
@@ -919,6 +956,28 @@ successfully once before being removed (read as debugging).
   what fixed it, and the failure is dropped.
   *False positives:* a flaky test that happens to pass after an unrelated
   `npm install`; one event at full weight in that session.
+- *The wrong runner:* an ordinary failure followed, with nothing changed in
+  between, by a green run of **another command for the same job** (`pnpm
+  test` after a red `yarn test`, `make test` after `go test ./...`), where
+  the failing command does not work later in the session, is at first
+  ordinary too. When the same pair recurs in 3 or more episodes of work
+  (`RUNNER_MIN_SESSIONS`), the failing command is the wrong one for this
+  repository: those failures get `recovered_by`, count in full, and lead to
+  `use-the-working-command`. An aggregate target (`make check`) passing is
+  not a runner for the job.
+- *A flag that made it work:* a setup/invocation failure followed, with no
+  file changed, by the same command line plus up to three options (`npm
+  install --legacy-peer-deps` after `npm install` failed with `ERESOLVE`) is
+  recorded with `works_with` naming the full form, like a variable in front.
+  Not without excerpts: options are arguments, and no argument survives
+  there.
+- *A test file that is not there:* `pytest tests/test_new_feature.py` failing
+  with `file or directory not found` for a path given on the command line,
+  where the file is not known to exist and is not created afterwards, is
+  recorded as a [`path-miss`](#path-miss--path-miss) on that path ("`pytest`
+  was pointed at tests/test_new_feature.py, which does not exist"), not as a
+  failure of the command: the agent guessed a path, and nothing is wrong
+  with how `pytest` is run.
 - *Test-first development is red, fix, green too:* a setup/invocation error
   that names what is missing (`No module named 'app.newfeat'`, `can't open
   file 'scripts/run.py'`, `file or directory not found: tests/test_x.py`,
@@ -1000,7 +1059,8 @@ mention); setup errors are not, because the files are not the cause.
 
 **What happened next** is recorded for recommendations, conservatively:
 `recovered_by` only for a *setup/invocation* failure (a command that ran and
-reported red was not "replaced" by the next green one), and only if a command
+reported red was not "replaced" by the next green one, unless the same pair
+recurs untouched in 3 or more sessions: the wrong runner, above), and only if a command
 *doing the same job* then succeeded (same
 role: test, build, lint, type-check or format; or a wrapper of the same tool,
 such as `uv run pytest` or `make test` for `pytest`) and the failing command
@@ -1123,7 +1183,8 @@ mostly agent sloppiness and is recorded with a separate variant.
 > read of a missing file that the agent then creates in the same session is
 > not recorded.
 
-**What:** a read or edit of a path that does not exist. A read of a missing
+**What:** a read or edit of a path that does not exist, or a test command
+pointed at a test file that does not exist (see `command-failure`). A read of a missing
 file that the agent then creates with a write in the same session (checking
 whether `CHANGELOG.md` exists before adding it) is not recorded.
 

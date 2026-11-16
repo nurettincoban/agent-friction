@@ -369,6 +369,7 @@ INVOCATION_ERROR_RE = re.compile(
     r"(?:[\w./-]+: )?(?:line \d+: |\d+: )?[^\s:]+: (?:command )?not found"
     r"|(?:zsh: )?command not found(?:: \S+)?"
     r"|.* is not recognized as an internal or external command.*"
+    r"|.* is not recognized as (?:the|a) name of a cmdlet.*"
     r"|(?:[\w./-]+: )?(?:line \d+: )?[^\s:]+: (?:No such file or directory|Permission denied)"
     r"|.*executable file not found in \$PATH.*"
     # the interpreter could not start the program
@@ -401,7 +402,7 @@ INVOCATION_ERROR_RE = re.compile(
     # dependencies could not be installed or built
     r"|" + _INSTALL_SHAPES +
     # the network was not there
-    r"|curl: \(\d+\) .*"
+    r"|curl: \((?!(?:7|28|52|56)\))\d+\) .*"
     r")$",
     re.M,
 )
@@ -572,6 +573,22 @@ def _activation(cmd: ParsedCommand, failed: str) -> str:
         mentioned = "activate" if "activate" in text else text
         return "" if mentioned in failed else text
     return ""
+
+
+def _added_flags(failed: str, passed: str) -> str:
+    """The options ``passed`` has and ``failed`` lacks, if that is all that differs."""
+    before, after = normalize_argv(failed).split(), normalize_argv(passed).split()
+    if len(after) <= len(before) or any(ch in passed for ch in "|;&<>"):
+        return ""
+    rest = list(after)
+    for word in before:
+        if word not in rest:
+            return ""
+        rest.remove(word)
+    plain = re.compile(r"--?[A-Za-z][\w-]*(?:=[\w./:@-]{1,40})?")
+    if not rest or len(rest) > 3 or not all(plain.fullmatch(word) for word in rest):
+        return ""
+    return " ".join(rest)
 
 
 def _up_to_verdict(step: Step | None, output: str) -> str:
@@ -823,9 +840,14 @@ _SERVICE_DOWN_RE = re.compile(
     r"Cannot connect to the Docker daemon|Connection refused|ECONNREFUSED"
     r"|could not connect to server|connection to server\b.{0,120}\bfailed"
     r"|Is the server running|Can't connect to (?:local )?(?:MySQL )?server"
-    r"|No connection could be made|server closed the connection unexpectedly",
+    r"|No connection could be made|server closed the connection unexpectedly"
+    # curl could not connect (7), timed out (28), got no reply (52) or lost the connection (56)
+    r"|curl: \((?:7|28|52|56)\) ",
     re.I,
 )
+#: Programs an agent asks "is it up yet?" with. A refused connection that the same line
+#: gets through a moment later was a server still starting, not friction.
+_PROBE_PROGRAMS = frozenset({"curl", "wget", "http", "https", "nc", "pg_isready", "wait-on"})
 _AUTH_RE = re.compile(
     r"credentials (?:have |are )?expired|expired ?token|token (?:has |is )?expired"
     r"|Unable to locate credentials|You must be logged in|not logged in(?:to)?\b"
@@ -961,9 +983,23 @@ DEV_SERVER_RE = re.compile(
     r")"
 )
 #: "bash: pnpm: command not found" and its variants: the program a shell could not find.
+#: Also cmd.exe ("'x' is not recognized as an internal or external command") and
+#: PowerShell ("The term 'x' is not recognized as the name of a cmdlet, function, ...").
 _NOT_FOUND_PROGRAM_RE = re.compile(
-    r"(?:^|: )([^\s:]+): (?:command )?not found\s*$|command not found: (\S+)\s*$", re.M
+    r"(?:^|: )([^\s:]+): (?:command )?not found\s*$|command not found: (\S+)\s*$"
+    r"|'([^'\n]+)' is not recognized as an internal or external command"
+    r"|The term '([^'\n]+)' is not recognized as (?:the|a) name of a cmdlet",
+    re.M,
 )
+
+
+def _unfound_program(output: str) -> str:
+    """The program a shell said it could not find, by its base name, or ``""``."""
+    match = _NOT_FOUND_PROGRAM_RE.search(output)
+    if match is None:
+        return ""
+    name = next(g for g in match.groups() if g).replace("\\", "/").rsplit("/", 1)[-1]
+    return re.sub(r"\.(?:exe|cmd|bat|ps1)$", "", name, flags=re.I)
 
 
 #: Praise, thanks and dismissals. A correction phrase *followed* by one of these is not a
@@ -1034,6 +1070,16 @@ _THING = (
     r"file|branch|directory|dir|folder|function|module|place|repo|path|approach|way|one|test"
     r"|package|version|line|class|method|command|thing|part|section|variable|field|column"
     r"|table|endpoint|component|config|setting|key|value|import|test file|page"
+)
+#: What an agent can be told to stop doing. Other gerunds after "stop" describe what the
+#: product should stop doing, which is a feature request.
+_AGENT_DOING = (
+    r"doing|editing|changing|adding|removing|deleting|touching|running|creating|writing"
+    r"|rewriting|modifying|refactoring|guessing|making|trying|using|installing|committing"
+    r"|pushing|asking|apologi[sz]ing|reverting|renaming|ignoring|skipping|mocking|importing"
+    r"|moving|putting|generating|overwriting|breaking|messing|going|assuming|inventing"
+    r"|hallucinating|repeating|reading|searching|looping|wasting|overthinking|overengineering"
+    r"|over-engineering|fiddling|tweaking|formatting|reformatting|commenting|working"
 )
 _UNDO = r"(?:revert|undo|roll ?back)"
 #: What an undo must refer to: the agent's own change, by pronoun or as "the last edit".
@@ -1124,7 +1170,8 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
             r"^(?:wrong|incorrect)(?:[.!]*$|\s*[.,;:!—-]+\s+\S)"
             r"|^stop(?:[.!]*$|\s*[.,;:!—-]+\s+(?:use|don't|do not|you|that|this|it\b|revert|undo"
             r"|wait|not |wrong|go back|put|leave|keep|read|look|check|ask|please|just)"
-            r"|\s+(?:that|it|this|doing|right there|\w+ing)\b)",
+            # "stop editing the tests", not "Stop showing the banner after it is dismissed"
+            rf"|\s+(?:that|it|this|right there|(?:{_AGENT_DOING})\b))",
             False,
         ),
         (
@@ -1234,6 +1281,42 @@ _REPORTED_SPEECH_RE = re.compile(
 )
 
 
+#: Finer names for what a pattern matched, still from a fixed vocabulary: the label is
+#: shown without excerpts too, so it never carries the human's own words.
+_REFINEMENTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "that's wrong": (
+        (r"not what", "that's not what I …"),
+        (r"\bnot (?:right|correct|true)", "that's not right"),
+        (r"\bnot working", "that's not working"),
+        (r"\bnot how", "that's not how …"),
+        (r"broken", "that's broken"),
+    ),
+    _STOP_LABEL: ((r"^stop", "stop."), (r"", "wrong.")),
+    "that didn't work": ((r"help", "that didn't help"), (r"doesn't|does not", "that doesn't work")),
+    "revert/undo": (
+        (r"\bundo", "undo that"),
+        (r"\broll", "roll it back"),
+        (r"\bput", "put it back"),
+        (r"", "revert that"),
+    ),
+    "still failing": (
+        (r"\bagain\b", "failing again"),
+        (r"still (?:broken|crash)", "still broken"),
+        (r"still (?:not|doesn't|does not)", "still not working"),
+        (r"still (?:wrong|incorrect|misaligned|off)", "still wrong"),
+        (r"same|getting|seeing|hitting", "still the same error"),
+    ),
+}
+
+
+def _refined(label: str, matched: str) -> str:
+    text = matched.lower()
+    for pattern, name in _REFINEMENTS.get(label, ()):
+        if re.search(pattern, text):
+            return name
+    return label
+
+
 def softened_correction(text: str, after_question: bool = False) -> list[str]:
     """The correction phrases in ``text`` that the human took back by blaming themselves.
 
@@ -1298,11 +1381,11 @@ def _judge(
         if label in _ANSWER_LABELS and after_question and stops:
             continue
         if match.start() < last_blame:
-            softened.append(label)
+            softened.append(_refined(label, match.group()))
             continue
         if label == "I told you" and _CONFIRM_TAIL_RE.search(head[match.start() :]):
             continue  # "I told you about the flag, right?" asks; it does not reproach
-        strong.append(label)
+        strong.append(_refined(label, match.group()))
         addressed_any = addressed_any or addressed
     if strong:
         stale = idle_seconds is not None and idle_seconds > CORRECTION_STALE_SECONDS
@@ -1760,6 +1843,21 @@ class _Detector:
         for finding in self.findings:
             if state.key_of.get(id(finding)) in still_red:
                 finding.detail["never_green"] = "1"  # red when the session ended
+        # A command pointed at a file that does not exist, and that was never created
+        # afterwards: the agent guessed a path. That is a miss on the path, and says
+        # nothing about how the command is run.
+        waiting = {id(m[0]) for m in state.missing}
+        for finding in self.findings:
+            rel = finding.detail.get("missing_file", "")
+            if rel and id(finding) in waiting and finding.signal == COMMAND_FAILURE:
+                command = next((t.key for t in finding.targets if t.kind == model.COMMAND), "")
+                finding.signal = PATH_MISS
+                finding.targets = [Target(model.FILE, rel)]
+                finding.summary = f"`{command}` was pointed at {rel}, which does not exist"
+                finding.detail["variant"] = "command"
+                self.exposed.add((model.FILE, rel))
+                unit = self.ctx.unit(self.stream.session_id, finding.ts)
+                self.exposed_in.add((model.FILE, rel, unit))
         # A red run with nothing after it: the session was still going when it was read,
         # or was abandoned there. Nobody can say whether the failure got resolved.
         acted = [e.line for e in self.stream.events if e.kind != model.AGENT_MESSAGE]
@@ -2331,7 +2429,7 @@ class _Detector:
             # A step that printed its own passing summary ran green, whatever came after.
             for step_key, step_verdict in own.items():
                 if step_verdict == "green" and (step_key != key or not ok or unknown):
-                    self._went_green(step_key)
+                    self._went_green(step_key, line=action.call.command or "")
             if result.ok:
                 # ... and so did any check whose passing summary an exit-0 command shows
                 # (`make check` printing "All checks passed!" for an earlier red `ruff`).
@@ -2368,7 +2466,10 @@ class _Detector:
                     if same in state.retry:
                         waited.add(id(state.retry[same]))
                     continue
-                if len(streak) >= POLL_MIN_FAILURES:
+                probing = cmd.program in _PROBE_PROGRAMS and all(
+                    f.detail.get("environment") == ENV_SERVICE for f in streak
+                )
+                if len(streak) >= POLL_MIN_FAILURES or probing:
                     waited |= {id(f) for f in streak}
                     if same in state.retry:
                         waited.add(id(state.retry[same]))
@@ -2381,10 +2482,15 @@ class _Detector:
             # also when the green run is another command doing the same job (`make test`
             # after a red `pytest tests/test_a.py`). A setup step is nobody's stand-in:
             # `npx playwright install` going well says nothing about `npm run e2e`.
-            self._went_green(key, exact=located is not None and is_setup_step(located))
+            self._went_green(
+                key,
+                exact=located is not None and is_setup_step(located),
+                line=action.call.command or "",
+            )
             # The command works after all, so nothing "replaced" it earlier in the session.
             for finding in state.replaced.pop(key, []):
                 finding.detail.pop("recovered_by", None)
+                finding.detail.pop("green_as", None)
             if cmd.inspection:
                 return
             waiting: list[tuple[Finding, str, int]] = []
@@ -2403,8 +2509,13 @@ class _Detector:
                         rf"(?:^|[\s;&|(/]){re.escape(unfound)}(\d[\d.]*)(?=\s|$)",
                         action.call.command or "",
                     )
+                    launcher = unfound.startswith("python") and re.search(
+                        r"(?:^|[\s;&|(/\\])py(?:\.exe)?(?=\s)", action.call.command or "", re.I
+                    )
                     if unfound and other is not None:
                         finding.detail["works_as"] = unfound + other.group(1)
+                    elif launcher:
+                        finding.detail["works_as"] = "py"  # the Windows launcher
                     # ... or with a variable in front: `PYTHONPATH=src pytest`
                     prefix = _env_prefix(action.call.command or "", self.ctx.command_key is str)
                     unchanged = state.changes_at.get(id(finding)) == state.changes
@@ -2413,6 +2524,16 @@ class _Detector:
                         finding.detail["variant"] != "ordinary" or self._promote(finding)
                     ):
                         finding.detail["works_with"] = f"{prefix} {label}"
+                    # ... or with a flag added: `npm install --legacy-peer-deps`
+                    flags = _added_flags(finding.detail["command"], action.call.command or "")
+                    if (
+                        flags
+                        and unchanged
+                        and self.ctx.command_key is str
+                        and "works_with" not in finding.detail
+                        and finding.detail["variant"] != "ordinary"
+                    ):
+                        finding.detail["works_with"] = f"{label} {flags}"
                     # ... or with an environment activated first on the same line
                     activation = _activation(cmd, finding.detail["command"])
                     if (activation and unchanged) and (
@@ -2541,10 +2662,13 @@ class _Detector:
                 detail["service"] = environment[1]
             elif environment[0] == ENV_VARIABLE:
                 detail["env_var"] = environment[1]
-        gone = _NOT_FOUND_PROGRAM_RE.search(result.output) if invocation else None
-        if gone is not None:
-            name = (gone.group(1) or gone.group(2)).rsplit("/", 1)[-1]
-            if step is not None and name == step.program:
+        name = _unfound_program(result.output) if invocation else ""
+        if name and step is not None:
+            # the key says `python` for `python3` and `py` alike: keep the word as typed
+            typed = re.search(
+                rf"(?:^|[\s;&|(/\\]){re.escape(name)}(?:\.exe)?(?=\s|$)", call.command or "", re.I
+            )
+            if name == step.program or (typed is not None and step.program == "python"):
                 detail["not_found"] = name
         if not certain:
             detail["ambiguous_step"] = "1"
@@ -2590,6 +2714,11 @@ class _Detector:
             missing = missing_name(result.output)
             if missing is not None:
                 state.missing.append((finding, key, *missing))
+                rel = self.ctx.resolver.resolve(missing[1], self._where(step, call.cwd))
+                guessed = missing[0] == "file" and command_role(key) == "test"
+                # ... a test file named on the command line itself
+                if guessed and missing[1] in tokens and rel and not self.ctx.is_known_file(rel):
+                    finding.detail["missing_file"] = rel
         # The same command line again, not a narrowed or otherwise changed invocation.
         same = (key, normalize_argv(call.command or ""))
         run = state.fail_runs.get(same, 0) + 1
@@ -2612,15 +2741,14 @@ class _Detector:
         # In `a && b` the output tells which step failed; b may never have run.
         step, certain = failing_step(cmd, output)
         # ... and a shell that could not find a program names it, wherever it stood.
-        unfound = _NOT_FOUND_PROGRAM_RE.search(output)
-        if unfound is not None:
-            name = (unfound.group(1) or unfound.group(2)).rsplit("/", 1)[-1]
+        name = _unfound_program(output)
+        if name:
             named = next((s for s in cmd.steps if s.key and name in (s.program, s.key)), None)
             if named is not None:
                 step, certain = named, True
         return step, certain
 
-    def _went_green(self, key: str, exact: bool = False, by: str = "") -> None:
+    def _went_green(self, key: str, exact: bool = False, by: str = "", line: str = "") -> None:
         """``key`` ran green: close what a green run of it, or of its job, closes.
 
         red -> edit -> green is the development loop working, so those failures are
@@ -2684,10 +2812,27 @@ class _Detector:
             for finding in state.red.pop(failed_key):
                 if failed_key != actual:
                     # the package was there; another way of running the job found it
-                    self._promote(finding)
+                    promoted = self._promote(finding)
+                    if (
+                        not promoted
+                        and not exact
+                        and finding.detail.get("variant") == "ordinary"
+                        and is_replacement(failed_key, actual)
+                        and not is_aggregate_check(actual)
+                        and state.changes_at.get(id(finding)) == state.changes
+                    ):
+                        # Another runner for the same job passes with nothing changed
+                        # (`pnpm test` after a red `yarn test`): perhaps the wrong runner
+                        # for this repository. Whether it recurs decides (engine).
+                        finding.detail["green_as"] = self.ctx.command_key(actual)
+                        state.replaced.setdefault(failed_key, []).append(finding)
                 elif (
                     finding.detail.get("variant") == "ordinary"
                     and command_role(failed_key) == "test"
+                    # the same line again: a narrower selection passing (`pytest
+                    # tests/test_cart.py` after a red `pytest`) says nothing about the
+                    # tests that were left out
+                    and normalize_argv(finding.detail["command"]) == normalize_argv(line)
                 ):
                     # A test that fails and then passes untouched may be flaky. Whether
                     # it is, only its recurring across sessions can say (engine).
@@ -2773,7 +2918,8 @@ class _Detector:
 
     @staticmethod
     def _correction_summary(confidence: float, matched: str, note: str, how: str) -> str:
-        what = "User correction" if confidence >= CORRECTION_STRONG else "Probable correction"
+        certain = confidence >= CORRECTION_STRONG
+        what = "The user corrected the agent" if certain else "Wording that could be a correction"
         return f"{what} (confidence {confidence:g}; matched {matched}; {note}); {how}"
 
     def _note_rework(self, paths: set[str] | frozenset[str], action: _Action) -> None:
@@ -2885,7 +3031,9 @@ class _Detector:
             f"The user declined {declined}" + (" and said why" if result.reason else ""),
             targets,
             excerpt="\n".join(excerpt_parts),
-            interval=self._round_trip(action),
+            # From the call to its result a human was reading a prompt, which is not the
+            # agent's time. Only what the agent then needs to get going again is claimed.
+            interval=_capped(_epoch(result), action.next_any),
             detail={"reason": result.reason, "command": call.command or ""},
         )
 

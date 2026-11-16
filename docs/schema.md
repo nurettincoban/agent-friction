@@ -2,7 +2,8 @@
 
 1. [Analysis result](#analysis-result) — what `analyze()` returns and
    `--format json` (`-f json`) prints.
-2. [Generic transcript format](#generic-transcript-format) — the JSONL input
+2. [Comparison result](#comparison-result) — what `compare -f json` prints.
+3. [Generic transcript format](#generic-transcript-format) — the JSONL input
    for transcripts from agents other than Claude Code.
 
 ## Analysis result
@@ -39,7 +40,7 @@ promise. Every option has a CLI flag: `transcripts` is `-t`, `since`/`until` are
 | `max_hotspots` | `None` | Maximum entries in each of `hotspots`, `commands`, `directories`; `None` lists every one. Nothing else depends on it: totals, the tree, `exposure` and `unattributed` are never truncated, and scores do not change with it. |
 | `now` | `None` | Fixed `generated_at`, for reproducible output. |
 | `excerpt_chars` | `240` | Maximum excerpt length. |
-| `repo_aliases` | `()` | Other absolute paths that are this repo, e.g. where it lived on the machine that recorded the transcripts. Windows paths (with a drive letter) are compared case-insensitively. |
+| `repo_aliases` | `()` | Other absolute paths that are this repo, e.g. where it lived on the machine that recorded the transcripts. Windows paths (with a drive letter) are compared case-insensitively, and when the repository or the session's working directory is such a path, the spellings Unix-style shells on Windows use for a drive (`/c/Users/...` in Git Bash, `/mnt/c/...` in WSL, `/cygdrive/c/...`) are read as that drive. |
 | `rework_window_days` | `14` | Window for `human-rework`. |
 | `agent_commit_patterns` | `None` | Regexes (case-insensitive, multiline) matched against `author: Name <email>\n<commit message>`; replaces the defaults. |
 | `bot_commit_patterns` | `()` | Extra regexes, matched the same way against `author: Name <email>`, for automation whose commits are never human rework (added to `gitsignals.DEFAULT_BOT_PATTERNS`: `[bot]` authors, dependabot, renovate, pre-commit-ci, github-actions, ...). |
@@ -219,6 +220,31 @@ Tool names in summaries are treated the same way: built-in tools (`Read`,
 `Edit`, `Bash`, `Grep`, `WebFetch`, `Task`, ... and the generic format's
 operation words) keep their names, any other name becomes `<tool:hash>`, and
 an MCP tool `mcp__<server>__<tool>` becomes `mcp__<server:hash>__<tool:hash>`.
+
+## Comparison result
+
+`agent-friction compare before.json after.json -f json` prints one object:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `schema_version` | int | `1`, versioned like the analysis result. |
+| `tool` | object | `name` and `version` of the tool that compared. |
+| `before`, `after` | object | Each scan's `repo`, `window` and `sessions`. |
+| `low_sample` | bool | Either side has fewer sessions than `--min-sessions`; the regression gate is then not applied. |
+| `changes` | array | One entry per file, directory or command found in either scan, ordered by status, then by score. |
+
+Each `changes[]` entry:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `kind`, `path` | string | As in the analysis result. |
+| `status` | string | `regressed`, `new`, `improved`, `resolved` (touched afterwards, no friction), `replaced` (not run afterwards, but the command the "before" scan recommended ran instead and failed less), `inactive` (not touched afterwards: no evidence either way), `too-little-data`, or `unchanged`. |
+| `before_events`, `after_events` | int | Friction events on each side. |
+| `before_exposure_sessions`, `after_exposure_sessions` | int | Sessions that touched the target on each side. |
+| `before_events_per_10_sessions`, `after_events_per_10_sessions` | number or null | The rates the verdict is based on; `null` when nothing touched it. |
+| `before_score`, `after_score` | number | Scores, for reference; verdicts follow the rates. |
+| `replaced_by` | string or null | With `replaced`: the command agents ran instead. |
+| `replacement_sessions`, `replacement_events` | int | With `replaced`: sessions that ran it afterwards, and its friction events there. |
 
 ## Generic transcript format
 

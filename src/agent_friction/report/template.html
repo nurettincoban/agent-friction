@@ -51,6 +51,10 @@ aside { overflow-wrap: anywhere; background: var(--panel); border: 1px solid var
   /* The detail panel stays beside the map while its evidence scrolls inside it. */
   aside { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; }
 }
+.sortbtn { font: inherit; font-weight: 600; color: inherit; background: none; border: 0; padding: 4px 0; min-height: 24px; cursor: pointer; text-align: inherit; }
+.sortbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+th[aria-sort="ascending"] .sortbtn::after { content: " ▲"; font-size: 10px; }
+th[aria-sort="descending"] .sortbtn::after { content: " ▼"; font-size: 10px; }
 aside h3 { margin: 0 0 4px; font-size: 14px; word-break: break-all; }
 .chip { display: inline-block; background: var(--chip); border-radius: 999px; padding: 1px 8px;
   margin: 2px 4px 2px 0; font-size: 12px; }
@@ -124,7 +128,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
   <p class="show-sm sub">Some columns are hidden on narrow screens. Tap a row for its sessions, events and signals.</p>
   <input type="search" id="filter" placeholder="Filter files and commands…" aria-label="Filter hotspots">
   <div class="tablewrap" style="margin-top:8px"><table id="table"><thead><tr>
-    <th scope="col">Path or command</th><th scope="col" class="num">Score</th><th scope="col" class="num hide-sm">Sessions</th><th scope="col" class="num hide-sm">Events</th><th scope="col" class="num">Time lost</th><th scope="col" class="hide-sm">Top signals</th><th scope="col">Confidence</th>
+    <th scope="col" data-sort="path"><button type="button" class="sortbtn">Path or command</button></th><th scope="col" class="num" data-sort="score" aria-sort="descending"><button type="button" class="sortbtn">Score</button></th><th scope="col" class="num hide-sm" data-sort="sessions"><button type="button" class="sortbtn">Sessions</button></th><th scope="col" class="num hide-sm" data-sort="events"><button type="button" class="sortbtn">Events</button></th><th scope="col" class="num" data-sort="est_minutes_lost"><button type="button" class="sortbtn">Time lost</button></th><th scope="col" class="hide-sm">Top signals</th><th scope="col" data-sort="confidence"><button type="button" class="sortbtn">Confidence</button></th>
   </tr></thead><tbody></tbody></table></div>
   <section id="unattr" hidden><h2 id="unattr-h">Not tied to a file or command</h2><div id="unattr-list"></div></section>
   <footer id="footer"></footer>
@@ -147,6 +151,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     return e;
   }
   function plural(n, word) { n = Number(n) || 0; return n + " " + word + (n === 1 ? "" : "s"); }
+  function utc(ts) { var t = String(ts || "").slice(0, 16).replace("T", " "); return t ? t + " UTC" : ""; }
   function lostPhrase(m) { return Number(m) > 0 ? "~" + mins(m) + " lost" : "no time estimate"; }
   function mins(m) {
     m = Number(m) || 0;
@@ -177,7 +182,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
   var w = R.window || {};
   document.getElementById("subtitle").textContent =
     (w.start || w.end ? String(w.start || "…").slice(0, 10) + " → " + String(w.end || "…").slice(0, 10) + " · " : "") +
-    "generated " + String(R.generated_at || "").slice(0, 16).replace("T", " ");
+    "generated " + utc(R.generated_at);
   if (Number(t.dropped_red_runs) > 0) {
     document.getElementById("stats").insertAdjacentElement("afterend", el("p", { class: "sub" },
       "Not counted: " + plural(t.dropped_red_runs, "failed run") + " of normal work (the agent fixed the failure, or was only waiting and polled until it passed; ~" +
@@ -216,7 +221,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
       detail.appendChild(el("h2", null, "Evidence"));
       h.evidence.forEach(function (e) {
         var d = el("div", { class: "ev" });
-        d.appendChild(el("div", { class: "meta" }, String(e.timestamp || "").slice(0, 16).replace("T", " ") + " · session " + String(e.session_id || "").slice(0, 8) + " · " + (titles[e.signal] || e.signal)));
+        d.appendChild(el("div", { class: "meta" }, utc(e.timestamp) + " · session " + String(e.session_id || "").slice(0, 8) + " · " + (titles[e.signal] || e.signal)));
         d.appendChild(el("div", null, e.summary + (e.trailing ? " (unresolved at end of session)" : "")));
         if (e.excerpt) d.appendChild(el("blockquote", null, e.excerpt));
         if (e.source) d.appendChild(el("div", { class: "meta mono" }, e.source + ":" + (e.line || "?")));
@@ -344,7 +349,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
       (items.length && items.length < count ? ", " + items.length + " shown" : "") + ")";
     items.forEach(function (e) {
       var d = el("div", { class: "ev" });
-      d.appendChild(el("div", { class: "meta" }, String(e.timestamp || "").slice(0, 16).replace("T", " ") + " · session " + String(e.session_id || "").slice(0, 8) + " · " + (titles[e.signal] || e.signal)));
+      d.appendChild(el("div", { class: "meta" }, utc(e.timestamp) + " · session " + String(e.session_id || "").slice(0, 8) + " · " + (titles[e.signal] || e.signal)));
       d.appendChild(el("div", null, e.summary));
       if (e.excerpt) d.appendChild(el("blockquote", null, e.excerpt));
       if (e.source) d.appendChild(el("div", { class: "meta mono" }, e.source + ":" + (e.line || "?")));
@@ -365,10 +370,33 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
 
   // Table
   var tbody = document.querySelector("#table tbody");
+  var sortKey = "score", sortDir = -1, query = "";
+  var confRank = { high: 3, medium: 2, low: 1 };
+  function sortValue(h, k) {
+    if (k === "path") return String(h.path).toLowerCase();
+    if (k === "confidence") return confRank[h.confidence] || 0;
+    return Number(h[k]) || 0;
+  }
+  function compareRows(a, b) {
+    var x = sortValue(a, sortKey), y = sortValue(b, sortKey);
+    if (x < y) return -sortDir;
+    if (x > y) return sortDir;
+    return b.score - a.score || (a.path < b.path ? -1 : 1);
+  }
+  Array.prototype.forEach.call(document.querySelectorAll("#table th[data-sort]"), function (th) {
+    th.querySelector("button").addEventListener("click", function () {
+      var k = th.dataset.sort;
+      if (k === sortKey) sortDir = -sortDir; else { sortKey = k; sortDir = k === "path" ? 1 : -1; }
+      Array.prototype.forEach.call(document.querySelectorAll("#table th[data-sort]"), function (o) { o.removeAttribute("aria-sort"); });
+      th.setAttribute("aria-sort", sortDir > 0 ? "ascending" : "descending");
+      fill(query);
+    });
+  });
   function fill(q) {
     tbody.textContent = "";
-    q = (q || "").toLowerCase();
-    items.slice().sort(function (a, b) { return b.score - a.score || (a.path < b.path ? -1 : 1); })
+    query = q || "";
+    q = query.toLowerCase();
+    items.slice().sort(compareRows)
       .filter(function (h) { return !q || String(h.path).toLowerCase().indexOf(q) >= 0; })
       .forEach(function (h) {
         var tr = el("tr", { class: "row" });

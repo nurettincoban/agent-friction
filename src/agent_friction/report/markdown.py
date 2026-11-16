@@ -75,6 +75,7 @@ def _details(h: dict[str, Any], titles: dict[str, str]) -> list[str]:
         out.append("")
         for e in ev:
             ts = str(e.get("timestamp", ""))[:16].replace("T", " ")
+            ts = f"{ts} UTC" if ts else ts
             sid = str(e.get("signal", ""))
             out.append(
                 f"- `{ts}` session `{str(e.get('session_id', ''))[:8]}` · "
@@ -96,6 +97,7 @@ def _unattributed(result: dict[str, Any]) -> list[str]:
     lines = [f"## {heading}", ""]
     for ev in result.get("unattributed") or []:
         when = str(ev.get("timestamp") or "")[:16].replace("T", " ")
+        when = f"{when} UTC" if when else when
         where = ""
         if ev.get("source"):
             where = " · " + _code(f"{ev['source']}:{ev.get('line', '?')}")

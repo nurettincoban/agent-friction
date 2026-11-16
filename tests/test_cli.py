@@ -485,3 +485,18 @@ def test_show_accepts_an_absolute_or_cwd_relative_path(monkeypatch: pytest.Monke
 def test_missing_transcript_path_is_an_error_even_with_allow_empty(tmp_path: Path) -> None:
     code, _, err = run("scan", str(tmp_path), "-t", str(tmp_path / "nope"), "--allow-empty")
     assert code == EXIT_ERROR and "transcript path does not exist" in err
+
+
+def test_compare_json_is_a_versioned_document(tmp_path: Path) -> None:
+    saved = tmp_path / "a.json"
+    run("scan", *INPUT, "-o", str(saved))
+    code, out, _ = run("compare", str(saved), str(saved), "-f", "json")
+    doc = json.loads(out)
+    assert code == EXIT_OK and doc["schema_version"] == 1
+    assert doc["tool"]["version"] == __version__ and doc["before"]["sessions"] == 6
+    assert isinstance(doc["changes"], list) and doc["low_sample"] is False
+
+
+def test_show_with_an_empty_target_is_a_usage_error() -> None:
+    code, _, err = run("show", "  ", "--repo", *INPUT)
+    assert code == EXIT_USAGE and "needs a target" in err

@@ -48,6 +48,8 @@ __all__ = [
 ]
 
 SCHEMA_VERSION = 1
+#: Where the generic format is described; docs/ is not part of the installed package.
+SCHEMA_URL = "https://github.com/nurettincoban/agent-friction/blob/main/docs/schema.md"
 TOOL_NAME = "agent-friction"
 
 Item = tuple[Finding, float]
@@ -278,6 +280,8 @@ THIRD_PARTY_DIRS = frozenset(
 BUILD_DIRS = frozenset({"target", "dist", "build"})
 #: A test command that fails and passes on a plain re-run in this many sessions is flaky.
 FLAKY_MIN_SESSIONS = 3
+#: Sessions in which another runner must pass, untouched, after a command went red.
+RUNNER_MIN_SESSIONS = 3
 #: A command the human stops in this many sessions is a row of its own.
 INTERRUPTED_COMMAND_MIN_SESSIONS = 3
 #: The share of an interrupt that goes to the command that was stopped.
@@ -349,6 +353,28 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
             finding.summary = finding.summary.replace(
                 "ordinary failure", "it passed on a plain re-run, with nothing changed"
             )
+    # Another runner for the same job passed with nothing changed (``green_as``): in
+    # ``RUNNER_MIN_SESSIONS`` sessions or more, the failing command is the wrong one here.
+    runners: dict[tuple[str, str], set[str]] = {}
+    swapped = [f for f in findings if "green_as" in f.detail]
+    for finding in swapped:
+        for key in _command_keys(finding):
+            runners.setdefault((key, finding.detail["green_as"]), set()).add(finding.unit)
+    for finding in swapped:
+        other = finding.detail.pop("green_as")
+        keys = _command_keys(finding)
+        if finding.detail.get("variant") != "ordinary" or not any(
+            len(runners.get((key, other), ())) >= RUNNER_MIN_SESSIONS for key in keys
+        ):
+            continue
+        finding.detail["recovered_by"] = other
+        finding.detail["variant"] = "invocation"
+        finding.targets = [t for t in finding.targets if t.kind == model.COMMAND]
+        finding.weight = 1.0
+        finding.interval = finding.interval or finding.run
+        finding.summary = finding.summary.replace(
+            "ordinary failure", f"`{other}` then passed, with nothing changed"
+        )
     dropped: list[Finding] = []
     for finding in pending:
         fix = finding.detail.pop("fixed_by_command")
@@ -914,7 +940,7 @@ class _Analysis:
                         f"{given} is not a JSONL transcript: none of its first "
                         f"{JSONL_PROBE_LINES} lines is a JSON object. Pass Claude Code "
                         "session files (*.jsonl), directories that contain them, or files in "
-                        "the generic format described in docs/schema.md."
+                        f"the generic format described in {SCHEMA_URL}"
                     )
             files = expand_transcript_paths(options.transcripts)
             if not files:
@@ -934,7 +960,7 @@ class _Analysis:
                 "CLAUDE_CONFIG_DIR if your config lives elsewhere, or pass transcript files or "
                 "directories explicitly. Logs "
                 "from other agents can be converted to the generic JSONL format described "
-                "in docs/schema.md."
+                f"in {SCHEMA_URL}"
             )
         return files
 

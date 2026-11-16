@@ -27,7 +27,7 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 | # | Command | Score | Sessions | Events | Est. time lost | Top signals | Confidence |
 |---:|---|---:|---:|---:|---:|---|---|
 | 1 | `pytest` | 48.6 | 4 | 7 | 3m | `command-failure`×7 | medium |
-| 2 | `rm` | 16.3 | 1 | 1 | 42s | `tool-rejected`×1 | low |
+| 2 | `rm` | 16.3 | 1 | 1 | 18s | `tool-rejected`×1 | low |
 | 3 | `curl` | 15.2 | 1 | 1 | 12s | `command-failure`×1 | low |
 | 4 | `python -m pytest` | 15.2 | 1 | 1 | 30s | `command-failure`×1 | low |
 
@@ -52,13 +52,13 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 
 **Evidence**
 
-- `2026-10-26 10:08` session `e65615b3` · Probable correction: Probable correction (confidence 0.4; matched "don't", "instead", "not allowed"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py
-- `2026-11-03 09:01` session `4132e18c` · Stale edit: Edit on src/shopfront/api/schema_gen.py refused: the file changed on disk after it was read
+- `2026-10-26 10:08 UTC` session `e65615b3` · Probable correction: Wording that could be a correction (confidence 0.4; matched "don't", "instead", "not allowed"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py
+- `2026-11-03 09:01 UTC` session `4132e18c` · Stale edit: Edit on src/shopfront/api/schema_gen.py refused: the file changed on disk after it was read
   > File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.
-- `2026-11-03 09:04` session `4132e18c` · User interrupt: The user interrupted the agent while it was working on src/shopfront/api/schema_gen.py
-- `2026-11-05 16:06` session `aider-20` · User correction: User correction (confidence 1; matched "that's wrong", "revert/undo"; the user names src/shopfront/api/schema_gen.py, which it had changed); names src/shopfront/api/schema_gen.py
+- `2026-11-03 09:04 UTC` session `4132e18c` · User interrupt: The user interrupted the agent while it was working on src/shopfront/api/schema_gen.py
+- `2026-11-05 16:06 UTC` session `aider-20` · User correction: The user corrected the agent (confidence 1; matched "that's wrong", "revert that"; the user names src/shopfront/api/schema_gen.py, which it had changed); names src/shopfront/api/schema_gen.py
   > That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml.
-- `2026-11-12 11:00` session `fb4e20bf` · Edit miss: Edit on src/shopfront/api/schema_gen.py failed: the text to replace was not found
+- `2026-11-12 11:00 UTC` session `fb4e20bf` · Edit miss: Edit on src/shopfront/api/schema_gen.py failed: the text to replace was not found
   > String to replace not found in file. String: API_VERSION = "2.3"
 
 </details>
@@ -75,13 +75,13 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 
 **Evidence**
 
-- `2026-10-26 10:08` session `e65615b3` · Probable correction: Probable correction (confidence 0.4; matched "don't", "instead", "not allowed"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py
-- `2026-10-29 14:11` session `9f6ff626` · User correction: User correction (confidence 1; matched "no, …", "I told you"; the agent then changed src/shopfront/checkout/service.py again); attributed to src/shopfront/checkout/service.py
+- `2026-10-26 10:08 UTC` session `e65615b3` · Probable correction: Wording that could be a correction (confidence 0.4; matched "don't", "instead", "not allowed"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py
+- `2026-10-29 14:11 UTC` session `9f6ff626` · User correction: The user corrected the agent (confidence 1; matched "no, …", "I told you"; the agent then changed src/shopfront/checkout/service.py again); attributed to src/shopfront/checkout/service.py
   > No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.
-- `2026-11-09 15:03` session `8d986baa` · Edit thrash: 7 successful edits to src/shopfront/checkout/service.py within one user turn
-- `2026-11-09 15:14` session `8d986baa` · User correction: User correction (confidence 1; matched "still failing", "I told you"; the user names src/shopfront/checkout/service.py, which it had changed); names src/shopfront/checkout/service.py
+- `2026-11-09 15:03 UTC` session `8d986baa` · Edit thrash: 7 successful edits to src/shopfront/checkout/service.py within one user turn
+- `2026-11-09 15:14 UTC` session `8d986baa` · User correction: The user corrected the agent (confidence 1; matched "still failing", "I told you"; the user names src/shopfront/checkout/service.py, which it had changed); names src/shopfront/checkout/service.py
   > It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only.
-- `2026-11-09 15:15` session `8d986baa` · Edit reverted: Edit on src/shopfront/checkout/service.py undid an earlier edit from the same session
+- `2026-11-09 15:15 UTC` session `8d986baa` · Edit reverted: Edit on src/shopfront/checkout/service.py undid an earlier edit from the same session
 
 </details>
 
@@ -92,7 +92,7 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 
 **Evidence**
 
-- `2026-10-29 14:00` session `9f6ff626` · Path miss: Read targeted src/shopfront/payments/refunds.py, which does not exist
+- `2026-10-29 14:00 UTC` session `9f6ff626` · Path miss: Read targeted src/shopfront/payments/refunds.py, which does not exist
   > File does not exist.
 
 </details>
@@ -104,7 +104,7 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 
 **Evidence**
 
-- `2026-11-12 11:01` session `fb4e20bf` · Search miss: Grep search in api/openapi.yaml returned nothing
+- `2026-11-12 11:01 UTC` session `fb4e20bf` · Search miss: Grep search in api/openapi.yaml returned nothing
   > pattern: API_VERSION
 
 </details>
@@ -116,7 +116,7 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 
 **Evidence**
 
-- `2026-10-29 14:04` session `9f6ff626` · Command failure: `pytest` failed (exit 1; ordinary failure)
+- `2026-10-29 14:04 UTC` session `9f6ff626` · Command failure: `pytest` failed (exit 1; ordinary failure)
   > $ pytest tests/test_refunds.py -x Exit code 1 tests/conftest.py:11: in engine     return make_engine(os.environ\['DATABASE_URL'\]) E   KeyError: 'DATABASE_URL' ERROR tests/test_checkout.py - KeyError: 'DATABASE_URL'
 
 </details>
@@ -132,15 +132,15 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 
 **Evidence**
 
-- `2026-10-26 10:03` session `e65615b3` · Command failure: `pytest` failed (exit 4; setup/invocation error)
+- `2026-10-26 10:03 UTC` session `e65615b3` · Command failure: `pytest` failed (exit 4; setup/invocation error)
   > $ pytest tests/test_checkout.py -q Exit code 4 ImportError while loading conftes … /shopfront/tests/conftest.py'. tests/conftest.py:3: in &lt;module&gt;     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
-- `2026-10-29 14:03` session `9f6ff626` · Command failure: `pytest` failed (exit 4; setup/invocation error)
+- `2026-10-29 14:03 UTC` session `9f6ff626` · Command failure: `pytest` failed (exit 4; setup/invocation error)
   > $ pytest tests/test_refunds.py Exit code 4 ImportError while loading conftest '~/shopfront/tests/conftest.py'. tests/conftest.py:3: in &lt;module&gt;     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
-- `2026-10-29 14:03` session `9f6ff626` · Command failure: `pytest` failed (exit 4; setup/invocation error)
+- `2026-10-29 14:03 UTC` session `9f6ff626` · Command failure: `pytest` failed (exit 4; setup/invocation error)
   > $ pytest tests/test_refunds.py -x Exit code 4 ImportError while loading conftest '~/shopfront/tests/conftest.py'. tests/conftest.py:3: in &lt;module&gt;     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
-- `2026-11-05 16:01` session `aider-20` · Command failure: `pytest` failed (exit 4; setup/invocation error)
+- `2026-11-05 16:01 UTC` session `aider-20` · Command failure: `pytest` failed (exit 4; setup/invocation error)
   > $ pytest -q ImportError while loading conftest '~/shopfront/tests/conftest.py'. tests/conftest.py:3: in &lt;module&gt;     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
-- `2026-11-09 15:01` session `8d986baa` · Command failure: `pytest` failed (judged from its output: the exit status was that of a pipe or a later step; setup/invocation error)
+- `2026-11-09 15:01 UTC` session `8d986baa` · Command failure: `pytest` failed (judged from its output: the exit status was that of a pipe or a later step; setup/invocation error)
   > $ pytest tests/test_checkout.py 2&gt;&amp;1 | tail -20 ImportError while loading confte … /shopfront/tests/conftest.py'. tests/conftest.py:3: in &lt;module&gt;     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
 
 </details>
@@ -156,7 +156,7 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 
 **Evidence**
 
-- `2026-11-03 09:03` session `4132e18c` · Tool call declined: The user declined Bash on `rm` and said why
+- `2026-11-03 09:03 UTC` session `4132e18c` · Tool call declined: The user declined Bash on `rm` and said why
   > $ rm -rf migrations/versions &amp;&amp; alembic revision --autogenerate -m currency user said: never delete existing migrations, add a new revision on top
 
 </details>
@@ -168,7 +168,7 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 
 **Evidence**
 
-- `2026-11-09 15:15` session `8d986baa` · Command failure: `curl` failed (exit 7; setup/invocation error)
+- `2026-11-09 15:15 UTC` session `8d986baa` · Command failure: `curl` failed (exit 7; the service on port 443 was not reachable)
   > $ curl -s -H 'Authorization: Bearer \[REDACTED:token\]' https://staging.shopfront.example/api/health Exit code 7 curl: (7) Failed to connect to staging.shopfront.example port 443: Connection refused
 
 </details>
@@ -180,7 +180,7 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 
 **Evidence**
 
-- `2026-11-12 11:02` session `fb4e20bf` · Command failure: `python -m pytest` failed (exit 4; setup/invocation error)
+- `2026-11-12 11:02 UTC` session `fb4e20bf` · Command failure: `python -m pytest` failed (exit 4; setup/invocation error)
   > $ python -m pytest -q Exit code 4 ImportError while loading conftest '~/shopfront/tests/conftest.py'. tests/conftest.py:3: in &lt;module&gt;     from shopfront.db import make_engine E   ModuleNotFoundError: No module named 'shopfront'
 
 </details>
@@ -196,15 +196,15 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 
 **Evidence**
 
-- `2026-10-29 14:00` session `9f6ff626` · Search miss: Grep search in src/shopfront returned nothing
+- `2026-10-29 14:00 UTC` session `9f6ff626` · Search miss: Grep search in src/shopfront returned nothing
   > pattern: RefundPolicy
-- `2026-10-29 14:00` session `9f6ff626` · Search miss: Glob search in src/shopfront returned nothing
+- `2026-10-29 14:00 UTC` session `9f6ff626` · Search miss: Glob search in src/shopfront returned nothing
   > pattern: src/shopfront/**/refund*.py
-- `2026-11-09 15:00` session `8d986baa` · Search miss: Grep search in src/shopfront returned nothing
+- `2026-11-09 15:00 UTC` session `8d986baa` · Search miss: Grep search in src/shopfront returned nothing
   > pattern: DiscountPolicy
-- `2026-11-09 15:00` session `8d986baa` · Search miss: Grep search in src/shopfront returned nothing
+- `2026-11-09 15:00 UTC` session `8d986baa` · Search miss: Grep search in src/shopfront returned nothing
   > pattern: RefundPolicy
-- `2026-11-09 15:00` session `8d986baa` · Search miss: Glob search in src/shopfront returned nothing
+- `2026-11-09 15:00 UTC` session `8d986baa` · Search miss: Glob search in src/shopfront returned nothing
   > pattern: **/*policy*.py
 
 </details>

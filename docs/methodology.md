@@ -359,7 +359,8 @@ Each event may claim a wall-clock interval from transcript timestamps:
 | `edit-miss`, `stale-edit` | one round trip; extended to the edit of the same file that lands only if every tool call in between failed too |
 | `command-failure` (setup/invocation) | one round trip; extended to the end of the command that recovered it (the same command succeeding, or a replacement doing the same job, within the next 5 shell calls of the turn) only if every tool call in between failed too |
 | `command-failure` (ordinary) | none |
-| `path-miss`, `file-too-large`, `tool-rejected`, `permission-denied` | one round trip (a `path-miss` that is a routine probe for an optional file: none) |
+| `path-miss`, `file-too-large`, `permission-denied` | one round trip (a `path-miss` that is a routine probe for an optional file: none) |
+| `tool-rejected` | from the human's answer to the next event in the transcript; the time the permission prompt was open (call to result) is a human's time and is never counted |
 | `search-miss`, `probable-correction` | none: weak signals never claim time |
 | `edit-revert` | from the original edit to the revert if both are in the same turn; otherwise one round trip |
 | `user-correction` | the rework only: from the agent's first tool call after the correction to its last change to the files the correction was about, in that turn; one round trip (that first call) if it does not return to those files; nothing if the session ends there. A `probable-correction` claims nothing |
@@ -462,7 +463,7 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `learn-from-rework` | 2+ `human-rework` |
 | `add-a-pointer` | 2+ `search-miss` in the file or directory, not counting searches for leftovers (`TODO`, `console.log`, conflict markers, ...), with other evidence or the same pattern missed in 2+ sessions by agents that went on looking for it (see the signal); lists the patterns |
 | `summarize-this-file` | 2+ `read-loop`, next to other evidence |
-| `use-the-working-command` | 2+ *setup/invocation* failures of a command were followed by the same successful command *doing the same job* (same role, or a wrapper of the same tool), in sessions where the failing command never worked afterwards. Never an install, version-control or housekeeping command. Also: 2+ `command not found` failures after which the same command ran under a versioned name of the program ("use `python3`, not `python`"), and 2+ setup/invocation failures after which the same command ran with a variable set in front of it and no file edited in between ("use `PYTHONPATH=src pytest`"; the value is shown only for a fixed set of variables such as `PYTHONPATH`, `NODE_ENV`, `DJANGO_SETTINGS_MODULE`, and only with excerpts, otherwise `NAME=...`) |
+| `use-the-working-command` | 2+ *setup/invocation* failures of a command were followed by the same successful command *doing the same job* (same role, or a wrapper of the same tool), in sessions where the failing command never worked afterwards. Never an install, version-control or housekeeping command. Also: 2+ `command not found` failures after which the same command ran under a versioned name of the program ("use `python3`, not `python`"), and 2+ setup/invocation failures after which the same command ran with a variable set in front of it and no file edited in between ("use `PYTHONPATH=src pytest`"; the value is shown only for a fixed set of variables such as `PYTHONPATH`, `NODE_ENV`, `DJANGO_SETTINGS_MODULE`, and only with excerpts, otherwise `NAME=...`) or with an option added ("use `npm install --legacy-peer-deps`"; only with excerpts). Also: ordinary failures after which another command for the same job passed with nothing changed, in 3+ sessions (`pnpm test` after a red `yarn test`: the wrong runner). On Windows the launcher counts as a name of the program ("use `py`, not `python`") |
 | `document-the-setup-step` | 2+ failures of a command that then passed after the same setup step with no file edited in between (`pip install`, `npm ci`, `docker compose up`, `cp .env.example .env`, or any other command that did so in 2+ sessions), or that then passed on a line that first activated an environment (`source .venv/bin/activate && pytest`, `poetry shell`, `conda activate <env>`): "run X before Y" |
 | `document-the-environment` | 2+ *environment* failures of a command (and none of the above): a service that was not reachable ("say how to start PostgreSQL before `pytest`"; the service is named when the output identifies it), missing or expired credentials, an unset environment variable (named only with excerpts), a port that was already in use, or a full disk |
 | `document-the-command` | 2+ setup/invocation failures of a command (and none of the above). If the same command then worked in a subdirectory, the advice names it ("run `npm test` from `web/`"). A command that is keyed by where it ran (`pytest (src/)`) is titled "Document how to run `pytest` in `src/`" |
@@ -498,7 +499,14 @@ repository's instruction files are searched for what it is about
   command, its key without the directory suffix; for advice that proposes
   something specific (`make test` instead of `pytest`, a setup step), that
   proposal. Matching is plain text on word boundaries: `pytest` is not
-  found in `pytest-cov` or `pytest.ini`, `a.py` not in `data.py`. Terms
+  found in `pytest-cov` or `pytest.ini`, `a.py` not in `data.py`. For the
+  two rules whose "already documented" form says that the files recommend
+  something (`use-the-working-command`, `document-the-setup-step`), a line
+  that names the proposal only to rule it out is not a mention: "Do not run
+  `make test` locally", "never pytest directly", "`make test` was removed",
+  "we no longer use make test" (a negation in the 40 characters before the
+  name within its sentence, or "was removed / is deprecated / no longer"
+  right after it). Terms
   shorter than 4 characters, bare launchers (`make`, `npm`... alone) and
   pseudonymized keys are not looked for, so with `--no-excerpts` only paths
   and public command names can match.

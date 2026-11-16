@@ -24,6 +24,9 @@ from agent_friction.redact import redact
 
 _DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _MAX_PATH_CHARS = 1024
+#: A Windows drive as Git Bash (``/c/Users``), WSL (``/mnt/c/Users``) and Cygwin
+#: (``/cygdrive/c/Users``) spell it.
+_UNIX_DRIVE_RE = re.compile(r"^/(?:mnt/|cygdrive/)?([A-Za-z])(?=/|$)")
 
 
 def to_posix(path: str) -> str:
@@ -70,6 +73,7 @@ class PathResolver:
         if not roots:  # pragma: no cover - absolute() always yields an absolute path
             roots.append("/")
         self.primary = roots[0]
+        self.drives = any(_DRIVE_RE.match(root) for root in roots)
         # Longest first so a worktree nested inside the repo wins over the repo.
         self.roots: tuple[str, ...] = tuple(sorted(roots, key=lambda r: (-len(r), r)))
 
@@ -89,11 +93,16 @@ class PathResolver:
         path = to_posix(path)
         if path == "~" or path.startswith("~/"):
             path = self.home + path[1:]
+        base = to_posix(cwd) if cwd else self.primary
         if not _is_abs(path):
-            base = to_posix(cwd) if cwd else self.primary
             if not _is_abs(base):
                 return None
             path = posixpath.join(base, path)
+        elif self.drives or _DRIVE_RE.match(base):
+            # A Unix-style shell on Windows: `cd /c/Users/me/repo` is `C:/Users/me/repo`.
+            drive = _UNIX_DRIVE_RE.match(path)
+            if drive is not None:
+                path = f"{drive.group(1).upper()}:/{path[drive.end() :].lstrip('/')}"
         return posixpath.normpath(path)
 
     def _relative(self, absolute: str) -> str | None:
@@ -329,7 +338,8 @@ _SUBCOMMAND_RE = re.compile(r"^[a-z][a-z0-9:_-]*$")
 TARGET_TOOLS = frozenset({"make", "gmake", "just", "task", "rake", "nox", "tox", "invoke"})
 _TARGET_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9:_.-]*$")
 _NUMERIC_RE = re.compile(r"^[-+]?[\d.,:]+[a-z%]{0,2}$", re.I)
-_PYTHON_RE = re.compile(r"^(python|pypy)[\d.]*$")
+# ``py`` is the Windows launcher: `py -m pytest` is `python -m pytest`
+_PYTHON_RE = re.compile(r"^(?:(?:python|pypy)[\d.]*|py)$")
 _SEPARATORS = frozenset({";", "&&", "||", "&", "|", "|&", "(", ")", ";;"})
 _VENDOR_DIRS = frozenset({"bin", "node_modules", "venv", ".venv", "Scripts", ".bin"})
 _SCRIPT_RE = re.compile(r"\.[A-Za-z0-9]{1,5}$")
@@ -1398,10 +1408,15 @@ def _is_source_target(target: str) -> bool:
 _ENV_PREFIX_RE = re.compile(r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|\"[^\"]*\"|\S*)\s+)+")
 
 
+_SLEEP_PREFIX_RE = re.compile(r"^(?:sleep \d+(?:\.\d+)?[smh]? ?(?:&&|;) ?)+")
+
+
 def normalize_argv(command: str) -> str:
-    """A command line with whitespace collapsed and leading ``VAR=value`` dropped.
+    """A command line with whitespace collapsed and leading ``VAR=value`` and waits dropped.
 
     Two runs are "the same command again" only if this text is identical.
     """
     text = re.sub(r"\s+", " ", command).strip()
+    # `sleep 3 && curl ...` is `curl ...` again, a little later
+    text = _SLEEP_PREFIX_RE.sub("", text)
     return _ENV_PREFIX_RE.sub("", text)

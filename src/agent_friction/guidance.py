@@ -194,19 +194,46 @@ class Guidance:
             with_imports.extend(self._imported(name))
         return list(dict.fromkeys(with_imports))
 
-    def mentions(self, terms: list[str], near: str = "") -> list[Mention]:
-        """Where the files that apply to ``near`` name any of ``terms``."""
+    def mentions(self, terms: list[str], near: str = "", affirmed: bool = False) -> list[Mention]:
+        """Where the files that apply to ``near`` name any of ``terms``.
+
+        With ``affirmed``, a line that names a term only to rule it out ("Do not run
+        `make test` locally", "`make test` was removed") is not a mention: it does not
+        document the term as the thing to use.
+        """
         patterns = [_pattern(t.strip()) for t in dict.fromkeys(terms) if usable(t)]
         if not patterns or self.repo is None:
             return []
         found: list[Mention] = []
         for rel in self.files(near):
             for number, line in self._read(rel):
-                if any(p.search(line) for p in patterns):
+                hits = [m for m in (p.search(line) for p in patterns) if m is not None]
+                if affirmed:
+                    hits = [m for m in hits if not _negated(line, m.start(), m.end())]
+                if hits:
                     found.append(Mention(rel, number))
                     if len(found) >= MAX_MENTIONS:
                         return found
         return found
+
+
+#: Words in front of a name that rule it out, and words after it that say it is gone.
+_NEGATED_BEFORE_RE = re.compile(
+    r"\b(?:do not|don't|dont|never|avoid|stop|not|no longer|instead of|rather than|unlike"
+    r"|deprecated|forbidden|must not|should not|shouldn't|cannot|can't|won't)\b[^.;:!?]{0,40}$",
+    re.I,
+)
+_NEGATED_AFTER_RE = re.compile(
+    r"^[`'\")*_\s]*(?:(?:was|were|is|are|has been|have been|got)\s+(?:\w+\s+)?"
+    r"(?:removed|deleted|deprecated|gone|dropped|retired|replaced|broken|disabled|forbidden"
+    r"|not\b|no longer)"
+    r"|(?:no longer|does not|doesn't|will not|won't|must not|should not|is not|isn't)\b)",
+    re.I,
+)
+
+
+def _negated(line: str, start: int, end: int) -> bool:
+    return bool(_NEGATED_BEFORE_RE.search(line[:start]) or _NEGATED_AFTER_RE.search(line[end:]))
 
 
 def _deny_lines(text: str, numbered: list[tuple[int, str]]) -> list[tuple[int, str]]:

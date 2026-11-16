@@ -217,3 +217,13 @@ def test_trailing_red_runs_are_marked_unresolved() -> None:
     assert "unresolved at end of session" in render_detail(r, item)
     assert "unresolved at end of session" in render_markdown(r)
     assert "e.trailing" in render_html(r)
+
+
+def test_git_only_empty_state_and_utc_labels() -> None:
+    empty = {"totals": {"sessions": 0}, "repo": {"name": "x"}, "hotspots": [], "commands": []}
+    text = render_terminal({**empty, "settings": {"git": True}})
+    assert "found in the git history" in text and "tool calls" not in text.split("\n", 2)[2]
+    r = sample_result()
+    item = find_target(r, "src/shop/generated/schema.py")
+    assert item is not None
+    assert " UTC" in render_detail(r, item) and " UTC" in render_markdown(r)

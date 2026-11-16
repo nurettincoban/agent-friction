@@ -2024,3 +2024,117 @@ def test_the_activation_step_is_what_the_advice_names(tmp_path: Path) -> None:
     assert advice["id"] == "document-the-setup-step"
     assert advice["setup"] == "source .venv/bin/activate" and "`pytest`" in advice["title"]
     assert "run `source .venv/bin/activate` before `pytest`" in advice["detail"]
+
+
+# ---- round 19 ----------------------------------------------------------------------------
+
+
+def _commands(tmp_path: Path, build: Any, count: int = 4, **kw: Any) -> list[dict[str, Any]]:
+    sessions = []
+    for i in range(count):
+        s = Session(f"s{i}", cwd=kw.get("cwd", "/repo")).user("go")
+        build(s)
+        sessions.append(s)
+    found: list[dict[str, Any]] = scan(tmp_path, sessions, kw.get("repo"))["commands"]
+    return found
+
+
+def test_a_subset_passing_is_not_flakiness(tmp_path: Path) -> None:
+    red = "FAILED tests/test_x.py::test_a\n1 failed, 40 passed in 2.0s"
+    (row,) = _commands(
+        tmp_path,
+        lambda s: s.bash("pytest", red, exit_code=1).bash("pytest tests/test_cart.py", "5 passed"),
+    )
+    assert row["recommendations"] == [] and row["score"] < 20
+    assert all("re-run" not in e["summary"] for e in row["evidence"])
+    (flaky,) = _commands(
+        tmp_path / "again",
+        lambda s: s.bash("pytest", red, exit_code=1).bash("pytest", "41 passed"),
+    )
+    assert [r["id"] for r in flaky["recommendations"]] == ["fix-the-flaky-test"]
+
+
+def test_waiting_for_a_server_is_dropped_not_documented(tmp_path: Path) -> None:
+    refused = "curl: (7) Failed to connect to localhost port 3000 after 0 ms: Connection refused"
+
+    def build(s: Session) -> None:
+        launch = {"command": "npm run dev", "run_in_background": True}
+        s.tool("Bash", launch, "Command running in background with ID: b1")
+        s.bash("curl -s localhost:3000/health", refused, exit_code=7)
+        s.bash("sleep 3 && curl -s localhost:3000/health", '{"ok":true}')
+
+    sessions = [Session(f"s{i}").user("go") for i in range(4)]
+    for s in sessions:
+        build(s)
+    out = scan(tmp_path, sessions)
+    assert out["commands"] == [] and out["totals"]["dropped_red_runs"] == 4
+    (down,) = _commands(
+        tmp_path / "down",
+        lambda s: s.bash("curl -s localhost:3000/health", refused, exit_code=7).read("/repo/a.py"),
+    )
+    assert [r["id"] for r in down["recommendations"]] == ["document-the-environment"]
+    assert "port 3000" in down["recommendations"][0]["title"]
+
+
+def test_git_bash_paths_on_windows_are_the_repo(tmp_path: Path) -> None:
+    home = "C:\\Users\\me\\repo"
+    missing = "ImportError while loading conftest\nModuleNotFoundError: No module named 'yaml'"
+    for spelled in ("/c/Users/me/repo", "/mnt/c/Users/me/repo", "/cygdrive/c/users/me/repo"):
+        sessions = []
+        for i in range(3):
+            s = Session(f"s{i}", cwd=home).user("go")
+            sessions.append(s.bash(f"cd {spelled} && pytest -q", missing, exit_code=4))
+        out = scan(tmp_path / spelled.split("/")[1], sessions, Path(home))
+        assert out["totals"]["tool_calls_in_repo"] == 3, spelled
+        assert [c["path"] for c in out["commands"]] == ["pytest"], spelled
+    # on a POSIX repository /c/... is just another directory
+    sessions = [
+        Session(f"s{i}").user("go").bash("cd /c/repo && pytest -q", missing, exit_code=4)
+        for i in range(3)
+    ]
+    assert scan(tmp_path / "posix", sessions)["commands"] == []
+
+
+def test_the_wrong_runner_is_named_once_it_recurs(tmp_path: Path) -> None:
+    def build(s: Session) -> None:
+        s.bash("yarn test", "Tests: 1 failed", exit_code=1).bash("pnpm test", "Tests: 5 passed")
+
+    (row,) = _commands(tmp_path, build, 3)
+    (advice,) = row["recommendations"]
+    assert advice["id"] == "use-the-working-command" and advice["replacement"] == "pnpm test"
+    assert row["evidence"][0]["summary"] == (
+        "`yarn test` failed (exit 1; `pnpm test` then passed, with nothing changed)"
+    )
+    (twice,) = _commands(tmp_path / "twice", build, 2)
+    assert twice["recommendations"] == [] and "pnpm" not in json.dumps(twice)
+
+
+def test_py_for_python_and_a_flag_that_fixed_it(tmp_path: Path) -> None:
+    unknown = (
+        "python : The term 'python' is not recognized as the name of a cmdlet, function, "
+        "script file, or operable program.\n    + FullyQualifiedErrorId : CommandNotFoundException"
+    )
+    (row,) = _commands(
+        tmp_path,
+        lambda s: s.bash("python -m pytest", unknown, exit_code=1).bash("py -m pytest", "5 passed"),
+    )
+    assert "use `py`, not `python`" in row["recommendations"][0]["detail"]
+    eresolve = "npm ERR! code ERESOLVE\nnpm ERR! ERESOLVE unable to resolve dependency tree"
+    (row,) = _commands(
+        tmp_path / "npm",
+        lambda s: s.bash("npm install", eresolve, exit_code=1).bash(
+            "npm install --legacy-peer-deps", "added 100 packages"
+        ),
+    )
+    (advice,) = row["recommendations"]
+    assert advice["title"] == "Tell agents to use `npm install --legacy-peer-deps`"
+    assert "add the option where the command is defined" in advice["detail"]
+
+
+def test_error_messages_point_at_the_published_schema(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("not a transcript\n")
+    with pytest.raises(AgentFrictionError) as raised:
+        analyze(AnalyzeOptions(repo=tmp_path, transcripts=[tmp_path / "notes.txt"]))
+    assert "https://github.com/nurettincoban/agent-friction/blob/main/docs/schema.md" in str(
+        raised.value
+    )

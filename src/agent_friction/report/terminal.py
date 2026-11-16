@@ -60,6 +60,12 @@ def _in_repo_calls(totals: dict[str, Any]) -> int:
     return int(value or 0)
 
 
+def _utc_label(timestamp: object) -> str:
+    """Evidence times are UTC; say so, since a reader assumes local time."""
+    text = str(timestamp or "")[:16].replace("T", " ")
+    return f"{text} UTC" if text else ""
+
+
 def _lost_phrase(minutes: float) -> str:
     return f"~{fmt_minutes(minutes)} lost" if minutes > 0 else "no time estimate"
 
@@ -88,7 +94,7 @@ def _unattributed_rows(result: dict[str, Any], st: Style, width: int, limit: int
     )
     items = list(result.get("unattributed") or [])
     for ev in items[:limit]:
-        when = str(ev.get("timestamp") or "")[:16].replace("T", " ")
+        when = _utc_label(ev.get("timestamp"))
         text = f"{ev.get('signal', '?')} · {ev.get('summary', '')}"
         room = max(40, width - 20)
         text = text if len(text) <= room else text[: room - 1] + "…"
@@ -167,6 +173,8 @@ def render_terminal(
         calls = _in_repo_calls(totals)
         if int(totals.get("friction_events", 0)):
             out.append(st.green("No hotspot: no file, directory, or command collected friction."))
+        elif not sessions:
+            out.append(st.green("No recurring friction found in the git history."))
         else:
             out.append(
                 st.green(f"No recurring friction found in {plural(calls, 'tool call')}.")
@@ -284,7 +292,7 @@ def render_detail(
     if evidence:
         out.append(st.bold("Evidence"))
         for ev in evidence:
-            ts = str(ev.get("timestamp", ""))[:16].replace("T", " ")
+            ts = _utc_label(ev.get("timestamp"))
             sess = str(ev.get("session_id", ""))[:8]
             out.append(
                 f"  {st.cyan(ts)} {st.dim('session ' + sess)}  "

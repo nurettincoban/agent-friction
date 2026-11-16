@@ -588,3 +588,22 @@ def test_the_exception_is_quoted_not_the_summary_after_it() -> None:
     (rec,) = recommend.recommend(model.COMMAND, "pytest", failures, None, quote)
     assert "Typical output: \"RuntimeError: fixture 'db' not found\"." in str(rec["detail"])
     assert "1 error in" not in str(rec["detail"])
+
+
+def test_a_line_that_rules_a_command_out_does_not_document_it(tmp_path: Path) -> None:
+    repo = write(
+        tmp_path,
+        {
+            "AGENTS.md": "Do not run `make test` locally.\n`make test` was removed in March.\n"
+            "We no longer use make test.\nRun `tox -e py`, never pytest directly.\n"
+            "Use `make check` before every commit.\n",
+        },
+    )
+    guide = Guidance(repo)
+    assert cited(guide.mentions(["make test"])) == ["AGENTS.md:1", "AGENTS.md:2", "AGENTS.md:3"]
+    assert guide.mentions(["make test"], affirmed=True) == []
+    assert guide.mentions(["pytest"], affirmed=True) == []
+    assert cited(guide.mentions(["make check", "tox -e py"], affirmed=True)) == [
+        "AGENTS.md:4",
+        "AGENTS.md:5",
+    ]

@@ -538,6 +538,8 @@ def _target_in_repo(target: str, repo: Path | None) -> str:
 
 
 def _cmd_show(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    if not args.target.strip():
+        raise UsageError("show needs a target: a file, a directory, or a command")
     if args.from_json is not None:
         result = _load_json(args.from_json)
     else:
@@ -615,7 +617,23 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         fmt = {".md": "markdown", ".json": "json"}.get(output.suffix.lower())
     if fmt == "json":
         payload = [c.to_dict() for c in changes]
-        text = json.dumps({"changes": payload}, indent=2, sort_keys=True) + "\n"
+        doc = {
+            "schema_version": 1,
+            "tool": {"name": "agent-friction", "version": __version__},
+            "before": {
+                "repo": before.get("repo"),
+                "window": before.get("window"),
+                "sessions": sessions[0],
+            },
+            "after": {
+                "repo": after.get("repo"),
+                "window": after.get("window"),
+                "sessions": sessions[1],
+            },
+            "low_sample": low_sample,
+            "changes": payload,
+        }
+        text = json.dumps(doc, indent=2, sort_keys=True) + "\n"
     else:
         text = render_compare(before, after, changes, markdown=fmt == "markdown")
     _write(text, output, stdout)
