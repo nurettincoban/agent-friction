@@ -122,7 +122,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
   <div class="tablewrap" style="margin-top:8px"><table id="table"><thead><tr>
     <th scope="col">Path or command</th><th scope="col" class="num">Score</th><th scope="col" class="num hide-sm">Sessions</th><th scope="col" class="num hide-sm">Events</th><th scope="col" class="num">Time lost</th><th scope="col" class="hide-sm">Top signals</th><th scope="col">Confidence</th>
   </tr></thead><tbody></tbody></table></div>
-  <section id="unattr" hidden><h2 id="unattr-h"></h2><div id="unattr-list"></div></section>
+  <section id="unattr" hidden><h2 id="unattr-h">Not tied to a file or command</h2><div id="unattr-list"></div></section>
   <footer id="footer"></footer>
 </main>
 <script id="data" type="application/json">__DATA__</script>
@@ -175,7 +175,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     "generated " + String(R.generated_at || "").slice(0, 16).replace("T", " ");
   if (Number(t.dropped_red_runs) > 0) {
     document.getElementById("stats").insertAdjacentElement("afterend", el("p", { class: "sub" },
-      "Not counted: " + plural(t.dropped_red_runs, "failed run") + " the agent then fixed, or that passed on a re-run (normal work, ~" +
+      "Not counted: " + plural(t.dropped_red_runs, "failed run") + " of normal work (the agent fixed the failure, or was only waiting and polled until it passed; ~" +
       mins(t.dropped_minutes) + " of run time)."));
   }
   [["sessions", "agent session", "agent sessions"], ["tool_calls", "tool call", "tool calls"],

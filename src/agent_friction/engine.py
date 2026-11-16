@@ -8,11 +8,12 @@ schema is documented in docs/schema.md.
 
 from __future__ import annotations
 
+import bisect
 import dataclasses
 import json
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -59,7 +60,7 @@ class AnalyzeOptions:
     #: ``False`` removes every verbatim transcript quote from the result.
     include_excerpts: bool = True
     max_evidence: int = 5
-    max_hotspots: int = 50
+    max_hotspots: int | None = None  # None: every hotspot
     #: Fixed "now" for ``generated_at`` (deterministic output in tests).
     now: datetime | None = None
     # ---- additions to the base contract ----
@@ -159,6 +160,37 @@ def read_error(exc: OSError) -> str:
     return "could not be read"
 
 
+#: A human prompt after this much silence starts a new episode of work in the session.
+EPISODE_IDLE_SECONDS = 2 * 3600.0
+
+
+def episode_starts(streams: Sequence[Stream]) -> dict[str, list[float]]:
+    """When the second and later episodes of each session begin (epoch seconds).
+
+    A session id can live for days (``claude --continue``): ten tasks on ten days
+    are ten independent occasions for the same friction, not one. A new episode
+    starts at a human prompt that follows ``EPISODE_IDLE_SECONDS`` or more without
+    any event in the session. Subagent streams never start one: their prompts are
+    written by the agent that drives them, and they belong to its episode.
+    """
+    by_session: dict[str, list[tuple[float, bool]]] = {}
+    for stream in streams:
+        marks = by_session.setdefault(stream.session_id, [])
+        for event in stream.events:
+            if event.ts is not None:
+                prompt = event.kind == model.USER_MESSAGE and not stream.sidechain
+                marks.append((event.ts.timestamp(), prompt))
+    starts: dict[str, list[float]] = {}
+    for session, marks in by_session.items():
+        marks.sort()
+        previous: float | None = None
+        for stamp, prompt in marks:
+            if prompt and previous is not None and stamp - previous >= EPISODE_IDLE_SECONDS:
+                starts.setdefault(session, []).append(stamp)
+            previous = stamp
+    return starts
+
+
 #: A commit up to this long after a session's last event still belongs to that session.
 COMMIT_SESSION_SLACK = timedelta(minutes=10)
 
@@ -202,7 +234,7 @@ def _unclaim_single_session_stretches(findings: Sequence[Finding]) -> None:
         if finding.detail.get("uncertain"):
             continue
         for target in finding.targets:
-            sessions.setdefault((target.kind, target.key), set()).add(finding.session_id)
+            sessions.setdefault((target.kind, target.key), set()).add(finding.unit)
     for finding in stuck:
         recurring = any(
             len(sessions.get((t.kind, t.key), ())) >= scoring.MEDIUM_MIN_SESSIONS
@@ -238,6 +270,8 @@ THIRD_PARTY_DIRS = frozenset(
 #: Names that usually hold build output but can be first-party (`src/build/`): third-party
 #: unless git says the directory is not ignored.
 BUILD_DIRS = frozenset({"target", "dist", "build"})
+#: A test command that fails and passes on a plain re-run in this many sessions is flaky.
+FLAKY_MIN_SESSIONS = 3
 #: A command the human stops in this many sessions is a row of its own.
 INTERRUPTED_COMMAND_MIN_SESSIONS = 3
 #: The share of an interrupt that goes to the command that was stopped.
@@ -259,6 +293,18 @@ def _command_keys(finding: Finding) -> list[str]:
     return [t.key for t in finding.targets if t.kind == model.COMMAND]
 
 
+#: Details that say the passing run was not the failing line again (another spelling, a
+#: variable in front, a setup step): the cause is known, and it is not flakiness.
+_EXPLAINED = frozenset(
+    {"works_with", "works_as", "works_in", "own_module", "recovered_by", "fixed_by_setup"}
+)
+
+
+def _plain_rerun(finding: Finding) -> bool:
+    detail = finding.detail
+    return detail.get("variant") == "ordinary" and not _EXPLAINED & detail.keys()
+
+
 def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
     """Decide, across sessions, what a single session cannot.
 
@@ -266,6 +312,10 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
       step (``fixed_by_command``): once is a coincidence or a one-off script and
       is dropped as the development loop; the same pair in two or more sessions
       is a setup step under another name and is kept in full.
+    * A red run of a test command that passed on a plain re-run with nothing changed
+      (``rerun_green``): from ``FLAKY_MIN_SESSIONS`` sessions on, the test is flaky
+      (variant ``flaky``), which is worth fixing; below that it stays an ordinary
+      failure.
     * An ordinary failure of a command that never went green in its session
       (``never_green``) after failing ``RECURRING_RED_MIN_RUNS`` times or more:
       from ``RECURRING_RED_MIN_SESSIONS`` such sessions on it is a pattern, not a
@@ -278,7 +328,21 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
     for finding in pending:
         for key in _command_keys(finding):
             pair = (key, finding.detail["fixed_by_command"])
-            pairs.setdefault(pair, set()).add(finding.session_id)
+            pairs.setdefault(pair, set()).add(finding.unit)
+    reruns: dict[str, set[str]] = {}
+    plain = [f for f in findings if "rerun_green" in f.detail and _plain_rerun(f)]
+    for finding in plain:
+        for key in _command_keys(finding):
+            reruns.setdefault(key, set()).add(finding.unit)
+    for finding in plain:
+        if any(len(reruns.get(key, ())) >= FLAKY_MIN_SESSIONS for key in _command_keys(finding)):
+            finding.detail["variant"] = "flaky"
+            finding.targets = [t for t in finding.targets if t.kind == model.COMMAND]
+            finding.weight = 1.0
+            finding.interval = finding.interval or finding.run
+            finding.summary = finding.summary.replace(
+                "ordinary failure", "it passed on a plain re-run, with nothing changed"
+            )
     dropped: list[Finding] = []
     for finding in pending:
         fix = finding.detail.pop("fixed_by_command")
@@ -309,13 +373,13 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
     runs: dict[tuple[str, str], int] = {}
     for finding in stuck:
         for key in _command_keys(finding):
-            runs[key, finding.session_id] = runs.get((key, finding.session_id), 0) + 1
+            runs[key, finding.unit] = runs.get((key, finding.unit), 0) + 1
     for (key, session), count in runs.items():
         if count >= RECURRING_RED_MIN_RUNS:
             red.setdefault(key, set()).add(session)
     for finding in stuck:
         if any(
-            len(red.get(key, ())) >= RECURRING_RED_MIN_SESSIONS and finding.session_id in red[key]
+            len(red.get(key, ())) >= RECURRING_RED_MIN_SESSIONS and finding.unit in red[key]
             for key in _command_keys(finding)
         ):
             finding.detail["recurring_red"] = "1"
@@ -335,7 +399,7 @@ def _attribute_interrupted_commands(findings: Sequence[Finding]) -> None:
         if finding.signal == signals.USER_INTERRUPT and key:
             by_key.setdefault(key, []).append(finding)
     for key, found in by_key.items():
-        if len({f.session_id for f in found}) < INTERRUPTED_COMMAND_MIN_SESSIONS:
+        if len({f.unit for f in found}) < INTERRUPTED_COMMAND_MIN_SESSIONS:
             continue
         for finding in found:
             finding.targets = [
@@ -354,7 +418,7 @@ def _score(items: Sequence[Item], exposed: set[str]) -> scoring.Score:
     A rework finding adds a friction "session" (the agent commit) that can pull
     the mean down, so the score from transcripts alone is the floor.
     """
-    sessions = exposed | {f.session_id for f, _ in items}
+    sessions = exposed | {f.unit for f, _ in items}
     full = scoring.score_items(items, len(sessions))
     if scoring.weak_only(f for f, _ in items):
         # Nothing but signals that also accompany productive work: a lead, never an alarm.
@@ -363,7 +427,7 @@ def _score(items: Sequence[Item], exposed: set[str]) -> scoring.Score:
     if len(transcript_items) == len(items) or not transcript_items:
         return full
     floor = scoring.score_items(
-        transcript_items, len(exposed | {f.session_id for f, _ in transcript_items})
+        transcript_items, len(exposed | {f.unit for f, _ in transcript_items})
     )
     return full if full.score >= floor.score else floor
 
@@ -445,7 +509,9 @@ class _Analysis:
         self.outside: dict[Path, set[str]] = {}
         self.skipped_events: dict[str, int] = {}
         self.source_labels: dict[str, str] = {}
-        self.exposure: dict[tuple[str, str], set[str]] = {}
+        self.exposure: dict[tuple[str, str], set[str]] = {}  # by episode of work
+        self.episodes: dict[str, list[float]] = {}
+        self.unit_session: dict[str, str] = {}
         self.git_used = False
         self.dropped: list[tuple[int, float, str]] = []
         self.unreadable: list[tuple[Path, str]] = []
@@ -494,6 +560,21 @@ class _Analysis:
             )
 
         return public_key(key, in_repo)
+
+    def unit(self, session_id: str, ts: datetime | None) -> str:
+        """The episode of work an event belongs to: the session id, or ``<id>#<n>``."""
+        starts = self.episodes.get(session_id)
+        if not starts or ts is None:
+            return session_id
+        number = bisect.bisect_right(starts, ts.timestamp())
+        if not number:
+            return session_id
+        unit = f"{session_id}#{number + 1}"
+        self.unit_session[unit] = session_id
+        return unit
+
+    def sessions_of(self, units: Iterable[str]) -> set[str]:
+        return {self.unit_session.get(unit, unit) for unit in units}
 
     def third_party(self, rel: str, directory: bool = False) -> bool:
         """Is ``rel`` other people's code or build output (``node_modules/``, ``.venv/``)?
@@ -631,6 +712,7 @@ class _Analysis:
                     if rel:
                         self.touched.add(rel)
 
+        self.episodes = episode_starts(streams)
         ctx = signals.DetectContext(
             self.resolver,
             self.is_file,
@@ -638,6 +720,7 @@ class _Analysis:
             # Without excerpts no project-specific name may survive in a command key.
             command_key=str if options.include_excerpts else self.public_command,
             first_party=self.first_party,
+            unit=self.unit,
         )
         findings: list[Finding] = []
         dropped: list[tuple[int, float, str]] = []
@@ -664,8 +747,8 @@ class _Analysis:
             self.skipped_events[source_key] = (
                 self.skipped_events.get(source_key, 0) + detection.skipped_events
             )
-            for kind, key in detection.exposed:
-                self._expose(exposure, kind, key, stream.session_id)
+            for kind, key, unit in detection.exposed_in:
+                self._expose(exposure, kind, key, unit)
 
         sources = self._sources(parsed)
         if options.include_git:
@@ -719,6 +802,8 @@ class _Analysis:
         if missing is not None and not self.git_used:
             raise missing  # neither transcripts nor git history: nothing to analyse
 
+        for finding in findings:
+            finding.episode = self.unit(finding.session_id, finding.ts)
         findings = self._drop_third_party(findings, exposure)
         _attribute_interrupted_commands(findings)
         for one_off in _settle_command_fixes(findings):
@@ -731,7 +816,7 @@ class _Analysis:
             finding.fid = index
         for finding in findings:  # friction implies exposure, whatever the detector saw
             for target in finding.targets:
-                self._expose(exposure, target.kind, target.key, finding.session_id)
+                self._expose(exposure, target.kind, target.key, finding.unit)
         self.exposure = exposure
         return self._emit(streams, findings, sources)
 
@@ -859,7 +944,7 @@ class _Analysis:
             by_kind[kind].append(self._entry(kind, key, items))
         for entries in by_kind.values():
             entries.sort(key=lambda e: (-e["score"], -e["events"], e["path"]))
-        limit = max(options.max_hotspots, 0)
+        limit = None if options.max_hotspots is None else max(options.max_hotspots, 0)
         shown: dict[str, list[dict[str, Any]]] = {}
         for kind, entries in by_kind.items():
             shown[kind] = entries[:limit]
@@ -895,6 +980,7 @@ class _Analysis:
             "sources": sources,
             "totals": {
                 "sessions": len({s.session_id for s in streams}),
+                "episodes": len({self.unit(s.session_id, e.ts) for s in streams for e in s.events}),
                 "tool_calls": sum(
                     1 for s in streams for e in s.events if e.kind == model.TOOL_CALL
                 ),
@@ -930,7 +1016,7 @@ class _Analysis:
             "directories": shown[model.DIR],
             "exposure": {
                 name: {
-                    key: len(sessions)
+                    key: len(self.sessions_of(sessions))
                     for (kind, key), sessions in sorted(self.exposure.items())
                     if kind == wanted
                 }
@@ -960,8 +1046,11 @@ class _Analysis:
         for finding in found:
             signal_counts[finding.signal] = signal_counts.get(finding.signal, 0) + 1
         ranked = sorted(signal_counts.items(), key=lambda kv: (-kv[1], kv[0]))
-        sessions = len(result.sessions)
-        commits = sum(s.session_id.startswith(scoring.GIT_SESSION_PREFIX) for s in result.sessions)
+        units = {s.session_id for s in result.sessions}
+        friction = self.sessions_of(units)
+        sessions = len(friction)
+        commits = sum(s.startswith(scoring.GIT_SESSION_PREFIX) for s in friction)
+        exposed = len(friction | self.sessions_of(self.exposure.get((kind, key), set())))
         level = scoring.confidence((s.session_id for s in result.sessions), signal_counts)
         capped = scoring.weak_only(found)
         if capped:
@@ -971,9 +1060,11 @@ class _Analysis:
             "kind": kind,
             "score": result.score,
             "sessions": sessions,
+            "episodes": len(units),
             "agent_commits": commits,
-            "exposure_sessions": result.exposure_sessions,
-            "friction_rate": result.friction_rate,
+            "exposure_sessions": exposed,
+            "exposure_episodes": result.exposure_sessions,
+            "friction_rate": round(sessions / exposed, 2) if exposed else 0.0,
             "events": len(found),
             "est_minutes_lost": scoring.lost_minutes(found),
             "signals": dict(ranked),
@@ -981,10 +1072,11 @@ class _Analysis:
             "why": scoring.explain(
                 ranked,
                 sessions - commits,
-                result.exposure_sessions - commits,
+                exposed - commits,
                 level,
                 commits,
                 capped=capped,
+                episodes=len(units) - commits,
             ),
             "recommendations": [],
             "evidence": [],
@@ -997,7 +1089,8 @@ class _Analysis:
                 "intensity": result.intensity,
                 "sessions": [
                     {
-                        "session_id": s.session_id,
+                        "session_id": self.unit_session.get(s.session_id, s.session_id),
+                        "episode": s.session_id,
                         "weighted_events": s.weighted_events,
                         "points": s.points,
                     }
@@ -1018,7 +1111,7 @@ class _Analysis:
             kind, key, found, facts, quote, shares, self.guidance
         )
         entry["evidence"] = [self._evidence(f) for f in _pick_evidence(found, options.max_evidence)]
-        transcript_sessions = entry["sessions"] - entry["agent_commits"]
+        transcript_sessions = entry["episodes"] - entry["agent_commits"]
         if transcript_sessions == 1 and entry["score"] < SINGLE_SESSION_ADVICE_MIN_SCORE:
             # One session and a low score is a lead to look at, not grounds for telling
             # anybody to change their repository.
@@ -1095,15 +1188,17 @@ class _Analysis:
             found = [f for f, _ in merged.values()]
             is_dir = bool(nodes) or path in dir_keys or path == ""
             result = _score(list(merged.values()), beneath.get(path, set()))
+            friction = self.sessions_of(s.session_id for s in result.sessions)
+            exposed = len(friction | self.sessions_of(beneath.get(path, set())))
             node = {
                 "name": path.rsplit("/", 1)[-1] if path else (self.repo.name or "repo"),
                 "path": path,
                 "kind": model.DIR if is_dir else model.FILE,
                 "score": result.score,
                 "events": len(found),
-                "sessions": result.friction_sessions,
-                "exposure_sessions": result.exposure_sessions,
-                "friction_rate": result.friction_rate,
+                "sessions": len(friction),
+                "exposure_sessions": exposed,
+                "friction_rate": round(len(friction) / exposed, 2) if exposed else 0.0,
                 "est_minutes_lost": scoring.lost_minutes(found),
                 "children": nodes,
             }

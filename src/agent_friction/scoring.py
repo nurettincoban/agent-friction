@@ -100,7 +100,7 @@ def score_items(items: Iterable[Item], exposure_sessions: int | None = None) -> 
     per_session: dict[str, float] = {}
     for finding, share in items:
         contribution = SEVERITY[finding.signal] * finding.weight * share
-        per_session[finding.session_id] = per_session.get(finding.session_id, 0.0) + contribution
+        per_session[finding.unit] = per_session.get(finding.unit, 0.0) + contribution
     sessions = tuple(
         SessionPoints(sid, round(raw, 3), round(session_points(raw), 3))
         for sid, raw in sorted(per_session.items())
@@ -227,6 +227,7 @@ def explain(
     level: str,
     agent_commits: int = 0,
     capped: bool = False,
+    episodes: int = 0,
 ) -> str:
     """One-sentence reason for a hotspot's score and confidence.
 
@@ -252,6 +253,10 @@ def explain(
         where = f"all {exposure} sessions that touched it"
     else:
         where = f"{sessions} of the {exposure} sessions that touched it"
+    if episodes > max(sessions, 1) and where:
+        # one long-running session id that was picked up again and again
+        where += f" (in {episodes} separate episodes of work)"
+        reason = reason.replace("across sessions", "across episodes of work")
     if agent_commits:
         commits = _plural(agent_commits, "agent commit")
         where = f"{where} and {commits}" if where else commits
@@ -288,15 +293,22 @@ def is_weak(finding: Finding) -> bool:
     return finding.signal in WEAK_ALONE_SIGNALS
 
 
+def wanted_hit(finding: Finding) -> bool:
+    """Did the agent behind this search miss go on looking, and not for leftovers?"""
+    return "wanted" in finding.detail and "hygiene" not in finding.detail
+
+
 def weak_only(findings: Iterable[Finding]) -> bool:
     """True if there is evidence and all of it is of the weak-alone kind.
 
     One thing lifts a search miss out of that class: the *same* pattern missed
-    in two or more sessions. A name that agents keep looking for is not a
-    one-off probe before creating something new.
+    in two or more sessions, each time by an agent that then went on looking
+    (``wanted``). A name that agents keep looking for is not a one-off probe
+    before creating something new, and not a check that no debug statement is
+    left.
     """
     found = list(findings)
-    stuck = {f.session_id for f in found if f.signal == NO_CONVERGENCE and not is_weak(f)}
+    stuck = {f.unit for f in found if f.signal == NO_CONVERGENCE and not is_weak(f)}
     if not found or not all(is_weak(f) or f.signal == NO_CONVERGENCE for f in found):
         return False
     if len(stuck) >= MEDIUM_MIN_SESSIONS:
@@ -304,6 +316,6 @@ def weak_only(findings: Iterable[Finding]) -> bool:
     sessions_by_pattern: dict[str, set[str]] = {}
     for finding in found:
         pattern = finding.detail.get("pattern", "").casefold()
-        if finding.signal == SEARCH_MISS and pattern:
-            sessions_by_pattern.setdefault(pattern, set()).add(finding.session_id)
+        if finding.signal == SEARCH_MISS and pattern and wanted_hit(finding):
+            sessions_by_pattern.setdefault(pattern, set()).add(finding.unit)
     return not any(len(s) >= MEDIUM_MIN_SESSIONS for s in sessions_by_pattern.values())

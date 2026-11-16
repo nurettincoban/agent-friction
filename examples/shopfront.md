@@ -2,7 +2,7 @@
 
 6 agent sessions analysed · 34 friction events · ~9m lost · 4 human corrections · 5 files affected
 
-_Not counted: 1 failed run the agent then fixed, or that passed on a re-run (normal work, ~6s of run time)._
+_Not counted: 1 failed run of normal work (the agent fixed the failure, or was only waiting and polled until it passed; ~6s of run time)._
 
 ## What to fix first
 

@@ -12,6 +12,7 @@ import posixpath
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 
 from agent_friction import model
 from agent_friction.adapters.common import QUESTION_TOOL_RE
@@ -803,6 +804,34 @@ _AUTH_RE = re.compile(
     r"|Invalid username or password|\b401 Unauthorized\b|\bcode E401\b",
     re.I,
 )
+#: Searches for leftovers: debug statements, work markers, conflict markers, focused or
+#: skipped tests. An empty result is the answer the agent wanted.
+HYGIENE_PATTERN_RE = re.compile(
+    r"console\\?\.(?:log|debug|warn)|\bdebugger\b|\bTODO\b|\bFIXME\b|\bXXX\b|\bHACK\b"
+    r"|<{4,}|>{4,}|={7}|\\?\.only\b|\b(?:fit|fdescribe|xit|xdescribe)\\?\("
+    r"|\bpdb\b|\bipdb\b|\bbreakpoint\\?\(|set_trace|binding\\?\.pry|\bdbg!|\bprint\\?\("
+    r"|\bdd\\?\(|var_dump|\bNOCOMMIT\b|\bDO NOT (?:COMMIT|MERGE)\b",
+    re.I,
+)
+_SEARCH_WORD_RE = re.compile(r"[A-Z]?[a-z0-9]{2,}|[A-Z]{3,}")
+
+
+def _search_words(text: str) -> set[str]:
+    """The words of a search pattern or path (``RefundPolicy`` -> refund, policy)."""
+    return {w.casefold() for w in _SEARCH_WORD_RE.findall(text) if len(w) >= 4}
+
+
+#: What `timeout N cmd` exits with when the time ran out.
+TIMEOUT_EXIT_CODE = 124
+_TIMEOUT_WRAPPER_RE = re.compile(r"(?:^|[;&|(]\s*)g?timeout\s+(?:-\S+\s+)*\d")
+#: A server saying that it is up.
+READY_BANNER_RE = re.compile(
+    r"\bready in \d|\bready (?:on|at|-) |\bstarted server\b|\blistening (?:on|at)\b"
+    r"|compiled successfully|\bLocal:\s+https?://|running (?:on|at) https?://"
+    r"|Application startup complete|Server (?:is )?(?:running|started|listening)"
+    r"|Development server (?:is )?running|webpack \S+ compiled",
+    re.I,
+)
 #: The shell could not change directory, so what came after `cd x &&` never ran.
 _CD_FAILED_RE = re.compile(
     r"(?:^|: )cd: (?:[^\n]*: )?(?:No such file or directory|Not a directory)\s*$"
@@ -1216,6 +1245,8 @@ class DetectContext:
     command_key: Callable[[str], str] = str
     #: True if a top-level module/package name belongs to the repository itself.
     first_party: Callable[[str], bool] = lambda top: False
+    #: The episode of work an event of a session belongs to (default: the session).
+    unit: Callable[[str, datetime | None], str] = lambda session, ts: session
 
 
 @dataclass
@@ -1390,6 +1421,7 @@ class _Cycle:
     result: Event | None = None
     command: str = ""
     label: str = ""
+    baseline: bool = False  # its first red run came before any change of the turn
     judged: bool = False  # a red run of it was read from output, not from an exit status
     unknown: bool = False  # its latest run showed neither red nor green
     spans: list[tuple[float, float]] = field(default_factory=list)  # red runs, edits between
@@ -1408,6 +1440,7 @@ class _Detector:
         self.ctx = ctx
         self.findings: list[Finding] = []
         self.exposed: set[tuple[str, str]] = set()  # every target the agent went near
+        self.exposed_in: set[tuple[str, str, str]] = set()  # ... and in which episode
         self.skipped_events = 0  # events a detector could not handle (never fatal)
         #: Red runs taken off the record: (transcript line, seconds the run took, reason)
         self.dropped: list[tuple[int, float, str]] = []
@@ -1442,7 +1475,8 @@ class _Detector:
             detail=detail or {},
         )
         self.findings.append(finding)
-        self.exposed.update((t.kind, t.key) for t in targets)
+        for target in targets:
+            self._see(target.kind, target.key, event)
         self.state.emitted_at[id(finding)] = self.state.ok_actions
         if signal in _FILE_TROUBLE:
             self.state.turn_trouble_files.update(t.key for t in targets if t.kind == model.FILE)
@@ -1563,7 +1597,7 @@ class _Detector:
             rel = resolver.resolve(event.path, event.cwd)
             action.file = rel or None
             if action.file:
-                self.exposed.add((model.FILE, action.file))
+                self._see(model.FILE, action.file, event)
         elif event.op == model.OP_SHELL and event.command:
             parsed = parse_command(event.command, is_windows_path(event.cwd) or None)
             primary = next((s for s in parsed.steps if s.key == parsed.key), None)
@@ -1574,12 +1608,16 @@ class _Detector:
                 action.cmd = parsed
                 if not parsed.inspection:
                     label = self._label(parsed.key, primary, event.cwd)
-                    self.exposed.add((model.COMMAND, label))
+                    self._see(model.COMMAND, label, event)
         elif event.op == model.OP_SEARCH:
             scope = _scope(event, self.ctx)
             if scope is not None:
                 is_file = bool(scope) and self.ctx.is_file(scope)
-                self.exposed.add((model.FILE if is_file else model.DIR, scope or "."))
+                self._see(model.FILE if is_file else model.DIR, scope or ".", event)
+
+    def _see(self, kind: str, key: str, event: Event) -> None:
+        self.exposed.add((kind, key))
+        self.exposed_in.add((kind, key, self.ctx.unit(self.stream.session_id, event.ts)))
 
     def _items(self) -> list[_Action | Event]:
         items: list[_Action | Event] = []
@@ -1690,8 +1728,13 @@ class _Detector:
         finding = self._emit(
             NO_CONVERGENCE,
             cycle.result,
-            f"`{cycle.label}` was still failing after {cycle.count} rounds of "
-            f"edit and re-run{where}; {ending}",
+            f"`{cycle.label}` was still failing after "
+            + (
+                f"{cycle.count} runs with edits in between"
+                if cycle.baseline
+                else f"{cycle.count} rounds of edit and re-run"
+            )
+            + f"{where}; {ending}",
             targets,
             excerpt=f"$ {cycle.command}\n{cycle.result.output}",
             detail={"count": str(cycle.count), "command": cycle.command},
@@ -1986,6 +2029,7 @@ class _Detector:
             self.state.missing_reads.setdefault(action.file, []).append(finding)
 
     def _on_read(self, action: _Action, result: Event) -> None:
+        self._looked_for(action.call.path or "")
         path = action.file
         if path is None:
             return
@@ -2017,9 +2061,21 @@ class _Detector:
             finding.summary = f"{path} was read {count} times with no edit in between"
             finding.detail["count"] = str(count)
 
+    def _looked_for(self, text: str, but_not: Finding | None = None) -> None:
+        """The agent goes on looking: earlier misses of this turn for it wanted a hit.
+
+        A reworded search, or a read or glob of a path named like what was searched
+        for, shows that the empty result was not what the agent hoped to see.
+        """
+        words = _search_words(text)
+        for finding, _ in self.state.turn_misses:
+            if finding is not but_not and words & _search_words(finding.detail["pattern"]):
+                finding.detail["wanted"] = "1"
+
     def _on_search(self, action: _Action, result: Event) -> None:
         call = action.call
         wanted = (call.pattern or "").casefold()
+        self._looked_for(call.pattern or "")
         if result.ok and not result.empty and wanted:
             # Found after all, elsewhere, in the same turn: the misses were the search.
             found = {id(f) for f, pattern in self.state.turn_misses if pattern == wanted}
@@ -2055,6 +2111,8 @@ class _Detector:
             # a weak signal: it may be a lead, but it claims no time
             detail={"pattern": call.pattern or "", "scope": scope or "."},
         )
+        if HYGIENE_PATTERN_RE.search(pattern):
+            finding.detail["hygiene"] = "1"  # finding nothing is what such a search is for
         self.state.probes.append((finding, call, scope))
         if wanted:
             self.state.turn_misses.append((finding, wanted))
@@ -2166,6 +2224,11 @@ class _Detector:
             state.turn_shell_ok = ok
             if command_role(key) is not None or is_aggregate_check(key):
                 state.turn_check_ok = ok
+                if ok:
+                    # Reading a file again between green runs of a check is following
+                    # along while things work, not going round in circles.
+                    state.reads.clear()
+                    state.read_findings.clear()
         if ok:
             if not cmd.inspection:
                 state.ok_commands += 1
@@ -2179,6 +2242,12 @@ class _Detector:
             waited: set[int] = set()
             for same in [k for k in state.streak if k[1] == argv]:
                 streak = state.streak.pop(same)
+                if len(streak) >= POLL_MIN_FAILURES and command_role(key) == "test":
+                    # Nobody polls a test suite: failing and then passing untouched is
+                    # flakiness. The red runs stay (the engine decides); the loop does not.
+                    if same in state.retry:
+                        waited.add(id(state.retry[same]))
+                    continue
                 if len(streak) >= POLL_MIN_FAILURES:
                     waited |= {id(f) for f in streak}
                     if same in state.retry:
@@ -2246,6 +2315,15 @@ class _Detector:
         if _CD_FAILED_RE.search(result.output) and any(s.moves for s in cmd.steps):
             # `cd missing-dir && npm test`: the shell stopped at the `cd`. Nothing ran
             # there, so there is no failure of `npm test (missing-dir/)` to record.
+            return
+        if (
+            result.exit_code == TIMEOUT_EXIT_CODE
+            and _TIMEOUT_WRAPPER_RE.search(action.call.command or "")
+            and READY_BANNER_RE.search(result.output)
+            and not INVOCATION_ERROR_RE.search(result.output)
+        ):
+            # `timeout 10 npm run dev` that came up and was then stopped by its own time
+            # box: the agent only wanted to see it start.
             return
         code = None if hidden else result.exit_code
         if cmd.inspection:
@@ -2475,6 +2553,13 @@ class _Detector:
                 if failed_key != actual:
                     # the package was there; another way of running the job found it
                     self._promote(finding)
+                elif (
+                    finding.detail.get("variant") == "ordinary"
+                    and command_role(failed_key) == "test"
+                ):
+                    # A test that fails and then passes untouched may be flaky. Whether
+                    # it is, only its recurring across sessions can say (engine).
+                    finding.detail["rerun_green"] = "1"
         self._drop(fixed, DROPPED_DEV_LOOP)
 
     def _promote(self, finding: Finding) -> bool:
@@ -2499,8 +2584,12 @@ class _Detector:
         fresh = cycle is None
         if cycle is None:
             cycle = state.cycles[key] = _Cycle(seen=state.turn_changes)
+        if fresh and state.changes <= cycle.seen:
+            cycle.baseline = True  # red before anything was changed in the turn
         if state.changes > cycle.seen:
-            cycle.count += 1
+            # The run that showed the problem counts with the rounds that failed to fix it:
+            # red, edit, red, edit, red, edit, red is four runs that never went green.
+            cycle.count += 2 if cycle.baseline and not cycle.count else 1
             for number, path, span in reversed(state.change_log):
                 if number <= cycle.seen:
                     break
@@ -2813,13 +2902,21 @@ class Detection:
     skipped_events: int = 0
     #: Red runs seen and not reported: (transcript line, seconds the run took, reason).
     dropped: list[tuple[int, float, str]] = field(default_factory=list)
+    #: ``exposed`` with the episode of work each target was touched in.
+    exposed_in: set[tuple[str, str, str]] = field(default_factory=set)
 
 
 def detect_stream(stream: Stream, ctx: DetectContext) -> Detection:
     """Run every transcript detector over one stream."""
     detector = _Detector(stream, ctx)
     findings = detector.run()
-    return Detection(findings, detector.exposed, detector.skipped_events, detector.dropped)
+    return Detection(
+        findings,
+        detector.exposed,
+        detector.skipped_events,
+        detector.dropped,
+        detector.exposed_in,
+    )
 
 
 def detect_with_exposure(

@@ -163,6 +163,14 @@ class Finding:
     stream: str = ""  # intervals are only merged within one stream
     #: When the call behind the event ran (epoch seconds), whether or not it claims time.
     run: tuple[float, float] | None = None
+    #: The episode of work it happened in (see docs/methodology.md); "" = the session.
+    episode: str = ""
+
+    @property
+    def unit(self) -> str:
+        """What recurrence is counted over: the episode, or the session if none is set."""
+        return self.episode or self.session_id
+
     detail: dict[str, str] = field(default_factory=dict)
     fid: int = -1
 

@@ -58,6 +58,41 @@ directory) if set, otherwise `~/.claude` and `~/.config/claude`.
   `exposure_sessions` and is reported as `agent_commits`, but not towards
   `totals.sessions` and not towards confidence.
 
+### Episodes
+
+Recurrence is the heart of the score, and a session id is a poor unit for
+it: `claude --continue` keeps one id alive for days. Ten tasks on ten days
+in one session id are ten independent occasions on which the same friction
+happened, not one bad afternoon. So recurrence is counted over **episodes of
+work**:
+
+- Within a session id, a new episode starts at a **human prompt that follows
+  2 hours or more without any event** in that session
+  (`EPISODE_IDLE_SECONDS`). An overnight break, a lunch break of two hours,
+  a session picked up the next week: each starts a new episode. Calendar
+  days are not used: timestamps are UTC, and midnight UTC falls in the
+  middle of somebody's working day.
+- Only a human prompt can start one. An agent that works on its own for
+  five hours, however long its commands take, is in one episode.
+- **Subagents never start an episode** and are never episodes of their own.
+  Their prompts are written by the agent that spawned them, and seventeen
+  subagents hitting the same wall in one afternoon are one coordinator's one
+  attempt, not seventeen independent observations. Their events belong to
+  whichever episode of the parent session they fall in.
+- A session that was never left idle is one episode, so for most sessions
+  nothing changes.
+
+Episodes are what the score's *recurrence* and *consistency*, the
+confidence levels and every "in N or more sessions" threshold (a setup step
+in 2, a check that stays red in 3, a flaky test in 3, a stopped command in
+3, a search pattern in 2) count. Wherever this document says "sessions" for
+those, read "episodes". What is **displayed** stays the session:
+`sessions`, `exposure_sessions`, `friction_rate` and the wording of
+recommendations count session ids, and `episodes` / `exposure_episodes`
+stand beside them in the JSON (`totals.episodes` for the whole scan). When
+they differ, the hotspot's `why` says so ("in the only session that touched
+it (in 10 separate episodes of work)").
+
 ## Attribution
 
 **Paths.** Absolute paths are matched lexically against the repo root, its
@@ -425,7 +460,7 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `clarify-before-acting` | 2+ `user-interrupt`. On a command (one that humans stopped in 3+ sessions, see the signal) the advice is to say when it should be run and what to run instead |
 | `add-a-fast-check` | 2+ `edit-revert` events or `edit-thrash` events of turns that did not end on a successful command and ran no test, lint or type check (thrash next to a check was not for want of one). Not when the file has 2+ `no-convergence` events: a check that will not pass needs `explain-the-failing-check`, not another check. The text names only what was seen ("2 reverted edits in 2 sessions") |
 | `learn-from-rework` | 2+ `human-rework` |
-| `add-a-pointer` | 2+ `search-miss` in the file or directory, with other evidence or the same pattern in 2+ sessions; lists the patterns |
+| `add-a-pointer` | 2+ `search-miss` in the file or directory, not counting searches for leftovers (`TODO`, `console.log`, conflict markers, ...), with other evidence or the same pattern missed in 2+ sessions by agents that went on looking for it (see the signal); lists the patterns |
 | `summarize-this-file` | 2+ `read-loop`, next to other evidence |
 | `use-the-working-command` | 2+ *setup/invocation* failures of a command were followed by the same successful command *doing the same job* (same role, or a wrapper of the same tool), in sessions where the failing command never worked afterwards. Never an install, version-control or housekeeping command. Also: 2+ `command not found` failures after which the same command ran under a versioned name of the program ("use `python3`, not `python`"), and 2+ setup/invocation failures after which the same command ran with a variable set in front of it and no file edited in between ("use `PYTHONPATH=src pytest`"; the value is shown only for a fixed set of variables such as `PYTHONPATH`, `NODE_ENV`, `DJANGO_SETTINGS_MODULE`, and only with excerpts, otherwise `NAME=...`) |
 | `document-the-setup-step` | 2+ failures of a command that then passed after the same setup step with no file edited in between (`pip install`, `npm ci`, `docker compose up`, `cp .env.example .env`, or any other command that did so in 2+ sessions): "run X before Y" |
@@ -436,6 +471,7 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `give-it-more-time` | 2+ harness timeouts of any other command (`npm run build` cut off after 2 minutes): say how long it takes, raise the timeout or run it in the background, or name a narrower command; replaces `document-the-command` for those |
 | `explain-the-failing-check` | 2+ `no-convergence` events from 2+ sessions, on the command ("Agents cannot get `pytest` to pass") or on a file edited during the rounds: document how to run and debug the check and what it expects |
 | `say-if-it-is-known-broken` | A command lifted out of the weak class because it stays red: it failed 2+ times and was still red at the end, in 3+ sessions (and there is no `no-convergence` event on it): "`npm run e2e` keeps ending red": say that it is known to be broken and what to run instead, or fix it |
+| `fix-the-flaky-test` | A test command failed and then passed on a plain re-run, with nothing changed in between, in 3+ sessions (variant `flaky`): "`npm test` looks flaky": fix or quarantine the flaky test, and say in AGENTS.md that a red run should be re-run once before anything is changed |
 
 ### What the repository already says
 

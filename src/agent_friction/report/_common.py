@@ -130,8 +130,8 @@ def dropped_note(result: dict[str, Any]) -> str | None:
         return None
     minutes = float(totals.get("dropped_minutes", 0) or 0)
     return (
-        f"Not counted: {plural(runs, 'failed run')} the agent then fixed, or that passed on a "
-        f"re-run (normal work, ~{fmt_minutes(minutes)} of run time)."
+        f"Not counted: {plural(runs, 'failed run')} of normal work (the agent fixed the failure, "
+        f"or was only waiting and polled until it passed; ~{fmt_minutes(minutes)} of run time)."
     )
 
 

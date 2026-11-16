@@ -3,6 +3,7 @@
     {
       "agent_commits": 0,
       "confidence": "medium",
+      "episodes": 4,
       "est_minutes_lost": 2.5,
       "events": 7,
       "evidence": [
@@ -57,6 +58,7 @@
           "timestamp": "2026-11-09T15:01:53Z"
         }
       ],
+      "exposure_episodes": 4,
       "exposure_sessions": 4,
       "friction_rate": 1.0,
       "kind": "command",
@@ -81,21 +83,25 @@
         "recurrence": 0.774,
         "sessions": [
           {
+            "episode": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
             "points": 1.585,
             "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
             "weighted_events": 2.0
           },
           {
+            "episode": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
             "points": 2.485,
             "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
             "weighted_events": 4.6
           },
           {
+            "episode": "aider-2026-11-05",
             "points": 1.585,
             "session_id": "aider-2026-11-05",
             "weighted_events": 2.0
           },
           {
+            "episode": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
             "points": 1.848,
             "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
             "weighted_events": 2.6
@@ -112,6 +118,7 @@
     {
       "agent_commits": 0,
       "confidence": "low",
+      "episodes": 1,
       "est_minutes_lost": 0.7,
       "events": 1,
       "evidence": [
@@ -126,6 +133,7 @@
           "timestamp": "2026-11-03T09:03:15Z"
         }
       ],
+      "exposure_episodes": 1,
       "exposure_sessions": 1,
       "friction_rate": 1.0,
       "kind": "command",
@@ -150,6 +158,7 @@
         "recurrence": 0.333,
         "sessions": [
           {
+            "episode": "4132e18c-d843-510d-aee7-82374ae93389",
             "points": 1.807,
             "session_id": "4132e18c-d843-510d-aee7-82374ae93389",
             "weighted_events": 2.5
@@ -166,6 +175,7 @@
     {
       "agent_commits": 0,
       "confidence": "low",
+      "episodes": 1,
       "est_minutes_lost": 0.2,
       "events": 1,
       "evidence": [
@@ -180,6 +190,7 @@
           "timestamp": "2026-11-09T15:15:24Z"
         }
       ],
+      "exposure_episodes": 1,
       "exposure_sessions": 1,
       "friction_rate": 1.0,
       "kind": "command",
@@ -194,6 +205,7 @@
         "recurrence": 0.333,
         "sessions": [
           {
+            "episode": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
             "points": 1.585,
             "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
             "weighted_events": 2.0
@@ -210,6 +222,7 @@
     {
       "agent_commits": 0,
       "confidence": "low",
+      "episodes": 1,
       "est_minutes_lost": 0.5,
       "events": 1,
       "evidence": [
@@ -224,6 +237,7 @@
           "timestamp": "2026-11-12T11:02:35Z"
         }
       ],
+      "exposure_episodes": 1,
       "exposure_sessions": 1,
       "friction_rate": 1.0,
       "kind": "command",
@@ -238,6 +252,7 @@
         "recurrence": 0.333,
         "sessions": [
           {
+            "episode": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
             "points": 1.585,
             "session_id": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
             "weighted_events": 2.0
@@ -256,6 +271,7 @@
     {
       "agent_commits": 0,
       "confidence": "medium",
+      "episodes": 2,
       "est_minutes_lost": 0.0,
       "events": 5,
       "evidence": [
@@ -310,6 +326,7 @@
           "timestamp": "2026-11-09T15:00:34Z"
         }
       ],
+      "exposure_episodes": 2,
       "exposure_sessions": 2,
       "friction_rate": 1.0,
       "kind": "dir",
@@ -334,11 +351,13 @@
         "recurrence": 0.528,
         "sessions": [
           {
+            "episode": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
             "points": 2.0,
             "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
             "weighted_events": 3.0
           },
           {
+            "episode": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
             "points": 1.585,
             "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
             "weighted_events": 2.0
@@ -382,6 +401,7 @@
     {
       "agent_commits": 0,
       "confidence": "high",
+      "episodes": 4,
       "est_minutes_lost": 3.6,
       "events": 12,
       "evidence": [
@@ -436,6 +456,7 @@
           "timestamp": "2026-11-12T11:00:48Z"
         }
       ],
+      "exposure_episodes": 4,
       "exposure_sessions": 4,
       "file": {
         "exists": true,
@@ -484,21 +505,25 @@
         "recurrence": 0.774,
         "sessions": [
           {
+            "episode": "4132e18c-d843-510d-aee7-82374ae93389",
             "points": 3.644,
             "session_id": "4132e18c-d843-510d-aee7-82374ae93389",
             "weighted_events": 11.5
           },
           {
+            "episode": "aider-2026-11-05",
             "points": 2.807,
             "session_id": "aider-2026-11-05",
             "weighted_events": 6.0
           },
           {
+            "episode": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
             "points": 2.524,
             "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
             "weighted_events": 4.75
           },
           {
+            "episode": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
             "points": 1.807,
             "session_id": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
             "weighted_events": 2.5
@@ -520,6 +545,7 @@
     {
       "agent_commits": 0,
       "confidence": "high",
+      "episodes": 3,
       "est_minutes_lost": 1.9,
       "events": 6,
       "evidence": [
@@ -574,6 +600,7 @@
           "timestamp": "2026-11-09T15:15:05Z"
         }
       ],
+      "exposure_episodes": 3,
       "exposure_sessions": 3,
       "file": {
         "exists": true,
@@ -612,16 +639,19 @@
         "recurrence": 0.667,
         "sessions": [
           {
+            "episode": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
             "points": 3.392,
             "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
             "weighted_events": 9.5
           },
           {
+            "episode": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
             "points": 2.322,
             "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
             "weighted_events": 4.0
           },
           {
+            "episode": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
             "points": 0.807,
             "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
             "weighted_events": 0.75
@@ -641,6 +671,7 @@
     {
       "agent_commits": 0,
       "confidence": "low",
+      "episodes": 1,
       "est_minutes_lost": 0.3,
       "events": 1,
       "evidence": [
@@ -655,6 +686,7 @@
           "timestamp": "2026-10-29T14:00:38Z"
         }
       ],
+      "exposure_episodes": 1,
       "exposure_sessions": 1,
       "file": {
         "exists": false,
@@ -674,6 +706,7 @@
         "recurrence": 0.333,
         "sessions": [
           {
+            "episode": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
             "points": 1.0,
             "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
             "weighted_events": 1.0
@@ -690,6 +723,7 @@
     {
       "agent_commits": 0,
       "confidence": "low",
+      "episodes": 1,
       "est_minutes_lost": 0.0,
       "events": 1,
       "evidence": [
@@ -704,6 +738,7 @@
           "timestamp": "2026-11-12T11:01:35Z"
         }
       ],
+      "exposure_episodes": 2,
       "exposure_sessions": 2,
       "file": {
         "exists": true,
@@ -723,6 +758,7 @@
         "recurrence": 0.333,
         "sessions": [
           {
+            "episode": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
             "points": 1.0,
             "session_id": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
             "weighted_events": 1.0
@@ -739,6 +775,7 @@
     {
       "agent_commits": 0,
       "confidence": "low",
+      "episodes": 1,
       "est_minutes_lost": 0.0,
       "events": 1,
       "evidence": [
@@ -753,6 +790,7 @@
           "timestamp": "2026-10-29T14:04:51Z"
         }
       ],
+      "exposure_episodes": 1,
       "exposure_sessions": 1,
       "file": {
         "exists": false,
@@ -772,6 +810,7 @@
         "recurrence": 0.333,
         "sessions": [
           {
+            "episode": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
             "points": 0.678,
             "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
             "weighted_events": 0.6
@@ -983,6 +1022,7 @@
     "directories_affected": 1,
     "dropped_minutes": 0.1,
     "dropped_red_runs": 1,
+    "episodes": 6,
     "est_minutes_lost": 9.4,
     "files_affected": 5,
     "friction_events": 34,

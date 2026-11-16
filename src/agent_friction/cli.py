@@ -213,6 +213,7 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-friction",
+        allow_abbrev=False,
         description="Map where coding agents lose time, make mistakes, and need human "
         "correction in your codebase, with the evidence to decide what to fix.",
         epilog="Examples:\n"
@@ -226,7 +227,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
-    scan = sub.add_parser("scan", help="analyse agent sessions and print the friction map")
+    scan = sub.add_parser(
+        "scan", allow_abbrev=False, help="analyse agent sessions and print the friction map"
+    )
     scan.add_argument("repo", nargs="?", type=Path, help=_REPO_HELP)
     _add_input_options(scan)
     out = scan.add_argument_group("output")
@@ -255,7 +258,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="exit 3 if any hotspot scores at least SCORE (for CI gates)",
     )
 
-    show = sub.add_parser("show", help="show the evidence behind one file, directory, or command")
+    show = sub.add_parser(
+        "show", allow_abbrev=False, help="show the evidence behind one file, directory, or command"
+    )
     show.add_argument("target", help="repo-relative file or directory, or a normalized command")
     show.add_argument("repo_pos", nargs="?", type=Path, metavar="repo", help=_REPO_HELP)
     show.add_argument("--repo", type=Path, help=argparse.SUPPRESS)
@@ -269,7 +274,9 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("--color", choices=("auto", "always", "never"), default="auto")
     _add_input_options(show)
 
-    cmp_ = sub.add_parser("compare", help="compare two saved scans: did friction go down?")
+    cmp_ = sub.add_parser(
+        "compare", allow_abbrev=False, help="compare two saved scans: did friction go down?"
+    )
     cmp_.add_argument("before", type=Path, help="earlier `scan -f json` result")
     cmp_.add_argument("after", type=Path, help="later `scan -f json` result")
     cmp_.add_argument(
@@ -311,7 +318,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--fail-on-regression", action="store_true", help="exit 3 if anything regressed or is new"
     )
 
-    src = sub.add_parser("sources", help="list the transcripts that would be analysed")
+    src = sub.add_parser(
+        "sources", allow_abbrev=False, help="list the transcripts that would be analysed"
+    )
     src.add_argument("repo", nargs="?", type=Path, help=_REPO_HELP)
     src.add_argument(
         "-t",
@@ -355,6 +364,9 @@ def _analyze(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
             ),
             bot_commit_patterns=[f"^author: .*(?:{p})" for p in args.bot_author],
             allow_no_transcripts=args.allow_empty,
+            # Every hotspot goes into the result: JSON, HTML, compare and show need the whole
+            # list; --top only trims the terminal and Markdown views.
+            max_hotspots=None,
         )
     )
     if int(result.get("totals", {}).get("sessions", 0)) == 0 and not args.allow_empty:
@@ -552,6 +564,12 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         raise AgentFrictionError(
             f"these scans are of different repositories ({names[0]!r} vs {names[1]!r}). "
             "Pass --allow-repo-mismatch if the repository was renamed."
+        )
+    roots = (before.get("repo", {}).get("root"), after.get("repo", {}).get("root"))
+    if roots[0] != roots[1] and None not in roots:
+        stderr.write(
+            f"agent-friction: note: the scans were made from different checkouts "
+            f"({roots[0]} vs {roots[1]}); paths are compared relative to each root\n"
         )
     changes = compare(
         before,

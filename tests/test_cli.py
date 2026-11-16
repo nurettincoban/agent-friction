@@ -414,3 +414,60 @@ def test_scan_warns_about_unreadable_transcripts(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(cli, "_analyze", fake)
     code, _, err = run("scan", *INPUT)
     assert code == EXIT_OK and "skipped x.jsonl: permission denied" in err
+
+
+def test_more_than_fifty_hotspots_are_all_kept(tmp_path: Path) -> None:
+    """--top trims the terminal view only; JSON, show and compare see every hotspot."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    lines = []
+    n = 0
+    for f in range(60):
+        (repo / f"m{f:02}.py").write_text("x = 1\n")
+        for s in range(2):
+            n += 1
+            sid, minute = f"s{f}-{s}", f % 50
+            base = f"2026-11-05T{10 + s:02}:{minute:02}"
+            lines += [
+                {"session": sid, "ts": base + ":00Z", "kind": "user_message", "text": "go"},
+                {
+                    "session": sid,
+                    "ts": base + ":05Z",
+                    "kind": "tool_call",
+                    "id": n,
+                    "op": "edit",
+                    "path": f"m{f:02}.py",
+                    "old": "nope",
+                    "new": "y",
+                    "cwd": str(repo),
+                },
+                {
+                    "session": sid,
+                    "ts": base + ":09Z",
+                    "kind": "tool_result",
+                    "id": n,
+                    "ok": False,
+                    "error": "edit_not_found",
+                    "output": "String to replace not found",
+                },
+            ]
+    log = tmp_path / "log.jsonl"
+    log.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+    args = [str(repo), "--transcripts", str(log), "--no-git"]
+    code, out, _ = run("scan", *args, "-f", "json")
+    assert code == EXIT_OK
+    assert len(json.loads(out)["hotspots"]) == 60
+    code, out, _ = run("scan", *args, "--top", "3")
+    assert code == EXIT_OK and "m59.py" not in out.split("What to fix first")[0]
+    code, out, _ = run("show", "m59.py", *args)
+    assert code == EXIT_OK and "m59.py" in out
+    saved = tmp_path / "a.json"
+    run("scan", *args, "-o", str(saved))
+    code, out, _ = run("compare", str(saved), str(saved), "-f", "json")
+    assert code == EXIT_OK
+    assert len(json.loads(out)["changes"]) == 60
+
+
+def test_option_abbreviations_are_rejected(capsys: pytest.CaptureFixture[str]) -> None:
+    code, _, _ = run("scan", *INPUT, "--no-exc")
+    assert code == EXIT_USAGE and "unrecognized arguments: --no-exc" in capsys.readouterr().err

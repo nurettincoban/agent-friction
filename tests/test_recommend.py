@@ -156,8 +156,8 @@ def test_command_rules() -> None:
 
 def test_directory_search_rule_lists_patterns() -> None:
     found = [
-        finding(signals.SEARCH_MISS, "s1", pattern="RefundPolicy"),
-        finding(signals.SEARCH_MISS, "s2", pattern="RefundPolicy"),
+        finding(signals.SEARCH_MISS, "s1", pattern="RefundPolicy", wanted="1"),
+        finding(signals.SEARCH_MISS, "s2", pattern="RefundPolicy", wanted="1"),
         finding(signals.SEARCH_MISS, "s2", pattern="refund_policy"),
     ]
     (rec,) = recommend.recommend(model.DIR, "src/shop", found, None, quote)
@@ -211,8 +211,22 @@ def test_probable_corrections_and_other_weak_signals_get_no_advice() -> None:
 
 
 def test_a_search_for_the_same_name_in_two_sessions_still_gets_a_pointer() -> None:
-    found = [finding(signals.SEARCH_MISS, f"s{i}", pattern="RefundPolicy") for i in range(2)]
+    def misses(**detail: str) -> list[Finding]:
+        return [
+            finding(signals.SEARCH_MISS, f"s{i}", pattern="RefundPolicy", **detail)
+            for i in range(2)
+        ]
+
+    found = misses(wanted="1")
     assert ids(recommend.recommend(model.DIR, "src", found, None, quote)) == ["add-a-pointer"]
+    # ... if the agents went on looking. A search that was content to find nothing, and
+    # one for leftovers, is a check that passed.
+    assert recommend.recommend(model.DIR, "src", misses(), None, quote) == []
+    assert recommend.recommend(model.DIR, "src", misses(wanted="1", hygiene="1"), None) == []
+    real = finding(signals.EDIT_MISS)
+    assert "add-a-pointer" not in ids(
+        recommend.recommend(model.DIR, "src", [*misses(hygiene="1"), real], None, quote)
+    )
     same_session = [finding(signals.SEARCH_MISS, "s1", pattern="RefundPolicy") for _ in range(2)]
     assert recommend.recommend(model.DIR, "src", same_session, None, quote) == []
 
@@ -287,7 +301,7 @@ def test_code_spans_survive_backticks(value: str, span: str) -> None:
 
 def test_a_search_pattern_with_backticks_stays_valid_markdown() -> None:
     def miss(session: str, pattern: str) -> Finding:
-        found = finding(signals.SEARCH_MISS, session, pattern=pattern)
+        found = finding(signals.SEARCH_MISS, session, pattern=pattern, wanted="1")
         found.targets = [Target(model.DIR, "src")]
         return found
 

@@ -345,7 +345,9 @@ any other command: the three runs with nothing changed already happened.
 times and then *succeeds*, with no change of any of the three kinds above in
 between, the agent was waiting for something outside the session: `gh pr
 checks` until CI is done, `curl -sf localhost:8000/health` until a server is
-up. The loop and its failures are dropped. Looking around while waiting (`cat
+up. The loop and its failures are dropped. (For a test command only the loop
+is dropped: nobody polls a test suite, and its red runs are kept as possible
+flakiness, see `command-failure`.) Looking around while waiting (`cat
 server.log`, `git status`) keeps it a wait. A loop that never passes, or that
 passes only after a change or a command that may have changed something,
 stays: then something was done about it.
@@ -354,15 +356,13 @@ stays: then something was done about it.
 
 **Attribution:** the normalized command.
 
-**False negatives:** a flaky test that fails twice and then passes untouched
-looks exactly like waiting and is dropped (a single red run followed by green
-stays on the record as an ordinary failure). "May have changed something" is
+**False negatives:** "May have changed something" is
 generous by design: three identical failures with an unrelated `git commit`
 or `docker restart db` between them are not a loop, although
 nothing relevant changed. The rule prefers missing such a loop to reporting
 the far more common red, script, red, script, green as one. A loop of
-identical failures that then passes untouched (four red `npm run e2e`, then
-green) is dropped as waiting, although the agent may simply have been lucky.
+identical failures of a command that is not a test and then passes untouched
+is dropped as waiting, although the agent may simply have been lucky.
 
 **What still gets through (false positives):**
 
@@ -388,7 +388,8 @@ green) is dropped as waiting, although the agent may simply have been lucky.
 
 **What:** within one turn the agent ran the same command 4 or more times,
 each of those runs came after a file change since the previous one (an
-edit-and-run round), every run failed as an *ordinary* failure, and the turn
+edit-and-run round; a first red run before anything was changed counts as
+one of the four: red, edit, red, edit, red, edit, red), every run failed as an *ordinary* failure, and the turn
 (or the session) ended with the command still red. One event per command and
 turn. A green run of the command, or of another command doing the same job
 (`make test` after `pytest ...`), at any point in the turn clears the count:
@@ -774,6 +775,24 @@ successfully once before being removed (read as debugging).
   in the code). Inline snippets are never classified this way.
   *False positives:* a test that asserts on such a message and fails for
   another reason, in a session that ends red.
+- *Flaky tests* (variant `flaky`): a red run of a test command (`pytest`,
+  `npm test`, `make test`, ...: role "test") that is followed by a green run
+  of the same command with **nothing changed in between** (no edit, no
+  command that changes files, no setup step, no other spelling of the
+  command) is at first an ordinary failure like any other. When that happens
+  in 3 or more episodes of work (`FLAKY_MIN_SESSIONS`), it is no longer
+  chance: those failures become variant `flaky`, count fully (weight 1.0),
+  claim their run time, are attributed to the command alone, and the command
+  gets `fix-the-flaky-test`. Below 3 they stay ordinary: weak evidence, no
+  advice. They are never among the dropped runs: `totals.dropped_red_runs`
+  counts red runs that an edit fixed, one-off fixes, and commands that are
+  not tests and were polled until they passed.
+- *A time-boxed start is not a failure:* `timeout 10 npm run dev` that exits
+  124 (the time ran out) after printing that it was up (`ready in 300 ms`,
+  `Local: http://...`, `listening on`, `compiled successfully`, `Application
+  startup complete`, ...; `READY_BANNER_RE`) did what the agent wanted: it
+  started. Nothing is recorded. Without such a banner, with another exit
+  status, or without `timeout` in front, it is judged like any other run.
 - *A `cd` that failed:* in `cd missing-dir && npm test`, when the shell
   reports that it could not change directory (`cd: missing-dir: No such file
   or directory`), nothing after the `cd` ran. No failure of `npm test
@@ -1092,9 +1111,26 @@ the expected result.
 
 **False positives:** searching to *confirm absence* for other reasons ("no
 remaining callers") is normal. This is therefore a weak signal: a place with
-nothing but search misses has its score capped and gets no recommendation,
-unless the same pattern missed in two or more sessions (agents keep looking
-for a name that is not there).
+nothing but search misses has its score capped and gets no recommendation.
+
+**What lifts it:** the same pattern missed in two or more episodes of work,
+each time by an agent that **wanted a hit** (detail `wanted`): later in the
+same turn it searched again with a pattern that shares a word with the
+missed one (`RefundPolicy`, then `refund_policy` or `*policy*.py`; words are
+the camel-case or snake-case parts of 4+ letters), or read, or tried to
+read, a path containing such a word. A search the agent was content to see
+come back empty (it moved on, or the turn ended there, as a last check after
+edits does) never lifts anything, however often it recurs.
+
+**Leftover checks never count** (detail `hygiene`): a pattern from the
+families people grep for before finishing — debug statements (`console.log`,
+`debugger`, `print(`, `pdb`, `breakpoint()`, `set_trace`, `binding.pry`,
+`dbg!`, `var_dump`), work markers (`TODO`, `FIXME`, `XXX`, `HACK`,
+`NOCOMMIT`), conflict markers (`<<<<<<<`, `>>>>>>>`), focused or skipped
+tests (`.only`, `fit(`, `fdescribe(`) — is meant to find nothing
+(`HYGIENE_PATTERN_RE`). Such misses are still listed as weak events, but
+they never lift a hotspot out of the weak class and are left out of the
+"point agents to what they are searching for" advice.
 
 ## `read-loop` — Read loop
 
@@ -1103,7 +1139,10 @@ for a name that is not there).
 
 **What:** the same range of the same file is read 3 or more times in a session
 with no successful edit to that file in between. Paging through a file with
-different offsets does not count.
+different offsets does not count. A green run of a test, lint, type-check,
+build or aggregate command starts the count again for every file: reading a
+file once more between runs that pass is following along while things work,
+not going round in circles.
 
 **Why:** the agent keeps returning to the file without progress (often after
 losing context).

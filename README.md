@@ -159,8 +159,11 @@ friction is, how often it **recurs** across sessions (one bad afternoon is not a
 file is not penalized just for being busy). Roughly: under 20 is an incident, 20-45 a pattern,
 above 45 a reliable struggle. Red-then-green test runs with a fix in between are normal work and
 are not counted, and weak signals on their own (re-reads, many edits, an empty search) stay in
-the incident band unless the same pattern recurs across sessions. Time lost is a floor estimate of agent time from timestamps (a correction claims only the rework it caused); waiting for
-a human is never counted. Confidence (low / medium /
+the incident band unless the same pattern recurs across sessions. Recurrence is counted over
+episodes of work, not session ids: a long-running session (`claude --continue`) counts once for
+every time a human picked it up again after two hours or more of silence, and subagents belong to
+the episode of the agent that started them. Time lost is a floor estimate of agent time from
+timestamps (a correction claims only the rework it caused); waiting for a human is never counted. Confidence (low / medium /
 high) depends on how many sessions back a hotspot and whether an independent second kind of
 evidence agrees. All of it is in
 [docs/methodology.md](https://github.com/nurettincoban/agent-friction/blob/main/docs/methodology.md).

@@ -36,7 +36,7 @@ promise. Every option has a CLI flag: `transcripts` is `-t`, `since`/`until` are
 | `include_git` | `True` | Add `human-rework` from `git log`. Silently unavailable outside a git repo. |
 | `include_excerpts` | `True` | `False` removes everything verbatim: excerpts become `null` and recommendations stop quoting prompts, search patterns, error lines and reasons. Repo paths remain; command keys keep only publicly known words, and project-specific names in them become hash placeholders such as `make <target:37bd73>` (methodology, Attribution). |
 | `max_evidence` | `5` | Evidence items per hotspot. |
-| `max_hotspots` | `50` | Maximum entries in each of `hotspots`, `commands`, `directories`. |
+| `max_hotspots` | `None` | Maximum entries in each of `hotspots`, `commands`, `directories`; `None` lists every one. Nothing else depends on it: totals, the tree, `exposure` and `unattributed` are never truncated, and scores do not change with it. |
 | `now` | `None` | Fixed `generated_at`, for reproducible output. |
 | `excerpt_chars` | `240` | Maximum excerpt length. |
 | `repo_aliases` | `()` | Other absolute paths that are this repo, e.g. where it lived on the machine that recorded the transcripts. Windows paths (with a drive letter) are compared case-insensitively. |
@@ -111,6 +111,7 @@ by repository or time window, so `0` marks an empty, binary or foreign file.
 | Field | Meaning |
 | --- | --- |
 | `sessions` | Distinct transcript sessions analysed (subagents belong to their parent; git commits are not counted). |
+| `episodes` | Episodes of work in those sessions: a session id counts once for every time it was picked up again after 2 hours or more of silence (methodology, Episodes). Equal to `sessions` when no session was. *Addition to the base contract.* |
 | `tool_calls` | Tool calls in those sessions. |
 | `friction_events` | All detected events, equal to the sum of `signals[].count`. |
 | `est_minutes_lost` | Union of all claimed intervals, in minutes (1 decimal). |
@@ -164,6 +165,7 @@ was fixed only if its target still has exposure there.
 | `agent_commits` | int | How many of `sessions` are agent commits from git whose rework no analysed transcript session accounts for (0 without git). `sessions - agent_commits` is the number of transcript sessions. |
 | `exposure_sessions` | int | Distinct sessions in which the agent touched this target at all, plus `agent_commits`; never less than `sessions`. |
 | `friction_rate` | float | `sessions / exposure_sessions`, two decimals, 0-1. |
+| `episodes`, `exposure_episodes` | int | The same two counts over episodes of work instead of session ids (plus `agent_commits`). These, not the session counts, are what `score_detail.recurrence`, `score_detail.consistency` and `confidence` are computed from; they equal `sessions` / `exposure_sessions` unless a long-lived session id was picked up again after a break. *Addition to the base contract.* |
 | `events` | int | Friction events attributed here. |
 | `est_minutes_lost` | float | Union of these events' intervals. |
 | `signals` | object | `{signal_id: count}`, most frequent first. |
@@ -171,7 +173,7 @@ was fixed only if its target still has exposure there.
 | `why` | str | One sentence: counts, friction sessions out of exposure sessions, top signals, reason for the confidence. |
 | `recommendations` | list | `{id, title, detail, signals, documented_in}`; `signals` lists the signal ids the rule is based on. `documented_in` is a list of `{"file": "AGENTS.md", "line": 12}` (repo-relative path, 1-based line; at most 3; empty when nothing was found): places where the repository's instruction files already name what the recommendation is about, in which case `title` and `detail` are in their "already documented" form (methodology, Recommendations). The lines themselves are never quoted. *Addition to the base contract.* May be empty. `title` and `detail` are Markdown: commands and quoted search patterns are inline code spans, fenced with more backticks than the value contains (a pattern ``a`b`` is written ```` ``a`b`` ````), so they stay valid whatever the transcript held. |
 | `evidence` | list | Up to `max_evidence` items, chronological. |
-| `score_detail` | object | The score's factors, each 0-1: `severity`, `recurrence`, `consistency` (`score` is 100 x their product, up to rounding); `mean_session_points`; `intensity` (sum of session points); `capped` (true when all evidence is weak and the score was limited to 19); and `sessions`: per session `session_id`, `weighted_events`, `points`. |
+| `score_detail` | object | The score's factors, each 0-1: `severity`, `recurrence`, `consistency` (`score` is 100 x their product, up to rounding); `mean_session_points`; `intensity` (sum of session points); `capped` (true when all evidence is weak and the score was limited to 19); and `sessions`: one entry per episode of work with `session_id`, `episode` (the session id for a session's first episode, `<session id>#<n>` for its n-th), `weighted_events`, `points`. |
 | `file` | object | File hotspots only: `exists`, `lines` (`null` if missing or over 5 MB), `generated`. |
 
 ### `evidence[]`

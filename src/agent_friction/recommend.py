@@ -71,6 +71,7 @@ RULE_IDS: tuple[str, ...] = (
     "give-it-more-time",
     "explain-the-failing-check",
     "say-if-it-is-known-broken",
+    "fix-the-flaky-test",
 )
 
 
@@ -178,6 +179,7 @@ DOCUMENTABLE: frozenset[str] = frozenset(
         "give-it-more-time",
         "explain-the-failing-check",
         "say-if-it-is-known-broken",
+        "fix-the-flaky-test",
     }
 )
 
@@ -361,7 +363,8 @@ class _Rules:
         )
 
     def search_misses(self, where: str) -> None:
-        found = self.get(signals.SEARCH_MISS)
+        # A search for leftovers (`TODO`, `console.log`) that finds none needs no pointer.
+        found = [f for f in self.get(signals.SEARCH_MISS) if "hygiene" not in f.detail]
         if len(found) < MIN_EVENTS:
             return
         detail = f"Agents searched {where} and found nothing {_in_sessions(found)}."
@@ -778,6 +781,17 @@ class _Rules:
                 "those sessions ended. If it is known to be broken, or needs something agents "
                 "do not have, say so in AGENTS.md together with what to run instead; "
                 "otherwise fix it, so that a red run means something again.",
+                [signals.COMMAND_FAILURE],
+            )
+        flaky = self.get(signals.COMMAND_FAILURE, "flaky")
+        if flaky:
+            self.add(
+                "fix-the-flaky-test",
+                f"{code(key)} looks flaky",
+                f"{code(key)} fails and then passes on a re-run with nothing changed in "
+                f"between ({_in_sessions(flaky)}): it looks flaky. Fix or quarantine the "
+                "flaky test, and until then say in AGENTS.md that a red run should be "
+                "re-run once before anything is changed.",
                 [signals.COMMAND_FAILURE],
             )
         self.no_convergence(key)

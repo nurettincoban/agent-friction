@@ -6,7 +6,7 @@ import os
 import re
 import shutil
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -134,7 +134,7 @@ def test_story_generated_schema_is_the_top_file(result: dict[str, Any]) -> None:
     )
     assert (top["exposure_sessions"], top["friction_rate"]) == (4, 1.0)
     detail = top["score_detail"]
-    assert detail["sessions"][0].keys() == {"session_id", "weighted_events", "points"}
+    assert detail["sessions"][0].keys() == {"session_id", "episode", "weighted_events", "points"}
     product = 100 * detail["severity"] * detail["recurrence"] * detail["consistency"]
     assert top["score"] == pytest.approx(product, abs=0.2)
 
@@ -1737,3 +1737,125 @@ def test_one_session_and_a_low_score_is_a_lead_not_advice(tmp_path: Path) -> Non
     s.reject("Bash", {"command": "rm -rf migrations"}, "never delete migrations")
     (row,) = scan(tmp_path, [s])["commands"]
     assert row["score"] < 20 and [r["id"] for r in row["recommendations"]] == ["state-the-boundary"]
+
+
+# ---- round 16 ------------------------------------------------------------------------
+
+MNF = "ImportError while loading conftest\nE   ModuleNotFoundError: No module named 'app'"
+
+
+def long_session(gap: timedelta, tasks: int = 10) -> Session:
+    s = Session("long")
+    for task in range(tasks):
+        s.now = builders.T0 + task * gap
+        s.user(f"task {task}: improve things")
+        s.edit("/repo/src/app.py", f"zz{task}", "y", error=builders.EDIT_NOT_FOUND)
+        s.edit("/repo/src/app.py", f"a{task}", f"b{task}")
+        s.bash("pytest", MNF, exit_code=4).bash("make test", "3 passed")
+    return s
+
+
+def test_one_session_id_picked_up_on_ten_days_is_ten_episodes(tmp_path: Path) -> None:
+    out = scan(tmp_path, [long_session(timedelta(days=1))])
+    assert (out["totals"]["sessions"], out["totals"]["episodes"]) == (1, 10)
+    (row,) = out["hotspots"]
+    # shown as the one session it is, scored and graded as the ten occasions it was
+    assert (row["sessions"], row["exposure_sessions"], row["friction_rate"]) == (1, 1, 1.0)
+    assert (row["episodes"], row["exposure_episodes"]) == (10, 10)
+    assert row["score_detail"]["recurrence"] == 1.0 and row["confidence"] == "medium"
+    assert "the only session that touched it (in 10 separate episodes of work)" in row["why"]
+    assert "recurs across episodes of work" in row["why"]
+    units = {s["episode"] for s in row["score_detail"]["sessions"]}
+    assert units == {"long", *(f"long#{n}" for n in range(2, 11))}
+    assert {s["session_id"] for s in row["score_detail"]["sessions"]} == {"long"}
+    (command,) = out["commands"]
+    assert command["episodes"] == 10
+    assert [r["id"] for r in command["recommendations"]] == ["use-the-working-command"]
+    assert out["tree"]["sessions"] == 1 and out["exposure"]["file"] == {"src/app.py": 1}
+
+
+def test_one_long_sitting_is_one_episode(tmp_path: Path) -> None:
+    out = scan(tmp_path, [long_session(timedelta(minutes=110), tasks=4)])
+    assert (out["totals"]["sessions"], out["totals"]["episodes"]) == (1, 1)
+    (row,) = out["hotspots"]
+    assert (row["sessions"], row["episodes"], row["confidence"]) == (1, 1, "low")
+    assert "episodes" not in row["why"]
+    assert row["score_detail"]["recurrence"] < 0.5
+
+
+def test_subagents_and_silent_stretches_do_not_start_an_episode(tmp_path: Path) -> None:
+    from agent_friction.adapters import parse_transcript
+    from agent_friction.engine import episode_starts
+
+    main = Session("s").user("go").read("/repo/a.py")
+    main.tick(3 * 3600).read("/repo/a.py")  # the agent worked on after a long wait: no prompt
+    main.tick(60).user("thanks, next")  # ... and this prompt follows activity at once
+    side = Session("s", sidechain=True, start=builders.T0 + timedelta(hours=9))
+    side.user("subagent task").read("/repo/a.py")
+    streams = [
+        stream
+        for i, s in enumerate((main, side))
+        for stream in parse_transcript(s.save(tmp_path / str(i))).streams
+    ]
+    assert episode_starts(streams) == {}
+    main.tick(10 * 3600).user("back again")
+    streams[0] = parse_transcript(main.save(tmp_path / "0")).streams[0]
+    (start,) = episode_starts(streams)["s"]
+    assert builders.T0.timestamp() + 13 * 3600 < start <= main.now.timestamp()
+
+
+def test_every_hotspot_is_listed_unless_a_limit_is_given(tmp_path: Path) -> None:
+    s = Session("many").user("go")
+    for i in range(60):
+        s.edit(f"/repo/src/f{i:02d}.py", error=builders.EDIT_NOT_FOUND)
+    assert AnalyzeOptions(repo=Path("/repo")).max_hotspots is None
+    assert len(scan(tmp_path, [s])["hotspots"]) == 60
+    limited = scan(tmp_path, [s], max_hotspots=7)
+    assert len(limited["hotspots"]) == 7 and limited["totals"]["files_affected"] == 60
+
+
+def test_a_test_that_passes_on_a_rerun_in_three_sessions_is_flaky(tmp_path: Path) -> None:
+    def sessions(count: int) -> list[Session]:
+        made = []
+        for i in range(count):
+            s = Session(f"s{i}").user("go")
+            s.bash("npm test", "Tests: 1 failed, 10 passed", exit_code=1, took=40)
+            made.append(s.bash("npm test", "Tests: 11 passed"))
+        return made
+
+    (row,) = scan(tmp_path, sessions(3))["commands"]
+    assert row["signals"] == {"command-failure": 3} and row["confidence"] == "medium"
+    assert not row["score_detail"]["capped"] and row["est_minutes_lost"] > 0
+    (rec,) = row["recommendations"]
+    assert (rec["id"], rec["title"]) == ("fix-the-flaky-test", "`npm test` looks flaky")
+    assert (
+        "fails and then passes on a re-run with nothing changed in between (3 times in 3"
+        in (rec["detail"])
+    )
+    assert "passed on a plain re-run, with nothing changed" in row["evidence"][0]["summary"]
+    # twice may be chance: weak evidence, no advice
+    (row,) = scan(tmp_path, sessions(2))["commands"]
+    assert row["score_detail"]["capped"] and row["recommendations"] == []
+
+
+def test_leftover_searches_never_become_a_pattern(tmp_path: Path) -> None:
+    def sessions(pattern: str, chase: bool) -> list[Session]:
+        made = []
+        for i in range(4):
+            s = Session(f"s{i}").user("go").edit("/repo/src/a.py")
+            s.grep(pattern, "/repo/src")
+            if chase:
+                s.grep(pattern, "/repo")
+            made.append(s)
+        return made
+
+    for pattern, chase in ((r"console\.log|debugger", True), ("RefundPolicy", False)):
+        out = scan(tmp_path, sessions(pattern, chase))
+        rows = [*out["directories"], *out["hotspots"]]
+        assert rows and all(r["confidence"] == "low" and r["score_detail"]["capped"] for r in rows)
+        assert all(r["recommendations"] == [] for r in rows), pattern
+    # the same name, looked for again and again by agents that wanted to find it
+    out = scan(tmp_path, sessions("RefundPolicy", True))
+    row = entry(out["directories"], "src")
+    assert row["confidence"] == "medium" and not row["score_detail"]["capped"]
+    assert [r["id"] for r in row["recommendations"]] == ["add-a-pointer"]

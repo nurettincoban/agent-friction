@@ -214,9 +214,9 @@ def test_a_derived_signal_is_not_a_second_kind_of_evidence() -> None:
 
 
 def test_weak_only_evidence() -> None:
-    def miss(session: str, pattern: str) -> Finding:
+    def miss(session: str, pattern: str, **detail: str) -> Finding:
         found = finding(signals.SEARCH_MISS, session)
-        found.detail["pattern"] = pattern
+        found.detail.update(pattern=pattern, **detail)
         return found
 
     assert not scoring.weak_only([])
@@ -226,7 +226,13 @@ def test_weak_only_evidence() -> None:
     assert scoring.weak_only([miss("s1", "feature_1"), miss("s2", "feature_2")])
     assert scoring.weak_only([miss("s1", "Policy"), miss("s1", "Policy")])
     # the same name missed in two sessions is no longer a one-off probe
-    assert not scoring.weak_only([miss("s1", "Policy"), miss("s2", "policy")])
+    again = [miss("s1", "Policy", wanted="1"), miss("s2", "policy", wanted="1")]
+    assert not scoring.weak_only(again)
+    # ... if both went on looking for it, and it is not a search for leftovers
+    assert scoring.weak_only([miss("s1", "Policy"), miss("s2", "policy", wanted="1")])
+    assert scoring.weak_only(
+        [miss("s1", "TODO", wanted="1", hygiene="1"), miss("s2", "TODO", wanted="1", hygiene="1")]
+    )
     counts = [(signals.READ_LOOP, 5)]
     assert "capped at 19" in scoring.explain(counts, 5, 5, "medium", capped=True)
     assert "capped" not in scoring.explain(counts, 5, 5, "medium")

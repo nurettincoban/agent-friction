@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from agent_friction import scoring, signals
+from agent_friction.model import Finding
 from agent_friction.signals import correction_confidence
 from tests import builders
 from tests.builders import Session, by_signal, detect
@@ -213,7 +214,8 @@ def test_search_miss_attribution(tmp_path: Path) -> None:
         ("dir", "docs"),
     ]
     assert found[0].excerpt == "pattern: Needle" and "Needle" not in found[0].summary
-    assert found[0].detail == {"pattern": "Needle", "scope": "src"}
+    # the same word was searched for again in the turn: the agent wanted a hit
+    assert found[0].detail == {"pattern": "Needle", "scope": "src", "wanted": "1"}
 
 
 # ---- command-failure / retry-loop ---------------------------------------------------------
@@ -2942,3 +2944,123 @@ def test_an_interrupted_command_is_named_on_the_event(tmp_path: Path) -> None:
     s = Session().user("go").read(A).interrupt()
     (found,) = detect(s, tmp_path)
     assert "interrupted" not in found.detail and keys(found) == [("file", "src/a.py")]
+
+
+# ---- round 16 ------------------------------------------------------------------------
+
+
+def test_a_miss_the_agent_keeps_chasing_wanted_a_hit(tmp_path: Path) -> None:
+    def details(s: Session) -> list[dict[str, str]]:
+        found = by_signal(detect(s, tmp_path), signals.SEARCH_MISS)
+        return [{k: v for k, v in f.detail.items() if k in ("wanted", "hygiene")} for f in found]
+
+    # reworded and searched again; then a file of that name is tried
+    s = Session().user("change the refund policy")
+    s.grep("RefundPolicy", "/repo/src").grep("refund_policy", "/repo/src")
+    s.read("/repo/src/policy.py", missing=True)
+    assert details(s) == [{"wanted": "1"}, {"wanted": "1"}]
+    # content with the empty result: on to something else
+    s = Session().user("add a feature")
+    s.grep("RefundPolicy", "/repo/src").read(A).edit(A)
+    assert details(s) == [{}]
+    # an unrelated search afterwards is not the same hunt
+    s = Session().user("add a feature")
+    s.grep("RefundPolicy", "/repo/src").grep("ShippingRate", "/repo/src")
+    assert details(s) == [{}, {}]
+    # a new turn is a new question
+    s = Session().user("add a feature").grep("RefundPolicy", "/repo/src")
+    s.user("and now?").grep("refund_policy", "/repo/src")
+    assert details(s) == [{}, {}]
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        r"console\.log|debugger",
+        "TODO|FIXME|XXX",
+        "<<<<<<<|>>>>>>>",
+        r"it\.only|describe\.only",
+        r"pdb|breakpoint\(\)",
+        r"print\(",
+    ],
+)
+def test_searching_for_leftovers_is_marked_as_such(tmp_path: Path, pattern: str) -> None:
+    s = Session().user("clean up").edit(A).grep(pattern, "/repo/src").grep(pattern, "/repo")
+    found = by_signal(detect(s, tmp_path), signals.SEARCH_MISS)
+    assert found and all(f.detail.get("hygiene") == "1" for f in found)
+    for ordinary in ("TodoList", "debugger_port", "only_admins", "printer", "DataXXL"):
+        s = Session().user("go").grep(ordinary, "/repo/src")
+        (miss,) = detect(s, tmp_path)
+        assert "hygiene" not in miss.detail, ordinary
+
+
+def test_red_before_the_first_edit_counts_as_a_run(tmp_path: Path) -> None:
+    def rounds(command: str, code: int, edits: int) -> list[Finding]:
+        s = Session().user("fix it")
+        for i in range(edits + 1):
+            if i:
+                s.edit(A, f"a{i}", f"b{i}")
+            s.bash(command, "E  assert 1 == 2\n1 failed in 0.1s", exit_code=code, took=30)
+        return by_signal(detect(s, tmp_path), signals.NO_CONVERGENCE)
+
+    # red, edit, red, edit, red, edit, red: four runs, piped or not, blamed on the file
+    for command, code in (("pytest -q 2>&1 | tail -5", 0), ("pytest -q", 1)):
+        (found,) = rounds(command, code, 3)
+        assert keys(found) == [("command", "pytest"), ("file", "src/a.py")]
+        assert found.detail["count"] == "4" and "4 runs with edits in between" in found.summary
+        assert rounds(command, code, 2) == []  # three runs are not yet a stall
+
+
+def test_a_time_boxed_start_that_came_up_is_not_a_failure(tmp_path: Path) -> None:
+    up = "> dev\n  VITE v5.0 ready in 300 ms\n  Local: http://localhost:5173/"
+    for banner in (up, "Server listening on port 3000", "webpack compiled successfully"):
+        s = Session().user("go").bash("timeout 10 npm run dev", banner, exit_code=124)
+        assert detect(s, tmp_path) == [], banner
+    # it never came up, it was not time-boxed, or it ended some other way: a failure
+    for command, output, code in (
+        ("timeout 10 npm run dev", "> dev\nstarting...", 124),
+        ("timeout 10 npm run dev", up, 1),
+        ("npm run build", up, 124),
+        ("timeout 60 pytest", "collected 3 items", 124),
+    ):
+        s = Session().user("go").bash(command, output, exit_code=code)
+        assert len(detect(s, tmp_path)) == 1, (command, code)
+
+
+def test_reading_between_green_runs_is_not_a_read_loop(tmp_path: Path) -> None:
+    s = Session().user("go")
+    for _ in range(5):
+        s.read(A).bash("pytest -q", "3 passed")
+    assert detect(s, tmp_path) == []
+    # between red runs, or with nothing run at all, it still is one
+    s = Session().user("go")
+    for _ in range(5):
+        s.read(A).bash("pytest -q", "1 failed", exit_code=1)
+    assert len(by_signal(detect(s, tmp_path), signals.READ_LOOP)) == 1
+    s = Session().user("go")
+    for _ in range(5):
+        s.read(A).bash("git status", "clean")
+    assert len(by_signal(detect(s, tmp_path), signals.READ_LOOP)) == 1
+
+
+def test_a_plain_rerun_that_passes_is_remembered(tmp_path: Path) -> None:
+    s = Session().user("go").bash("npm test", "Tests: 1 failed", exit_code=1)
+    s.bash("npm test", "Tests: 11 passed")
+    (found,) = detect(s, tmp_path)
+    assert found.detail["rerun_green"] == "1" and found.detail["variant"] == "ordinary"
+    # twice red, then green untouched: not "waiting" where a test suite is concerned
+    s = Session().user("go")
+    s.bash("npm test", "Tests: 1 failed", exit_code=1).bash("npm test", "1 failed", exit_code=1)
+    s.bash("npm test", "Tests: 11 passed")
+    assert all(
+        f.detail.get("rerun_green") for f in by_signal(detect(s, tmp_path), signals.COMMAND_FAILURE)
+    )
+    # ... but polling something else still is
+    s = Session().user("go")
+    for _ in range(3):
+        s.bash("gh pr checks 12", "build pending", exit_code=8)
+    s.bash("gh pr checks 12", "build pass")
+    assert detect(s, tmp_path) == []
+    # an edit in between is the development loop
+    s = Session().user("go").bash("npm test", "Tests: 1 failed", exit_code=1).edit(A)
+    assert detect(s.bash("npm test", "Tests: 11 passed"), tmp_path) == []
