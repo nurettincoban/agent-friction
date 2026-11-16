@@ -598,3 +598,17 @@ def test_windows_separators_are_not_posix_escapes() -> None:
     assert is_windows_path("C:\\Users\\dev") and is_windows_path("c:/Users/dev")
     assert not is_windows_path("/home/dev") and not is_windows_path(None)
     assert not is_windows_path("src/c:/x")
+
+
+def test_same_line_assignments_are_followed_and_nothing_else() -> None:
+    from agent_friction.attribution import VARIABLE, expand_assignments
+
+    assert expand_assignments("A=scripts/x.sh; $A") == "A=scripts/x.sh; scripts/x.sh"
+    assert expand_assignments('export D="web app" && cd $D') == 'export D="web app" && cd web app'
+    assert expand_assignments("N=3; pytest -n ${N} $NN") == "N=3; pytest -n 3 $NN"
+    # a prefix assignment, a computed value and a later definition are left alone
+    for line in ("A=x make $A", "A=$(pwd); $A/run.sh", "$A; A=x", "echo $HOME"):
+        assert expand_assignments(line) == line
+    assert parse_command("$TOOL lint").key == VARIABLE == public_key(VARIABLE)
+    assert parse_command("cd web && $A/run.sh --all").key == "<variable>/run.sh"
+    assert parse_command("echo $HOME; make test").key == "make test"

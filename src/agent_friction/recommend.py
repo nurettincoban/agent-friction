@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent_friction import attribution, model, scoring, signals
+from agent_friction.guidance import Guidance, Mention, path_terms
 from agent_friction.model import Finding
 
 #: A file with at least this many lines is called "large" in recommendations.
@@ -159,11 +160,52 @@ def _code_list(pairs: Sequence[tuple[str, int]], quote: Quoter) -> str:
     )
 
 
+#: Rules whose advice is "write it down": if it is written down already, they say so.
+DOCUMENTABLE: frozenset[str] = frozenset(
+    {
+        "edit-the-source-not-the-output",
+        "document-what-rewrites-this-file",
+        "path-agents-expect",
+        "write-down-the-rule",
+        "state-the-boundary",
+        "allow-or-document-the-boundary",
+        "use-the-working-command",
+        "document-the-setup-step",
+        "document-the-environment",
+        "document-the-command",
+        "make-the-failure-actionable",
+        "run-it-in-the-background",
+        "give-it-more-time",
+        "explain-the-failing-check",
+        "say-if-it-is-known-broken",
+    }
+)
+
+#: (terms to look for, title, rest of the sentence after "<file:line> already ")
+Already = tuple[Sequence[str], str, str]
+
+
+def _refs(mentions: Sequence[Mention]) -> str:
+    cited = [code(str(m)) for m in mentions]
+    return cited[0] if len(cited) == 1 else ", ".join(cited[:-1]) + " and " + cited[-1]
+
+
 class _Rules:
     def __init__(
-        self, findings: Sequence[Finding], quote: Quoter | None, shares: Mapping[int, float]
+        self,
+        findings: Sequence[Finding],
+        quote: Quoter | None,
+        shares: Mapping[int, float],
+        guidance: Guidance | None = None,
+        subjects: Sequence[str] = (),
+        near: str = "",
+        subject_name: str = "",
     ) -> None:
         self.shares = shares
+        self.guidance = guidance
+        self.subjects = list(subjects)
+        self.near = near
+        self.subject_name = subject_name
         self.by_signal: dict[str, list[Finding]] = {}
         for finding in findings:
             self.by_signal.setdefault(finding.signal, []).append(finding)
@@ -176,10 +218,45 @@ class _Rules:
             return found
         return [f for f in found if f.detail.get("variant") == variant]
 
-    def add(self, rule_id: str, title: str, detail: str, based_on: Sequence[str]) -> None:
+    def add(
+        self,
+        rule_id: str,
+        title: str,
+        detail: str,
+        based_on: Sequence[str],
+        already: Already | None = None,
+    ) -> None:
+        """Record a recommendation, in its "already documented" form where that applies.
+
+        ``already`` is the rule's own wording for the case that the instruction files
+        name what it would have suggested; any other documentable rule whose subject
+        (the path, the command) is named there gets a note instead of new advice.
+        """
         assert rule_id in RULE_IDS, rule_id
+        mentions: list[Mention] = []
+        guidance = self.guidance
+        if guidance is not None and rule_id in DOCUMENTABLE:
+            if already is not None:
+                mentions = guidance.mentions(list(already[0]), self.near)
+            if mentions and already is not None:
+                title, detail = already[1], f"{_refs(mentions)} already {already[2]}"
+            else:
+                mentions = guidance.mentions(self.subjects, self.near)
+                if mentions:
+                    detail += (
+                        f" Note that {_refs(mentions)} already mentions {self.subject_name}: "
+                        "check that what it says matches what happened here, and if it does, "
+                        "enforce it (a hook, a permission rule, a wrapper) rather than adding "
+                        "another line."
+                    )
         self.out.append(
-            {"id": rule_id, "title": title, "detail": detail, "signals": sorted(set(based_on))}
+            {
+                "id": rule_id,
+                "title": title,
+                "detail": detail,
+                "signals": sorted(set(based_on)),
+                "documented_in": [m.as_dict() for m in mentions],
+            }
         )
 
     # ---- shared rules ----------------------------------------------------------------
@@ -330,6 +407,15 @@ class _Rules:
                 "AGENTS.md which source to change and which command regenerates it, and "
                 "consider denying direct edits to it.",
                 [f.signal for f in involved],
+                (
+                    self.subjects,
+                    "Generated file: telling agents was not enough",
+                    "mentions this file, yet agents ran into trouble editing it directly "
+                    f"{_in_sessions(involved)}. Another line will not help. Enforce it: deny "
+                    "direct edits with a permission rule, or add a pre-edit hook that names "
+                    "the source to change and the command that regenerates the file. (If "
+                    "that line is newer than these sessions, give it time first.)",
+                ),
             )
         if len(misses) >= MIN_EVENTS and large and facts is not None:
             self.add(
@@ -505,6 +591,20 @@ class _Rules:
                 "Say in AGENTS.md how to log in, or that agents cannot and should stop and "
                 "ask instead of retrying."
             )
+        elif kind == signals.ENV_PORT:
+            title = f"Say what to do when the port {code(key)} needs is taken"
+            detail = (
+                f"{code(key)} failed {often} because the port it listens on was already in "
+                "use, usually by a server left running earlier. Say in AGENTS.md how to check "
+                "for and stop it, or let the command pick a free port."
+            )
+        elif kind == signals.ENV_DISK:
+            title = f"Free disk space where agents run {code(key)}"
+            detail = (
+                f"{code(key)} failed {often} because the disk was full. Free space on the "
+                "machine agents work on, and say in AGENTS.md what is safe to clean (caches, "
+                "build output) when it happens again."
+            )
         else:
             title = f"Document the environment variables {code(key)} needs"
             variables = _top([f.detail.get("env_var", "") for f in failures], 3)
@@ -517,6 +617,17 @@ class _Rules:
                 "`.env.example`, a secrets manager), or load them in the command itself."
             )
         self.add("document-the-environment", title, detail, [signals.COMMAND_FAILURE])
+
+    def _use_instead(self, better: str, worse: str, failures: Sequence[Finding]) -> Already:
+        return (
+            [better],
+            f"{code(better)} is documented, yet agents run {code(worse)}",
+            f"names {code(better)}; agents still ran {code(worse)} and failed "
+            f"{_in_sessions(failures)}. Another line will not help. Enforce it: a hook or "
+            f"permission rule that blocks {code(worse)}, or a wrapper that makes "
+            f"{code(worse)} do what {code(better)} does. (If that line is newer than these "
+            "sessions, give it time first.)",
+        )
 
     def command(self, key: str) -> None:
         failures = self.get(signals.COMMAND_FAILURE)
@@ -566,6 +677,7 @@ class _Rules:
                 f"the PATH here; {_times(count)} the same command then ran with {code(name)}. "
                 f'Add a line to AGENTS.md such as: "use {code(name)}, not {code(old)}".',
                 [signals.COMMAND_FAILURE],
+                self._use_instead(name, old, invocation),
             )
         elif forms and forms[0][1] >= MIN_EVENTS:
             form, count = forms[0]
@@ -577,6 +689,7 @@ class _Rules:
                 f'file edited in between. Add a line to AGENTS.md such as: "use {code(form)}", '
                 "or set the variable where the command is defined.",
                 [signals.COMMAND_FAILURE],
+                self._use_instead(form, key, invocation),
             )
         elif places and places[0][1] >= MIN_EVENTS:
             place, count = places[0]
@@ -600,6 +713,7 @@ class _Rules:
                 f"those sessions. Add a line to AGENTS.md such as: "
                 f'"use {code(fix)}, not {code(key)}".',
                 [signals.COMMAND_FAILURE],
+                self._use_instead(fix, key, failures),
             )
         elif setups and setups[0][1] >= MIN_EVENTS:
             setup, count = setups[0]
@@ -610,6 +724,15 @@ class _Rules:
                 f'the agent ran {code(setup)}. Say so in AGENTS.md ("run {code(setup)} before '
                 f'{code(key)}"), or make the environment ready before the agent starts.',
                 [signals.COMMAND_FAILURE],
+                (
+                    [setup],
+                    f"{code(setup)} is documented, yet agents start without it",
+                    f"names {code(setup)}; {code(key)} still failed {_in_sessions(failures)} "
+                    "until the agent ran it. Another line will not help: make the environment "
+                    "ready before the agent starts (a setup script or a session-start hook), "
+                    f"or have {code(key)} run the step itself. (If that line is newer than "
+                    "these sessions, give it time first.)",
+                ),
             )
         elif len(environment) >= MIN_EVENTS:
             self.environment(key, environment)
@@ -660,7 +783,16 @@ class _Rules:
         self.no_convergence(key)
         self.rejections()
         self.denials(f"{code(key)}")
-        self.interrupts()
+        stopped = self.get(signals.USER_INTERRUPT)
+        if len(stopped) >= MIN_EVENTS:
+            self.add(
+                "clarify-before-acting",
+                f"Say when agents should run {code(key)}",
+                f"Humans stopped {code(key)} while it was running {_in_sessions(stopped)}. If "
+                "it takes too long or should not be run here, say so in AGENTS.md together "
+                "with what to run instead (a narrower or faster command).",
+                [signals.USER_INTERRUPT],
+            )
 
 
 _WORD_RE = re.compile(r"[a-z_][a-z0-9_]{3,}")
@@ -755,17 +887,27 @@ def recommend(
     facts: FileFacts | None = None,
     quote: Quoter | None = None,
     shares: Mapping[int, float] | None = None,
+    guidance: Guidance | None = None,
 ) -> list[dict[str, object]]:
     """Recommendations for one hotspot.
 
     ``quote`` redacts and truncates verbatim transcript text; pass ``None`` to
     keep all verbatim text out of the recommendations. ``shares`` maps a
     finding's ``fid`` to the fraction of it attributed to this hotspot
-    (default 1).
+    (default 1). ``guidance`` is what the repository's instruction files already
+    say (see :mod:`agent_friction.guidance`); without it nothing counts as documented.
     """
     if scoring.weak_only(findings):
         return []  # nothing here that productive work does not also produce
-    rules = _Rules(findings, quote, shares or {})
+    subjects: list[str] = []
+    near, name = "", "it"
+    if kind == model.FILE:
+        subjects, near, name = path_terms(key), key.rpartition("/")[0], "this file"
+    elif kind == model.COMMAND:
+        located = _IN_DIRECTORY_RE.match(key)
+        base = located.group(1) if located else key
+        subjects, near, name = [base], (located.group(2) if located else ""), code(base)
+    rules = _Rules(findings, quote, shares or {}, guidance, subjects, near, name)
     if kind == model.FILE:
         rules.file(facts)
     elif kind == model.COMMAND:

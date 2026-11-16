@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from agent_friction import model, recommend, redact, signals
+from agent_friction.guidance import Guidance, Mention, path_terms
 from agent_friction.model import Finding, Target
 from agent_friction.recommend import FileFacts, file_facts
 
@@ -356,3 +357,158 @@ def test_a_command_in_a_subdirectory_is_named_as_such() -> None:
     assert str(rec["detail"]).startswith("`pytest` in `src/` failed 2 times in 2 sessions")
     (root,) = recommend.recommend(model.COMMAND, "pytest", failures, None)
     assert root["title"] == "Document how to run `pytest`"
+
+
+# ---- round 15: what the instruction files already say ---------------------------------
+
+
+def write(root: Path, files: dict[str, str]) -> Path:
+    for name, text in files.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    return root
+
+
+def cited(found: list[Mention]) -> list[str]:
+    return [str(m) for m in found]
+
+
+def test_instruction_files_are_searched_on_word_boundaries(tmp_path: Path) -> None:
+    repo = write(
+        tmp_path,
+        {
+            "AGENTS.md": "# Rules\nRun pytest-cov via tox.\nSee pytest.ini and data.py.\n"
+            "Use `make test`.\nNever edit src/api/schema_gen.py.\nRun pytest, then stop.\n",
+            "CLAUDE.md": "pytest is fine here\n",
+            ".github/copilot-instructions.md": "prefer make test\n",
+            ".cursorrules": "make test\n",
+            ".cursor/rules/testing.mdc": "always make test\n",
+            "notes.md": "pytest\n",
+        },
+    )
+    guide = Guidance(repo)
+    assert cited(guide.mentions(["pytest"])) == ["AGENTS.md:6", "CLAUDE.md:1"]
+    assert cited(guide.mentions(["a.py"])) == []  # not `data.py`
+    assert cited(guide.mentions(path_terms("src/api/schema_gen.py"))) == ["AGENTS.md:5"]
+    assert cited(guide.mentions(["schema_gen.py"])) == ["AGENTS.md:5"]
+    # at most three places are cited, in a fixed order of files
+    assert cited(guide.mentions(["make test"])) == [
+        "AGENTS.md:4",
+        ".github/copilot-instructions.md:1",
+        ".cursorrules:1",
+    ]
+    # a bare launcher, a short word or a placeholder is not looked for
+    assert guide.mentions(["make"]) == guide.mentions(["tox"]) == []
+    assert guide.mentions(["make <target:37bd73>"]) == []
+    assert Guidance(None).mentions(["pytest"]) == Guidance(tmp_path / "nope").mentions(["x"]) == []
+    assert path_terms("src/app/__init__.py") == ["src/app/__init__.py"]
+    assert path_terms("Makefile") == ["Makefile"]
+
+
+def test_nested_files_apply_to_what_lies_beneath_them(tmp_path: Path) -> None:
+    repo = write(
+        tmp_path,
+        {"web/AGENTS.md": "run npm test here\n", "web/src/CLAUDE.md": "\nnpm test\n"},
+    )
+    guide = Guidance(repo)
+    assert cited(guide.mentions(["npm test"])) == []
+    assert cited(guide.mentions(["npm test"], "api")) == []
+    assert cited(guide.mentions(["npm test"], "web")) == ["web/AGENTS.md:1"]
+    assert cited(guide.mentions(["npm test"], "web/src/lib")) == [
+        "web/AGENTS.md:1",
+        "web/src/CLAUDE.md:2",
+    ]
+    assert guide.mentions(["npm test"], "../web") == []
+
+
+def test_only_small_text_files_inside_the_repo_are_read(tmp_path: Path) -> None:
+    from agent_friction import guidance
+
+    outside = tmp_path / "elsewhere.md"
+    outside.write_text("use make test\n")
+    repo = write(tmp_path / "repo", {"CLAUDE.md": "use make test\n"})
+    (repo / "AGENTS.md").symlink_to(repo / "CLAUDE.md")  # one file, cited once
+    (repo / ".cursorrules").symlink_to(outside)
+    assert cited(Guidance(repo).mentions(["make test"])) == ["AGENTS.md:1"]
+    (repo / "CLAUDE.md").write_text("x" * guidance.MAX_FILE_BYTES + "\nuse make test\n")
+    assert Guidance(repo).mentions(["make test"]) == []
+    (repo / "CLAUDE.md").write_bytes(b"\x00\x01 make test\n")
+    assert Guidance(repo).mentions(["make test"]) == []
+
+
+def test_permission_deny_rules_count_and_other_settings_do_not(tmp_path: Path) -> None:
+    settings = {
+        "permissions": {
+            "allow": ["Bash(pytest:*)", "Bash(npm run lint)"],
+            "deny": ["Bash(npm run e2e:*)", "Edit(src/api/schema_gen.py)"],
+        },
+        "env": {"NOTE": "npm run e2e"},
+    }
+    import json
+
+    repo = write(tmp_path, {".claude/settings.json": json.dumps(settings, indent=2)})
+    guide = Guidance(repo)
+    assert cited(guide.mentions(["npm run e2e"])) == [".claude/settings.json:8"]
+    assert cited(guide.mentions(["src/api/schema_gen.py"])) == [".claude/settings.json:9"]
+    assert guide.mentions(["pytest"]) == guide.mentions(["npm run lint"]) == []
+    (repo / ".claude/settings.local.json").write_text("{not json")
+    assert cited(Guidance(repo).mentions(["npm run e2e"])) == [".claude/settings.json:8"]
+
+
+def test_documented_advice_changes_form(tmp_path: Path) -> None:
+    repo = write(
+        tmp_path,
+        {
+            "AGENTS.md": "Setup: run `pip install -e .` first.\n",
+            "src/AGENTS.md": "\n\nTests: pytest needs PYTHONPATH.\n",
+        },
+    )
+    guide = Guidance(repo)
+    failures = [
+        finding(signals.COMMAND_FAILURE, f"s{i}", variant="invocation", command="pytest")
+        for i in range(2)
+    ]
+    # the command is keyed by where it ran: that directory's file applies
+    (rec,) = recommend.recommend(model.COMMAND, "pytest (src/)", failures, None, guidance=guide)
+    assert rec["documented_in"] == [{"file": "src/AGENTS.md", "line": 3}]
+    assert rec["title"] == "Document how to run `pytest` in `src/`"
+    assert "Note that `src/AGENTS.md:3` already mentions `pytest`: check that" in str(rec["detail"])
+    (root,) = recommend.recommend(model.COMMAND, "pytest", failures, None, guidance=guide)
+    assert root["documented_in"] == [] and "already" not in str(root["detail"])
+    # a setup step that is written down is not suggested again
+    fixed = [
+        finding(signals.COMMAND_FAILURE, f"s{i}", fixed_by_setup="pip install -e .")
+        for i in range(2)
+    ]
+    (step,) = recommend.recommend(model.COMMAND, "pytest", fixed, None, guidance=guide)
+    assert step["id"] == "document-the-setup-step"
+    assert step["title"] == "`pip install -e .` is documented, yet agents start without it"
+    assert str(step["detail"]).startswith("`AGENTS.md:1` already names `pip install -e .`; ")
+    assert "Say so in AGENTS.md" not in str(step["detail"])
+    (plain,) = recommend.recommend(model.COMMAND, "pytest", fixed, None)
+    assert plain["title"] == "Document the setup `pytest` needs" and plain["documented_in"] == []
+
+
+def test_port_and_disk_failures_get_their_own_words() -> None:
+    for kind, title in (
+        ("port", "Say what to do when the port `npm run dev` needs is taken"),
+        ("disk", "Free disk space where agents run `npm run dev`"),
+        ("auth", "Say how `npm run dev` gets its credentials"),
+    ):
+        found = [
+            finding(signals.COMMAND_FAILURE, f"s{i}", variant="environment", environment=kind)
+            for i in range(2)
+        ]
+        (rec,) = recommend.recommend(model.COMMAND, "npm run dev", found, None)
+        assert (rec["id"], rec["title"]) == ("document-the-environment", title)
+
+
+def test_a_command_humans_keep_stopping_is_about_the_command() -> None:
+    stops = [finding(signals.USER_INTERRUPT, f"s{i}") for i in range(3)]
+    (rec,) = recommend.recommend(model.COMMAND, "npm run e2e", stops, None)
+    assert rec["id"] == "clarify-before-acting"
+    assert rec["title"] == "Say when agents should run `npm run e2e`"
+    assert "Humans stopped `npm run e2e` while it was running 3 times in 3" in str(rec["detail"])
+    (on_file,) = recommend.recommend(model.FILE, "a.py", stops, FileFacts(True, 10))
+    assert on_file["title"] == "Tell agents what to check before acting here"

@@ -95,7 +95,7 @@ by repository or time window, so `0` marks an empty, binary or foreign file.
 
 | Field | Meaning |
 | --- | --- |
-| `kind` | `"claude-code"`, `"generic"` or `"git"`. |
+| `kind` | `"claude-code"`, `"generic"`, `"git"`, or `"unreadable"` for a transcript file that could not be read (see `error`). |
 | `path` | `claude-code:<repo name>` for Claude Code transcripts (the project directory encodes an absolute path and is never shown), the file for generic transcripts (home as `~`; only `generic:<file name>` with `--no-excerpts`), or the repo root for git. |
 | `sessions` | Distinct sessions with activity in the repo (for git: agent commits in the window). |
 | `skipped_lines` | Lines that were not valid JSON objects or lacked required structure. |
@@ -104,6 +104,7 @@ by repository or time window, so `0` marks an empty, binary or foreign file.
 | `files` | Transcript files read (not for git). |
 | `sessions_outside_repo` | Sessions dropped because they never touched this repo (not for git). |
 | `available`, `note` | git only: whether history could be read, and why not. |
+| `error` | `kind: "unreadable"` only: why the file could not be read, in fixed words: `"permission denied"`, `"file not found"`, `"is a directory"` or `"could not be read"`. One entry per file; `path` is the file name alone (its directory may name a user or a project), `files` is 1 and every count is 0. Nothing from such a file is in the result. *Addition to the base contract.* |
 
 ### `totals`
 
@@ -119,6 +120,7 @@ by repository or time window, so `0` marks an empty, binary or foreign file.
 | `probable_corrections` | `probable-correction` events (wording only, or two weak cues): a separate, weak signal. Listed as evidence, never quoted, never the basis of a recommendation. |
 | `files_affected` | File hotspots before `max_hotspots` truncation. |
 | `commands_affected`, `directories_affected` | Likewise. |
+| `third_party_events` | Events set aside because everything they were about lies in third-party or build directories (`node_modules/`, `.venv/`, `vendor/`, git-ignored directories, ...; methodology, Attribution). They are in no hotspot, signal count or `friction_events`. *Addition to the base contract.* |
 | `unattributed_events` | Events that could not be tied to a path or command. Their evidence is the top-level `unattributed` list. |
 
 ### `exposure`
@@ -167,7 +169,7 @@ was fixed only if its target still has exposure there.
 | `signals` | object | `{signal_id: count}`, most frequent first. |
 | `confidence` | str | `"low"`, `"medium"` or `"high"`. |
 | `why` | str | One sentence: counts, friction sessions out of exposure sessions, top signals, reason for the confidence. |
-| `recommendations` | list | `{id, title, detail, signals}`; `signals` lists the signal ids the rule is based on. May be empty. `title` and `detail` are Markdown: commands and quoted search patterns are inline code spans, fenced with more backticks than the value contains (a pattern ``a`b`` is written ```` ``a`b`` ````), so they stay valid whatever the transcript held. |
+| `recommendations` | list | `{id, title, detail, signals, documented_in}`; `signals` lists the signal ids the rule is based on. `documented_in` is a list of `{"file": "AGENTS.md", "line": 12}` (repo-relative path, 1-based line; at most 3; empty when nothing was found): places where the repository's instruction files already name what the recommendation is about, in which case `title` and `detail` are in their "already documented" form (methodology, Recommendations). The lines themselves are never quoted. *Addition to the base contract.* May be empty. `title` and `detail` are Markdown: commands and quoted search patterns are inline code spans, fenced with more backticks than the value contains (a pattern ``a`b`` is written ```` ``a`b`` ````), so they stay valid whatever the transcript held. |
 | `evidence` | list | Up to `max_evidence` items, chronological. |
 | `score_detail` | object | The score's factors, each 0-1: `severity`, `recurrence`, `consistency` (`score` is 100 x their product, up to rounding); `mean_session_points`; `intensity` (sum of session points); `capped` (true when all evidence is weak and the score was limited to 19); and `sessions`: per session `session_id`, `weighted_events`, `points`. |
 | `file` | object | File hotspots only: `exists`, `lines` (`null` if missing or over 5 MB), `generated`. |

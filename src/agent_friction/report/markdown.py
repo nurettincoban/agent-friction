@@ -121,7 +121,11 @@ _CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.S)
 
 
 def _escape_prose(s: str) -> str:
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Quoted transcript text must not render images or links, or notify people, when the
+    # report is pasted into an issue or PR: escape link brackets and break @mentions.
+    s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    s = s.replace("[", "\\[").replace("]", "\\]")
+    return re.sub(r"@(?=[A-Za-z0-9])", "@\u200b", s)
 
 
 def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:

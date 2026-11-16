@@ -388,6 +388,10 @@ INVOCATION_ERROR_RE = re.compile(
     r"|make(?:\[\d+\])?: \*\*\* No rule to make target .*"
     r"|.*No rule to make target .*"
     r"|npm (?:ERR!|error) (?:Missing script|enoent|code ENOENT).*"
+    r"|error Command \"[^\"\n]+\" not found\.?"
+    r"|.*ERR_PNPM_NO_SCRIPT.*"
+    r"|npm (?:ERR!|error) (?:code EBADENGINE|engine Unsupported engine|notsup Unsupported engine).*"
+    r"|error .*: The engine \"\w+\" is incompatible with this module\..*"
     r"|fatal: not a git repository.*"
     r"|error: could not find `Cargo\.toml`.*"
     r"|(?:ERROR|error): (?:Could not find a version|No matching distribution|"
@@ -793,9 +797,24 @@ _AUTH_RE = re.compile(
     r"|Unable to locate credentials|You must be logged in|not logged in(?:to)?\b"
     r"|authentication failed|Authentication required|Permission denied \(publickey"
     r"|\b(?:gh|gcloud|az|aws sso|docker|npm|vercel|firebase) (?:auth )?login\b"
-    r"|InvalidClientTokenId|could not read Username",
+    r"|InvalidClientTokenId|could not read Username"
+    # a remote that refuses the credentials at hand
+    r"|The requested URL returned error: 40[13]|Permission to \S+ denied to "
+    r"|Invalid username or password|\b401 Unauthorized\b|\bcode E401\b",
     re.I,
 )
+#: The shell could not change directory, so what came after `cd x &&` never ran.
+_CD_FAILED_RE = re.compile(
+    r"(?:^|: )cd: (?:[^\n]*: )?(?:No such file or directory|Not a directory)\s*$"
+    r"|^cd: no such file or directory: |: can't cd to ",
+    re.M | re.I,
+)
+#: The port a server wants is taken, usually by one left running earlier.
+_PORT_IN_USE_RE = re.compile(
+    r"EADDRINUSE|address already in use|port (?:\d+ )?is already (?:in use|allocated)", re.I
+)
+#: The disk is full.
+_DISK_FULL_RE = re.compile(r"\bENOSPC\b|No space left on device", re.I)
 _VAR = r"[`'\"]?([A-Z][A-Z0-9_]{2,})[`'\"]?"
 _ENV_VAR_RE = re.compile(
     rf"[Mm]issing(?: required)? env(?:ironment)? var(?:iable)?s?:? {_VAR}"
@@ -829,17 +848,24 @@ _PORT_RE = re.compile(r"(?:\bport |(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])
 ENV_SERVICE = "service"
 ENV_AUTH = "auth"
 ENV_VARIABLE = "variable"
+ENV_PORT = "port"
+ENV_DISK = "disk"
 
 
 def environment_error(output: str) -> tuple[str, str] | None:
     """``(kind, name)`` if a failure's output blames the environment, else ``None``.
 
     ``kind`` is ``service`` (something the command talks to is not running),
-    ``auth`` (credentials missing or expired) or ``variable`` (an environment
-    variable is not set). ``name`` is the service from a fixed vocabulary
+    ``auth`` (credentials missing or expired), ``variable`` (an environment
+    variable is not set), ``port`` (the port a server wants is taken) or ``disk``
+    (no space left). ``name`` is the service from a fixed vocabulary
     ("PostgreSQL", "the Docker daemon", "the service on port 8080"), the
     variable's name, or empty.
     """
+    if _DISK_FULL_RE.search(output):
+        return ENV_DISK, ""
+    if _PORT_IN_USE_RE.search(output):
+        return ENV_PORT, ""
     down = _SERVICE_DOWN_RE.search(output)
     if down is not None:
         port = _PORT_RE.search(output)
@@ -934,6 +960,10 @@ _UNDO_OBJECT = (
     r"|(?:the|my) (?:last|previous|latest) (?:change|changes|edit|edits|commit|commits|one"
     r"|thing|step|two|three|few|\d+)"
     r"|the (?:change|changes|edit|edits|commit|commits))\b"
+)
+#: The human asks for a change to be taken back: "revert src/app.py", "put it back".
+_UNDO_ASKED_RE = re.compile(
+    rf"\b{_UNDO}\b|\bput (?:\S+ ){{1,4}}back\b|\brestore\b|\bgo back to\b", re.I
 )
 _STILL = (
     r"still (?:failing|fails|broken|not working|not fixed|doesn't work|does not work"
@@ -1347,6 +1377,7 @@ class _State:
     emitted_at: dict[int, int] = field(default_factory=dict)
     turn_shell_ok: bool | None = None
     turn_check_ok: bool | None = None  # ... and its last test/lint/build/aggregate command
+    undo_asked: bool = False  # the prompt of this turn asks for an undo
     turn_misses: list[tuple[Finding, str]] = field(default_factory=list)
 
 
@@ -1863,7 +1894,7 @@ class _Detector:
             versions.append(call.content_digest)
             state.write_times[(path, call.content_digest)] = now
             state.write_turns[(path, call.content_digest)] = state.turns
-        if reverted:
+        if reverted and not state.undo_asked:
             self._emit(
                 EDIT_REVERT,
                 result,
@@ -2212,6 +2243,10 @@ class _Detector:
                     waiting.append((finding, failed_key, left))
             state.pending = waiting
             return
+        if _CD_FAILED_RE.search(result.output) and any(s.moves for s in cmd.steps):
+            # `cd missing-dir && npm test`: the shell stopped at the `cd`. Nothing ran
+            # there, so there is no failure of `npm test (missing-dir/)` to record.
+            return
         code = None if hidden else result.exit_code
         if cmd.inspection:
             # Probing (ls, cat, git status, ...) is not friction, whatever it answers.
@@ -2270,6 +2305,8 @@ class _Detector:
                 ENV_SERVICE: f"{environment[1] or 'a service it needs'} was not reachable",
                 ENV_AUTH: "credentials were missing or expired",
                 ENV_VARIABLE: "an environment variable was not set",
+                ENV_PORT: "the port it needs was already in use",
+                ENV_DISK: "the disk was full",
             }[environment[0]]
         summary = f"`{shown(key)}` failed ({status}; {kind})"
         if not certain:
@@ -2652,6 +2689,7 @@ class _Detector:
         last = turn[-1]
         if last.result is not None and last.result.error == model.ERR_REJECTED:
             return  # already counted as tool-rejected
+        stopped = ""
         targets = self._action_targets(last)
         if not targets:
             if last.call.op in (model.OP_READ, model.OP_EDIT, model.OP_WRITE, model.OP_SHELL):
@@ -2661,6 +2699,7 @@ class _Detector:
             # Stopping a running command is about the work in progress, not about the
             # command: the event goes to what the agent had been changing, if anything.
             what = f"running `{targets[0].key}`"
+            stopped = targets[0].key
             edited: list[str] = []
             for action in reversed(turn):
                 changed = action.call.op in (model.OP_EDIT, model.OP_WRITE)
@@ -2679,9 +2718,14 @@ class _Detector:
             f"The user interrupted the agent while it was {what}",
             targets,
             interval=_capped(_epoch(turn[-1].call), _epoch(event)),
+            detail={"interrupted": stopped} if stopped else None,
         )
 
     def _on_prompt(self, event: Event) -> None:
+        # Taking a change back because the human said to is following an instruction.
+        self.state.undo_asked = (
+            _UNDO_ASKED_RE.search(event.text[:CORRECTION_HEAD_CHARS]) is not None
+        )
         _, finished = self._turn_bounds()
         if self.state.agent_seen is not None:
             finished = max(finished or 0.0, self.state.agent_seen)

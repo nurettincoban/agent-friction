@@ -399,6 +399,11 @@ def _load_json(path: Path) -> dict[str, Any]:
         isinstance(data.get("totals"), dict)
         and isinstance(data["totals"].get("sessions"), int)
         and all(isinstance(data.get(k), list) for k in ("hotspots", "commands"))
+        and all(
+            isinstance(item, dict) and isinstance(item.get("events", 0), int)
+            for k in ("hotspots", "commands", "directories")
+            for item in (data.get(k) or [])
+        )
     ):
         raise AgentFrictionError(
             f"{path}: not an agent-friction result (make one with `scan -f json`)"
@@ -413,11 +418,20 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _write(text: str, output: Path | None, stdout: TextIO) -> None:
     if output is None:
-        stdout.write(text)
+        try:
+            stdout.write(text)
+            stdout.flush()
+        except BrokenPipeError:
+            raise
+        except OSError as exc:  # e.g. a full disk behind a redirect
+            raise AgentFrictionError(f"cannot write the report: {exc.strerror or exc}") from None
         return
     if not output.parent.is_dir():
         raise UsageError(f"{output.parent}: directory does not exist")
-    output.write_text(text, encoding="utf-8", errors="replace")
+    try:
+        output.write_text(text, encoding="utf-8", errors="replace")
+    except OSError as exc:  # read-only dir, full disk, file locked by another program
+        raise AgentFrictionError(f"cannot write {output}: {exc.strerror or exc}") from None
 
 
 def _utf8_safe(stream: TextIO) -> TextIO:
@@ -441,6 +455,13 @@ def _utf8_safe(stream: TextIO) -> TextIO:
     return stream
 
 
+def _warn_unreadable(result: dict[str, Any], stderr: TextIO) -> None:
+    for src in result.get("sources", []):
+        if src.get("kind") == "unreadable":
+            why = src.get("error", "unreadable")
+            stderr.write(f"agent-friction: skipped {src.get('path', '?')}: {why}\n")
+
+
 def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     if args.output is not None and str(args.output) == "-":
         args.output = None  # `-o -` means standard output, as usual
@@ -458,6 +479,7 @@ def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
             return EXIT_USAGE
     fmt = fmt or "terminal"
     result = _analyze(args, args.repo)
+    _warn_unreadable(result, stderr)
     if fmt == "json":
         text = render_json(result)
     elif fmt == "markdown":
@@ -584,6 +606,8 @@ def _cmd_sources(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         if events == 0:
             unreadable += 1
             note = "  (no events: empty, binary, or not a transcript)"
+            if Path(path).is_file() and not os.access(path, os.R_OK):
+                note = "  (unreadable: permission denied)"
         elif skipped:
             note = f"  ({events} events, {plural(skipped, 'line')} skipped)"
         else:

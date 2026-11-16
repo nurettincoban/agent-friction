@@ -87,6 +87,18 @@ under `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR`). Point it elsewhere with `-
 If the sessions were recorded where the repo lived at another path (a teammate's laptop, a CI
 runner, an old checkout), add `--repo-alias /that/path`.
 
+### It reads what you already told your agents
+
+Before it suggests a line for `AGENTS.md`, it checks `AGENTS.md`, `CLAUDE.md` (including nested
+ones), `.github/copilot-instructions.md`, `.cursorrules`, `.cursor/rules/` and the deny rules in
+`.claude/settings.json`. If the advice is already written down and agents still trip over it, it
+says so ("`AGENTS.md:3` already names `make test`, yet agents run `pytest`") and suggests
+enforcing it (a hook, a permission rule, a wrapper) instead of adding another line. See
+[What the repository already says](https://github.com/nurettincoban/agent-friction/blob/main/docs/methodology.md#what-the-repository-already-says).
+
+Dependencies and build output (`node_modules`, `.venv`, `site-packages`, git-ignored directories)
+are left out of the map, since agents reading library code is not a problem in your code.
+
 ### The improvement loop
 
 The point is not the report, it is the fix. Measure, change something, measure again:
@@ -146,8 +158,8 @@ friction is, how often it **recurs** across sessions (one bad afternoon is not a
 **consistently** it happens in the sessions that touch that file or command at all (so a busy
 file is not penalized just for being busy). Roughly: under 20 is an incident, 20-45 a pattern,
 above 45 a reliable struggle. Red-then-green test runs with a fix in between are normal work and
-are not counted, and weak signals on their own (re-reads, many edits, an empty search) never
-rise above the incident band. Time lost is a floor estimate of agent time from timestamps (a correction claims only the rework it caused); waiting for
+are not counted, and weak signals on their own (re-reads, many edits, an empty search) stay in
+the incident band unless the same pattern recurs across sessions. Time lost is a floor estimate of agent time from timestamps (a correction claims only the rework it caused); waiting for
 a human is never counted. Confidence (low / medium /
 high) depends on how many sessions back a hotspot and whether an independent second kind of
 evidence agrees. All of it is in
@@ -203,6 +215,8 @@ within a schema version.
   never quoted, and excluded from the headline count. It is English-only and still a heuristic,
   so treat the count as a floor.
 - Time lost is a floor, not a measurement of human time.
+- One session is a lead, not a pattern: rows seen in a single session get no advice unless a
+  human said the rule in their own words.
 - When a command's exit status is hidden (`pytest | tail`, `cmd; echo done`), the verdict comes
   from its output. If the filter cut the summary line away, the run counts as neither red nor green.
 - Changes made by commands are inferred, not seen. `sed -i`, formatters, `--fix`, codemods,

@@ -209,6 +209,14 @@ def render_terminal(
     note = dropped_note(result)
     if note:
         out.append(st.dim(note))
+    third = int(totals.get("third_party_events", 0) or 0)
+    if third:
+        out.append(
+            st.dim(
+                f"Also left out: {plural(third, 'event')} in dependencies or build output "
+                "(node_modules, .venv, git-ignored directories)."
+            )
+        )
     if any(int(h.get("agent_commits", 0)) for h in all_items(result)):
         out.append(st.dim("For git evidence, sess counts the agent commits involved."))
     skipped = sum(int(s.get("skipped_lines", 0)) for s in result.get("sources", []))

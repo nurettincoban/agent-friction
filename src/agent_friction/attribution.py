@@ -17,7 +17,7 @@ import posixpath
 import re
 import shlex
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from agent_friction.redact import redact
@@ -800,6 +800,43 @@ def posix_separators(command: str, windows: bool | None = None) -> str:
     return _WINDOWS_SEPARATOR_RE.sub("/", command) if windows else command
 
 
+#: `NAME=value` standing alone on the line (not `NAME=value command`), with a plain value.
+_ASSIGNMENT_RE = re.compile(
+    r"(?:^|[;&\n])\s*(?:export\s+)?([A-Za-z_]\w*)="
+    r"(\"[\w./:@%+,~ -]*\"|'[\w./:@%+,~ -]*'|[\w./:@%+,~-]+)(?=\s*(?:;|&&|\n|$))"
+)
+_VARIABLE_RE = re.compile(r"\$(?:\{[A-Za-z_]\w*\}|[A-Za-z_]\w*)")
+#: What a shell variable that the line does not define is called in a command key.
+VARIABLE = "<variable>"
+
+
+def expand_assignments(command: str) -> str:
+    """``A=scripts/x.sh; $A`` with the variable filled in: ``A=scripts/x.sh; scripts/x.sh``.
+
+    Only assignments of a plain value made on the same line are followed; nothing
+    is evaluated.
+    """
+    if "$" not in command or "=" not in command:
+        return command
+    for match in reversed(list(_ASSIGNMENT_RE.finditer(command))):
+        name, value = match.group(1), match.group(2).strip("\"'")
+        head, tail = command[: match.end()], command[match.end() :]
+        tail = re.sub(r"\$(?:\{" + name + r"\}|" + name + r"\b)", value.replace("\\", "\\\\"), tail)
+        command = head + tail
+    return command
+
+
+def _name_variables(step: Step) -> Step:
+    """A step run through a variable nobody defined on the line: ``<variable> test``."""
+    if "$" not in step.key and "$" not in step.program:
+        return step
+    return replace(
+        step,
+        key=_VARIABLE_RE.sub(VARIABLE, step.key),
+        program=_VARIABLE_RE.sub(VARIABLE, step.program),
+    )
+
+
 def parse_command(command: str, windows: bool | None = None) -> ParsedCommand:
     """Normalize a shell command line. Rules are documented in docs/methodology.md.
 
@@ -810,9 +847,9 @@ def parse_command(command: str, windows: bool | None = None) -> ParsedCommand:
     and read-only inspection (``cat``, ``tail``, ``grep``) are passed over, so
     ``mkdir -p out && pytest | tail -5`` is ``pytest``.
     """
-    command = posix_separators(command, windows)
+    command = expand_assignments(posix_separators(command, windows))
     try:
-        steps = _steps(command)
+        steps = [_name_variables(step) for step in _steps(command)]
     except (IndexError, ValueError, RecursionError):  # never let one odd line stop a scan
         steps = []
     if not steps:
@@ -1105,7 +1142,7 @@ def public_key(key: str, keep: Callable[[str], bool] | None = None) -> str:
     previous = ""
     for position, word in enumerate(key.split()):
         parts = [p for p in word.split(":") if p]
-        if keep is not None and keep(word):
+        if (keep is not None and keep(word)) or word == VARIABLE:
             known = True
         elif position == 0:
             known = word in PUBLIC_PROGRAMS

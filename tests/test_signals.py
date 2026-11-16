@@ -2845,3 +2845,100 @@ def test_windows_commands_keep_their_paths(tmp_path: Path) -> None:
     s = Session().user("go").bash("python my\\ script.py", error, exit_code=2)
     (found,) = detect(s, tmp_path)
     assert keys(found) == [("command", "python my script.py")]
+
+
+# ---- round 15 ------------------------------------------------------------------------
+
+CLASSIFIED = [
+    (
+        "git push",
+        "remote: Permission to acme/x.git denied to bot.\nfatal: unable to access "
+        "'https://github.com/acme/x.git/': The requested URL returned error: 403",
+        ("environment", "auth"),
+    ),
+    ("git fetch", "remote: Invalid username or password.", ("environment", "auth")),
+    (
+        "npm run dev",
+        "Error: listen EADDRINUSE: address already in use :::3000",
+        ("environment", "port"),
+    ),
+    ("npm run build", "Error: ENOSPC: no space left on device, write", ("environment", "disk")),
+    ("yarn test", 'error Command "test" not found.', ("invocation", None)),
+    ("pnpm test", "ERR_PNPM_NO_SCRIPT  Missing script: test", ("invocation", None)),
+    (
+        "npm ci",
+        'npm ERR! engine Unsupported engine: wanted: {"node":">=20"} (current: {"node":"18"})',
+        ("invocation", None),
+    ),
+    # ... and what only looks like those stays an ordinary failure
+    ("git push", "! [rejected] main -> main (non-fast-forward)", ("ordinary", None)),
+    ("yarn test", "error Command failed with exit code 1.", ("ordinary", None)),
+    ("npm run build", "error TS2304: Cannot find name 'space'", ("ordinary", None)),
+    ("pytest", "E   assert response.status_code == 403\n1 failed", ("ordinary", None)),
+]
+
+
+@pytest.mark.parametrize(("command", "output", "expected"), CLASSIFIED)
+def test_more_failures_of_the_surroundings_are_told_apart(
+    tmp_path: Path, command: str, output: str, expected: tuple[str, str | None]
+) -> None:
+    s = Session().user("go").bash(command, output, exit_code=1)
+    (found,) = detect(s, tmp_path)
+    assert (found.detail["variant"], found.detail.get("environment")) == expected
+
+
+def test_a_command_after_a_cd_that_failed_never_ran(tmp_path: Path) -> None:
+    gone = "/bin/bash: line 1: cd: missing-dir: No such file or directory"
+    s = Session().user("go").bash("cd missing-dir && npm test", gone, exit_code=1)
+    assert detect(s, tmp_path) == []
+    # the directory was there: the failure is that of the command in it
+    s = Session().user("go").bash("cd web && npm test", "1 failing", exit_code=1)
+    (found,) = detect(s, tmp_path)
+    assert keys(found) == [("command", "npm test (web/)")]
+    # the same words from a command that changed no directory are its own failure
+    s = (
+        Session()
+        .user("go")
+        .bash("make build", "sh: cd: out: No such file or directory", exit_code=2)
+    )
+    assert len(detect(s, tmp_path)) == 1
+
+
+def test_an_undo_the_human_asked_for_is_not_a_reverted_edit(tmp_path: Path) -> None:
+    def session(said: str) -> Session:
+        s = Session().user("rename it").edit(A, "a", "b")
+        return s.user(said).edit(A, "b", "a")
+
+    (found,) = detect(session("No, revert src/a.py"), tmp_path)
+    assert found.signal == signals.USER_CORRECTION  # counted once, as what the human said
+    assert detect(session("Please put the old name back"), tmp_path) == []
+    # the agent backing out on its own is still a reverted edit
+    assert [f.signal for f in detect(session("hmm, the build is slow today"), tmp_path)] == [
+        signals.EDIT_REVERT
+    ]
+    s = Session().user("rename it").edit(A, "a", "b").edit(A, "b", "a")
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.EDIT_REVERT]
+
+
+def test_commands_run_through_a_variable(tmp_path: Path) -> None:
+    def key(command: str) -> str:
+        s = Session().user("go").bash(command, "Error: boom", exit_code=1)
+        (found,) = detect(s, tmp_path)
+        return found.targets[0].key
+
+    assert key("A=scripts/x.sh; $A") == "scripts/x.sh"
+    assert key("SP=scripts && node ${SP}/shot.js") == "node scripts/shot.js"
+    assert key("node $SP/shot.js") == "node <variable>/shot.js"
+    assert key("$RUNNER test") == key("$OTHER --all") == "<variable>"
+
+
+def test_an_interrupted_command_is_named_on_the_event(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.tool("Bash", {"command": "npm run e2e"}, builders.INTERRUPT_TOOL, is_error=True)
+    s.user(builders.INTERRUPT_TOOL, as_blocks=True)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.USER_INTERRUPT and found.targets == []
+    assert found.detail == {"interrupted": "npm run e2e"}
+    s = Session().user("go").read(A).interrupt()
+    (found,) = detect(s, tmp_path)
+    assert "interrupted" not in found.detail and keys(found) == [("file", "src/a.py")]

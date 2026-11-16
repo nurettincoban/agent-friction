@@ -64,6 +64,7 @@
       "recommendations": [
         {
           "detail": "`pytest` failed 7 times in 4 sessions; 5 times the agent then got the same job done with `make test`, and `pytest` did not work later in those sessions. Add a line to AGENTS.md such as: \"use `make test`, not `pytest`\".",
+          "documented_in": [],
           "id": "use-the-working-command",
           "signals": [
             "command-failure"
@@ -132,6 +133,7 @@
       "recommendations": [
         {
           "detail": "A human declined the agent's action once in 1 session. State the boundary explicitly (what must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a permission rule. Reasons given: \"never delete existing migrations, add a new revision on top\"",
+          "documented_in": [],
           "id": "state-the-boundary",
           "signals": [
             "tool-rejected"
@@ -315,6 +317,7 @@
       "recommendations": [
         {
           "detail": "Agents searched under src/shopfront/ and found nothing 5 times in 2 sessions. They looked for `RefundPolicy` (2x), `**/*policy*.py`, `DiscountPolicy`. If the concept exists under another name or elsewhere, add a pointer in AGENTS.md (or a comment/alias where agents look). If it does not exist, say so.",
+          "documented_in": [],
           "id": "add-a-pointer",
           "signals": [
             "search-miss"
@@ -445,6 +448,7 @@
       "recommendations": [
         {
           "detail": "This file looks generated (judging by a \"code generated\" marker), yet agents ran into trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md which source to change and which command regenerates it, and consider denying direct edits to it.",
+          "documented_in": [],
           "id": "edit-the-source-not-the-output",
           "signals": [
             "edit-miss",
@@ -454,6 +458,7 @@
         },
         {
           "detail": "6 edits failed to locate the target in this 1031-line file (2 matched several places, 4 matched nothing) across 4 sessions. Split it into smaller modules, or give repeated blocks unique nearby text (section comments, distinct names) so an edit can be targeted.",
+          "documented_in": [],
           "id": "split-or-anchor-large-file",
           "signals": [
             "edit-miss"
@@ -462,6 +467,7 @@
         },
         {
           "detail": "A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: \"No, stop hand-editing src/shopfront/api/schema_gen.py. It is generated: change api/openapi.yaml and run make codegen.\" / \"That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml.\"",
+          "documented_in": [],
           "id": "write-down-the-rule",
           "signals": [
             "user-correction"
@@ -580,6 +586,7 @@
       "recommendations": [
         {
           "detail": "A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: \"It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only.\" / \"No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.\"",
+          "documented_in": [],
           "id": "write-down-the-rule",
           "signals": [
             "user-correction"
@@ -588,6 +595,7 @@
         },
         {
           "detail": "Edits here did not converge: 2 reverted edits in 1 session. Document the quickest command that validates this file (a single test, a type check) so agents can verify instead of iterating blind.",
+          "documented_in": [],
           "id": "add-a-fast-check",
           "signals": [
             "edit-revert"
@@ -980,6 +988,7 @@
     "friction_events": 34,
     "probable_corrections": 1,
     "sessions": 6,
+    "third_party_events": 0,
     "tool_calls": 74,
     "unattributed_events": 0
   },

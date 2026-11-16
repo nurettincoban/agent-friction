@@ -489,6 +489,13 @@ was a shell command, the command is *not* blamed (stopping a running `pytest`
 says nothing about `pytest`): the event goes to the files edited in the turn
 (the 5 most recent, split evenly), or is unattributed if there are none.
 
+*Unless it keeps happening.* The event remembers which command was stopped
+(detail `interrupted`). A command that humans stop in 3 or more sessions is
+no longer about the work in progress: each of those events is then also
+attributed to the command, with a share of 0.3, which gives it a light row
+under "commands" and the advice to say when it should be run and what to run
+instead.
+
 **False positives:** people also interrupt to add information or because they
 ran out of time.
 
@@ -598,6 +605,13 @@ existing line), a command ran successfully while it was in place, and the
 edit is then exactly undone, nothing is recorded. The agent looked at
 something and cleaned up after itself.
 
+*An undo the human asked for is not a revert:* when the prompt that started
+the turn asks for a change to be taken back ("No, revert src/app.py", "undo
+that", "put the old name back", "restore ..."), edits in that turn that undo
+earlier ones are the agent doing as told. The human's message is the event
+(a `user-correction`, if it is one); it is not counted a second time as an
+`edit-revert`, and it does not feed "edits did not converge".
+
 **Why:** work on this file went in a circle.
 
 **Attribution:** the file.
@@ -633,7 +647,9 @@ successfully once before being removed (read as debugging).
   found`, `bash: ./x.sh: No such file or directory | Permission denied`,
   `ModuleNotFoundError: No module named ...`, `ImportError while loading
   conftest`, `can't open file`, `Cannot find module`, `error: unrecognized
-  arguments`, `make: *** No rule to make target`, `npm error Missing script`,
+  arguments`, `make: *** No rule to make target`, `npm error Missing script`, yarn's
+  `error Command "test" not found.`, `ERR_PNPM_NO_SCRIPT`, npm's `Unsupported
+  engine` / `EBADENGINE` (the wrong Node version is a setup problem),
   `fatal: not a git repository`, `curl: (N) ...`, and install/build failures
   (`npm error code E401 | ERESOLVE | ...`, `Failed to build ...`, `error:
   subprocess-exited-with-error`, `ERROR: Failed building wheel`, `No solution
@@ -740,7 +756,14 @@ successfully once before being removed (read as debugging).
   - `auth`: credentials are missing or expired. `credentials expired`,
     `token has expired`, `Unable to locate credentials`, `You must be logged
     in`, `authentication failed`, `Permission denied (publickey`, a hint to
-    run `gh auth login` / `aws sso login` / `docker login`;
+    run `gh auth login` / `aws sso login` / `docker login`, a remote that
+    answers `The requested URL returned error: 403` (or 401), `Permission
+    to <repo> denied to <user>`, `Invalid username or password`, `401
+    Unauthorized`;
+  - `port`: the port a server wants is taken (`EADDRINUSE`, `address already
+    in use`, `port is already allocated`), usually by one left running
+    earlier;
+  - `disk`: the disk is full (`ENOSPC`, `No space left on device`);
   - `variable`: an environment variable is not set. `Missing required
     environment variable X`, `X: unbound variable`, `X is not set`, a bare
     `KeyError: 'X'` (upper-case names only). The name is shown only where
@@ -751,6 +774,10 @@ successfully once before being removed (read as debugging).
   in the code). Inline snippets are never classified this way.
   *False positives:* a test that asserts on such a message and fails for
   another reason, in a session that ends red.
+- *A `cd` that failed:* in `cd missing-dir && npm test`, when the shell
+  reports that it could not change directory (`cd: missing-dir: No such file
+  or directory`), nothing after the `cd` ran. No failure of `npm test
+  (missing-dir/)` is recorded: the line is dropped.
 - *Ordinary failures* (anything else: a red test, a linter or type checker
   reporting problems, a script that raises) count at weight 0.3 and claim no
   lost time. A red test during development is the tool working as intended.

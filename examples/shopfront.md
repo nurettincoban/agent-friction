@@ -117,7 +117,7 @@ _Not counted: 1 failed run the agent then fixed, or that passed on a re-run (nor
 **Evidence**
 
 - `2026-10-29 14:04` session `9f6ff626` · Command failure: `pytest` failed (exit 1; ordinary failure)
-  > $ pytest tests/test_refunds.py -x Exit code 1 tests/conftest.py:11: in engine     return make_engine(os.environ['DATABASE_URL']) E   KeyError: 'DATABASE_URL' ERROR tests/test_checkout.py - KeyError: 'DATABASE_URL'
+  > $ pytest tests/test_refunds.py -x Exit code 1 tests/conftest.py:11: in engine     return make_engine(os.environ\['DATABASE_URL'\]) E   KeyError: 'DATABASE_URL' ERROR tests/test_checkout.py - KeyError: 'DATABASE_URL'
 
 </details>
 
@@ -169,7 +169,7 @@ _Not counted: 1 failed run the agent then fixed, or that passed on a re-run (nor
 **Evidence**
 
 - `2026-11-09 15:15` session `8d986baa` · Command failure: `curl` failed (exit 7; setup/invocation error)
-  > $ curl -s -H 'Authorization: Bearer [REDACTED:token]' https://staging.shopfront.example/api/health Exit code 7 curl: (7) Failed to connect to staging.shopfront.example port 443: Connection refused
+  > $ curl -s -H 'Authorization: Bearer \[REDACTED:token\]' https://staging.shopfront.example/api/health Exit code 7 curl: (7) Failed to connect to staging.shopfront.example port 443: Connection refused
 
 </details>
 

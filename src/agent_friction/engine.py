@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -27,7 +28,8 @@ from agent_friction.discovery import (
     repo_roots,
 )
 from agent_friction.errors import AgentFrictionError, NoTranscriptsError
-from agent_friction.model import Finding, ParsedFile, Stream
+from agent_friction.guidance import Guidance
+from agent_friction.model import Finding, ParsedFile, Stream, Target
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -118,16 +120,24 @@ def _apply_window(
 
 
 def _load(
-    files: Sequence[Path], since: datetime | None, until: datetime | None
+    files: Sequence[Path],
+    since: datetime | None,
+    until: datetime | None,
+    unreadable: list[tuple[Path, str]] | None = None,
 ) -> tuple[list[ParsedFile], dict[str, list[model.Event]]]:
-    """Parsed files cut to the window, and each stream's events from before it (by key)."""
+    """Parsed files cut to the window, and each stream's events from before it (by key).
+
+    Files that cannot be read are skipped and noted in ``unreadable`` with the reason.
+    """
     seen: dict[str, str] = {}
     parsed: list[ParsedFile] = []
     context: dict[str, list[model.Event]] = {}
     for path in files:
         try:
             item = parse_transcript(path, seen)
-        except OSError:
+        except OSError as exc:
+            if unreadable is not None:
+                unreadable.append((path, read_error(exc)))
             continue
         for stream in item.streams:
             before = _apply_window(stream, since, until)
@@ -136,6 +146,17 @@ def _load(
         item.streams = [s for s in item.streams if s.events]
         parsed.append(item)
     return parsed, context
+
+
+def read_error(exc: OSError) -> str:
+    """Why a file could not be read, in fixed words (never the path)."""
+    if isinstance(exc, PermissionError):
+        return "permission denied"
+    if isinstance(exc, FileNotFoundError):
+        return "file not found"
+    if isinstance(exc, IsADirectoryError):
+        return "is a directory"
+    return "could not be read"
 
 
 #: A commit up to this long after a session's last event still belongs to that session.
@@ -191,6 +212,40 @@ def _unclaim_single_session_stretches(findings: Sequence[Finding]) -> None:
             finding.intervals = ()
 
 
+#: Directory names that hold other people's code or build output, wherever they occur.
+THIRD_PARTY_DIRS = frozenset(
+    {
+        "node_modules",
+        "bower_components",
+        "site-packages",
+        "dist-packages",
+        "vendor",
+        ".venv",
+        "venv",
+        ".tox",
+        ".nox",
+        "__pycache__",
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".gradle",
+        ".next",
+        ".nuxt",
+        ".eggs",
+    }
+)
+#: Names that usually hold build output but can be first-party (`src/build/`): third-party
+#: unless git says the directory is not ignored.
+BUILD_DIRS = frozenset({"target", "dist", "build"})
+#: A command the human stops in this many sessions is a row of its own.
+INTERRUPTED_COMMAND_MIN_SESSIONS = 3
+#: The share of an interrupt that goes to the command that was stopped.
+INTERRUPTED_COMMAND_SHARE = 0.3
+#: Below this score a hotspot seen in a single session is a lead: it gets no advice.
+SINGLE_SESSION_ADVICE_MIN_SCORE = 20.0
+#: ... except what rests on a human's own words (a correction, a stated reason).
+HUMAN_STATED_RULES = frozenset({"write-down-the-rule", "state-the-boundary"})
 #: Evidence items listed for events that belong to no hotspot (``unattributed``).
 MAX_UNATTRIBUTED_EVIDENCE = 20
 
@@ -266,6 +321,27 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
             finding.detail["recurring_red"] = "1"
             finding.interval = finding.interval or finding.run
     return dropped
+
+
+def _attribute_interrupted_commands(findings: Sequence[Finding]) -> None:
+    """A command the human stops session after session becomes a (light) command row.
+
+    One interrupt is about the work in progress. The same command stopped in
+    three sessions is about the command: it is too slow, or should not be run.
+    """
+    by_key: dict[str, list[Finding]] = {}
+    for finding in findings:
+        key = finding.detail.get("interrupted", "")
+        if finding.signal == signals.USER_INTERRUPT and key:
+            by_key.setdefault(key, []).append(finding)
+    for key, found in by_key.items():
+        if len({f.session_id for f in found}) < INTERRUPTED_COMMAND_MIN_SESSIONS:
+            continue
+        for finding in found:
+            finding.targets = [
+                *finding.targets,
+                Target(model.COMMAND, key, INTERRUPTED_COMMAND_SHARE),
+            ]
 
 
 def _is_git(finding: Finding) -> bool:
@@ -365,12 +441,16 @@ class _Analysis:
         self.touched: set[str] = set()
         self._is_file_cache: dict[str, bool | None] = {}
         self._facts: dict[str, recommend.FileFacts] = {}
+        self.guidance = Guidance(self.repo)
         self.outside: dict[Path, set[str]] = {}
         self.skipped_events: dict[str, int] = {}
         self.source_labels: dict[str, str] = {}
         self.exposure: dict[tuple[str, str], set[str]] = {}
         self.git_used = False
         self.dropped: list[tuple[int, float, str]] = []
+        self.unreadable: list[tuple[Path, str]] = []
+        self.third_party_events = 0
+        self._ignored: set[str] | None = None
 
     # ---- repository knowledge --------------------------------------------------------
 
@@ -414,6 +494,49 @@ class _Analysis:
             )
 
         return public_key(key, in_repo)
+
+    def third_party(self, rel: str, directory: bool = False) -> bool:
+        """Is ``rel`` other people's code or build output (``node_modules/``, ``.venv/``)?
+
+        Decided by directory names, and, where git is in use, by ``.gitignore``: a
+        path inside an ignored directory is not the repository's own code.
+        """
+        parts = rel.split("/")
+        if any(part in THIRD_PARTY_DIRS or part.endswith(".egg-info") for part in parts):
+            return True
+        ancestors = {"/".join(parts[:depth]) for depth in range(1, len(parts))}
+        if directory or self._disk_is_file(rel) is False:
+            ancestors.add(rel)
+        if self._ignored is not None:
+            return bool(ancestors & self._ignored)
+        return any(part in BUILD_DIRS for part in (parts if directory else parts[:-1]))
+
+    def _drop_third_party(
+        self, findings: list[Finding], exposure: dict[tuple[str, str], set[str]]
+    ) -> list[Finding]:
+        """Take files and directories that are not the repository's own out of the picture."""
+        seen = {(t.kind, t.key) for f in findings for t in f.targets if t.kind != model.COMMAND}
+        seen |= {(kind, key) for kind, key in exposure if kind != model.COMMAND}
+        paths = {key for _, key in seen}
+        if self.options.include_git and paths:
+            directories = {"/".join(p.split("/")[:d]) for p in paths for d in range(1, 12)}
+            if (self.repo / ".git").exists():
+                self._ignored = gitsignals.ignored_directories(self.repo, sorted(directories))
+        outside = {key for kind, key in seen if self.third_party(key, kind == model.DIR)}
+        if not outside:
+            return findings
+        for kind, key in list(exposure):
+            if kind != model.COMMAND and key in outside:
+                del exposure[(kind, key)]
+        kept: list[Finding] = []
+        for finding in findings:
+            own = [t for t in finding.targets if t.kind == model.COMMAND or t.key not in outside]
+            if finding.targets and not own:
+                self.third_party_events += 1
+                continue
+            finding.targets = own
+            kept.append(finding)
+        return kept
 
     def is_known_file(self, rel: str) -> bool:
         return rel in self.touched or self._disk_is_file(rel) is True
@@ -487,7 +610,7 @@ class _Analysis:
             if not (options.allow_no_transcripts and options.include_git):
                 raise
             missing, files = exc, []
-        parsed, context = _load(files, self.since, self.until)
+        parsed, context = _load(files, self.since, self.until, self.unreadable)
         for item in parsed:
             # Sessions that never worked in this repo are not this repo's sessions.
             relevant = [s for s in item.streams if self._in_repo(s)]
@@ -596,6 +719,8 @@ class _Analysis:
         if missing is not None and not self.git_used:
             raise missing  # neither transcripts nor git history: nothing to analyse
 
+        findings = self._drop_third_party(findings, exposure)
+        _attribute_interrupted_commands(findings)
         for one_off in _settle_command_fixes(findings):
             low, high = one_off.run or (0.0, 0.0)
             dropped.append((one_off.line, max(0.0, high - low), signals.DROPPED_ONE_OFF))
@@ -635,7 +760,7 @@ class _Analysis:
                 path = Path(given).expanduser()
                 if not path.exists():
                     raise NoTranscriptsError(f"Transcript path does not exist: {given}")
-                if path.is_file() and not _looks_like_jsonl(path):
+                if path.is_file() and os.access(path, os.R_OK) and not _looks_like_jsonl(path):
                     raise NoTranscriptsError(
                         f"{given} is not a JSONL transcript: none of its first "
                         f"{JSONL_PROBE_LINES} lines is a JSON object. Pass Claude Code "
@@ -692,7 +817,24 @@ class _Analysis:
         for key, entry in grouped.items():
             entry["sessions"] = len(sessions[key])
             entry["sessions_outside_repo"] = len(outside[key] - sessions[key])
-        return [grouped[key] for key in sorted(grouped)]
+        listed = [grouped[key] for key in sorted(grouped)]
+        # A transcript that could not be read is said so, not passed over in silence. Only
+        # its file name is shown: the directory may name a user or a project.
+        for path, reason in sorted(self.unreadable):
+            listed.append(
+                {
+                    "kind": "unreadable",
+                    "path": path.name,
+                    "sessions": 0,
+                    "skipped_lines": 0,
+                    "skipped_events": 0,
+                    "ignored_lines": 0,
+                    "files": 1,
+                    "sessions_outside_repo": 0,
+                    "error": reason,
+                }
+            )
+        return listed
 
     # ---- output ----------------------------------------------------------------------
 
@@ -769,6 +911,7 @@ class _Analysis:
                 "commands_affected": len(by_kind[model.COMMAND]),
                 "directories_affected": len(by_kind[model.DIR]),
                 "unattributed_events": sum(1 for f in findings if not f.targets),
+                "third_party_events": self.third_party_events,
             },
             "signals": [
                 {
@@ -871,8 +1014,18 @@ class _Analysis:
         facts = self.facts(key) if kind == model.FILE else None
         quote = self.quote if options.include_excerpts else None
         shares = {f.fid: share for f, share in items}
-        entry["recommendations"] = recommend.recommend(kind, key, found, facts, quote, shares)
+        entry["recommendations"] = recommend.recommend(
+            kind, key, found, facts, quote, shares, self.guidance
+        )
         entry["evidence"] = [self._evidence(f) for f in _pick_evidence(found, options.max_evidence)]
+        transcript_sessions = entry["sessions"] - entry["agent_commits"]
+        if transcript_sessions == 1 and entry["score"] < SINGLE_SESSION_ADVICE_MIN_SCORE:
+            # One session and a low score is a lead to look at, not grounds for telling
+            # anybody to change their repository.
+            # What a human said in so many words is passed on, as the question it is.
+            entry["recommendations"] = [
+                r for r in entry["recommendations"] if r["id"] in HUMAN_STATED_RULES
+            ]
         if facts is not None:
             entry["file"] = facts.as_dict()
 

@@ -188,3 +188,10 @@ def test_unattributed_events_are_listed_in_every_report() -> None:
     assert '"unattributed"' in render_html(result)
     quiet = {**result, "totals": {"sessions": 3}, "unattributed": []}
     assert "Not tied" not in render_terminal(quiet, color=False)
+
+
+def test_markdown_quotes_cannot_render_images_or_mention_people() -> None:
+    from agent_friction.report.markdown import _html_escape
+
+    out = _html_escape("![x](http://e/i.png) cc @octocat `@kept`")
+    assert "![" not in out and "@octocat" not in out and "`@kept`" in out

@@ -1545,3 +1545,195 @@ def test_a_command_that_keeps_ending_red_gets_a_question(tmp_path: Path) -> None
     assert "failed 6 times in 3 sessions and was still red" in rule["detail"]
     fewer = _scan(tmp_path / "two", _sessions(tmp_path / "two", 2, stuck))
     assert fewer["commands"][0]["recommendations"] == []
+
+
+# ---- round 15 ------------------------------------------------------------------------
+
+DOCUMENTED = (
+    "# Shopfront\n\n"
+    "Use `make test`, not `pytest`. Never hand-edit src/shopfront/api/schema_gen.py; "
+    "edit api/openapi.yaml and run make codegen.\n"
+)
+
+
+def recommendation(out: dict[str, Any], path: str, rule: str) -> dict[str, Any]:
+    rows = [*out["hotspots"], *out["commands"], *out["directories"]]
+    (found,) = (r for r in entry(rows, path)["recommendations"] if r["id"] == rule)
+    return dict(found)
+
+
+def test_advice_that_is_already_written_down_says_so(tmp_path: Path) -> None:
+    repo = tmp_path / "shopfront"
+    shutil.copytree(fixture_story.REPO, repo)
+    (repo / "AGENTS.md").write_text(DOCUMENTED)
+    out = story(repo=repo)
+    pytest_rec = recommendation(out, "pytest", "use-the-working-command")
+    assert pytest_rec["documented_in"] == [{"file": "AGENTS.md", "line": 3}]
+    assert pytest_rec["title"] == "`make test` is documented, yet agents run `pytest`"
+    assert pytest_rec["detail"].startswith(
+        "`AGENTS.md:3` already names `make test`; agents still ran `pytest` and failed 7 times "
+        "in 4 sessions. Another line will not help. Enforce it: a hook or permission rule"
+    )
+    assert "Add a line to AGENTS.md" not in pytest_rec["detail"]
+    schema = recommendation(out, SCHEMA, "edit-the-source-not-the-output")
+    assert schema["documented_in"] == [{"file": "AGENTS.md", "line": 3}]
+    assert schema["title"] == "Generated file: telling agents was not enough"
+    assert schema["detail"].startswith("`AGENTS.md:3` already mentions this file, yet agents")
+    assert "Say in AGENTS.md" not in schema["detail"]
+    # other documentable advice about the same file keeps its text and gains a note
+    rule = recommendation(out, SCHEMA, "write-down-the-rule")
+    assert rule["documented_in"] == schema["documented_in"]
+    assert "Note that `AGENTS.md:3` already mentions this file" in rule["detail"]
+    # ... advice that is not about documentation is left alone
+    split = recommendation(out, SCHEMA, "split-or-anchor-large-file")
+    assert split["documented_in"] == [] and "already" not in split["detail"]
+    # ... and so is everything the file does not name
+    service = recommendation(out, SERVICE, "write-down-the-rule")
+    assert service["documented_in"] == [] and "AGENTS.md:3" not in service["detail"]
+    # the instruction file itself is never quoted, with or without excerpts
+    bare = story(repo=repo, include_excerpts=False)
+    assert recommendation(bare, SCHEMA, "edit-the-source-not-the-output") == schema
+    assert "Never hand-edit" not in json.dumps(out) + json.dumps(bare)
+
+
+def test_without_instruction_files_nothing_is_documented(result: dict[str, Any]) -> None:
+    rows = [*result["hotspots"], *result["commands"], *result["directories"]]
+    recs = [r for row in rows for r in row["recommendations"]]
+    assert recs and all(r["documented_in"] == [] for r in recs)
+    assert "already" not in recommendation(result, "pytest", "use-the-working-command")["detail"]
+    assert recommendation(result, "pytest", "use-the-working-command")["title"] == (
+        "Tell agents to use `make test`"
+    )
+
+
+def scan(tmp_path: Path, sessions: list[Session], repo: Path | None = None, **kw: Any) -> Any:
+    files = [s.save(tmp_path / "t" / s.session_id) for s in sessions]
+    kw.setdefault("include_git", False)
+    return analyze(AnalyzeOptions(repo=repo or Path("/repo"), transcripts=files, **kw))
+
+
+def missed(paths: list[str], root: str = "/repo") -> list[Session]:
+    sessions = []
+    for i in range(3):
+        s = Session(f"s{i}", cwd=root).user("go")
+        for path in paths:
+            s.edit(f"{root}/{path}", error=builders.EDIT_NOT_FOUND)
+            s.grep("Nothing", f"{root}/{path.rsplit('/', 1)[0]}")
+        sessions.append(s)
+    return sessions
+
+
+def test_other_peoples_code_is_not_a_hotspot(tmp_path: Path) -> None:
+    theirs = [
+        "node_modules/react/index.js",
+        "web/node_modules/x/a.js",
+        ".venv/lib/python3.12/site-packages/django/db/base.py",
+        "vendor/github.com/x/y.go",
+        "target/debug/build.rs",
+        "dist/app.js",
+        "pkg/__pycache__/a.py",
+    ]
+    out = scan(tmp_path, missed([*theirs, "src/app.py", "src/builders/dist.py"]))
+    assert [h["path"] for h in out["hotspots"]] == ["src/app.py", "src/builders/dist.py"]
+    assert [d["path"] for d in out["directories"]] == ["src", "src/builders"]
+    assert [c["name"] for c in out["tree"]["children"]] == ["src"]
+    assert out["totals"]["third_party_events"] == 3 * 2 * len(theirs)
+    assert out["totals"]["friction_events"] == 3 * 2 * 2
+    assert not any("node_modules" in key for key in json.dumps(out["exposure"]).split('"'))
+    # nothing of the kind: nothing is set aside
+    assert scan(tmp_path, missed(["src/app.py"]))["totals"]["third_party_events"] == 0
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_gitignore_decides_what_is_build_output(tmp_path: Path) -> None:
+    repo = tmp_path / "proj"
+    for name in ("build/gen.py", "out/gen.py", "src/a.py"):
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text("x = 1\n")
+    (repo / ".gitignore").write_text("out/\n*.log\n")
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True, env=env)
+    paths = ["build/gen.py", "out/gen.py", "src/a.py", "node_modules/x/a.js"]
+    sessions = missed(paths, str(repo))
+    # `build/` is not ignored here, so it is this repository's own; `out/` is ignored
+    out = scan(tmp_path, sessions, repo, include_git=True)
+    assert [h["path"] for h in out["hotspots"]] == ["build/gen.py", "src/a.py"]
+    assert out["totals"]["third_party_events"] == 3 * 2 * 2
+    # without git, names are all there is to go by
+    out = scan(tmp_path, sessions, repo)
+    assert [h["path"] for h in out["hotspots"]] == ["out/gen.py", "src/a.py"]
+
+
+def test_a_transcript_that_cannot_be_read_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_friction import engine
+
+    real = engine.parse_transcript
+
+    def parse(path: Path, *args: Any) -> Any:
+        if path.name == "locked.jsonl":
+            raise PermissionError(13, "Permission denied", str(path))
+        if path.name == "gone.jsonl":
+            raise OSError(5, "Input/output error")
+        return real(path, *args)
+
+    monkeypatch.setattr(engine, "parse_transcript", parse)
+    good = Session("ok").user("go").edit("/repo/a.py", error=builders.EDIT_NOT_FOUND)
+    files = [good.save(tmp_path / "private-client", name) for name in ("ok", "locked", "gone")]
+    out = analyze(AnalyzeOptions(repo=Path("/repo"), transcripts=files, include_git=False))
+    assert [(s["kind"], s["path"], s.get("error")) for s in out["sources"][1:]] == [
+        ("unreadable", "gone.jsonl", "could not be read"),
+        ("unreadable", "locked.jsonl", "permission denied"),
+    ]
+    assert "error" not in out["sources"][0] and out["totals"]["sessions"] == 1
+    assert "private-client" not in json.dumps(out["sources"][1:])
+
+
+def stopped(sessions: int) -> list[Session]:
+    made = []
+    for i in range(sessions):
+        s = Session(f"s{i}").user("go")
+        s.tool("Bash", {"command": "npm run e2e"}, builders.INTERRUPT_TOOL, is_error=True)
+        made.append(s.user(builders.INTERRUPT_TOOL, as_blocks=True))
+    return made
+
+
+def test_a_command_stopped_in_three_sessions_is_a_row(tmp_path: Path) -> None:
+    out = scan(tmp_path, stopped(3))
+    (row,) = out["commands"]
+    assert (row["path"], row["signals"], row["sessions"]) == (
+        "npm run e2e",
+        {"user-interrupt": 3},
+        3,
+    )
+    assert out["unattributed"] == [] and out["totals"]["unattributed_events"] == 0
+    assert [r["title"] for r in row["recommendations"]] == [
+        "Say when agents should run `npm run e2e`"
+    ]
+    # a light row: well below what three corrections would score
+    assert 0 < row["score"] < 40
+    # twice is not yet about the command
+    out = scan(tmp_path, stopped(2))
+    assert out["commands"] == [] and len(out["unattributed"]) == 2
+
+
+def test_one_session_and_a_low_score_is_a_lead_not_advice(tmp_path: Path) -> None:
+    def invocation(sessions: int) -> list[Session]:
+        made = []
+        for i in range(sessions):
+            s = Session(f"s{i}").user("go")
+            for _ in range(2):
+                s.bash("npm test", 'npm ERR! Missing script: "test"', exit_code=1)
+            made.append(s)
+        return made
+
+    (row,) = scan(tmp_path, invocation(1))["commands"]
+    assert row["score"] < 20 and row["sessions"] == 1 and row["recommendations"] == []
+    (row,) = scan(tmp_path, invocation(2))["commands"]
+    assert [r["id"] for r in row["recommendations"]] == ["document-the-command"]
+    # what a human said in so many words is still passed on from a single session
+    s = Session("one").user("go")
+    s.reject("Bash", {"command": "rm -rf migrations"}, "never delete migrations")
+    (row,) = scan(tmp_path, [s])["commands"]
+    assert row["score"] < 20 and [r["id"] for r in row["recommendations"]] == ["state-the-boundary"]

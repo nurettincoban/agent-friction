@@ -180,6 +180,36 @@ def read_history(
     return GitHistory(True, "", commits)
 
 
+def ignored_directories(repo: Path, directories: Sequence[str]) -> set[str]:
+    """Those of the repo-relative ``directories`` that ``.gitignore`` rules match.
+
+    One ``git check-ignore`` call for all of them. Never raises: without git, or
+    outside a repository, nothing is ignored.
+    """
+    wanted = sorted({d.strip("/") for d in directories if d.strip("/")})
+    if not wanted:
+        return set()
+    command = ["git", "-C", str(repo), "check-ignore", "--stdin", "-z"]
+    env = {**os.environ, "LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0"}
+    try:
+        proc = subprocess.run(
+            command,
+            input="".join(f"{d}/\0" for d in wanted),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=GIT_TIMEOUT_SECONDS,
+            check=False,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return set()
+    if proc.returncode not in (0, 1):
+        return set()
+    return {d.strip("/") for d in proc.stdout.split("\0") if d.strip("/")}
+
+
 Range = tuple[int, int]  # half-open line range [start, end)
 
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")

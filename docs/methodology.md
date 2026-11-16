@@ -130,6 +130,15 @@ together, and so that the key can be shown even when excerpts are off:
    redactor would change (`make 2` is `make`; a key that would start with
    such a word is discarded). Every key passes through the redactor.
 
+   A shell variable is followed only if the same line assigns it a plain
+   value on its own (`A=scripts/x.sh; $A` is `scripts/x.sh`; `SP=scripts &&
+   node $SP/shot.js` is `node scripts/shot.js`). Nothing is evaluated: a
+   prefix assignment (`A=x make $A`), a computed value (`A=$(pwd)`) or a
+   variable from the environment stays unknown and is written `<variable>`
+   in the key (`$RUNNER test` is `<variable>`, `node $SP/shot.js` is `node
+   <variable>/shot.js`), so that such lines share one row instead of one
+   per variable name.
+
 6. **Say where, for tools that work on the directory they are in.** For
    build, test, lint and package tools (`DIRECTORY_TOOLS`: `npm`, `pnpm`,
    `yarn`, `make`, `cargo`, `go`, `uv`, `pytest`, `tox`, ..., and any key
@@ -176,6 +185,32 @@ Files are attributed from a command line only if they are arguments of the
 command that names the line. When a human declines a chain of commands, the
 event is keyed by the step they most plausibly objected to (see
 [`tool-rejected`](signals.md)).
+
+### Third-party and build directories
+
+Friction inside other people's code or build output is not something the
+repository's instructions can fix, and it must not outrank first-party
+files. Files and directories are set aside when
+
+- a component of their path is one of `node_modules`, `bower_components`,
+  `site-packages`, `dist-packages`, `vendor`, `.venv`, `venv`, `.tox`,
+  `.nox`, `__pycache__`, `.git`, `.mypy_cache`, `.pytest_cache`,
+  `.ruff_cache`, `.gradle`, `.next`, `.nuxt`, `.eggs` or ends in
+  `.egg-info` (`THIRD_PARTY_DIRS`), wherever it occurs;
+- or they lie in a directory that `.gitignore` rules match (one `git
+  check-ignore` call per scan, only when git is in use and the repository
+  is a git repository). An ignored *file* in a tracked directory (`.env`)
+  is still the repository's own;
+- or, when git cannot be asked (`--no-git`, no repository), they lie in a
+  directory named `dist`, `build` or `target` (`BUILD_DIRS`). With git, those
+  three names are judged by `.gitignore` alone, so a tracked `src/build/`
+  package stays first-party.
+
+Such paths are in no hotspot, directory row, tree node or exposure count,
+and get no recommendation. An event that was only about such paths is
+dropped and counted in `totals.third_party_events`; an event that also has
+a first-party file or a command keeps those. Commands are never set aside:
+`node_modules/.bin/jest` failing is a failure of `jest`.
 
 ## Exposure
 
@@ -387,20 +422,72 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `write-down-the-rule` | corroborated `user-correction` events whose attributed shares sum to 0.5 or more; quotes up to 3. "The rule the human keeps repeating" is claimed only when 2+ of the corrections share wording (two content words, or one distinctive word of 7+ letters, e.g. the same class name); otherwise the recommendation only asks whether the correction(s) reflect a standing rule. A `probable-correction` never counts |
 | `state-the-boundary` | 2+ `tool-rejected`, or 1 with a stated reason |
 | `allow-or-document-the-boundary` | 2+ `permission-denied` |
-| `clarify-before-acting` | 2+ `user-interrupt` |
+| `clarify-before-acting` | 2+ `user-interrupt`. On a command (one that humans stopped in 3+ sessions, see the signal) the advice is to say when it should be run and what to run instead |
 | `add-a-fast-check` | 2+ `edit-revert` events or `edit-thrash` events of turns that did not end on a successful command and ran no test, lint or type check (thrash next to a check was not for want of one). Not when the file has 2+ `no-convergence` events: a check that will not pass needs `explain-the-failing-check`, not another check. The text names only what was seen ("2 reverted edits in 2 sessions") |
 | `learn-from-rework` | 2+ `human-rework` |
 | `add-a-pointer` | 2+ `search-miss` in the file or directory, with other evidence or the same pattern in 2+ sessions; lists the patterns |
 | `summarize-this-file` | 2+ `read-loop`, next to other evidence |
 | `use-the-working-command` | 2+ *setup/invocation* failures of a command were followed by the same successful command *doing the same job* (same role, or a wrapper of the same tool), in sessions where the failing command never worked afterwards. Never an install, version-control or housekeeping command. Also: 2+ `command not found` failures after which the same command ran under a versioned name of the program ("use `python3`, not `python`"), and 2+ setup/invocation failures after which the same command ran with a variable set in front of it and no file edited in between ("use `PYTHONPATH=src pytest`"; the value is shown only for a fixed set of variables such as `PYTHONPATH`, `NODE_ENV`, `DJANGO_SETTINGS_MODULE`, and only with excerpts, otherwise `NAME=...`) |
 | `document-the-setup-step` | 2+ failures of a command that then passed after the same setup step with no file edited in between (`pip install`, `npm ci`, `docker compose up`, `cp .env.example .env`, or any other command that did so in 2+ sessions): "run X before Y" |
-| `document-the-environment` | 2+ *environment* failures of a command (and none of the above): a service that was not reachable ("say how to start PostgreSQL before `pytest`"; the service is named when the output identifies it), missing or expired credentials, or an unset environment variable (named only with excerpts) |
+| `document-the-environment` | 2+ *environment* failures of a command (and none of the above): a service that was not reachable ("say how to start PostgreSQL before `pytest`"; the service is named when the output identifies it), missing or expired credentials, an unset environment variable (named only with excerpts), a port that was already in use, or a full disk |
 | `document-the-command` | 2+ setup/invocation failures of a command (and none of the above). If the same command then worked in a subdirectory, the advice names it ("run `npm test` from `web/`"). A command that is keyed by where it ran (`pytest (src/)`) is titled "Document how to run `pytest` in `src/`" |
 | `make-the-failure-actionable` | 1+ `retry-loop` on a command |
 | `run-it-in-the-background` | 2+ harness timeouts of a command that is a server or watcher (`npm run dev`, `uvicorn`, ...); replaces `document-the-command` for those |
 | `give-it-more-time` | 2+ harness timeouts of any other command (`npm run build` cut off after 2 minutes): say how long it takes, raise the timeout or run it in the background, or name a narrower command; replaces `document-the-command` for those |
 | `explain-the-failing-check` | 2+ `no-convergence` events from 2+ sessions, on the command ("Agents cannot get `pytest` to pass") or on a file edited during the rounds: document how to run and debug the check and what it expects |
 | `say-if-it-is-known-broken` | A command lifted out of the weak class because it stays red: it failed 2+ times and was still red at the end, in 3+ sessions (and there is no `no-convergence` event on it): "`npm run e2e` keeps ending red": say that it is known to be broken and what to run instead, or fix it |
+
+### What the repository already says
+
+Most advice here ends in "say so in AGENTS.md". Where that has been done,
+repeating it is wasted effort, so before a recommendation is given the
+repository's instruction files are searched for what it is about
+(`guidance.py`):
+
+- **Files read:** `AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md`
+  and `.cursorrules` at the root; the files directly in `.cursor/rules/` (at
+  most 50); `AGENTS.md` and `CLAUDE.md` in every directory between the root
+  and the hotspot (for `web/src/a.ts`: `web/` and `web/src/`; for a command
+  keyed `npm test (web/)`: `web/`); and the `permissions.deny` rules of
+  `.claude/settings.json` and `.claude/settings.local.json` (only the lines
+  holding a deny rule; allow rules and other settings are not instructions).
+  Files over 200 KB, binary files, and links that lead outside the
+  repository are not read; a file reachable under two names is read once.
+- **What is looked for:** for a file, its repo-relative path or its file name
+  (the path only for names such as `__init__.py` or `index.ts`); for a
+  command, its key without the directory suffix; for advice that proposes
+  something specific (`make test` instead of `pytest`, a setup step), that
+  proposal. Matching is plain text on word boundaries: `pytest` is not
+  found in `pytest-cov` or `pytest.ini`, `a.py` not in `data.py`. Terms
+  shorter than 4 characters, bare launchers (`make`, `npm`... alone) and
+  pseudonymized keys are not looked for, so with `--no-excerpts` only paths
+  and public command names can match.
+- **What changes:** the recommendation gets `documented_in` (file and line,
+  at most 3 places). If the files name what the rule would have proposed,
+  its title and text switch to an enforcement form: "`AGENTS.md:12` already
+  names `make test`; agents still ran `pytest` and failed 7 times in 4
+  sessions. Another line will not help. Enforce it: a hook or permission
+  rule that blocks `pytest`, or a wrapper ..." (`use-the-working-command`,
+  `document-the-setup-step`, `edit-the-source-not-the-output`). Other advice
+  that amounts to writing something down (`DOCUMENTABLE` in `recommend.py`)
+  keeps its text and gains a note that the file or command is already
+  mentioned at that place and should be checked and enforced rather than
+  restated. Advice that is not about documentation (splitting a large file,
+  learning from rework) is never changed.
+- **What it does not know:** whether the line says the right thing (a
+  mention is not an instruction), and whether it was written before or
+  after the sessions that were analysed; the text says so ("if that line is
+  newer than these sessions, give it time first"). The instruction files
+  are never quoted, with or without excerpts: only `file:line` is shown.
+
+### One session is a lead
+
+A hotspot seen in a single transcript session with a score below 20 gets no
+recommendation: one bad afternoon is something to look at, not grounds for
+telling anyone to change their repository. The exception is advice that
+rests on the human's own words in that session, which is passed on as the
+question it is: `write-down-the-rule` (in its "check whether this is a
+standing rule" form) and `state-the-boundary`.
 
 ## Privacy and redaction
 

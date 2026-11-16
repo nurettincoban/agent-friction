@@ -358,3 +358,59 @@ def test_compare_writes_to_a_file_with_format_from_extension(tmp_path: Path) -> 
     code, out, _ = run("compare", str(saved), str(saved), "-o", str(report))
     assert code == EXIT_OK and out == ""
     assert report.read_text(encoding="utf-8").startswith("# Friction comparison")
+
+
+def test_an_unwritable_output_is_an_error_not_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def deny(*_a: object, **_k: object) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "write_text", deny)
+    code, _, err = run("scan", *INPUT, "-o", str(tmp_path / "x.html"))
+    assert code == EXIT_ERROR and "cannot write" in err and "Permission denied" in err
+
+
+def test_a_failing_stdout_is_an_error_not_a_traceback() -> None:
+    class Full(io.StringIO):
+        def write(self, s: str) -> int:
+            raise OSError(28, "No space left on device")
+
+    err = io.StringIO()
+    code = main(["scan", *INPUT, "-f", "json"], stdout=Full(), stderr=err)
+    assert code == EXIT_ERROR and "No space left" in err.getvalue()
+
+
+def test_compare_rejects_damaged_entries(tmp_path: Path) -> None:
+    saved = tmp_path / "scan.json"
+    assert run("scan", *INPUT, "-o", str(saved))[0] == EXIT_OK
+    data = json.loads(saved.read_text(encoding="utf-8"))
+    data["commands"] = [1, 2]
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps(data), encoding="utf-8")
+    code, _, err = run("compare", str(saved), str(bad))
+    assert code == EXIT_ERROR and "not an agent-friction result" in err
+
+
+def test_package_root_exports_the_python_api() -> None:
+    import agent_friction
+
+    assert agent_friction.analyze.__name__ == "analyze"
+    assert agent_friction.AnalyzeOptions.__name__ == "AnalyzeOptions"
+
+
+def test_scan_warns_about_unreadable_transcripts(monkeypatch: pytest.MonkeyPatch) -> None:
+    import agent_friction.cli as cli
+
+    real = cli._analyze
+
+    def fake(args: object, repo: Path) -> dict:  # type: ignore[type-arg]
+        result = real(args, repo)  # type: ignore[arg-type]
+        result["sources"].append(
+            {"kind": "unreadable", "path": "x.jsonl", "error": "permission denied"}
+        )
+        return result
+
+    monkeypatch.setattr(cli, "_analyze", fake)
+    code, _, err = run("scan", *INPUT)
+    assert code == EXIT_OK and "skipped x.jsonl: permission denied" in err
