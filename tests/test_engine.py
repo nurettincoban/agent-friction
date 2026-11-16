@@ -1410,4 +1410,5 @@ def test_a_transcript_outside_home_is_not_cited_by_its_absolute_path(tmp_path: P
         # On Windows the temp dir is under C:\Users\<name>, which is masked as home
         # (~/...); anywhere else it is cited relative to what was given.
         assert source == cited or (source.startswith("~/") and source.endswith(cited))
-        assert out["sources"][0]["path"] == cited
+        listed = out["sources"][0]["path"]
+        assert listed == cited or (listed.startswith("~/") and listed.endswith(cited))
