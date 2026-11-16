@@ -8,6 +8,7 @@ from typing import Any
 from agent_friction.report._common import (
     all_items,
     collect_recommendations,
+    dropped_note,
     fmt_minutes,
     plural,
     signal_titles,
@@ -128,6 +129,9 @@ def render_terminal(
             st.green(f"No recurring friction found in {plural(calls, 'tool call')}.")
             + (st.dim(" That is a small sample; check again later.") if calls < 50 else "")
         )
+        note = dropped_note(result)
+        if note:
+            out.append(st.dim(note))
         return "\n".join(out) + "\n"
 
     if hotspots:
@@ -167,6 +171,9 @@ def render_terminal(
             "the total counts each minute once."
         )
     )
+    note = dropped_note(result)
+    if note:
+        out.append(st.dim(note))
     if any(int(h.get("agent_commits", 0)) for h in all_items(result)):
         out.append(st.dim("For git evidence, sess counts the agent commits involved."))
     skipped = sum(int(s.get("skipped_lines", 0)) for s in result.get("sources", []))

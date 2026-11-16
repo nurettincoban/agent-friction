@@ -187,14 +187,20 @@ def render_compare(
         ("too-little-data", "Too few sessions touched these to tell"),
     ]
     out: list[str] = ["# Friction comparison" if markdown else "agent-friction compare", ""]
-    out += [summary_line(before, after), ""]
+    out += [
+        summary_line(before, after),
+        "Rates are friction events per 10 sessions that touched the target; "
+        "(8/2 → 4/2) means 8 events in 2 such sessions before, 4 in 2 after.",
+        "",
+    ]
     any_change = False
     for status, label in groups:
         rows = [c for c in changes if c.status == status]
         if not rows:
             continue
         any_change = True
-        out.append(f"## {label} ({len(rows)})" if markdown else f"{label} ({len(rows)})")
+        count = plural(len(rows), "target")
+        out.append(f"## {label} ({count})" if markdown else f"{label} ({count})")
         for c in rows:
             suffix = "/" if c.kind == "dir" else ""
             name = f"$ {c.path}" if c.kind == "command" else c.path + suffix

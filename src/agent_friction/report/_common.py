@@ -120,3 +120,16 @@ def find_dir(result: dict[str, Any], target: str) -> dict[str, Any] | None:
 
     tree: dict[str, Any] | None = result.get("tree")
     return walk(tree) if isinstance(tree, dict) else None
+
+
+def dropped_note(result: dict[str, Any]) -> str | None:
+    """One line on red runs left out as normal work, so the headline floor is auditable."""
+    totals = result.get("totals", {})
+    runs = int(totals.get("dropped_red_runs", 0) or 0)
+    if runs <= 0:
+        return None
+    minutes = float(totals.get("dropped_minutes", 0) or 0)
+    return (
+        f"Not counted: {plural(runs, 'failed run')} the agent then fixed, or that passed on a "
+        f"re-run (normal work, ~{fmt_minutes(minutes)} of run time)."
+    )

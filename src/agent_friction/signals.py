@@ -11,7 +11,7 @@ import fnmatch
 import posixpath
 import re
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from agent_friction import model
 from agent_friction.adapters.common import QUESTION_TOOL_RE
@@ -25,10 +25,12 @@ from agent_friction.attribution import (
     PathResolver,
     Step,
     command_role,
+    env_copy,
     is_aggregate_check,
     is_inline_code,
     is_replacement,
     is_setup_command,
+    is_setup_step,
     is_shell_edit,
     may_change_files,
     normalize_argv,
@@ -168,7 +170,7 @@ CATALOG: tuple[SignalDef, ...] = (
         "one session with identical arguments, with no success of that command and nothing "
         "changed in between: no edit, and no other command that could have changed files (a "
         "script, an install, a move). Dropped as waiting if the same line then passes with "
-        "nothing changed.",
+        "nothing changed; never dropped because it passed after something was done.",
         "The failure output did not tell the agent what to do, so it kept guessing.",
         "The normalized command.",
         3.0,
@@ -228,10 +230,12 @@ CATALOG: tuple[SignalDef, ...] = (
         "Command failure",
         "A shell command failed: it exited non-zero or, where the exit status belongs to a "
         "pipe or a later step, its own output says so. Setup and invocation errors (command "
-        "not found, missing module, bad arguments, …) count fully; ordinary failures, such as "
-        f"a test that fails, count at {ORDINARY_FAILURE_WEIGHT}. A red run followed by a change "
-        "and a green run of the same job is dropped. Read-only inspection commands (ls, grep, "
-        "…) are ignored.",
+        "not found, missing module, bad arguments, …) and environment failures (a service "
+        "that is not running, missing credentials, an unset variable) count fully; ordinary "
+        f"failures, such as a test that fails, count at {ORDINARY_FAILURE_WEIGHT}. A red run "
+        "followed by an edit and a green run of the same job is dropped; one that passed only "
+        "after a setup step, with no file edited, is kept in full. Read-only inspection "
+        "commands (ls, grep, …) are ignored.",
         "Agents guess how to build, test and run things; a wrong guess burns a round trip "
         "every session until the right command is written down.",
         "The normalized command. Ordinary failures are also attributed to repo files named "
@@ -331,6 +335,11 @@ CATALOG: tuple[SignalDef, ...] = (
         0.5,
     ),
 )
+
+#: Why a red run was seen and not reported (``totals.dropped_red_runs``).
+DROPPED_DEV_LOOP = "dev-loop"  # red, change, green
+DROPPED_WAITING = "waiting"  # the same line failed, then passed untouched
+DROPPED_ONE_OFF = "one-off"  # green after a command that fixed it in this session only
 
 BY_ID: dict[str, SignalDef] = {s.id: s for s in CATALOG}
 SEVERITY: dict[str, float] = {s.id: s.severity for s in CATALOG}
@@ -699,6 +708,84 @@ def is_invocation_error(
     if match is not None and not _TESTS_RAN_RE.search(output):
         return not own(match.group(1).split(".")[0])
     return False
+
+
+#: Failures of the surroundings rather than of the code or the command line: a service
+#: that is not running, credentials that are missing or expired, an unset variable.
+_SERVICE_DOWN_RE = re.compile(
+    r"Cannot connect to the Docker daemon|Connection refused|ECONNREFUSED"
+    r"|could not connect to server|connection to server\b.{0,120}\bfailed"
+    r"|Is the server running|Can't connect to (?:local )?(?:MySQL )?server"
+    r"|No connection could be made|server closed the connection unexpectedly",
+    re.I,
+)
+_AUTH_RE = re.compile(
+    r"credentials (?:have |are )?expired|expired ?token|token (?:has |is )?expired"
+    r"|Unable to locate credentials|You must be logged in|not logged in(?:to)?\b"
+    r"|authentication failed|Authentication required|Permission denied \(publickey"
+    r"|\b(?:gh|gcloud|az|aws sso|docker|npm|vercel|firebase) (?:auth )?login\b"
+    r"|InvalidClientTokenId|could not read Username",
+    re.I,
+)
+_VAR = r"[`'\"]?([A-Z][A-Z0-9_]{2,})[`'\"]?"
+_ENV_VAR_RE = re.compile(
+    rf"[Mm]issing(?: required)? env(?:ironment)? var(?:iable)?s?:? {_VAR}"
+    rf"|[Ee]nv(?:ironment)? var(?:iable)? {_VAR} (?:is )?(?:not set|missing|required|undefined)"
+    rf"|\b{_VAR}: unbound variable|^KeyError: {_VAR}\s*$"
+    rf"|\b{_VAR} (?:is not set|must be set|environment variable (?:is )?(?:not set|required))",
+    re.M,
+)
+#: Services named only from a fixed vocabulary, so that no transcript text is passed on.
+_SERVICE_PORTS = {
+    "5432": "PostgreSQL",
+    "3306": "MySQL",
+    "6379": "Redis",
+    "27017": "MongoDB",
+    "5672": "RabbitMQ",
+    "9200": "Elasticsearch",
+    "9092": "Kafka",
+    "11211": "Memcached",
+}
+_SERVICE_WORDS = (
+    (re.compile(r"docker daemon|docker\.sock", re.I), "the Docker daemon"),
+    (re.compile(r"psycopg|postgres|psql|\bpg_", re.I), "PostgreSQL"),
+    (re.compile(r"mysql|mariadb", re.I), "MySQL"),
+    (re.compile(r"redis", re.I), "Redis"),
+    (re.compile(r"mongo", re.I), "MongoDB"),
+    (re.compile(r"rabbitmq|amqp", re.I), "RabbitMQ"),
+    (re.compile(r"elasticsearch|opensearch", re.I), "Elasticsearch"),
+    (re.compile(r"kafka", re.I), "Kafka"),
+)
+_PORT_RE = re.compile(r"(?:\bport |(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):)(\d{2,5})\b")
+ENV_SERVICE = "service"
+ENV_AUTH = "auth"
+ENV_VARIABLE = "variable"
+
+
+def environment_error(output: str) -> tuple[str, str] | None:
+    """``(kind, name)`` if a failure's output blames the environment, else ``None``.
+
+    ``kind`` is ``service`` (something the command talks to is not running),
+    ``auth`` (credentials missing or expired) or ``variable`` (an environment
+    variable is not set). ``name`` is the service from a fixed vocabulary
+    ("PostgreSQL", "the Docker daemon", "the service on port 8080"), the
+    variable's name, or empty.
+    """
+    down = _SERVICE_DOWN_RE.search(output)
+    if down is not None:
+        port = _PORT_RE.search(output)
+        if port is not None and port.group(1) in _SERVICE_PORTS:
+            return ENV_SERVICE, _SERVICE_PORTS[port.group(1)]
+        for pattern, name in _SERVICE_WORDS:
+            if pattern.search(output):
+                return ENV_SERVICE, name
+        return ENV_SERVICE, f"the service on port {port.group(1)}" if port else ""
+    variable = _ENV_VAR_RE.search(output)
+    if variable is not None:
+        return ENV_VARIABLE, next(g for g in variable.groups() if g)
+    if _AUTH_RE.search(output):
+        return ENV_AUTH, ""
+    return None
 
 
 #: Commands that keep running until stopped. Run in the foreground they can only end in
@@ -1124,6 +1211,12 @@ class _State:
     # ordinary failures per command that are still red, and those an edit has followed
     red: dict[str, list[Finding]] = field(default_factory=dict)
     red_then_edited: dict[str, list[Finding]] = field(default_factory=dict)
+    # ... and those followed only by commands that may have changed something, with
+    # those commands per finding id: (label, is it a setup step?)
+    red_then_ran: dict[str, list[Finding]] = field(default_factory=dict)
+    ran_after: dict[int, list[tuple[str, bool]]] = field(default_factory=dict)
+    looped: set[int] = field(default_factory=set)  # failures that are part of a retry loop
+    key_of: dict[int, str] = field(default_factory=dict)  # command key per failure
     # failures for which another command stood in, per failed command
     replaced: dict[str, list[Finding]] = field(default_factory=dict)
     # setup command that succeeded after a failure that is still pending, by finding id
@@ -1190,6 +1283,8 @@ class _Detector:
         self.findings: list[Finding] = []
         self.exposed: set[tuple[str, str]] = set()  # every target the agent went near
         self.skipped_events = 0  # events a detector could not handle (never fatal)
+        #: Red runs taken off the record: (transcript line, seconds the run took, reason)
+        self.dropped: list[tuple[int, float, str]] = []
         self.state = _State()
 
     # ---- helpers ---------------------------------------------------------------------
@@ -1272,15 +1367,24 @@ class _Detector:
         if extended is not None and extended[1] > finding.interval[1]:
             finding.interval = extended
 
-    def _drop(self, ids: set[int]) -> None:
-        """Remove findings (by ``id``) from the record and from every pending list."""
+    def _drop(self, ids: set[int], reason: str = "") -> None:
+        """Remove findings (by ``id``) from the record and from every pending list.
+
+        With a ``reason``, failed commands among them are counted as red runs that were
+        seen and deliberately not reported.
+        """
         if not ids:
             return
         state = self.state
+        if reason:
+            for finding in self.findings:
+                if id(finding) in ids and finding.signal == COMMAND_FAILURE:
+                    low, high = finding.run or (0.0, 0.0)
+                    self.dropped.append((finding.line, max(0.0, high - low), reason))
         self.findings = [f for f in self.findings if id(f) not in ids]
         state.pending = [p for p in state.pending if id(p[0]) not in ids]
         state.missing = [m for m in state.missing if id(m[0]) not in ids]
-        for table in (state.red, state.red_then_edited, state.replaced):
+        for table in (state.red, state.red_then_edited, state.red_then_ran, state.replaced):
             for name in list(table):
                 table[name] = [f for f in table[name] if id(f) not in ids]
                 if not table[name]:
@@ -1391,6 +1495,11 @@ class _Detector:
                 self.skipped_events += 1
         self._settle_correction()
         self._end_turn()
+        state = self.state
+        still_red = set(state.red) | set(state.red_then_edited) | set(state.red_then_ran)
+        for finding in self.findings:
+            if state.key_of.get(id(finding)) in still_red:
+                finding.detail["never_green"] = "1"  # red when the session ended
         return self.findings
 
     def _end_turn(self) -> None:
@@ -1653,24 +1762,40 @@ class _Detector:
             )
 
     def _on_change(
-        self, path: str = "", span: tuple[float, float] | None = None, certain: bool = True
+        self,
+        path: str = "",
+        span: tuple[float, float] | None = None,
+        certain: bool = True,
+        by: tuple[str, bool] | None = None,
     ) -> None:
         """Files changed (an edit, a write, or a shell command that rewrites files).
 
         ``certain=False``: a command ran that *may* have changed something. It ends
-        streaks and lets a later green run count as a fix, but it is not an edit.
+        streaks, but it is not an edit: if the red runs before it go green with nothing
+        but such commands in between, it was the environment that got fixed, not the
+        code. ``by`` names the command and says whether it is a setup step.
         """
         state = self.state
+        # Re-running a failing command three times with nothing changed is friction
+        # whatever happens afterwards: a retry loop and its failures are never dropped.
+        state.looped |= {id(f) for same in state.retry for f in state.streak.get(same, ())}
         if certain:
             state.changes += 1
             state.change_log.append((state.changes, path, span))
-        # A change turns the red runs so far into red -> edit -> (maybe) green, unless they
-        # were a retry loop: re-running a failing command three times with nothing changed
-        # is friction whatever happens afterwards.
-        looping = {key for key, _ in state.retry}
-        for failed_key, findings in state.red.items():
-            if failed_key not in looping:
-                state.red_then_edited.setdefault(failed_key, []).extend(findings)
+            # An edit turns the red runs so far into red -> edit -> (maybe) green.
+            for table in (state.red, state.red_then_ran):
+                for failed_key, findings in table.items():
+                    fresh = [f for f in findings if id(f) not in state.looped]
+                    if fresh:
+                        state.red_then_edited.setdefault(failed_key, []).extend(fresh)
+            state.red_then_ran = {}
+        else:
+            for failed_key, findings in state.red.items():
+                state.red_then_ran.setdefault(failed_key, []).extend(findings)
+            if by is not None:
+                for findings in state.red_then_ran.values():
+                    for finding in findings:
+                        state.ran_after.setdefault(id(finding), []).append(by)
         state.red = {}
         # A change ends every "same command, nothing changed" streak.
         state.fail_runs.clear()
@@ -1756,7 +1881,7 @@ class _Detector:
             # Found after all, elsewhere, in the same turn: the misses were the search.
             found = {id(f) for f, pattern in self.state.turn_misses if pattern == wanted}
             if found:
-                self._drop(found)
+                self._drop(found, DROPPED_DEV_LOOP)
                 self.state.probes = [p for p in self.state.probes if id(p[0]) not in found]
                 self.state.turn_misses = [
                     m for m in self.state.turn_misses if id(m[0]) not in found
@@ -1804,9 +1929,16 @@ class _Detector:
         before: list[Step] = []
         after: list[Step] = []
         edit = result.ok and is_shell_edit(cmd, action.call.command or "")
+        # `cp .env.example .env` writes a file, but it sets up the environment
+        template = result.ok and any(env_copy(step) for step in cmd.steps)
+        if template and not is_shell_edit(
+            replace(cmd, steps=tuple(s for s in cmd.steps if not env_copy(s))), ""
+        ):
+            edit = False
         ran = not cmd.inspection and result.error in ("", model.ERR_EXIT, model.ERR_OTHER)
         if ran and not edit:
-            steps = _candidates(cmd)
+            judged = _candidates(cmd)
+            steps = [s for s in cmd.steps if s in judged or env_copy(s)]
             if not result.ok:
                 # in a failed line, only what demonstrably ran before the step that failed
                 blamed, sure = self._blamed_step(cmd, result.output)
@@ -1815,13 +1947,25 @@ class _Detector:
             # The command the line is judged by is never its own fix, so it counts after.
             at = next((i for i, step in enumerate(steps) if step.key == cmd.key), len(steps))
             before, after = steps[:at], steps[at:]
-        if any(may_change_files(step.key) for step in before):
-            self._on_change(certain=False)
-        self._judge_shell(action, cmd, result)
-        if any(may_change_files(step.key) for step in after):
-            self._on_change(certain=False)
+        for step in before:
+            self._possibly_changed(step, action.call.cwd)
+        self._judge_shell(action, cmd, result, edit)
+        for step in after:
+            self._possibly_changed(step, action.call.cwd)
 
-    def _judge_shell(self, action: _Action, cmd: ParsedCommand, result: Event) -> None:
+    def _possibly_changed(self, step: Step, cwd: str | None) -> None:
+        """``step`` ran and may have changed something (see ``may_change_files``)."""
+        copied = env_copy(step)
+        setup = copied is not None or is_setup_step(step)
+        if not setup and not may_change_files(step.key):
+            return
+        # Version control records work, it does not make a failing command pass.
+        named = step.program not in ("git", "gh", "glab")
+        label = copied if copied and self.ctx.command_key is str else None
+        label = label or self._label(step.key, step, cwd)
+        self._on_change(certain=False, by=(label, setup) if named else None)
+
+    def _judge_shell(self, action: _Action, cmd: ParsedCommand, result: Event, edit: bool) -> None:
         state = self.state
         key = cmd.key
         located: Step | None = self._primary(action)
@@ -1830,7 +1974,7 @@ class _Detector:
             return self._label(name, located, action.call.cwd)
 
         state.pending = [(f, k, n - 1) for f, k, n in state.pending if n > 1]
-        if result.ok and is_shell_edit(cmd, action.call.command or ""):
+        if edit:
             self._on_change()  # `sed -i`, a formatter, `--fix`: a change like any edit
         # `pytest | tail -5` exits with the status of `tail`. Exit 0 is then no verdict:
         # the output decides, and where it does not, the run is neither red nor green.
@@ -1893,15 +2037,16 @@ class _Detector:
                     waited |= {id(f) for f in streak}
                     if same in state.retry:
                         waited.add(id(state.retry[same]))
-            self._drop(waited)
+            self._drop(waited, DROPPED_WAITING)
             if is_setup_command(key):
                 state.streak.clear()  # whatever passes after an install was not just waiting
             state.fail_runs = {k: v for k, v in state.fail_runs.items() if k[0] != key}
             state.retry = {k: v for k, v in state.retry.items() if k[0] != key}
             # red -> edit -> green is the development loop working: forget those failures,
             # also when the green run is another command doing the same job (`make test`
-            # after a red `pytest tests/test_a.py`).
-            self._went_green(key)
+            # after a red `pytest tests/test_a.py`). A setup step is nobody's stand-in:
+            # `npx playwright install` going well says nothing about `npm run e2e`.
+            self._went_green(key, exact=located is not None and is_setup_step(located))
             # The command works after all, so nothing "replaced" it earlier in the session.
             for finding in state.replaced.pop(key, []):
                 finding.detail.pop("recovered_by", None)
@@ -1912,7 +2057,19 @@ class _Detector:
                 if failed_key == key:
                     setup = state.setup_after.pop(id(finding), "")
                     if setup:
-                        finding.detail["fixed_by_setup"] = setup
+                        finding.detail.setdefault("fixed_by_setup", setup)
+                    # The same command, somewhere else or under another name
+                    label = shown(key)
+                    was = finding.targets[0].key if finding.targets else label
+                    if label != was and label.startswith(was + " ("):
+                        finding.detail["works_in"] = label[len(was) + 2 : -1]
+                    unfound = finding.detail.get("not_found", "")
+                    other = re.search(
+                        rf"(?:^|[\s;&|(/]){re.escape(unfound)}(\d[\d.]*)(?=\s|$)",
+                        action.call.command or "",
+                    )
+                    if unfound and other is not None:
+                        finding.detail["works_as"] = unfound + other.group(1)
                     self._recover(finding, action)
                 elif finding.detail["variant"] != "ordinary" and is_typo_of(failed_key, key):
                     # `npm run biuld`, then `npm run build`: a slip of the keyboard that
@@ -1967,7 +2124,9 @@ class _Detector:
         targets = [Target(model.COMMAND, shown(key))]
         # A setup/invocation error says nothing about the files on the command line, and
         # neither does a failure we cannot pin on one step.
-        for candidate in () if invocation or not certain else path_candidates(tokens):
+        environment = None if invocation or inline else environment_error(result.output)
+        blameless = invocation or not certain or environment is not None
+        for candidate in () if blameless else path_candidates(tokens):
             rel = self.ctx.resolver.resolve(candidate, self._where(step, call.cwd))
             if not (rel and self.ctx.is_known_file(rel)):
                 rel = self.ctx.resolver.resolve(candidate, call.cwd)
@@ -1979,6 +2138,12 @@ class _Detector:
         if hidden:
             status = "judged from its output: the exit status was that of a pipe or a later step"
         kind = "setup/invocation error" if invocation else "ordinary failure"
+        if environment is not None:
+            kind = {
+                ENV_SERVICE: f"{environment[1] or 'a service it needs'} was not reachable",
+                ENV_AUTH: "credentials were missing or expired",
+                ENV_VARIABLE: "an environment variable was not set",
+            }[environment[0]]
         summary = f"`{shown(key)}` failed ({status}; {kind})"
         if not certain:
             summary = (
@@ -1989,6 +2154,18 @@ class _Detector:
             "variant": "invocation" if invocation else "ordinary",
             "command": call.command or "",
         }
+        if environment is not None:
+            detail["variant"] = "environment"
+            detail["environment"] = environment[0]
+            if environment[0] == ENV_SERVICE and environment[1]:
+                detail["service"] = environment[1]
+            elif environment[0] == ENV_VARIABLE:
+                detail["env_var"] = environment[1]
+        gone = _NOT_FOUND_PROGRAM_RE.search(result.output) if invocation else None
+        if gone is not None:
+            name = (gone.group(1) or gone.group(2)).rsplit("/", 1)[-1]
+            if step is not None and name == step.program:
+                detail["not_found"] = name
         if not certain:
             detail["ambiguous_step"] = "1"
         if hidden:
@@ -2009,11 +2186,13 @@ class _Detector:
             summary,
             targets,
             excerpt=f"$ {call.command}\n{result.output}",
-            weight=1.0 if invocation else ORDINARY_FAILURE_WEIGHT,
+            weight=1.0 if invocation or environment else ORDINARY_FAILURE_WEIGHT,
             # An ordinary failure (a red test) is information, not lost time.
-            interval=self._round_trip(action) if invocation else None,
+            interval=self._round_trip(action) if invocation or environment else None,
             detail=detail,
         )
+        finding.run = _capped(_epoch(call), _epoch(result))
+        state.key_of[id(finding)] = key
         state.pending.append((finding, key, RECOVERY_LOOKAHEAD))
         if hook_fixed:
             state.red_then_edited.setdefault(key, []).append(finding)
@@ -2055,7 +2234,7 @@ class _Detector:
                 step, certain = named, True
         return step, certain
 
-    def _went_green(self, key: str) -> None:
+    def _went_green(self, key: str, exact: bool = False) -> None:
         """``key`` ran green: close what a green run of it, or of its job, closes.
 
         red -> edit -> green is the development loop working, so those failures are
@@ -2066,7 +2245,11 @@ class _Detector:
         state = self.state
 
         def closes(failed_key: str) -> bool:
-            if failed_key == key or is_replacement(failed_key, key):
+            if failed_key == key:
+                return True
+            if exact:
+                return False
+            if is_replacement(failed_key, key):
                 return True
             return is_aggregate_check(key) and command_role(failed_key) is not None
 
@@ -2075,10 +2258,32 @@ class _Detector:
         fixed: set[int] = set()
         for failed_key in [k for k in state.red_then_edited if closes(k)]:
             fixed |= {id(f) for f in state.red_then_edited.pop(failed_key)}
+        # Green after nothing but commands, with no file edited: what was wrong was the
+        # environment, and the command that put it right is worth writing down.
+        for failed_key in [k for k in state.red_then_ran if closes(k)]:
+            for finding in state.red_then_ran.pop(failed_key):
+                ran = state.ran_after.pop(id(finding), [])
+                setups = list(dict.fromkeys(label for label, setup in ran if setup))
+                others = [label for label, setup in ran if not setup]
+                if setups:
+                    # ... and the files on its command line were not what was wrong
+                    finding.targets = [t for t in finding.targets if t.kind == model.COMMAND]
+                    finding.detail["fixed_by_setup"] = " && ".join(setups)
+                    finding.weight = 1.0
+                    finding.interval = finding.interval or finding.run
+                    finding.summary += "; it passed after a setup step, with no file edited"
+                elif id(finding) in state.looped:
+                    continue  # stays as it is
+                elif others:
+                    # A script, a generator, a build: perhaps the fix, perhaps a
+                    # coincidence. Whether it recurs across sessions decides (engine).
+                    finding.detail["fixed_by_command"] = others[-1]
+                else:
+                    fixed.add(id(finding))
         # Green with no change in between: those red runs stay on the record for good.
         for failed_key in [k for k in state.red if closes(k)]:
             del state.red[failed_key]
-        self._drop(fixed)
+        self._drop(fixed, DROPPED_DEV_LOOP)
 
     def _red_run(
         self, key: str, label: str, action: _Action, result: Event, hidden: bool = False
@@ -2394,13 +2599,15 @@ class Detection:
     exposed: set[tuple[str, str]]
     #: Events a detector raised on. They are skipped and counted, never fatal.
     skipped_events: int = 0
+    #: Red runs seen and not reported: (transcript line, seconds the run took, reason).
+    dropped: list[tuple[int, float, str]] = field(default_factory=list)
 
 
 def detect_stream(stream: Stream, ctx: DetectContext) -> Detection:
     """Run every transcript detector over one stream."""
     detector = _Detector(stream, ctx)
     findings = detector.run()
-    return Detection(findings, detector.exposed, detector.skipped_events)
+    return Detection(findings, detector.exposed, detector.skipped_events, detector.dropped)
 
 
 def detect_with_exposure(

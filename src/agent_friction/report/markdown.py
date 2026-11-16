@@ -7,6 +7,7 @@ from typing import Any
 
 from agent_friction.report._common import (
     collect_recommendations,
+    dropped_note,
     fmt_minutes,
     plural,
     signal_titles,
@@ -122,7 +123,13 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
     commands = list(result.get("commands", []))[:top]
     if not hotspots and not commands and not result.get("directories"):
         out += ["No recurring friction found.", ""]
+        note = dropped_note(result)
+        if note:
+            out += [f"_{note}_", ""]
         return "\n".join(out)
+    note = dropped_note(result)
+    if note:
+        out += [f"_{note}_", ""]
 
     recs = collect_recommendations(result, limit=5)
     if recs:

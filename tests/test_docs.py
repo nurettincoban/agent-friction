@@ -155,8 +155,20 @@ def test_catalog_descriptions_state_the_rules_that_decide() -> None:
     assert "not corroborated" in described[signals.PROBABLE_CORRECTION]
     assert "could have changed files" in described[signals.RETRY_LOOP]
     assert "something also went wrong" in described[signals.EDIT_THRASH]
-    assert "change and a green run" in described[signals.COMMAND_FAILURE]
+    assert "edit and a green run" in described[signals.COMMAND_FAILURE]
+    assert "after a setup step, with no file edited, is kept" in described[signals.COMMAND_FAILURE]
     text = read("signals.md")
     # ... and the doc says the same in its own words
     assert "only if behaviour corroborates it" in _section(text, signals.USER_CORRECTION)
     assert "may have changed something" in _section(text, signals.RETRY_LOOP)
+
+
+def test_documented_rules_for_recurring_red_runs_match_the_code() -> None:
+    from agent_friction import engine
+
+    runs, sessions = engine.RECURRING_RED_MIN_RUNS, engine.RECURRING_RED_MIN_SESSIONS
+    for name in ("signals.md", "methodology.md"):
+        text = " ".join(read(name).split())
+        assert f"failed {runs} or more times in a session" in text.replace("fails", "failed")
+        assert f"in {sessions} or more sessions" in text
+    assert "`dropped_red_runs`" in read("schema.md") and "`dropped_minutes`" in read("schema.md")

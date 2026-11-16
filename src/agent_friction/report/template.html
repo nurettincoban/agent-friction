@@ -172,6 +172,11 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
   document.getElementById("subtitle").textContent =
     (w.start || w.end ? String(w.start || "…").slice(0, 10) + " → " + String(w.end || "…").slice(0, 10) + " · " : "") +
     "generated " + String(R.generated_at || "").slice(0, 16).replace("T", " ");
+  if (Number(t.dropped_red_runs) > 0) {
+    document.getElementById("stats").insertAdjacentElement("afterend", el("p", { class: "sub" },
+      "Not counted: " + plural(t.dropped_red_runs, "failed run") + " the agent then fixed, or that passed on a re-run (normal work, ~" +
+      mins(t.dropped_minutes) + " of run time)."));
+  }
   [["sessions", "agent session", "agent sessions"], ["tool_calls", "tool call", "tool calls"],
    ["friction_events", "friction event", "friction events"], ["est_minutes_lost", "est. time lost", "est. time lost"],
    ["corrections", "human correction", "human corrections"], ["files_affected", "file affected", "files affected"]]

@@ -2,6 +2,8 @@
 
 6 agent sessions analysed · 34 friction events · ~9m lost · 4 human corrections · 5 files affected
 
+_Not counted: 1 failed run the agent then fixed, or that passed on a re-run (normal work, ~6s of run time)._
+
 ## What to fix first
 
 1. `src/shopfront/api/schema_gen.py`: **Generated file: point agents at its source** This file looks generated (judging by a "code generated" marker), yet agents ran into trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md which source to change and which command regenerates it, and consider denying direct edits to it.
@@ -216,7 +218,7 @@
 | `user-interrupt` User interrupt | 1 | The human interrupted the agent after it had made at least one tool call in the turn. The interrupt that accompanies a declined tool call is not counted again. |
 | `edit-miss` Edit miss | 6 | An edit failed because the text to replace was not found in the file, or matched several places. |
 | `edit-revert` Edit reverted | 2 | An edit exactly undid an earlier successful edit to the same file in the same session, or a write restored an earlier version of the file. Taking out lines that were only added and then run successfully (a debug print) is not counted. |
-| `command-failure` Command failure | 9 | A shell command failed: it exited non-zero or, where the exit status belongs to a pipe or a later step, its own output says so. Setup and invocation errors (command not found, missing module, bad arguments, …) count fully; ordinary failures, such as a test that fails, count at 0.3. A red run followed by a change and a green run of the same job is dropped. Read-only inspection commands (ls, grep, …) are ignored. |
+| `command-failure` Command failure | 9 | A shell command failed: it exited non-zero or, where the exit status belongs to a pipe or a later step, its own output says so. Setup and invocation errors (command not found, missing module, bad arguments, …) and environment failures (a service that is not running, missing credentials, an unset variable) count fully; ordinary failures, such as a test that fails, count at 0.3. A red run followed by an edit and a green run of the same job is dropped; one that passed only after a setup step, with no file edited, is kept in full. Read-only inspection commands (ls, grep, …) are ignored. |
 | `edit-thrash` Edit thrash | 1 | One file received 6 or more successful edits within a single turn in which something also went wrong: an edit miss, a stale edit or a reverted edit on that file, or a failed command or retry loop in the turn. |
 | `stale-edit` Stale edit | 1 | An edit or write was refused because the file had not been read first, or changed on disk after it was read. |
 | `probable-correction` Probable correction | 1 | A human prompt that is worded like a correction but is not corroborated by behaviour (the agent had changed nothing, or the human names no changed file and the agent did not go back to what it had changed), or that only contains two or more weaker cues. It may be an ordinary follow-up request. |

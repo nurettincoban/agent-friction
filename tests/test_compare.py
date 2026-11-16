@@ -50,9 +50,9 @@ def test_render_compare_text_and_markdown() -> None:
     after["hotspots"][0]["events"] = 1
     changes = compare(before, after)
     text = render_compare(before, after, changes)
-    assert "Improved (1)" in text and "schema.py" in text
+    assert "Improved (1 target)" in text and "schema.py" in text
     md = render_compare(before, after, changes, markdown=True)
-    assert md.startswith("# Friction comparison") and "## Improved (1)" in md
+    assert md.startswith("# Friction comparison") and "## Improved (1 target)" in md
     same = render_compare(before, before, compare(before, before))
     assert "No meaningful change." in same
 

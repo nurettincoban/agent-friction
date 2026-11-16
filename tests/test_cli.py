@@ -93,7 +93,7 @@ def test_compare(tmp_path: Path) -> None:
     after = tmp_path / "after.json"
     after.write_text(json.dumps(data), encoding="utf-8")
     code, out, _ = run("compare", str(before), str(after))
-    assert code == EXIT_OK and "Improved (1)" in out
+    assert code == EXIT_OK and "Improved (1 target)" in out
     code, out, _ = run("compare", str(after), str(before), "-f", "json", "--fail-on-regression")
     assert code == EXIT_GATE
     assert json.loads(out)["changes"][0]["status"] == "regressed"

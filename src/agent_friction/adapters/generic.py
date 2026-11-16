@@ -109,7 +109,7 @@ def parse_file(path: Path, seen: dict[str, str] | None = None) -> ParsedFile:
             if not raw:
                 continue
             try:
-                obj = json.loads(raw)
+                obj = model.load_json_line(raw)
             except (ValueError, RecursionError):
                 parsed.skipped_lines += 1
                 continue

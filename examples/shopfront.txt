@@ -48,3 +48,4 @@ What to fix first
 
 ● high ◐ medium ○ low confidence · drill in: agent-friction show <path> · full map: --format html -o map.html
 Per-row time can overlap (one stall can involve a file and a command); the total counts each minute once.
+Not counted: 1 failed run the agent then fixed, or that passed on a re-run (normal work, ~6s of run time).

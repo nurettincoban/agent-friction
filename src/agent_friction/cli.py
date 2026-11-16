@@ -413,7 +413,7 @@ def _write(text: str, output: Path | None, stdout: TextIO) -> None:
         return
     if not output.parent.is_dir():
         raise UsageError(f"{output.parent}: directory does not exist")
-    output.write_text(text, encoding="utf-8")
+    output.write_text(text, encoding="utf-8", errors="replace")
 
 
 def _utf8_safe(stream: TextIO) -> TextIO:

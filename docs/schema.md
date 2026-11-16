@@ -112,6 +112,8 @@ by repository or time window, so `0` marks an empty, binary or foreign file.
 | `tool_calls` | Tool calls in those sessions. |
 | `friction_events` | All detected events, equal to the sum of `signals[].count`. |
 | `est_minutes_lost` | Union of all claimed intervals, in minutes (1 decimal). |
+| `dropped_red_runs` | Failed commands that were seen and deliberately **not** reported as friction: red runs of the development loop (red, edit, green), commands the agent was only waiting on (failed, then passed untouched), and red runs that went green after a one-off command. They are in no hotspot, signal count or `friction_events`; the number says how much was looked at and set aside. Mistyped commands are not in it: they stay events, as weak evidence. *Addition to the base contract.* |
+| `dropped_minutes` | What those runs took, from call to result, in minutes (1 decimal). A sum of run times, not lost time: it is not part of `est_minutes_lost`. *Addition to the base contract.* |
 | `corrections` | `user-correction` events: clear wording **and** corroborated by what the human named or the agent did next. A lower bound. |
 | `probable_corrections` | `probable-correction` events (wording only, or two weak cues): a separate, weak signal. Listed as evidence, never quoted, never the basis of a recommendation. |
 | `files_affected` | File hotspots before `max_hotspots` truncation. |
@@ -178,8 +180,8 @@ was fixed only if its target still has exposure there.
 | `timestamp` | ISO-8601 UTC; `null` only for generic events without `ts`. |
 | `summary` | What happened, built from structure only: tool name, repo-relative path, normalized command name, counts, commit hashes. Never contains prompts, search patterns, command arguments or output. |
 | `excerpt` | Redacted, truncated transcript text (error output, the command, the human's words, the search pattern), or `null`. Always `null` with `--no-excerpts`, and always `null` for `probable-correction` (a guess never quotes the human). May contain newlines. |
-| `source` | Where to look the event up: `claude-code:<repo name>/<session file>.jsonl` (never the project directory), a generic transcript file (home as `~`), or `"git"`. `null` for transcript evidence with `--no-excerpts`. |
-| `line` | 1-based line number in `source`; `0` for git. |
+| `source` | Where to look the event up: `claude-code:<repo name>/<session file>.jsonl` (never the project directory), a generic transcript file as it was passed (home as `~`; a file that could only be named by an absolute path is named relative to the working directory or to the `--transcripts` directory it was found in, `logs/nightly/run.jsonl`, or else by its file name), or `"git"`. `null` for transcript evidence with `--no-excerpts`. |
+| `line` | 1-based line number in `source` (int). For git evidence, the short hash of the human commit (str, 8 hex digits), so that `git:<line>` is something `git show` accepts. |
 | `est_seconds_lost` | float. Seconds of agent time this event alone claims (the length of its interval, one decimal); `0.0` if it claims none. A hotspot's `est_minutes_lost` is the union of its events' intervals, so it equals the sum of these only when they do not overlap. *Addition within schema version 1.* |
 
 ### `tree`

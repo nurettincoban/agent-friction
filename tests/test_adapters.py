@@ -362,3 +362,22 @@ def test_absurdly_nested_json_is_a_skipped_line(tmp_path: Path) -> None:
     )
     g = generic.parse_file(generic_file)
     assert g.skipped_lines + g.ignored_lines == 1
+
+
+def test_lone_surrogates_are_replaced_at_the_boundary(tmp_path: Path) -> None:
+    assert model.load_json_line('{"a\\ud83d": ["x\\udc00y", {"b": "\\ud83d\\ude00 ok"}]}') == {
+        "a\ufffd": ["x\ufffdy", {"b": "\U0001f600 ok"}]  # a whole pair is a character
+    }
+    assert model.load_json_line('{"path": "C:\\\\users\\\\dev"}') == {"path": "C:\\users\\dev"}
+    for kind, line in (
+        ("claude", '{"type":"user","sessionId":"s","uuid":"u1","cwd":"/repo",'
+                   '"timestamp":"2026-11-05T16:00:00Z",'
+                   '"message":{"role":"user","content":"go \\ud83d"}}'),
+        ("generic", '{"session":"g","ts":"2026-11-05T16:00:00Z","kind":"user_message",'
+                    '"text":"go \\ud83d"}'),
+    ):  # fmt: skip
+        path = tmp_path / f"{kind}.jsonl"
+        path.write_text(line + "\n")
+        (stream,) = parse_transcript(path).streams
+        assert [e.text for e in stream.events] == ["go \ufffd"]
+        stream.events[0].text.encode("utf-8")

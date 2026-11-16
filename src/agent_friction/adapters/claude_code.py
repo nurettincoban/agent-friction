@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -290,7 +289,7 @@ def parse_file(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFi
             if not raw:
                 continue
             try:
-                obj = json.loads(raw)
+                obj = model.load_json_line(raw)
             except (ValueError, RecursionError):
                 parsed.skipped_lines += 1
                 continue

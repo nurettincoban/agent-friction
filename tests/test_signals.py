@@ -2425,7 +2425,14 @@ NO_CHANGES = ["cat src/a.py", "git status", "ls -la", "grep -rn foo src", "ruff 
 def test_a_change_made_by_a_command_is_a_change(tmp_path: Path, change: str) -> None:
     fixed = Session().user("go").bash("npm test", "1 failing", exit_code=1)
     fixed.bash(change, "").bash("npm test", "3 passing")
-    assert detect(fixed, tmp_path) == []  # red -> change -> green: the loop working
+    found = detect(fixed, tmp_path)
+    if change in ("python scripts/patch.py", "./scripts/regenerate.sh"):
+        # no file was seen to change: recurrence across sessions decides (see the engine)
+        assert [f.detail["fixed_by_command"] for f in found] == [change.removeprefix("./")]
+    elif change == "npm install left-pad":
+        assert [f.detail["fixed_by_setup"] for f in found] == ["npm install"]
+    else:
+        assert found == []  # red -> change -> green: the loop working
 
     loop = Session().user("go")
     for _ in range(3):
@@ -2476,7 +2483,8 @@ def test_a_possible_change_is_not_an_edit_and_never_its_own_fix(tmp_path: Path) 
     # ... but a script that ran earlier on the same line is
     same_line = Session().user("go").bash("npm test", "1 failing", exit_code=1)
     same_line.bash("python scripts/patch.py && npm test", "3 passing")
-    assert detect(same_line, tmp_path) == []
+    (maybe,) = detect(same_line, tmp_path)
+    assert maybe.detail["fixed_by_command"] == "python scripts/patch.py"
 
     # rounds of "run a script, run the check" are not counted as edit-and-run rounds:
     # nobody saw an edit, so no-convergence is not claimed and no file is named
@@ -2514,3 +2522,124 @@ def test_inline_and_stdin_keys_carry_the_directory_too(tmp_path: Path) -> None:
         [("command", "python <stdin> (web/)")],
         [("command", "node <inline> (web/)")],
     ]
+
+
+# ---- round 12 -----------------------------------------------------------------------------
+
+PG_DOWN = (
+    'E   psycopg2.OperationalError: connection to server at "localhost" (127.0.0.1), '
+    "port 5432 failed: Connection refused\n12 errors in 1.31s"
+)
+PLAYWRIGHT = "Error: browserType.launch: Executable doesn't exist at /root/.cache/chrome"
+SETUP_FIXES = [
+    ("pytest tests/test_a.py", PG_DOWN, "docker compose up -d db", "docker compose up"),
+    ("npm run build", "Error: boom", "cp .env.example .env", "cp .env.example .env"),
+    ("npm run e2e", PLAYWRIGHT, "npx playwright install", "npx playwright"),
+    ("npm run e2e", PLAYWRIGHT, "pip install -r requirements.txt", "pip install"),
+    ("pytest", "1 failed in 1s", "make bootstrap", "make bootstrap"),
+]
+
+
+@pytest.mark.parametrize(("command", "output", "fix", "label"), SETUP_FIXES)
+def test_a_failure_fixed_by_a_setup_step_is_what_we_are_here_for(
+    tmp_path: Path, command: str, output: str, fix: str, label: str
+) -> None:
+    s = Session().user("go").edit(A).bash(command, output, exit_code=1)
+    s.bash(fix, "ok").bash(command, "5 passed")
+    (found,) = detect(s, tmp_path)
+    assert found.detail["fixed_by_setup"] == label and found.weight == 1.0
+    assert not scoring.is_weak(found) and found.interval is not None
+    assert "passed after a setup step, with no file edited" in found.summary
+    assert [t.kind for t in found.targets] == ["command"]  # the test file was not the cause
+
+    # with an edit in between nobody can say what fixed it: the development loop
+    for order in ((fix, None), (None, fix)):
+        edited = Session().user("go").bash(command, output, exit_code=1)
+        for step in order:
+            edited = edited.bash(step, "ok") if step else edited.edit(A)
+        edited.bash(command, "5 passed")
+        assert detect(edited, tmp_path) == []
+
+    # a retry loop is never erased by a later green run, and it learns what fixed it
+    loop = Session().user("go")
+    for _ in range(4):
+        loop.bash(command, output, exit_code=1)
+    loop.bash(fix, "ok").bash(command, "5 passed")
+    found_loop = detect(loop, tmp_path)
+    assert len(by_signal(found_loop, signals.RETRY_LOOP)) == 1
+    failures = by_signal(found_loop, signals.COMMAND_FAILURE)
+    assert [f.detail.get("fixed_by_setup") for f in failures] == [label] * 4
+
+
+def test_a_setup_step_going_well_is_not_the_check_going_green(tmp_path: Path) -> None:
+    # `npx playwright install` is "a test tool" by name; it must not stand in for the tests
+    s = Session().user("go").bash("npm run e2e", PLAYWRIGHT, exit_code=1)
+    s.bash("npx playwright install", "ok")
+    (found,) = detect(s, tmp_path)
+    assert found.detail.get("never_green") == "1" and "fixed_by_setup" not in found.detail
+    # version control is never "the fix": the failure is dropped as before
+    git = Session().user("go").bash("npm test", "1 failing", exit_code=1)
+    git.bash("git commit -m wip", "[main 1a2b3c4] wip").bash("npm test", "3 passing")
+    assert detect(git, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        (PG_DOWN, ("service", "PostgreSQL")),
+        ("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker "
+         "daemon running?", ("service", "the Docker daemon")),
+        ("Error: connect ECONNREFUSED 127.0.0.1:6379", ("service", "Redis")),
+        ("curl: (7) Failed to connect to localhost port 8080: Connection refused",
+         ("service", "the service on port 8080")),
+        ("django.db.utils.OperationalError: could not connect to server", ("service", "")),
+        ("Error: Missing required environment variable DATABASE_URL", ("variable", "DATABASE_URL")),
+        ("./run.sh: line 3: API_TOKEN: unbound variable", ("variable", "API_TOKEN")),
+        ("KeyError: 'STRIPE_KEY'", ("variable", "STRIPE_KEY")),
+        ("Error: AWS credentials expired", ("auth", "")),
+        ("error: You must be logged in to the server (Unauthorized)", ("auth", "")),
+        ("To get started with GitHub CLI, please run:  gh auth login", ("auth", "")),
+        ("FAILED tests/test_a.py::test_x - AssertionError\n1 failed, 3 passed", None),
+        ("E   assert response.status_code == 401", None),
+        ("KeyError: 'user_id'", None),
+        ("error TS2304: Cannot find name 'foo'.", None),
+    ],
+)  # fmt: skip
+def test_environment_errors(output: str, expected: tuple[str, str] | None) -> None:
+    assert signals.environment_error(output) == expected
+
+
+def test_an_environment_failure_counts_in_full_unless_code_fixed_it(tmp_path: Path) -> None:
+    s = Session().user("go").edit(A).bash("pytest tests/test_a.py", PG_DOWN, exit_code=1)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["variant"] == "environment" and found.detail["service"] == "PostgreSQL"
+    assert found.weight == 1.0 and found.interval is not None and not scoring.is_weak(found)
+    assert found.summary == "`pytest` failed (exit 1; PostgreSQL was not reachable)"
+    assert [t.kind for t in found.targets] == ["command"]
+    s.edit(A, "localhost", "db").bash("pytest tests/test_a.py", "12 passed")  # wrong host in code
+    assert detect(s, tmp_path) == []
+    snippet = Session().user("go").bash("python -c 'import redis; redis.Redis().ping()'",
+                                        "redis.exceptions.ConnectionError: Connection refused",
+                                        exit_code=1)  # fmt: skip
+    assert detect(snippet, tmp_path)[0].detail["variant"] == "ordinary"  # ad-hoc code
+
+
+def test_the_same_command_under_another_name_or_in_another_place(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.bash("python scripts/gen.py", "bash: python: command not found", exit_code=127)
+    s.bash("python3 scripts/gen.py", "generated")
+    (found,) = detect(s, tmp_path)
+    assert (found.detail["not_found"], found.detail["works_as"]) == ("python", "python3")
+    same = Session().user("go")
+    same.bash("python scripts/gen.py", "bash: python: command not found", exit_code=127)
+    same.bash("source .venv/bin/activate && python scripts/gen.py", "generated")
+    assert "works_as" not in detect(same, tmp_path)[0].detail
+
+    wd = Session().user("go")
+    wd.bash("npm test", "npm error enoent Could not read package.json", exit_code=254)
+    wd.bash("cd web && npm test", "Tests: 3 passed, 3 total")
+    assert detect(wd, tmp_path)[0].detail["works_in"] == "web/"
+    again = Session().user("go")
+    again.bash("npm test", "npm error enoent Could not read package.json", exit_code=254)
+    again.bash("npm install", "ok").bash("npm test", "Tests: 3 passed, 3 total")
+    assert "works_in" not in detect(again, tmp_path)[0].detail

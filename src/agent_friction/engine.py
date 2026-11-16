@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -190,6 +191,80 @@ def _unclaim_single_session_stretches(findings: Sequence[Finding]) -> None:
             finding.intervals = ()
 
 
+#: Sessions in which the same command must stay red for its failures to count in full,
+#: and how often it must have failed in each. One red run when a session ends is routine.
+RECURRING_RED_MIN_SESSIONS = 3
+RECURRING_RED_MIN_RUNS = 2
+
+
+def _command_keys(finding: Finding) -> list[str]:
+    return [t.key for t in finding.targets if t.kind == model.COMMAND]
+
+
+def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
+    """Decide, across sessions, what a single session cannot.
+
+    * A red run that went green after some command which is not a known setup
+      step (``fixed_by_command``): once is a coincidence or a one-off script and
+      is dropped as the development loop; the same pair in two or more sessions
+      is a setup step under another name and is kept in full.
+    * An ordinary failure of a command that never went green in its session
+      (``never_green``) after failing ``RECURRING_RED_MIN_RUNS`` times or more:
+      from ``RECURRING_RED_MIN_SESSIONS`` such sessions on it is a pattern, not a
+      red test: it is no longer weak and claims its own run time.
+
+    Returns the findings that were dropped.
+    """
+    pairs: dict[tuple[str, str], set[str]] = {}
+    pending = [f for f in findings if "fixed_by_command" in f.detail]
+    for finding in pending:
+        for key in _command_keys(finding):
+            pair = (key, finding.detail["fixed_by_command"])
+            pairs.setdefault(pair, set()).add(finding.session_id)
+    dropped: list[Finding] = []
+    for finding in pending:
+        fix = finding.detail.pop("fixed_by_command")
+        recurs = any(
+            len(pairs.get((key, fix), ())) >= scoring.MEDIUM_MIN_SESSIONS
+            for key in _command_keys(finding)
+        )
+        if recurs:
+            finding.detail["fixed_by_setup"] = fix
+            finding.targets = [t for t in finding.targets if t.kind == model.COMMAND]
+            finding.weight = 1.0
+            finding.interval = finding.interval or finding.run
+            finding.summary += "; it passed after another command, with no file edited"
+        else:
+            dropped.append(finding)
+    gone = {id(f) for f in dropped}
+    findings[:] = [f for f in findings if id(f) not in gone]
+
+    red: dict[str, set[str]] = {}
+    stuck = [
+        f
+        for f in findings
+        if f.signal == signals.COMMAND_FAILURE
+        and f.detail.get("never_green")
+        and f.detail.get("variant") == "ordinary"
+        and "inline" not in f.detail
+    ]
+    runs: dict[tuple[str, str], int] = {}
+    for finding in stuck:
+        for key in _command_keys(finding):
+            runs[key, finding.session_id] = runs.get((key, finding.session_id), 0) + 1
+    for (key, session), count in runs.items():
+        if count >= RECURRING_RED_MIN_RUNS:
+            red.setdefault(key, set()).add(session)
+    for finding in stuck:
+        if any(
+            len(red.get(key, ())) >= RECURRING_RED_MIN_SESSIONS and finding.session_id in red[key]
+            for key in _command_keys(finding)
+        ):
+            finding.detail["recurring_red"] = "1"
+            finding.interval = finding.interval or finding.run
+    return dropped
+
+
 def _is_git(finding: Finding) -> bool:
     return finding.signal == signals.HUMAN_REWORK
 
@@ -292,6 +367,7 @@ class _Analysis:
         self.source_labels: dict[str, str] = {}
         self.exposure: dict[tuple[str, str], set[str]] = {}
         self.git_used = False
+        self.dropped: list[tuple[int, float, str]] = []
 
     # ---- repository knowledge --------------------------------------------------------
 
@@ -320,6 +396,21 @@ class _Analysis:
         if on_disk is not None:
             return on_disk
         return rel in self.touched or "." in rel.rsplit("/", 1)[-1].lstrip(".")
+
+    def public_command(self, key: str) -> str:
+        """A command key without excerpts: project-specific names hashed, repo paths kept.
+
+        Repo paths are shown everywhere else in such a report, so a script of the
+        repository (``scripts/deploy.sh``) stays readable in a command key too.
+        """
+
+        def in_repo(word: str) -> bool:
+            rel = word[2:] if word.startswith("./") else word
+            return (
+                "/" in word and not word.startswith(("/", "~")) and self._disk_is_file(rel) is True
+            )
+
+        return public_key(key, in_repo)
 
     def is_known_file(self, rel: str) -> bool:
         return rel in self.touched or self._disk_is_file(rel) is True
@@ -353,7 +444,18 @@ class _Analysis:
             return f"{claude_code.KIND}:{name}"
         if not self.options.include_excerpts:
             return f"{item.kind}:{item.path.name}"
-        return self.display_path(item.path)
+        shown = self.display_path(item.path)
+        if not Path(shown).is_absolute() and not re.match(r"^[A-Za-z]:/", shown):
+            return shown  # given relatively, or under the home directory (`~/...`)
+        # An absolute path says where on this machine the logs live (user, client,
+        # project). Name the file by where it is in what was passed instead.
+        path = item.path.absolute()
+        for given in [Path.cwd(), *(Path(g).expanduser() for g in self.options.transcripts or ())]:
+            root = given.absolute()
+            if root.is_dir() and path.is_relative_to(root):
+                inside = path.relative_to(root).as_posix()
+                return inside if root == Path.cwd() else f"{root.name}/{inside}"
+        return item.path.name
 
     def source_label(self, item: ParsedFile) -> str:
         """One transcript file, as cited by evidence (with a line number next to it)."""
@@ -408,10 +510,11 @@ class _Analysis:
             self.is_file,
             self.is_known_file,
             # Without excerpts no project-specific name may survive in a command key.
-            command_key=str if options.include_excerpts else public_key,
+            command_key=str if options.include_excerpts else self.public_command,
             first_party=self.first_party,
         )
         findings: list[Finding] = []
+        dropped: list[tuple[int, float, str]] = []
         exposure: dict[tuple[str, str], set[str]] = {}
         for stream in streams:
             detection = signals.detect_stream(stream, ctx)
@@ -427,8 +530,10 @@ class _Analysis:
                     detection,
                     findings=[f for f in full.findings if f.line >= first],
                     skipped_events=full.skipped_events,
+                    dropped=[d for d in full.dropped if d[0] >= first],
                 )
             findings.extend(detection.findings)
+            dropped.extend(detection.dropped)
             source_key = str(stream.source)
             self.skipped_events[source_key] = (
                 self.skipped_events.get(source_key, 0) + detection.skipped_events
@@ -485,6 +590,10 @@ class _Analysis:
         if missing is not None and not self.git_used:
             raise missing  # neither transcripts nor git history: nothing to analyse
 
+        for one_off in _settle_command_fixes(findings):
+            low, high = one_off.run or (0.0, 0.0)
+            dropped.append((one_off.line, max(0.0, high - low), signals.DROPPED_ONE_OFF))
+        self.dropped = dropped
         _unclaim_single_session_stretches(findings)
         findings.sort(key=_finding_order)
         for index, finding in enumerate(findings):
@@ -643,6 +752,10 @@ class _Analysis:
                 ),
                 "friction_events": len(findings),
                 "est_minutes_lost": scoring.lost_minutes(findings),
+                # Red runs that were seen and deliberately not reported: the development
+                # loop (red, change, green), waiting, one-off fixes. Not friction.
+                "dropped_red_runs": len(self.dropped),
+                "dropped_minutes": round(sum(d[1] for d in self.dropped) / 60.0, 1),
                 # Corroborated corrections only; "probable" ones are listed as evidence.
                 "corrections": counts.get(signals.USER_CORRECTION, 0),
                 "probable_corrections": counts.get(signals.PROBABLE_CORRECTION, 0),
@@ -760,7 +873,8 @@ class _Analysis:
             "summary": self.clean(finding.summary),
             "excerpt": text,
             "source": self.cited_source(finding),
-            "line": finding.line,
+            # a transcript line; for git evidence, the short hash of the human's commit
+            "line": finding.detail.get("human_commit", 0) if _is_git(finding) else finding.line,
             # what this event alone claims; a hotspot's minutes are the union, not the sum
             "est_seconds_lost": round(
                 sum(end - start for start, end in scoring.claimed(finding)), 1

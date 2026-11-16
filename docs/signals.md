@@ -266,7 +266,8 @@ is always `null`, with or without `--no-excerpts`.
 > session with identical arguments, with no success of that command and
 > nothing changed in between: no edit, and no other command that could have
 > changed files (a script, an install, a move). Dropped as waiting if the
-> same line then passes with nothing changed.
+> same line then passes with nothing changed; never dropped because it passed
+> after something was done.
 
 **What:** the same command line fails 3 or more times in a row within a
 session, with **identical arguments** (after collapsing whitespace and
@@ -311,9 +312,11 @@ relevant, only whether something was, or may have been, changed:
    something (`git push`, `git fetch`, `docker logs`; `REPORT_ONLY_KEYS`) do
    not. Nobody saw what such a command did, so it
    is treated as "something possibly changed" and nothing more: it ends the
-   streak of identical failures and lets a later green run count as a fix,
-   but it is not an edit. It names no file, does not count as a round for
-   `no-convergence`, and does not corroborate a correction. In a failed line
+   streak of identical failures, but it is not an edit. It names no file,
+   does not count as a round for `no-convergence`, and does not corroborate
+   a correction. What a green run after such a command means is decided
+   under [`command-failure`](#command-failure--command-failure) ("Fail,
+   setup step, pass"). In a failed line
    only the steps that demonstrably ran before the failing one count
    (`python fix.py && pytest`), and the command a line is judged by is never
    its own fix: `python gen.py` red, `python gen.py` green is a failure that
@@ -321,8 +324,9 @@ relevant, only whether something was, or may have been, changed:
 
 A retry loop is *derived from* command failures. For confidence it is not a
 second kind of evidence next to them (see methodology). Once a loop is recorded it stays, together with its
-failures, even if the command goes green after a later edit: the three runs
-with nothing changed already happened.
+failures, even if the command goes green after a later edit, install or
+any other command: the three runs with nothing changed already happened.
+(If it went green after a setup step, its failures also record that step.)
 
 **Waiting is not a loop.** If the very same command line fails 2 or more
 times and then *succeeds*, with no change of any of the three kinds above in
@@ -343,7 +347,9 @@ stays on the record as an ordinary failure). "May have changed something" is
 generous by design: three identical failures with an unrelated `git commit`
 or `docker restart db` between them are not a loop, although
 nothing relevant changed. The rule prefers missing such a loop to reporting
-the far more common red, script, red, script, green as one.
+the far more common red, script, red, script, green as one. A loop of
+identical failures that then passes untouched (four red `npm run e2e`, then
+green) is dropped as waiting, although the agent may simply have been lucky.
 
 **What still gets through (false positives):**
 
@@ -585,10 +591,13 @@ successfully once before being removed (read as debugging).
 
 > **In short:** A shell command failed: it exited non-zero or, where the exit
 > status belongs to a pipe or a later step, its own output says so. Setup and
-> invocation errors (command not found, missing module, bad arguments, …)
-> count fully; ordinary failures, such as a test that fails, count at 0.3. A
-> red run followed by a change and a green run of the same job is dropped.
-> Read-only inspection commands (ls, grep, …) are ignored.
+> invocation errors (command not found, missing module, bad arguments, …) and
+> environment failures (a service that is not running, missing credentials,
+> an unset variable) count fully; ordinary failures, such as a test that
+> fails, count at 0.3. A red run followed by an edit and a green run of the
+> same job is dropped; one that passed only after a setup step, with no file
+> edited, is kept in full. Read-only inspection commands (ls, grep, …) are
+> ignored.
 
 **What:** a shell command exits non-zero (or the tool reports an error).
 
@@ -673,29 +682,89 @@ successfully once before being removed (read as debugging).
     wait or a retry loop, and does not clear a `no-convergence` stretch.
 
   `a && b` is not such a case: there the exit status is real.
+- *Environment failures* count fully too (weight 1.0, variant
+  `environment`, one round trip of lost time): the command and the code may
+  be fine, but something around them was not there (`environment_error`).
+  Three kinds, read from the output of a failure that is not a
+  setup/invocation error:
+  - `service`: something the command talks to is not running. `Cannot connect
+    to the Docker daemon`, `Connection refused`, `ECONNREFUSED`, `could not
+    connect to server`, `connection to server ... failed`, `Is the server
+    running`. The service is named only from a fixed vocabulary (by its
+    default port or a word in the output: PostgreSQL, MySQL, Redis, MongoDB,
+    RabbitMQ, Elasticsearch, Kafka, Memcached, "the Docker daemon", else "the
+    service on port N"), so no transcript text is passed on;
+  - `auth`: credentials are missing or expired. `credentials expired`,
+    `token has expired`, `Unable to locate credentials`, `You must be logged
+    in`, `authentication failed`, `Permission denied (publickey`, a hint to
+    run `gh auth login` / `aws sso login` / `docker login`;
+  - `variable`: an environment variable is not set. `Missing required
+    environment variable X`, `X: unbound variable`, `X is not set`, a bare
+    `KeyError: 'X'` (upper-case names only). The name is shown only where
+    excerpts are.
+
+  Such a failure blames no file on the command line. It is dropped like any
+  red run when an edit and then a green run follow (the host name was wrong
+  in the code). Inline snippets are never classified this way.
+  *False positives:* a test that asserts on such a message and fails for
+  another reason, in a session that ends red.
 - *Ordinary failures* (anything else: a red test, a linter or type checker
   reporting problems, a script that raises) count at weight 0.3 and claim no
   lost time. A red test during development is the tool working as intended.
   They are weak evidence: a command with nothing but ordinary failures is
-  capped below the "pattern" band and gets no recommendation, however many
-  sessions it appears in.
+  capped below the "pattern" band and gets no recommendation, in however
+  many sessions a single red run appears. Two things lift an ordinary
+  failure out of that class: a setup step that made it pass (next but one
+  point), and staying red session after session: when a command fails 2 or
+  more times in a session and is still red when the session ends (detail
+  `never_green`), and that happens in 3 or more sessions, those failures are
+  no longer weak (detail `recurring_red`) and each claims its own run time.
 - *Inline code is not a command of the repository:* `python -c '...'`,
   `node -e '...'`, `ruby -e`, `perl -e`, `bun -e`, `php -r`, and scripts piped
   to an interpreter are keyed `python <inline>` / `python <stdin>`. What an
   ad-hoc snippet does is the snippet's business, so its failures are ordinary
   whatever they print; only a missing or non-executable interpreter (exit
   126/127) is a setup error. Inline code never gets "document the command".
-- *Red, fix, green is not counted at all:* an ordinary failure that is
-  followed by a change (an edit, a shell command that rewrites files, or any
-  command that may have changed something such as a patch script or an
-  install; see ["What counts as a change"](#retry-loop--retry-loop)) and
-  then by a success of the same command, **or of
-  another command doing the same job** (`pytest tests/test_a.py` red, edit,
-  `make test` green), is dropped. That is the development loop doing its job. An ordinary
-  failure stays on the record when the command goes green with nothing but
-  looks and other checks in between (flaky, or fixed outside the transcript),
-  never goes green
-  in the session, or was part of a [retry loop](#retry-loop--retry-loop).
+- *Red, fix, green is not counted at all:* an ordinary or environment
+  failure that is followed by an **edit** (Edit/Write, or a shell command
+  that rewrites files: kinds 1 and 2 of ["What counts as a
+  change"](#retry-loop--retry-loop)) and then by a success of the same
+  command, **or of another command doing the same job** (`pytest
+  tests/test_a.py` red, edit, `make test` green), is dropped. That is the
+  development loop doing its job. A failure stays on the record when the
+  command goes green with nothing but looks and other checks in between
+  (flaky, or fixed outside the transcript), never goes green in the session,
+  or was part of a [retry loop](#retry-loop--retry-loop).
+- *Fail, setup step, pass is the thing to write down:* when a red run goes
+  green and the only things that happened in between were commands that may
+  have changed something (kind 3), **with no file edited**, the code was
+  never the problem. What is done with the failure depends on the command in
+  between, not on how the failure was worded:
+  - a **setup step** (`is_setup_step`: `pip install`, `npm ci`, `uv sync`,
+    `docker compose up`, `make bootstrap`, `alembic upgrade`, ... by key; a
+    tool with `install`, `ci`, `bootstrap`, `setup`, `migrate`, `up`,
+    `login` or `sync` among its first words, such as `npx playwright
+    install`; or a local configuration file created from a template, `cp
+    .env.example .env`): the failure is kept at full weight with
+    `fixed_by_setup` (several steps joined with ` && `), blames no file,
+    claims its run time, and from two such events on leads to
+    `document-the-setup-step`: "run `docker compose up` before `pytest`";
+  - **any other command** (`./scripts/reset-db.sh`, `python tools/gen.py`,
+    `make generate`): once, that is a coincidence or a one-off script, and
+    the failure is dropped like the development loop (counted in
+    `totals.dropped_red_runs`). The same failing command passing after the
+    same other command in **two or more sessions** is a setup step under a
+    name we did not know: those failures are kept with `fixed_by_setup`,
+    exactly as above;
+  - **version control** (`git`, `gh`) is never the fix: the failure is
+    dropped.
+
+  A setup step that succeeds is never itself "the check going green": `npx
+  playwright install` running fine says nothing about `npm run e2e`.
+  With an edit anywhere between the red and the green run, nobody can say
+  what fixed it, and the failure is dropped.
+  *False positives:* a flaky test that happens to pass after an unrelated
+  `npm install`; one event at full weight in that session.
 - *Test-first development is red, fix, green too:* a setup/invocation error
   that names what is missing (`No module named 'app.newfeat'`, `can't open
   file 'scripts/run.py'`, `file or directory not found: tests/test_x.py`,

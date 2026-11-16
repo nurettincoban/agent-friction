@@ -801,7 +801,7 @@
     {
       "attribution": "The normalized command.",
       "count": 0,
-      "description": "The same command line failed 3 or more times in a row in one session with identical arguments, with no success of that command and nothing changed in between: no edit, and no other command that could have changed files (a script, an install, a move). Dropped as waiting if the same line then passes with nothing changed.",
+      "description": "The same command line failed 3 or more times in a row in one session with identical arguments, with no success of that command and nothing changed in between: no edit, and no other command that could have changed files (a script, an install, a move). Dropped as waiting if the same line then passes with nothing changed; never dropped because it passed after something was done.",
       "id": "retry-loop",
       "severity": 3.0,
       "title": "Retry loop",
@@ -855,7 +855,7 @@
     {
       "attribution": "The normalized command. Ordinary failures are also attributed to repo files named on the command line; setup/invocation errors are not (the files are not the cause).",
       "count": 9,
-      "description": "A shell command failed: it exited non-zero or, where the exit status belongs to a pipe or a later step, its own output says so. Setup and invocation errors (command not found, missing module, bad arguments, …) count fully; ordinary failures, such as a test that fails, count at 0.3. A red run followed by a change and a green run of the same job is dropped. Read-only inspection commands (ls, grep, …) are ignored.",
+      "description": "A shell command failed: it exited non-zero or, where the exit status belongs to a pipe or a later step, its own output says so. Setup and invocation errors (command not found, missing module, bad arguments, …) and environment failures (a service that is not running, missing credentials, an unset variable) count fully; ordinary failures, such as a test that fails, count at 0.3. A red run followed by an edit and a green run of the same job is dropped; one that passed only after a setup step, with no file edited, is kept in full. Read-only inspection commands (ls, grep, …) are ignored.",
       "id": "command-failure",
       "severity": 2.0,
       "title": "Command failure",
@@ -973,6 +973,8 @@
     "commands_affected": 4,
     "corrections": 4,
     "directories_affected": 1,
+    "dropped_minutes": 0.1,
+    "dropped_red_runs": 1,
     "est_minutes_lost": 9.4,
     "files_affected": 5,
     "friction_events": 34,

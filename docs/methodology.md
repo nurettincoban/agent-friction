@@ -218,7 +218,9 @@ score       = 100 x severity x recurrence x consistency
 ```
 
 - **severity(signal)** is the per-signal constant from the [catalog](signals.md).
-- **weight** is 1 except that an ordinary `command-failure` uses 0.3.
+- **weight** is 1 except that an ordinary `command-failure` uses 0.3 (one
+  that passed only after a setup step counts 1, like setup/invocation and
+  environment failures).
 - **Weak evidence is capped.** If every event on a target is of a weak kind
   (`edit-thrash`, `read-loop`, `search-miss`, `probable-correction`, or an
   *ordinary* `command-failure`; see the [catalog](signals.md); also a `path-miss` on a routinely probed optional file, and `no-convergence` events that all come from one session), the score is capped at **19**, below the band where
@@ -226,8 +228,12 @@ score       = 100 x severity x recurrence x consistency
   recommendation is made. Such a target can be a lead; it cannot be an alarm
   or fail a build on its own. This is what keeps `git stash pop` with nothing
   stashed, a red `mypy` run or ten unrelated `python -c` snippets from adding
-  up to "a command that keeps failing": it takes a setup/invocation error, a
-  retry loop or a human reaction to lift a command out of the cap.
+  up to "a command that keeps failing": it takes a setup/invocation error,
+  an environment failure, a failure that a setup step fixed, a retry loop or
+  a human reaction to lift a command out of the cap. One more thing does: a
+  command that failed 2 or more times in a session and was still red when
+  the session ended, in 3 or more sessions (`RECURRING_RED_MIN_SESSIONS`).
+  Those failures are no longer weak, and each claims its own run time.
 - **share** is 1 except when one correction is split over several files.
 - **log2 per session** gives diminishing returns: a session contributes one
   more point each time its friction doubles, so one pathological session
@@ -383,9 +389,10 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `learn-from-rework` | 2+ `human-rework` |
 | `add-a-pointer` | 2+ `search-miss` in the file or directory, with other evidence or the same pattern in 2+ sessions; lists the patterns |
 | `summarize-this-file` | 2+ `read-loop`, next to other evidence |
-| `use-the-working-command` | 2+ *setup/invocation* failures of a command were followed by the same successful command *doing the same job* (same role, or a wrapper of the same tool), in sessions where the failing command never worked afterwards. Never an install, version-control or housekeeping command |
-| `document-the-setup-step` | 2+ failures of a command that then worked after the same setup command (`pip install`, `npm ci`, ...) |
-| `document-the-command` | 2+ setup/invocation failures of a command (and neither of the above) |
+| `use-the-working-command` | 2+ *setup/invocation* failures of a command were followed by the same successful command *doing the same job* (same role, or a wrapper of the same tool), in sessions where the failing command never worked afterwards. Never an install, version-control or housekeeping command. Also: 2+ `command not found` failures after which the same command ran under a versioned name of the program ("use `python3`, not `python`") |
+| `document-the-setup-step` | 2+ failures of a command that then passed after the same setup step with no file edited in between (`pip install`, `npm ci`, `docker compose up`, `cp .env.example .env`, or any other command that did so in 2+ sessions): "run X before Y" |
+| `document-the-environment` | 2+ *environment* failures of a command (and none of the above): a service that was not reachable ("say how to start PostgreSQL before `pytest`"; the service is named when the output identifies it), missing or expired credentials, or an unset environment variable (named only with excerpts) |
+| `document-the-command` | 2+ setup/invocation failures of a command (and none of the above). If the same command then worked in a subdirectory, the advice names it ("run `npm test` from `web/`") |
 | `make-the-failure-actionable` | 1+ `retry-loop` on a command |
 | `run-it-in-the-background` | 2+ harness timeouts of a command that is a server or watcher (`npm run dev`, `uvicorn`, ...); replaces `document-the-command` for those |
 | `give-it-more-time` | 2+ harness timeouts of any other command (`npm run build` cut off after 2 minutes): say how long it takes, raise the timeout or run it in the background, or name a narrower command; replaces `document-the-command` for those |
@@ -514,9 +521,11 @@ follow one rule: anything that looks like a home directory becomes `~`.
   code that calls a write function count as edits. Any other command that
   ran and is neither a look nor a check (`python tools/fix_imports.py`, `npm
   install`, `git commit`) counts as "may have changed something": enough to
-  end a retry loop and to make the next green run a fix, never enough to
-  name a file. This errs towards forgiving: a failure that went away after
-  an unrelated command is read as fixed. It still misses changes made
+  end a retry loop, never enough to name a file. A red run that goes green
+  after such commands alone is kept when the command was a setup step, or
+  when the same pair recurs in two sessions; otherwise it is dropped, which
+  errs towards forgiving: a one-off script that really was the missing
+  setup step is not reported until it happens again. It still misses changes made
   outside the transcript (the human's editor, another agent or subagent, a
   watcher) and changes made by commands named like checks (`pytest
   --snapshot-update`, a `make test` that regenerates files): there, red

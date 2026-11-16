@@ -7,9 +7,12 @@ Everything downstream (scoring, recommendations, output) only sees findings.
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 # Event kinds
 TOOL_CALL = "tool_call"
@@ -158,5 +161,31 @@ class Finding:
     #: Further pieces of claimed time, for an event made of several separate stretches.
     intervals: tuple[tuple[float, float], ...] = ()
     stream: str = ""  # intervals are only merged within one stream
+    #: When the call behind the event ran (epoch seconds), whether or not it claims time.
+    run: tuple[float, float] | None = None
     detail: dict[str, str] = field(default_factory=dict)
     fid: int = -1
+
+
+_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
+
+def _whole(value: Any) -> Any:
+    if isinstance(value, str):
+        return _SURROGATE_RE.sub("\ufffd", value)
+    if isinstance(value, list):
+        return [_whole(item) for item in value]
+    if isinstance(value, dict):
+        return {_whole(key): _whole(item) for key, item in value.items()}
+    return value
+
+
+def load_json_line(raw: str) -> Any:
+    """``json.loads`` for a transcript line, with nothing in it that cannot be written out.
+
+    JSON may escape half of a surrogate pair (``"\\ud83d"``, a truncated emoji).
+    Python reads that as a lone surrogate, which no UTF-8 writer accepts. Every
+    such character becomes U+FFFD here, at the boundary, in keys and values.
+    """
+    obj = json.loads(raw)
+    return _whole(obj) if "\\u" in raw else obj

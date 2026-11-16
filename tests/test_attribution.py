@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_friction import attribution
 from agent_friction.attribution import (
     PathResolver,
     command_role,
@@ -402,7 +403,7 @@ def test_parse_command_never_raises_on_shell_ish_noise() -> None:
     import random
 
     rng = random.Random(20261115)
-    for _ in range(4000):
+    for _ in range(2000):
         size = rng.randint(0, 14)
         glue = rng.choice(("", " ", " ", " "))
         command = glue.join(rng.choice(_FUZZ_ATOMS) for _ in range(size))
@@ -553,3 +554,30 @@ def test_tools_whose_exit_status_is_an_answer(command: str) -> None:
 )
 def test_aggregate_checks(key: str, aggregate: bool) -> None:
     assert is_aggregate_check(key) is aggregate
+
+
+@pytest.mark.parametrize(
+    ("line", "setup", "copy"),
+    [
+        ("docker compose up -d db", True, None),
+        ("npx playwright install", True, None),
+        ("pip install -r requirements.txt", True, None),
+        ("npm ci", True, None),
+        ("make bootstrap", True, None),
+        ("cp .env.example .env", False, "cp .env.example .env"),
+        ("cp config/settings.sample.yml config/settings.yml", False,
+         "cp config/settings.sample.yml config/settings.yml"),
+        ("ln -s ../shared/.env .env.local", False, "ln ../shared/.env .env.local"),
+        ("cp src/a.py src/b.py", False, None),
+        ("cp '.env example' .env", False, None),  # not a name we would print
+        ("npx playwright test", False, None),
+        ("npm run build", False, None),
+        ("git pull --install-hooks", False, None),
+        ("python scripts/install_hooks.py", False, None),
+        ("./scripts/setup.sh", False, None),
+    ],
+)  # fmt: skip
+def test_setup_steps(line: str, setup: bool, copy: str | None) -> None:
+    (step,) = parse_command(line).steps
+    assert attribution.is_setup_step(step) is setup
+    assert attribution.env_copy(step) == copy

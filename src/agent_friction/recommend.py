@@ -63,6 +63,7 @@ RULE_IDS: tuple[str, ...] = (
     "summarize-this-file",
     "use-the-working-command",
     "document-the-setup-step",
+    "document-the-environment",
     "document-the-command",
     "make-the-failure-actionable",
     "run-it-in-the-background",
@@ -461,6 +462,40 @@ class _Rules:
 
     # ---- command rules ---------------------------------------------------------------
 
+    def environment(self, key: str, failures: list[Finding]) -> None:
+        """The command is fine; what it needs around it was not there."""
+        kind = _top([f.detail.get("environment", "") for f in failures], 1)[0][0]
+        often = _in_sessions(failures)
+        if kind == signals.ENV_SERVICE:
+            named = _top([f.detail.get("service", "") for f in failures], 1)
+            service = named[0][0] if named else "the service it needs"
+            title = f"Say how to start {service} before {code(key)}"
+            detail = (
+                f"{code(key)} failed {often} because {service} was not reachable. Say in "
+                "AGENTS.md how to start it and how to check that it is up, or start it before "
+                "the agent does. If it cannot run where agents work, say which checks to "
+                "run instead."
+            )
+        elif kind == signals.ENV_AUTH:
+            title = f"Say how {code(key)} gets its credentials"
+            detail = (
+                f"{code(key)} failed {often} because credentials were missing or expired. "
+                "Say in AGENTS.md how to log in, or that agents cannot and should stop and "
+                "ask instead of retrying."
+            )
+        else:
+            title = f"Document the environment variables {code(key)} needs"
+            variables = _top([f.detail.get("env_var", "") for f in failures], 3)
+            which = ""
+            if variables and self.quote is not None:
+                which = " (" + ", ".join(code(name) for name, _ in variables) + ")"
+            detail = (
+                f"{code(key)} failed {often} because an environment variable was not set"
+                f"{which}. Say in AGENTS.md where the values come from (a template such as "
+                "`.env.example`, a secrets manager), or load them in the command itself."
+            )
+        self.add("document-the-environment", title, detail, [signals.COMMAND_FAILURE])
+
     def command(self, key: str) -> None:
         failures = self.get(signals.COMMAND_FAILURE)
         invocation = self.get(signals.COMMAND_FAILURE, "invocation")
@@ -494,7 +529,32 @@ class _Rules:
             )
         fixes = _top([f.detail.get("recovered_by", "") for f in failures], 1)
         setups = _top([f.detail.get("fixed_by_setup", "") for f in failures], 1)
-        if fixes and fixes[0][1] >= MIN_EVENTS:
+        names = _top([f.detail.get("works_as", "") for f in invocation], 1)
+        places = _top([f.detail.get("works_in", "") for f in invocation], 1)
+        environment = self.get(signals.COMMAND_FAILURE, "environment")
+        if names and names[0][1] >= MIN_EVENTS:
+            # `python: command not found`, then the same line with `python3`
+            name, count = names[0]
+            old = _top([f.detail.get("not_found", "") for f in invocation], 1)[0][0]
+            self.add(
+                "use-the-working-command",
+                f"Tell agents to use {code(name)}",
+                f"{code(key)} failed {_in_sessions(invocation)} because {code(old)} is not on "
+                f"the PATH here; {_times(count)} the same command then ran with {code(name)}. "
+                f'Add a line to AGENTS.md such as: "use {code(name)}, not {code(old)}".',
+                [signals.COMMAND_FAILURE],
+            )
+        elif places and places[0][1] >= MIN_EVENTS:
+            place, count = places[0]
+            self.add(
+                "document-the-command",
+                f"Tell agents to run {code(key)} in {code(place)}",
+                f"{code(key)} failed {_in_sessions(invocation)} where the agent first ran it; "
+                f"{_times(count)} it then worked in {code(place)}. Add a line to AGENTS.md "
+                f'such as: "run {code(key)} from {code(place)}".',
+                [signals.COMMAND_FAILURE],
+            )
+        elif fixes and fixes[0][1] >= MIN_EVENTS:
             # Only a command doing the same job counts (see signals: is_replacement), and
             # only in sessions where the failing command never worked afterwards.
             fix, count = fixes[0]
@@ -517,6 +577,8 @@ class _Rules:
                 f'{code(key)}"), or make the environment ready before the agent starts.',
                 [signals.COMMAND_FAILURE],
             )
+        elif len(environment) >= MIN_EVENTS:
+            self.environment(key, environment)
         elif len(invocation) >= MIN_EVENTS:
             detail = (
                 f"{code(key)} failed {_in_sessions(invocation)} with setup or invocation errors."

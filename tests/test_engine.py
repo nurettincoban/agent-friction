@@ -504,7 +504,9 @@ def test_git_rework_is_merged_into_file_hotspots(tmp_path: Path) -> None:
     assert hotspot["confidence"] == "low"
     assert "learn-from-rework" in [r["id"] for r in hotspot["recommendations"]]
     rework = next(e for e in hotspot["evidence"] if e["signal"] == "human-rework")
-    assert (rework["source"], rework["line"], rework["excerpt"]) == ("git", 0, "human fix-up")
+    assert (rework["source"], rework["excerpt"]) == ("git", "human fix-up")
+    assert re.fullmatch(r"[0-9a-f]{8}", rework["line"])  # the human commit, not "line 0"
+    assert rework["line"] in rework["summary"]
     assert rework["session_id"].startswith("git:")
     assert out["sources"][-1]["kind"] == "git" and out["sources"][-1]["sessions"] == 2
     assert out["totals"]["sessions"] == 1  # git commits are not transcript sessions
@@ -1232,3 +1234,177 @@ def test_a_session_of_prose_with_no_location_touched_no_repository(tmp_path: Pat
     out = analyze(AnalyzeOptions(repo=repo, transcripts=[log], include_git=False, now=NOW))
     assert out["totals"]["sessions"] == 2
     assert out["sources"][0]["sessions_outside_repo"] == 1
+
+
+# ---- round 12 -------------------------------------------------------------------------------
+
+PG_DOWN = (
+    'E   psycopg2.OperationalError: connection to server at "localhost" (127.0.0.1), '
+    "port 5432 failed: Connection refused\n12 errors in 1.31s"
+)
+
+
+def _sessions(tmp_path: Path, count: int, body: Any) -> list[Session]:
+    (tmp_path / "repo").mkdir(parents=True, exist_ok=True)
+    sessions = []
+    for i in range(count):
+        s = Session(f"r{i}", cwd=str(tmp_path / "repo")).user(f"task {i}")
+        body(s)
+        sessions.append(s)
+    return sessions
+
+
+def _recommended(out: dict[str, Any]) -> list[tuple[str, str]]:
+    return [(r["id"], r["title"]) for c in out["commands"] for r in c["recommendations"]]
+
+
+def test_fail_setup_pass_in_every_session_is_the_headline(tmp_path: Path) -> None:
+    def body(s: Session) -> None:
+        s.bash("pytest tests/test_a.py", PG_DOWN, exit_code=1, took=20)
+        s.bash("docker compose up -d db", "Container db  Started", took=15)
+        s.bash("pytest tests/test_a.py", "12 passed in 3.1s")
+
+    out = _scan(tmp_path, _sessions(tmp_path, 4, body))
+    (row,) = out["commands"]
+    assert (row["path"], row["events"], row["confidence"]) == ("pytest", 4, "medium")
+    assert row["score_detail"]["capped"] is False and row["est_minutes_lost"] > 0
+    (rule,) = row["recommendations"]
+    assert rule["id"] == "document-the-setup-step"
+    assert "run `docker compose up` before `pytest`" in rule["detail"]
+    assert out["hotspots"] == []  # the test file is not blamed for a database that is down
+
+
+def test_a_command_that_fixed_it_once_is_a_coincidence_twice_is_a_setup_step(
+    tmp_path: Path,
+) -> None:
+    def body(s: Session) -> None:
+        s.bash("pytest", "1 failed in 1s", exit_code=1, took=30)
+        s.bash("./scripts/reset-db.sh", "ok").bash("pytest", "4 passed")
+
+    once = _scan(tmp_path / "one", _sessions(tmp_path / "one", 1, body))
+    assert once["totals"]["friction_events"] == 0 and once["commands"] == []
+    assert once["totals"]["dropped_red_runs"] == 1 and once["totals"]["dropped_minutes"] == 0.5
+    often = _scan(tmp_path / "many", _sessions(tmp_path / "many", 3, body))
+    (row,) = often["commands"]
+    assert row["events"] == 3 and row["score_detail"]["capped"] is False
+    assert _recommended(often) == [("document-the-setup-step", "Document the setup `pytest` needs")]
+    assert "`scripts/reset-db.sh`" in row["recommendations"][0]["detail"]
+    assert often["totals"]["dropped_red_runs"] == 0
+
+
+def test_red_runs_that_were_not_reported_are_counted(tmp_path: Path) -> None:
+    def body(s: Session) -> None:
+        s.bash("pytest", "1 failed in 1s", exit_code=1, took=60)  # red, edit, green
+        s.edit(str(tmp_path / "repo" / "a.py")).bash("pytest", "4 passed")
+        for _ in range(2):  # waiting for a server
+            s.bash("curl -sf localhost:8000/health", "", exit_code=7, took=3)
+        s.bash("curl -sf localhost:8000/health", "ok")
+        s.bash("npm test", "1 failing", exit_code=1, took=600)  # stays red: reported
+
+    out = _scan(tmp_path, _sessions(tmp_path, 2, body))
+    assert out["totals"]["dropped_red_runs"] == 6 and out["totals"]["dropped_minutes"] == 2.2
+    assert out["totals"]["friction_events"] == 2
+
+
+def test_a_check_that_stays_red_session_after_session_is_not_capped(tmp_path: Path) -> None:
+    def stuck(s: Session) -> None:
+        s.bash("npm run e2e", "2 failed", exit_code=1, took=40)
+        s.read(str(tmp_path / "repo" / "a.py"))
+        s.bash("npm run e2e -- --debug", "2 failed", exit_code=1, took=40)
+
+    def once(s: Session) -> None:
+        s.bash("npm run e2e", "2 failed", exit_code=1, took=40)
+
+    for name, count, body, capped in (
+        ("three", 3, stuck, False),
+        ("two", 2, stuck, True),  # not yet a pattern
+        ("single", 4, once, True),  # one red run when a session ends is routine
+    ):
+        out = _scan(tmp_path / name, _sessions(tmp_path / name, count, body))
+        (row,) = out["commands"]
+        assert row["score_detail"]["capped"] is capped, name
+        assert (row["est_minutes_lost"] > 0) is (not capped), name
+
+
+def test_environment_failures_get_their_own_advice(tmp_path: Path) -> None:
+    cases = {
+        "pytest": (PG_DOWN, "Say how to start PostgreSQL before `pytest`"),
+        "./scripts/deploy.sh": (
+            "Error: AWS credentials expired",
+            "Say how `scripts/deploy.sh` gets its credentials",
+        ),
+        "npm run build": (
+            "Error: Missing required environment variable DATABASE_URL",
+            "Document the environment variables `npm run build` needs",
+        ),
+    }
+
+    def body(s: Session) -> None:
+        for command, (output, _) in cases.items():
+            s.bash(command, output, exit_code=1)
+
+    sessions = _sessions(tmp_path, 3, body)
+    out = _scan(tmp_path, sessions)
+    assert sorted(_recommended(out)) == sorted(
+        ("document-the-environment", title) for _, title in cases.values()
+    )
+    assert all(c["confidence"] == "medium" and c["est_minutes_lost"] > 0 for c in out["commands"])
+    assert "(`DATABASE_URL`)" in json.dumps(out, ensure_ascii=False)
+    hidden = _scan(tmp_path, [], include_excerpts=False)
+    assert "DATABASE_URL" not in json.dumps(hidden) and len(_recommended(hidden)) == 3
+    # ... and a script of the repository stays readable where repo paths are shown anyway
+    (tmp_path / "repo" / "scripts").mkdir()
+    (tmp_path / "repo" / "scripts" / "deploy.sh").write_text("#!/bin/sh\n")
+    named = _scan(tmp_path, [], include_excerpts=False)
+    assert "scripts/deploy.sh" in [c["path"] for c in named["commands"]]
+    assert "scripts/deploy.sh" not in [c["path"] for c in hidden["commands"]]
+
+
+def test_advice_names_the_program_or_the_directory_that_worked(tmp_path: Path) -> None:
+    def body(s: Session) -> None:
+        s.bash("python scripts/gen.py", "bash: python: command not found", exit_code=127)
+        s.bash("python3 scripts/gen.py", "generated")
+        s.bash("npm test", "npm error enoent Could not read package.json", exit_code=254)
+        s.bash("cd web && npm test", "Tests: 3 passed, 3 total")
+
+    (tmp_path / "repo" / "web").mkdir(parents=True)
+    out = _scan(tmp_path, _sessions(tmp_path, 2, body))
+    assert sorted(_recommended(out)) == [
+        ("document-the-command", "Tell agents to run `npm test` in `web/`"),
+        ("use-the-working-command", "Tell agents to use `python3`"),
+    ]
+    details = " ".join(r["detail"] for c in out["commands"] for r in c["recommendations"])
+    assert '"use `python3`, not `python`"' in details
+    assert '"run `npm test` from `web/`"' in details
+
+
+def test_half_a_surrogate_pair_in_a_transcript_can_be_written_out(tmp_path: Path) -> None:
+    (tmp_path / "repo").mkdir()
+    s = Session("u", cwd=str(tmp_path / "repo")).user("go \ud83d")
+    s.bash("pytest", "bash: pytest: command not found \ud83d", exit_code=127)
+    path = tmp_path / "u.jsonl"  # escaped in the file, as a harness writes it
+    path.write_text("\n".join(json.dumps(json.loads(line)) for line in s.lines) + "\n")
+    assert "\\ud83d" in path.read_text()
+    out = analyze(
+        AnalyzeOptions(repo=tmp_path / "repo", transcripts=[path], include_git=False, now=NOW)
+    )
+    text = json.dumps(out, ensure_ascii=False)
+    text.encode("utf-8")  # must not raise
+    assert "command not found �" in text and out["totals"]["friction_events"] == 1
+
+
+def test_a_transcript_outside_home_is_not_cited_by_its_absolute_path(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    line = {"session": "g", "ts": "2026-11-05T16:00:00Z", "kind": "tool_call", "id": 1,
+            "op": "shell", "command": "make build", "cwd": str(repo)}  # fmt: skip
+    done = {"session": "g", "ts": "2026-11-05T16:00:02Z", "kind": "tool_result", "id": 1,
+            "exit_code": 127, "output": "sh: 1: make: not found"}  # fmt: skip
+    log = tmp_path / "client-logs" / "nightly" / "run.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text(json.dumps(line) + "\n" + json.dumps(done) + "\n")
+    for given, cited in ((tmp_path / "client-logs", "client-logs/nightly/run.jsonl"),
+                         (log, "run.jsonl")):  # fmt: skip
+        out = analyze(AnalyzeOptions(repo=repo, transcripts=[given], include_git=False, now=NOW))
+        assert out["commands"][0]["evidence"][0]["source"] == cited
+        assert out["sources"][0]["path"] == cited

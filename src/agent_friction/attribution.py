@@ -16,7 +16,7 @@ import hashlib
 import posixpath
 import re
 import shlex
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1048,20 +1048,23 @@ def _placeholder(word: str, position: int, previous: str) -> str:
     return f"<{kind}:{hashlib.sha256(word.encode()).hexdigest()[:PUBLIC_HASH_DIGITS]}>"
 
 
-def public_key(key: str) -> str:
+def public_key(key: str, keep: Callable[[str], bool] | None = None) -> str:
     """``key`` with every project-specific name replaced by a short stable hash.
 
     Words from a fixed public vocabulary (well-known programs, subcommands and
     target names such as ``test`` or ``build``) are kept; any other word (a
     script path, a make target, an npm script, an unknown executable) becomes
     ``<kind:hash>``. The same name always gives the same placeholder, so
-    grouping across sessions and reports still works.
+    grouping across sessions and reports still works. ``keep`` may vouch for a
+    word that is shown anyway (a script path inside the repository).
     """
     out: list[str] = []
     previous = ""
     for position, word in enumerate(key.split()):
         parts = [p for p in word.split(":") if p]
-        if position == 0:
+        if keep is not None and keep(word):
+            known = True
+        elif position == 0:
             known = word in PUBLIC_PROGRAMS
         else:
             known = word in PUBLIC_VOCABULARY or (
@@ -1162,6 +1165,39 @@ def is_shell_edit(parsed: ParsedCommand, command: str) -> bool:
 
 
 _SCRATCH_RE = re.compile(r"\.(?:log|out|txt|tmp|pid|err)$|^&|^/dev/|^/tmp/|^/var/|^\$TMP", re.I)
+
+
+#: Words that make a command a setup step wherever they stand (`npx playwright install`).
+_SETUP_ARGS = frozenset({"install", "ci", "bootstrap", "setup", "migrate", "up", "login", "sync"})
+_ENV_FILE_RE = re.compile(r"^\.env(?:\..+)?$|\.local(?:\.\w+)?$")
+_TEMPLATE_FILE_RE = re.compile(r"[._-](?:example|sample|template|dist|defaults?)(?:\.\w+)?$", re.I)
+
+
+def is_setup_step(step: Step) -> bool:
+    """Does ``step`` prepare the environment: install, start a service, migrate, log in?"""
+    if is_setup_command(step.key):
+        return True
+    if step.program in ("git", "gh", "glab") or "/" in step.program:
+        return False
+    words = [a for a in step.args if a[:1] != "-"][:3]
+    return step.program in SUBCOMMAND_TOOLS and any(w in _SETUP_ARGS for w in words)
+
+
+def env_copy(step: Step) -> str | None:
+    """``cp .env.example .env``: creating local configuration from a template.
+
+    Returns the command as it can be shown (program and file names), or ``None``.
+    That is a setup step, not a change to the code, although it writes a file.
+    """
+    if step.program not in ("cp", "ln", "mv", "install"):
+        return None
+    names = [a for a in step.args if a[:1] != "-"]
+    if len(names) != 2 or not all(re.fullmatch(r"[\w./-]+", n) for n in names):
+        return None
+    source, target = (n.rsplit("/", 1)[-1] for n in names)
+    if _ENV_FILE_RE.search(target) or _TEMPLATE_FILE_RE.search(source):
+        return f"{step.program} {names[0]} {names[1]}"
+    return None
 
 
 #: Commands that only show or send something; nothing local is different afterwards.

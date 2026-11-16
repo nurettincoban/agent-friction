@@ -268,8 +268,12 @@ def is_weak(finding: Finding) -> bool:
     invocation errors, retry loops and human reactions make a command a hotspot.
     """
     if finding.signal == COMMAND_FAILURE:
+        detail = finding.detail
+        if "fixed_by_setup" in detail or "recurring_red" in detail:
+            # it took a setup step to pass, or it stays red session after session
+            return False
         # an ordinary failure, or a mistyped name that the agent then spelled correctly
-        return finding.detail.get("variant") == "ordinary" or "typo_of" in finding.detail
+        return detail.get("variant") == "ordinary" or "typo_of" in detail
     if finding.signal == NO_CONVERGENCE:
         return finding.detail.get("uncertain") == "1"  # its end was not seen
     if finding.signal == PATH_MISS:

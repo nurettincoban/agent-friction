@@ -132,7 +132,7 @@ attribution rule, and known false positives in [docs/signals.md](https://github.
 | `human-rework` | A human rewrote lines an agent commit had just written, or committed a fix/revert of it (git) |
 | `edit-miss` | An edit could not find its target text, or found it more than once |
 | `edit-revert` | An edit undid an earlier edit in the same session |
-| `command-failure` | A command failed because of setup or invocation; a red test that the agent then fixes is not counted |
+| `command-failure` | A command failed because of setup, invocation, or the environment (a service down, credentials, an unset variable); a red test the agent then fixes is not counted, one that passed only after a setup step is |
 | `no-convergence` | The agent kept editing and re-running the same check, and it never went green |
 | `edit-thrash` | One file edited many times in one session |
 | `stale-edit` | An edit refused because the file changed or was never read |
