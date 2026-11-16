@@ -541,6 +541,39 @@ def _env_prefix(command: str, values: bool) -> str:
     return " ".join(shown)
 
 
+#: Steps that put an environment in place for the rest of a command line.
+_ACTIVATORS = frozenset(
+    {"poetry shell", "pipenv shell", "conda activate", "mamba activate", "micromamba activate"}
+)
+
+
+def _activation(cmd: ParsedCommand, failed: str) -> str:
+    """The step of a green command line that activates an environment, if ``failed`` had none.
+
+    ``source .venv/bin/activate && pytest`` after a red ``pytest``: what was missing
+    was the activation, and that is what is worth writing down. Also ``. venv/bin/activate``,
+    ``poetry shell``, ``conda activate <env>``, ``nvm use``.
+    """
+    for step in cmd.steps:
+        words = [step.program, *step.args]
+        if step.program in ("source", ".") and step.args:
+            script = step.args[0]
+            if not re.search(r"(?:^|/)(?:activate(?:\.\w+)?|\S*env\S*|\.?envrc)$", script):
+                continue
+            text = f"source {script}"
+        elif " ".join(words[:2]) in _ACTIVATORS:
+            text = " ".join(
+                words[:3] if words[0] != "poetry" and words[0] != "pipenv" else words[:2]
+            )
+        elif words[:2] in (["nvm", "use"], ["workon"]) or step.program == "workon":
+            text = " ".join(words[:3])
+        else:
+            continue
+        mentioned = "activate" if "activate" in text else text
+        return "" if mentioned in failed else text
+    return ""
+
+
 def _up_to_verdict(step: Step | None, output: str) -> str:
     """``output`` cut after the line that carries ``step``'s red verdict, if it has one.
 
@@ -945,7 +978,7 @@ _SOFTENER_RE = re.compile(
     r"|but (?:fine|ok|okay|whatever|it works|that works|good enough|i can live with (?:it|that))"
     r"|(?:wait|oh|hang on|hold on),? (?:also|and also|one more thing|additionally|while you)"
     # the human takes the blame, or is only asking
-    r"|(?:because|after|since|when|once) (?:i|my|we|our)\b|my (?:bad|fault|mistake)"
+    r"|my (?:bad|fault|mistake)"
     r"|just (?:curious|wondering|asking|checking|confirming|making sure)"
     r"|out of curiosity|no complaints?|not complaining|curious|genuine(?:ly)? (?:question|asking)"
     # an acknowledgement: "you removed the flag as asked, now ..."
@@ -953,6 +986,24 @@ _SOFTENER_RE = re.compile(
     # the problem predates the agent's work
     r"|before your (?:change|changes|edit|edits|commit|commits|fix|pr)|not caused by you(?:r \w+)?"
     r"|already (?:broken|failing|red|there)|pre-?existing|not (?:related to|because of) your)\b",
+    re.I,
+)
+#: The human names their own action or omission as the cause: "... because I hadn't
+#: pulled", "failing again after I merged main", "because my VPN was off". Not "after I
+#: pulled your change", "when I run it", "since I can't sign in", "because we use tabs",
+#: which say what is wrong with the agent's work. It voids a phrase like any softener,
+#: but if the agent then changes the same files again its work did need redoing.
+_SELF_BLAME_RE = re.compile(
+    r"\b(?:because|after|since|as|cause|cuz) (?:i|we)(?:'d|'ve| had| have| just| accidentally"
+    r"| never| also)* "
+    r"(?:hadn't|had not|haven't|have not|didn't|did not|forgot|never|merged|pulled|rebased"
+    r"|changed|edited|updated|upgraded|downgraded|reverted|reset|switched|checked out|deleted"
+    r"|removed|renamed|moved|broke|messed|misconfigured|mistyped|stashed|bumped|touched"
+    r"|was|were|wasn't|weren't)\b"
+    r"(?! (?:in |down |up )?(?:your|you\b|it\b|that\b|this\b|the (?:change|changes|fix|patch"
+    r"|edit|edits|commit)\b))"
+    r"|\b(?:because|since) (?:of )?(?:my|our) \w+(?: \w+)? (?:was|were|is|are|wasn't|isn't"
+    r"|had|hadn't|has|hasn't)\b",
     re.I,
 )
 #: The human is moving on to something else: a description of a bug ("it doesn't work on
@@ -994,7 +1045,7 @@ _UNDO_OBJECT = (
 )
 #: The human asks for a change to be taken back: "revert src/app.py", "put it back".
 _UNDO_ASKED_RE = re.compile(
-    rf"\b{_UNDO}\b|\bput (?:\S+ ){{1,4}}back\b|\brestore\b|\bgo back to\b", re.I
+    rf"\b{_UNDO}\b|\b(?:put|roll) (?:\S+ ){{1,4}}back\b|\brestore\b|\bgo back to\b", re.I
 )
 _STILL = (
     r"still (?:failing|fails|broken|not working|not fixed|doesn't work|does not work"
@@ -1016,7 +1067,8 @@ _RESULT_NOUN = (
 #: Labels of the openers that are an *answer*, not a verdict, when the agent had just asked
 #: a question ("Shall I refactor util.py?" -> "No, leave it." / "Stop. Just commit.").
 _ANSWER_LABEL = "no, …"
-_ANSWER_LABELS = frozenset({_ANSWER_LABEL, "no no", "not quite", "wrong. / stop."})
+_STOP_LABEL = "wrong. / stop."
+_ANSWER_LABELS = frozenset({_ANSWER_LABEL, "not quite", _STOP_LABEL})
 
 #: (label, pattern, addressed). *Addressed* phrases speak to the agent in the second person
 #: or about what the human had asked for, and count wherever they stand in the head of the
@@ -1068,7 +1120,7 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
         ),
         (
             # "wrong. use pnpm" / "stop. use the other client"; not "Stop. Hammer time".
-            "wrong. / stop.",
+            _STOP_LABEL,
             r"^(?:wrong|incorrect)(?:[.!]*$|\s*[.,;:!—-]+\s+\S)"
             r"|^stop(?:[.!]*$|\s*[.,;:!—-]+\s+(?:use|don't|do not|you|that|this|it\b|revert|undo"
             r"|wait|not |wrong|go back|put|leave|keep|read|look|check|ask|please|just)"
@@ -1112,7 +1164,8 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
             rf"^(?:(?:please|pls|just|now|ok|okay|so)[, ]+)*{_UNDO}(?:[.!,]|$|\s+{_UNDO_OBJECT})"
             rf"|(?:[.,;:!?]|\b(?:please|just|and|then|so))\s+{_UNDO}\s+{_UNDO_OBJECT}"
             rf"|\b(?:can|could|would|will) you (?:please |just )?{_UNDO}\s+{_UNDO_OBJECT}"
-            r"|\bput (?:it|that|this|them|those|everything) (?:all )?back\b",
+            r"|\bput (?:it|that|this|them|those|everything) (?:all )?back\b"
+            r"|\broll (?:it|that|this|them|those|everything) (?:all )?back\b",
             True,
         ),
         (
@@ -1181,6 +1234,18 @@ _REPORTED_SPEECH_RE = re.compile(
 )
 
 
+def softened_correction(text: str, after_question: bool = False) -> list[str]:
+    """The correction phrases in ``text`` that the human took back by blaming themselves.
+
+    "Still failing after I merged main" is not counted as a correction: the
+    human names their own action as the cause. If the agent nevertheless goes
+    back to the files it had just changed, its work did need redoing, and the
+    detector then records a probable correction. Phrases followed by praise or
+    a dismissal ("... but that's fine") are not returned.
+    """
+    return _judge(text, after_question, None)[2]
+
+
 def correction_confidence(
     text: str, after_question: bool = False, idle_seconds: float | None = None
 ) -> tuple[float, list[str]]:
@@ -1190,22 +1255,35 @@ def correction_confidence(
       gives 1.0 wherever it stands in the head of the message.
     * A *verdict* ("No, ...", "that's wrong", "still failing") gives 1.0 only
       when it opens the message, the message does not move on to a new task,
-      and it is not a "No" answering a question the agent just asked
-      (``after_question``). If the human replied more than
+      and it is not a "No" answering an offer or a choice the agent just put
+      to the human (``after_question``; "wrong", "no no" and a request to undo
+      stay corrections after any question). If the human replied more than
       ``CORRECTION_STALE_SECONDS`` after the agent finished (``idle_seconds``),
       a verdict alone is only a probable correction (0.4).
-    * Praise or a dismissal after a phrase voids it.
+    * Praise, a dismissal or the human blaming themselves after a phrase voids it
+      (see ``softened_correction`` for the last).
     * Otherwise two or more distinct weaker cues give 0.4, unless the message
       contains thanks, praise or a dismissal.
     * A single weaker cue ("don't forget ...", "actually, can you also ...")
       is ordinary conversation and gives 0.
     """
+    confidence, labels, _ = _judge(text, after_question, idle_seconds)
+    return confidence, labels
+
+
+def _judge(
+    text: str, after_question: bool, idle_seconds: float | None
+) -> tuple[float, list[str], list[str]]:
+    """``correction_confidence`` plus the phrases only self-blame voided."""
     # A pasted screenshot comes first in the message; the words after it are the reply.
     head = _ATTACHMENT_RE.sub("", text.strip())[:CORRECTION_HEAD_CHARS].replace("’", "'")
     # Somebody else's words, quoted for discussion, are not the human correcting the agent.
     head = _REPORTED_SPEECH_RE.sub(" ", head)
     softeners = [m.start() for m in _SOFTENER_RE.finditer(head)]
     last_softener = max(softeners) if softeners else -1
+    blame = [m.start() for m in _SELF_BLAME_RE.finditer(head)]
+    last_blame = max(blame) if blame else -1
+    softened: list[str] = []
     new_task = bool(_NEW_TASK_RE.search(head))
     strong: list[str] = []
     addressed_any = False
@@ -1215,7 +1293,12 @@ def correction_confidence(
             continue
         if not addressed and new_task:
             continue
-        if label in _ANSWER_LABELS and after_question:
+        # "Stop. Just commit." answers an offer; "wrong. use the client" does not
+        stops = label != _STOP_LABEL or match.group().lower().startswith("stop")
+        if label in _ANSWER_LABELS and after_question and stops:
+            continue
+        if match.start() < last_blame:
+            softened.append(label)
             continue
         if label == "I told you" and _CONFIRM_TAIL_RE.search(head[match.start() :]):
             continue  # "I told you about the flag, right?" asks; it does not reproach
@@ -1224,14 +1307,14 @@ def correction_confidence(
     if strong:
         stale = idle_seconds is not None and idle_seconds > CORRECTION_STALE_SECONDS
         if stale and not addressed_any:
-            return CORRECTION_PROBABLE, [*strong, "long pause"]
-        return CORRECTION_STRONG, strong
-    if softeners:
-        return 0.0, []
+            return CORRECTION_PROBABLE, [*strong, "long pause"], []
+        return CORRECTION_STRONG, strong, []
+    if softeners or blame:
+        return 0.0, [], softened
     weak = [label for label, pattern in _WEAK_CORRECTION if pattern.search(head)]
     if len(weak) >= CORRECTION_MIN_CUES:
-        return CORRECTION_PROBABLE, weak
-    return 0.0, []
+        return CORRECTION_PROBABLE, weak, []
+    return 0.0, [], []
 
 
 @dataclass
@@ -1245,6 +1328,8 @@ class DetectContext:
     is_known_file: Callable[[str], bool]
     #: How a command key is shown (identity, or ``attribution.public_key`` without excerpts).
     command_key: Callable[[str], str] = str
+    #: How a tool name is shown (identity, or ``attribution.public_tool`` without excerpts).
+    tool_name: Callable[[str], str] = str
     #: True if a top-level module/package name belongs to the repository itself.
     first_party: Callable[[str], bool] = lambda top: False
     #: The episode of work an event of a session belongs to (default: the session).
@@ -1389,6 +1474,8 @@ class _State:
     missing_reads: dict[str, list[Finding]] = field(default_factory=dict)
     # a strongly worded correction waiting for the agent to act on it
     unconfirmed: _Unconfirmed | None = None
+    # a correction the human blamed on themselves: (prompt, files changed before it, phrases)
+    softened: tuple[Event, frozenset[str], str] | None = None
     # this turn: did anything go wrong, how did its last command end, which searches missed
     turn_trouble: bool = False
     turn_trouble_files: set[str] = field(default_factory=set)
@@ -1486,6 +1573,10 @@ class _Detector:
         elif signal in _TROUBLE:
             self.state.turn_trouble = True
         return finding
+
+    def _tool(self, call: Event) -> str:
+        """The tool's name as it may be shown (a pseudonym without excerpts)."""
+        return self.ctx.tool_name(call.tool)
 
     def _label(self, key: str, step: Step | None, cwd: str | None) -> str:
         """How a command is named in the result: its key, and where in the repo it ran.
@@ -1669,6 +1760,12 @@ class _Detector:
         for finding in self.findings:
             if state.key_of.get(id(finding)) in still_red:
                 finding.detail["never_green"] = "1"  # red when the session ended
+        # A red run with nothing after it: the session was still going when it was read,
+        # or was abandoned there. Nobody can say whether the failure got resolved.
+        acted = [e.line for e in self.stream.events if e.kind != model.AGENT_MESSAGE]
+        for finding in self.findings:
+            if acted and finding.signal == COMMAND_FAILURE and finding.line == acted[-1]:
+                finding.detail["trailing"] = "1"
         return self.findings
 
     def _end_turn(self) -> None:
@@ -1830,7 +1927,7 @@ class _Detector:
                 self._emit(
                     EDIT_MISS,
                     result,
-                    f"{call.tool} on {path} failed: the text to replace was not found",
+                    f"{self._tool(call)} on {path} failed: the text to replace was not found",
                     targets,
                     excerpt=result.output,
                     interval=interval,
@@ -1841,7 +1938,7 @@ class _Detector:
                 self._emit(
                     EDIT_MISS,
                     result,
-                    f"{call.tool} on {path} failed: the text to replace matched "
+                    f"{self._tool(call)} on {path} failed: the text to replace matched "
                     f"{count or 'several'} places",
                     targets,
                     excerpt=result.output,
@@ -1858,7 +1955,7 @@ class _Detector:
                 self._emit(
                     STALE_EDIT,
                     result,
-                    f"{call.tool} on {path} refused: {reason}",
+                    f"{self._tool(call)} on {path} refused: {reason}",
                     targets,
                     excerpt=result.output,
                     interval=interval,
@@ -1947,7 +2044,7 @@ class _Detector:
             self._emit(
                 EDIT_REVERT,
                 result,
-                f"{call.tool} on {path} undid an earlier edit from the same session",
+                f"{self._tool(call)} on {path} undid an earlier edit from the same session",
                 targets,
                 interval=_capped_back(reverted_at, now) or self._round_trip(action),
             )
@@ -2024,7 +2121,7 @@ class _Detector:
         finding = self._emit(
             PATH_MISS,
             result,
-            f"{action.call.tool} targeted {action.file}, which does not exist"
+            f"{self._tool(action.call)} targeted {action.file}, which does not exist"
             + (" (a routine look for an optional file)" if probe else ""),
             [Target(model.FILE, action.file)],
             excerpt=result.output,
@@ -2046,7 +2143,7 @@ class _Detector:
                 self._emit(
                     FILE_TOO_LARGE,
                     result,
-                    f"{action.call.tool} of {path} was refused: the file is too large to "
+                    f"{self._tool(action.call)} of {path} was refused: the file is too large to "
                     "read in one piece",
                     [Target(model.FILE, path)],
                     excerpt=result.output,
@@ -2111,7 +2208,7 @@ class _Detector:
         finding = self._emit(
             SEARCH_MISS,
             result,
-            f"{call.tool} search in {where} returned nothing",
+            f"{self._tool(call)} search in {where} returned nothing",
             [Target(model.FILE if is_file else model.DIR, scope or ".")],
             excerpt=f"pattern: {call.pattern}" if call.pattern else "",
             # a weak signal: it may be a lead, but it claims no time
@@ -2316,6 +2413,14 @@ class _Detector:
                         finding.detail["variant"] != "ordinary" or self._promote(finding)
                     ):
                         finding.detail["works_with"] = f"{prefix} {label}"
+                    # ... or with an environment activated first on the same line
+                    activation = _activation(cmd, finding.detail["command"])
+                    if (activation and unchanged) and (
+                        finding.detail["variant"] != "ordinary" or self._promote(finding)
+                    ):
+                        activation = self.ctx.command_key(activation)
+                        finding.detail.setdefault("fixed_by_setup", activation)
+                        finding.summary += "; it passed with an environment activated first"
                     self._recover(finding, action)
                 elif finding.detail["variant"] != "ordinary" and is_typo_of(failed_key, key):
                     # `npm run biuld`, then `npm run build`: a slip of the keyboard that
@@ -2679,6 +2784,26 @@ class _Detector:
 
     def _confirm_correction(self, paths: set[str] | frozenset[str], note: str) -> None:
         """The agent acted on files a strongly worded correction was about."""
+        softened = self.state.softened
+        if softened is not None and softened[1] & paths:
+            # The human blamed themselves, and the agent still had to redo its change.
+            self.state.softened = None
+            prompt, files, matched = softened
+            back = sorted(files & paths)[:CORRECTION_MAX_FILES]
+            finding = self._emit(
+                PROBABLE_CORRECTION,
+                prompt,
+                self._correction_summary(
+                    CORRECTION_PROBABLE,
+                    matched,
+                    f"the user named their own action as the cause, but {note}",
+                    "attributed to " + ", ".join(back),
+                ),
+                [Target(model.FILE, rel, 1.0 / len(back)) for rel in back],
+                detail={"confidence": f"{CORRECTION_PROBABLE:g}", "corroborated": "softened"},
+            )
+            self.findings.sort(key=lambda f: f.line)
+            del finding
         pending = self.state.unconfirmed
         if pending is None or not (pending.files & paths):
             return
@@ -2690,6 +2815,7 @@ class _Detector:
     def _settle_correction(self) -> None:
         """The turn after a strongly worded correction is over: did the agent act on it?"""
         rework, self.state.rework = self.state.rework, None
+        self.state.softened = None
         self._settle_wording()
         if rework is not None and rework.finding.signal == USER_CORRECTION:
             # A correction costs the rework it caused: from the agent's first call after
@@ -2744,8 +2870,10 @@ class _Detector:
                 return
             if step is not None and step.key:
                 targets = [Target(model.COMMAND, self._label(step.key, step, call.cwd))]
-        what = targets[0].key if targets else call.tool
+        tool = self._tool(call)
+        what = targets[0].key if targets else ""
         what = f"`{what}`" if targets and targets[0].kind == model.COMMAND else what
+        declined = f"{tool} on {what}" if what else tool
         excerpt_parts = []
         if call.op == model.OP_SHELL and call.command:
             excerpt_parts.append(f"$ {call.command}")
@@ -2754,7 +2882,7 @@ class _Detector:
         self._emit(
             TOOL_REJECTED,
             result,
-            f"The user declined {call.tool} on {what}" + (" and said why" if result.reason else ""),
+            f"The user declined {declined}" + (" and said why" if result.reason else ""),
             targets,
             excerpt="\n".join(excerpt_parts),
             interval=self._round_trip(action),
@@ -2779,13 +2907,15 @@ class _Detector:
             if step is not None and step.key:
                 targets = [Target(model.COMMAND, self._label(step.key, step, call.cwd))]
         by = {"hook": "a hook", "blocked": "the harness"}.get(result.reason, "permission settings")
-        what = targets[0].key if targets else call.tool
+        tool = self._tool(call)
+        what = targets[0].key if targets else ""
         what = f"`{what}`" if targets and targets[0].kind == model.COMMAND else what
+        denied = f"{tool} on {what}" if what else tool
         excerpt = [f"$ {call.command}"] if call.op == model.OP_SHELL and call.command else []
         self._emit(
             PERMISSION_DENIED,
             result,
-            f"{call.tool} on {what} was denied by {by}; it did not run",
+            f"{denied} was denied by {by}; it did not run",
             targets,
             excerpt="\n".join([*excerpt, result.output]),
             interval=self._round_trip(action),
@@ -2810,7 +2940,7 @@ class _Detector:
         if not targets:
             if last.call.op in (model.OP_READ, model.OP_EDIT, model.OP_WRITE, model.OP_SHELL):
                 return  # the agent was working outside the repo
-            what = f"running {last.call.tool}"
+            what = f"running {self._tool(last.call)}"
         elif targets[0].kind == model.COMMAND:
             # Stopping a running command is about the work in progress, not about the
             # command: the event goes to what the agent had been changing, if anything.
@@ -2847,8 +2977,16 @@ class _Detector:
             finished = max(finished or 0.0, self.state.agent_seen)
         asked = _epoch(event)
         idle = asked - finished if asked is not None and finished is not None else None
-        confidence, labels = correction_confidence(event.text, event.after_question, idle)
+        confidence, labels, softened = _judge(event.text, event.after_question, idle)
         if confidence <= 0:
+            before = frozenset(
+                a.file
+                for a in self.state.turn
+                if a.file and a.call.op in (model.OP_EDIT, model.OP_WRITE)
+            )
+            if softened and before:
+                matched = ", ".join(f'"{label}"' for label in softened)
+                self.state.softened = (event, before, matched)
             return
         touched: list[str] = []  # most recent first
         edited: list[str] = []

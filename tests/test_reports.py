@@ -195,3 +195,25 @@ def test_markdown_quotes_cannot_render_images_or_mention_people() -> None:
 
     out = _html_escape("![x](http://e/i.png) cc @octocat `@kept`")
     assert "![" not in out and "@octocat" not in out and "`@kept`" in out
+
+
+def test_rows_without_a_time_estimate_say_so() -> None:
+    from agent_friction.report._common import fmt_lost
+
+    assert fmt_lost(0) == "n/a" and fmt_lost(2) == "2m"
+    r = sample_result()
+    r["hotspots"][0]["est_minutes_lost"] = 0
+    item = find_target(r, "src/shop/generated/schema.py")
+    assert item is not None
+    assert "no time estimate" in render_detail(r, item)
+    assert "n/a" in render_terminal(r) and "| n/a |" in render_markdown(r)
+
+
+def test_trailing_red_runs_are_marked_unresolved() -> None:
+    r = sample_result()
+    r["hotspots"][0]["evidence"][0]["trailing"] = True
+    item = find_target(r, "src/shop/generated/schema.py")
+    assert item is not None
+    assert "unresolved at end of session" in render_detail(r, item)
+    assert "unresolved at end of session" in render_markdown(r)
+    assert "e.trailing" in render_html(r)

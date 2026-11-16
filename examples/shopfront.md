@@ -19,8 +19,8 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 | 1 | `src/shopfront/api/schema_gen.py` | 56.8 | 4 | 12 | 4m | `edit-miss`×6, `user-correction`×2, `probable-correction`×1 | high |
 | 2 | `src/shopfront/checkout/service.py` | 43.4 | 3 | 6 | 2m | `edit-revert`×2, `user-correction`×2, `edit-thrash`×1 | high |
 | 3 | `src/shopfront/payments/refunds.py` | 11.4 | 1 | 1 | 18s | `path-miss`×1 | low |
-| 4 | `api/openapi.yaml` | 9.7 | 1 | 1 | 0s | `search-miss`×1 | low |
-| 5 | `tests/test_refunds.py` | 8.5 | 1 | 1 | 0s | `command-failure`×1 | low |
+| 4 | `api/openapi.yaml` | 9.7 | 1 | 1 | n/a | `search-miss`×1 | low |
+| 5 | `tests/test_refunds.py` | 8.5 | 1 | 1 | n/a | `command-failure`×1 | low |
 
 ## Commands that keep failing
 
@@ -35,7 +35,7 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 
 | # | Directory | Score | Sessions | Events | Est. time lost | Top signals | Confidence |
 |---:|---|---:|---:|---:|---:|---|---|
-| 1 | `src/shopfront` | 29.5 | 2 | 5 | 0s | `search-miss`×5 | medium |
+| 1 | `src/shopfront` | 29.5 | 2 | 5 | n/a | `search-miss`×5 | medium |
 
 ## Evidence
 

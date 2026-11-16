@@ -151,9 +151,7 @@ corroborated: ...").
 - **What voids a phrase:**
   - *Praise or a dismissal after it* in the same message ("thanks", "great",
     "nailed it", "keep going", "looks good", "that's fine", "... are fine",
-    "never mind", "ignore it", "unrelated", "flaky", ...), the human taking
-    the blame or naming their own action as the cause ("... because I hadn't
-    pulled", "tests failing again after I merged main", "my bad") or only
+    "never mind", "ignore it", "unrelated", "flaky", "my bad", ...) or only
     asking ("just curious", "just checking", "not complaining"), an
     acknowledgement ("you removed the flag as asked, now ..."), or saying
     that the problem predates the agent ("before your change", "already
@@ -166,6 +164,22 @@ corroborated: ...").
     but fine", "... but it works", "... but good enough") and an afterthought
     that only adds to the request ("no, wait, also add a --verbose flag",
     "oh, one more thing").
+  - *The human naming their own action as the cause* after the phrase:
+    "because", "after" or "since", then "I" or "we", then what they did or
+    failed to do ("hadn't", "didn't", "forgot", "never", "merged", "pulled",
+    "rebased", "changed", "updated", "reverted", "switched", ...), or "because
+    my VPN was off": "That didn't work because I hadn't pulled", "tests
+    failing again after I merged main". Saying what they *saw* is not taking
+    the blame, and stays a correction: "that doesn't work, I get a KeyError
+    when I run it", "Still failing when I run make test", "It's still broken
+    after I pulled your change" (what was pulled is the agent's work), "you
+    broke the login since I can't sign in anymore", "No, that's wrong because
+    we use tabs here". Unlike praise, self-blame is only the human's guess at
+    the cause. If the agent then changes a file again that it had changed in
+    the turn before the message, its work did need redoing, and the message
+    is recorded as a *probable* correction (confidence 0.4, never quoted,
+    `corroborated: softened`), attributed to those files. If the agent only
+    reruns a command, or edits something else, nothing is recorded.
   - *Somebody else's words:* a quotation introduced by a reporting phrase
     ("Here's the reviewer's comment: 'No, I said to keep the old name'. Do
     you agree?", "Bob wrote: \"that is wrong, revert it\"", "the ticket says
@@ -176,12 +190,18 @@ corroborated: ...").
   - *Moving on* voids a verdict: "next task", "new task", "another issue",
     "let's move on", "next: ..." ("It doesn't work on Windows yet; next task: add Windows
     support").
-  - *An opener that answers a question:* if the final paragraph of the last
-    thing the agent wrote contains a question mark ("Want me to refactor
-    util.py? It would take a few minutes."), or the agent's last action was a
-    question/choice tool (`AskUserQuestion`, `ExitPlanMode`, `ask_user`, ...),
-    then a leading "No, ...", "Not quite", "Wrong." or "Stop." is read as an
-    answer, not an objection. Phrases addressed to the agent still count.
+  - *An opener that answers an offer or a choice:* if the final paragraph of
+    the last thing the agent wrote puts an offer or a choice to the human
+    ("Want me to refactor util.py? It would take a few minutes.", "Should I
+    also rename it?", "Do you want tests?", "Which module?", "A or B?"), or
+    the agent's last action was a question/choice tool (`AskUserQuestion`,
+    `ExitPlanMode`, `ask_user`, ...), then a leading "No, ...", "Not quite"
+    or "Stop." is read as an answer, not an objection. A closing courtesy is
+    not such a question, because agents end most turns with one: "Anything
+    else?", "Let me know if you'd like changes?", "How does that look?",
+    "What next?". After any question, "wrong.", "no no", a request to undo
+    ("roll it back", "revert that") and phrases addressed to the agent still
+    count.
   - *A long pause:* a verdict typed more than 5 minutes after the agent's last
     activity, with nothing addressed to the agent, may be about something
     else by then. Naming a changed file is then not enough: it counts as a
@@ -233,7 +253,9 @@ about a failure the agent did not cause, which it then fixes in a file it had
 touched. Naming a changed file corroborates even when the complaint is about
 something else in the same sentence. A "No, ..." that answers a question the
 agent asked several messages earlier, or one phrased without a question mark,
-is read as a verdict. Second-person phrases about the past ("you forgot the
+is read as a verdict. So is a "No, ..." in reply to a question that is neither
+an offer nor a choice in the wording we know ("Does that look right?" - "No,
+the header is off" is counted, and is usually meant, as a correction). Second-person phrases about the past ("you forgot the
 migration last week, and I fixed it") and rhetorical "why did you ..." are
 strong wording.
 
@@ -872,6 +894,15 @@ successfully once before being removed (read as debugging).
     `fixed_by_setup` (several steps joined with ` && `), blames no file,
     claims its run time, and from two such events on leads to
     `document-the-setup-step`: "run `docker compose up` before `pytest`";
+  - an **environment activated on the green line itself**: `pytest` fails
+    with a setup/invocation error and `source .venv/bin/activate && pytest`
+    (or `. venv/bin/activate && ...`, `poetry shell && ...`, `conda activate
+    <env> && ...`, `nvm use && ...`) then passes with no file changed in
+    between. The command key is the same both times, so nothing "replaced"
+    it; what was missing is the activation, recorded as `fixed_by_setup`
+    (`source .venv/bin/activate`) and named by `document-the-setup-step`. Not
+    when the failed line had the activation too. A wrapper (`uv run pytest`)
+    is another command and leads to `use-the-working-command` instead;
   - **any other command** (`./scripts/reset-db.sh`, `python tools/gen.py`,
     `make generate`): once, that is a coincidence or a one-off script, and
     the failure is dropped like the development loop (counted in
@@ -975,7 +1006,13 @@ role: test, build, lint, type-check or format; or a wrapper of the same tool,
 such as `uv run pytest` or `make test` for `pytest`) and the failing command
 did not succeed later in the session; `fixed_by_setup` if the same command
 succeeded after an install/setup command (`pip install`, `npm ci`, `uv sync`,
-`docker compose up`, ...). A `git commit` or `rm` that happens to succeed
+`docker compose up`, ...) or with an environment activated in front of it.
+A failure that is the last thing in its session (no later tool call and no
+later human message: the session was still running when it was read, or was
+abandoned there) is marked `trailing` (`evidence[].trailing: true`). It
+counts like any other failure - an agent that stops on a red run has not
+been helped by the repository - but nothing shows whether it was resolved,
+and reports say so. A `git commit` or `rm` that happens to succeed
 next is neither.
 
 **False positives / limits:** when the output of a chain matches no known

@@ -3128,3 +3128,157 @@ def test_a_missing_module_the_agent_just_imported_is_its_own_bug(tmp_path: Path)
     assert found.detail["variant"] == "invocation"
     s = Session().user("go").bash("pytest -q", missing, exit_code=4)
     assert detect(s, tmp_path)[0].detail["variant"] == "invocation"
+
+
+# ---- round 18: self-blame, questions, activation, trailing red runs ----------------------
+
+BLAMES_THE_AGENT = [
+    "that doesn't work, I get a KeyError when I run it",
+    "Still failing when I run make test",
+    "It's still broken after I pulled your change",
+    "That didn't work. When I click save nothing happens",
+    "you broke the login since I can't sign in anymore",
+    "No, that's wrong because we use tabs here",
+]
+BLAMES_THEMSELVES = [
+    "That didn't work because I hadn't pulled. Try again now.",
+    "It's not working because my VPN was off.",
+    "tests failing again after I merged main",
+    "Still failing since we never rebased, sorry",
+]
+
+
+@pytest.mark.parametrize("text", BLAMES_THE_AGENT)
+def test_saying_what_the_human_saw_is_not_taking_the_blame(tmp_path: Path, text: str) -> None:
+    assert correction_confidence(text)[0] == signals.CORRECTION_STRONG, text
+    assert signals.softened_correction(text) == []
+    s = Session().user("add the feature").edit(A).say("Done.").user(text).edit(A, "p", "q")
+    (fix,) = detect(s, tmp_path)
+    assert fix.signal == signals.USER_CORRECTION and keys(fix) == [("file", "src/a.py")]
+
+
+@pytest.mark.parametrize("text", BLAMES_THEMSELVES)
+def test_self_blame_voids_a_correction_unless_the_agent_redoes_its_work(
+    tmp_path: Path, text: str
+) -> None:
+    assert correction_confidence(text) == (0.0, []), text
+    assert signals.softened_correction(text), text
+    # the agent only runs the tests again: the human was right to blame themselves
+    calm = Session().user("add the feature").edit(A).say("Done.").user(text)
+    calm.bash("pytest", "1 passed")
+    assert detect(calm, tmp_path) == []
+    # the agent goes back to the file it had just changed: its work did need redoing
+    redo = Session().user("add the feature").edit(A).say("Done.").user(text).edit(A, "p", "q")
+    (fix,) = detect(redo, tmp_path)
+    assert fix.signal == signals.PROBABLE_CORRECTION and keys(fix) == [("file", "src/a.py")]
+    assert fix.detail["corroborated"] == "softened" and fix.excerpt == ""
+    assert fix.line == 5 and "named their own action as the cause" in fix.summary
+    # another file, or the next prompt's work, is not a response to it
+    other = Session().user("add the feature").edit(A).say("Done.").user(text).edit(B)
+    other.user("now the docs").edit(A, "p", "q")
+    assert detect(other, tmp_path) == []
+
+
+def test_praise_after_a_phrase_is_never_a_softened_correction(tmp_path: Path) -> None:
+    text = "still failing but that's unrelated, ignore it. Add a flag to src/a.py"
+    assert signals.softened_correction(text) == []
+    s = Session().user("add the feature").edit(A).say("Done.").user(text).edit(A, "p", "q")
+    assert detect(s, tmp_path) == []
+
+
+CLOSERS = [
+    "Done. Anything else?",
+    "All tests pass. Let me know if you'd like any changes?",
+    "I've updated the handler. Is there anything else you'd like me to change or add?",
+    "Done.\n\nHow does that look?",
+    "What would you like to do next?",
+]
+OFFERS = [
+    "Should I also rename the helper?",
+    "Do you want me to add tests?",
+    "Use the REST client or the gRPC one?",
+    "Which module?",
+    "Done.\n\nWant me to refactor util.py? It would take a few minutes.",
+    "Shall I proceed?",
+]
+
+
+def test_only_an_offer_or_a_choice_makes_the_reply_an_answer() -> None:
+    from agent_friction.adapters.common import asks_question
+
+    assert not any(asks_question(text) for text in CLOSERS)
+    assert all(asks_question(text) for text in OFFERS)
+
+
+@pytest.mark.parametrize("closer", CLOSERS)
+def test_a_closing_courtesy_does_not_swallow_a_correction(tmp_path: Path, closer: str) -> None:
+    for text in ("wrong. use PaymentClient", "no no no. roll it back", "No, keep the old name"):
+        s = Session().user("add the feature").edit(A).say(closer).user(text).edit(A, "p", "q")
+        (fix,) = detect(s, tmp_path)
+        assert fix.signal == signals.USER_CORRECTION, (closer, text)
+
+
+def test_wrong_and_roll_it_back_are_corrections_after_any_question(tmp_path: Path) -> None:
+    for text in ("wrong. use PaymentClient", "no no no. roll it back", "roll it back"):
+        assert correction_confidence(text, after_question=True)[0] == signals.CORRECTION_STRONG
+        s = Session().user("add the feature").edit(A).say("Should I also add tests?")
+        s.user(text).edit(A, "p", "q")
+        (fix,) = detect(s, tmp_path)
+        assert fix.signal == signals.USER_CORRECTION, text
+    for text in ("No, keep the old name", "Stop. Just commit.", "Not quite, only the unit tests"):
+        assert correction_confidence(text, after_question=True) == (0.0, []), text
+
+
+NO_FLASK = "Traceback\nModuleNotFoundError: No module named 'flask'"
+
+
+@pytest.mark.parametrize(
+    ("line", "step"),
+    [
+        ("source .venv/bin/activate && pytest", "source .venv/bin/activate"),
+        (". .venv/bin/activate && pytest", "source .venv/bin/activate"),
+        ("poetry shell && pytest", "poetry shell"),
+        ("conda activate shop && pytest", "conda activate shop"),
+    ],
+)
+def test_an_activation_in_front_of_the_green_run_is_the_setup_step(
+    tmp_path: Path, line: str, step: str
+) -> None:
+    s = Session().user("go").bash("pytest", NO_FLASK, exit_code=1).bash(line, "5 passed")
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["fixed_by_setup"] == step
+    assert failure.summary.endswith("it passed with an environment activated first")
+
+
+def test_an_activation_is_not_the_fix_when_it_was_there_before_or_code_changed(
+    tmp_path: Path,
+) -> None:
+    line = "source .venv/bin/activate && pytest"
+    both = Session().user("go").bash(line, NO_FLASK, exit_code=1).bash(line, "5 passed")
+    edited = Session().user("go").bash("pytest", NO_FLASK, exit_code=1).edit(A).bash(line, "ok")
+    for s in (both, edited):
+        assert all("fixed_by_setup" not in f.detail for f in detect(s, tmp_path))
+
+
+def test_a_red_run_with_nothing_after_it_is_marked_trailing(tmp_path: Path) -> None:
+    last = Session().user("go").bash("pytest", "1 failed", exit_code=1)
+    (failure,) = detect(last, tmp_path)
+    assert failure.detail["trailing"] == "1"
+    # the agent's closing words do not resolve it
+    (failure,) = detect(last.say("The test still fails."), tmp_path)
+    assert failure.detail["trailing"] == "1"
+    for more in (
+        Session().user("go").bash("pytest", "1 failed", exit_code=1).read(A),
+        Session().user("go").bash("pytest", "1 failed", exit_code=1).user("ok, leave it"),
+    ):
+        assert all("trailing" not in f.detail for f in detect(more, tmp_path))
+
+
+def test_a_tool_denied_without_a_target_is_named_once(tmp_path: Path) -> None:
+    s = Session().user("go")
+    refused = "Claude requested permissions to use WebFetch, but you haven't granted it yet."
+    s.tool("WebFetch", {"url": "https://example.com"}, refused, is_error=True)
+    s.reject("mcp__tracker__create", {"title": "x"})
+    denied, declined = detect(s, tmp_path)
+    assert denied.summary == "WebFetch was denied by permission settings; it did not run"
+    assert declined.summary == "The user declined mcp__tracker__create"

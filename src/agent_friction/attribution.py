@@ -1128,6 +1128,98 @@ def _placeholder(word: str, position: int, previous: str) -> str:
     return f"<{kind}:{hashlib.sha256(word.encode()).hexdigest()[:PUBLIC_HASH_DIGITS]}>"
 
 
+#: Tool names that say nothing about a project: the built-in tools of the agents whose
+#: transcripts are read, and the generic format's operation words.
+PUBLIC_TOOLS = frozenset(
+    [
+        "read",
+        "edit",
+        "write",
+        "multiedit",
+        "notebookedit",
+        "notebookread",
+        "bash",
+        "bashoutput",
+        "killshell",
+        "killbash",
+        "taskoutput",
+        "taskstop",
+        "grep",
+        "glob",
+        "ls",
+        "webfetch",
+        "websearch",
+        "task",
+        "agent",
+        "todowrite",
+        "todoread",
+        "exitplanmode",
+        "enterplanmode",
+        "askuserquestion",
+        "skill",
+        "slashcommand",
+        "toolsearch",
+        "powershell",
+        "listmcpresourcestool",
+        "readmcpresourcetool",
+        "search",
+        "shell",
+        "other",
+        "view",
+        "create",
+        "str_replace",
+        "str_replace_editor",
+        "str_replace_based_edit_tool",
+        "insert",
+        "undo_edit",
+        "apply_patch",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "list_dir",
+        "list_directory",
+        "run_terminal_cmd",
+        "run_command",
+        "execute_command",
+        "run_shell_command",
+        "shell_command",
+        "file_search",
+        "grep_search",
+        "codebase_search",
+        "search_files",
+        "search_file_content",
+        "list_files",
+        "replace",
+        "replace_in_file",
+        "write_to_file",
+        "delete_file",
+        "web_search",
+        "web_fetch",
+        "update_plan",
+    ]
+)
+
+
+def _tool_hash(kind: str, name: str) -> str:
+    return f"<{kind}:{hashlib.sha256(name.encode()).hexdigest()[:PUBLIC_HASH_DIGITS]}>"
+
+
+def public_tool(name: str) -> str:
+    """A tool name as it may be shown without excerpts.
+
+    Built-in tool names are kept. Any other name was chosen by a project or by
+    one of its plugins and becomes ``<tool:hash>``; an MCP tool
+    ``mcp__<server>__<tool>`` becomes ``mcp__<server:hash>__<tool:hash>``, so
+    that tools of one server can still be told to belong together.
+    """
+    if name.lower() in PUBLIC_TOOLS:
+        return name
+    if name.startswith("mcp__") and "__" in name[5:]:
+        server, _, tool = name[5:].partition("__")
+        return f"mcp__{_tool_hash('server', server)}__{_tool_hash('tool', tool)}"
+    return _tool_hash("tool", name)
+
+
 def public_key(key: str, keep: Callable[[str], bool] | None = None) -> str:
     """``key`` with every project-specific name replaced by a short stable hash.
 

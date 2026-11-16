@@ -22,7 +22,12 @@ from typing import Any
 
 from agent_friction import __version__, gitsignals, model, recommend, redact, scoring, signals
 from agent_friction.adapters import claude_code, parse_transcript
-from agent_friction.attribution import PUBLIC_HASH_DIGITS, PathResolver, public_key
+from agent_friction.attribution import (
+    PUBLIC_HASH_DIGITS,
+    PathResolver,
+    public_key,
+    public_tool,
+)
 from agent_friction.discovery import (
     claude_config_dirs,
     discover_repo_transcripts,
@@ -96,7 +101,7 @@ def _iso(value: datetime | None) -> str | None:
 def _in_window(ts: datetime | None, since: datetime | None, until: datetime | None) -> bool:
     if ts is None:
         return True
-    return not ((since is not None and ts < since) or (until is not None and ts > until))
+    return not ((since is not None and ts < since) or (until is not None and ts >= until))
 
 
 def _apply_window(
@@ -775,6 +780,7 @@ class _Analysis:
             self.is_known_file,
             # Without excerpts no project-specific name may survive in a command key.
             command_key=str if options.include_excerpts else self.public_command,
+            tool_name=str if options.include_excerpts else public_tool,
             first_party=self.first_party,
             unit=self.unit,
         )
@@ -1197,6 +1203,8 @@ class _Analysis:
         if options.include_excerpts and finding.excerpt.strip():
             text = redact.excerpt(finding.excerpt, options.excerpt_chars)
         return {
+            # the last thing that happened in its session: not known to be resolved
+            **({"trailing": True} if finding.detail.get("trailing") else {}),
             "signal": finding.signal,
             "session_id": finding.session_id,
             "timestamp": _iso(finding.ts),

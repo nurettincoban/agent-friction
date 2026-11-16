@@ -73,14 +73,44 @@ QUESTION_TOOL_RE = re.compile(
 )
 
 
+#: A closing courtesy, not a question that a "no" could answer: "Anything else?",
+#: "Let me know if you'd like changes?", "How does that look?".
+_CLOSER_RE = re.compile(
+    r"\b(?:anything (?:else|more|further)|let me know|what(?:'s| is| would you like)? next"
+    r"|what else|what would you like|what do you think|how (?:does|do|did) (?:that|this|it|they)"
+    r"|how(?:'s| is) that|any (?:questions|thoughts|feedback|concerns|other|further|more)"
+    r"|(?:does|do|did) (?:that|this|it|these|they) (?:look|work|help|make sense|seem|feel)"
+    r"|make sense|sound good|look good|looks? (?:right|ok|okay)|happy with|feel free)\b",
+    re.I,
+)
+#: An offer to do something or a request to choose, which a "no" answers: "Should I
+#: also rename it?", "Do you want tests?", "Which module?", "A or B?".
+_OFFER_RE = re.compile(
+    r"\b(?:should (?:i|we)|shall (?:i|we)|(?:do|did) you (?:want|need|prefer|mean)"
+    r"|would you (?:like|prefer|rather)|want me to|like me to|(?:can|may|could|might) i\b"
+    r"|is it (?:ok|okay|fine|alright)|(?:ok|okay|fine|alright) (?:if|to|with)"
+    r"|(?:go ahead|proceed|continue)\b|which\b|or\b|(?:are|were) you\b"
+    r"|is (?:that|this|it) (?:the|what)"
+    r"|ready (?:to|for)|permission|confirm)",
+    re.I,
+)
+
+
 def asks_question(text: str) -> bool:
-    """Does agent prose put a question to the human in its final paragraph?
+    """Does agent prose end by offering something or asking the human to choose?
 
     "Want me to refactor util.py? It would take a few minutes." asks, although
-    it does not end in a question mark. Only this one bit is kept of the text.
+    it does not end in a question mark; a "No, leave it" after it is an answer.
+    "Done. Anything else?" and "Let me know if that works?" are closing
+    courtesies: what the human says next is about the work, not about them.
+    Only this one bit is kept of the text.
     """
     paragraphs = [p for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
-    return bool(paragraphs) and "?" in paragraphs[-1]
+    if not paragraphs:
+        return False
+    sentences = re.split(r"(?<=[.!?])\s+|\n", paragraphs[-1])
+    questions = [s for s in sentences if s.rstrip(" *_)\"'").endswith("?")]
+    return any(_OFFER_RE.search(q) is not None and _CLOSER_RE.search(q) is None for q in questions)
 
 
 def edit_pairs(

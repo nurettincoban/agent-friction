@@ -6,6 +6,11 @@ import math
 from typing import Any
 
 
+def fmt_lost(minutes: float) -> str:
+    """A row's time lost; "n/a" when its evidence carries no time estimate at all."""
+    return fmt_minutes(minutes) if minutes > 0 else "n/a"
+
+
 def fmt_minutes(minutes: float) -> str:
     """Render a duration in minutes compactly: ``42s``, ``7m``, ``2h 05m``."""
     # Round half up (not Python's half-to-even) so this matches the HTML report.

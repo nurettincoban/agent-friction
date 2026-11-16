@@ -8,6 +8,7 @@ from typing import Any
 from agent_friction.report._common import (
     collect_recommendations,
     dropped_note,
+    fmt_lost,
     fmt_minutes,
     plural,
     signal_titles,
@@ -40,7 +41,7 @@ def _table(items: list[dict[str, Any]], label: str) -> list[str]:
         lines.append(
             f"| {i} | {_cell(_code(h.get('path', '')))} | {float(h.get('score', 0)):.1f}"
             f" | {h.get('sessions', 0)} | {h.get('events', 0)}"
-            f" | {fmt_minutes(float(h.get('est_minutes_lost', 0)))} | {_cell(sig)}"
+            f" | {fmt_lost(float(h.get('est_minutes_lost', 0)))} | {_cell(sig)}"
             f" | {h.get('confidence', 'low')} |"
         )
     return lines
@@ -78,6 +79,7 @@ def _details(h: dict[str, Any], titles: dict[str, str]) -> list[str]:
             out.append(
                 f"- `{ts}` session `{str(e.get('session_id', ''))[:8]}` · "
                 f"{titles.get(sid, sid)}: {_html_escape(str(e.get('summary', '')))}"
+                + (" (unresolved at end of session)" if e.get("trailing") else "")
             )
             if e.get("excerpt"):
                 quoted = _html_escape(str(e["excerpt"]).replace("\n", " "))

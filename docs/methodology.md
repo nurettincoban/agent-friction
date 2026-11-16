@@ -14,8 +14,8 @@ constants live next to the code that uses them and are listed here.
    discarded at this step and never reach the output. Of the agent's prose
    two things are kept: *when* it was written (a marker that the agent was
    active, used for time estimates) and whether the last message before a
-   human reply asked something (a question mark in its final paragraph, or a
-   question/choice tool). Of the text of an edit only hashes are kept, plus
+   human reply offered something or asked for a choice (in its final
+   paragraph, or with a question/choice tool). Of the text of an edit only hashes are kept, plus
    one bit: whether it only added text. Harness and IDE blocks inside user
    turns (`<system-reminder>`, `<ide_opened_file>`, ...) are stripped.
 3. **Detect.** Deterministic rules turn events into friction events
@@ -463,7 +463,7 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `add-a-pointer` | 2+ `search-miss` in the file or directory, not counting searches for leftovers (`TODO`, `console.log`, conflict markers, ...), with other evidence or the same pattern missed in 2+ sessions by agents that went on looking for it (see the signal); lists the patterns |
 | `summarize-this-file` | 2+ `read-loop`, next to other evidence |
 | `use-the-working-command` | 2+ *setup/invocation* failures of a command were followed by the same successful command *doing the same job* (same role, or a wrapper of the same tool), in sessions where the failing command never worked afterwards. Never an install, version-control or housekeeping command. Also: 2+ `command not found` failures after which the same command ran under a versioned name of the program ("use `python3`, not `python`"), and 2+ setup/invocation failures after which the same command ran with a variable set in front of it and no file edited in between ("use `PYTHONPATH=src pytest`"; the value is shown only for a fixed set of variables such as `PYTHONPATH`, `NODE_ENV`, `DJANGO_SETTINGS_MODULE`, and only with excerpts, otherwise `NAME=...`) |
-| `document-the-setup-step` | 2+ failures of a command that then passed after the same setup step with no file edited in between (`pip install`, `npm ci`, `docker compose up`, `cp .env.example .env`, or any other command that did so in 2+ sessions): "run X before Y" |
+| `document-the-setup-step` | 2+ failures of a command that then passed after the same setup step with no file edited in between (`pip install`, `npm ci`, `docker compose up`, `cp .env.example .env`, or any other command that did so in 2+ sessions), or that then passed on a line that first activated an environment (`source .venv/bin/activate && pytest`, `poetry shell`, `conda activate <env>`): "run X before Y" |
 | `document-the-environment` | 2+ *environment* failures of a command (and none of the above): a service that was not reachable ("say how to start PostgreSQL before `pytest`"; the service is named when the output identifies it), missing or expired credentials, an unset environment variable (named only with excerpts), a port that was already in use, or a full disk |
 | `document-the-command` | 2+ setup/invocation failures of a command (and none of the above). If the same command then worked in a subdirectory, the advice names it ("run `npm test` from `web/`"). A command that is keyed by where it ran (`pytest (src/)`) is titled "Document how to run `pytest` in `src/`" |
 | `make-the-failure-actionable` | 1+ `retry-loop` on a command |
@@ -538,7 +538,9 @@ Transcripts contain secrets. The engine therefore:
   search patterns, command lines, command output, reasons for declining,
   commit subjects) in exactly two places: `excerpt` and the quotes inside
   recommendation details. Both disappear with `--no-excerpts`.
-  What remains then is structural: tool names, repo-relative paths, counts,
+  What remains then is structural: tool names (built-in ones as they are;
+  any other, such as an MCP server's or a plugin's, as `<tool:hash>` or
+  `mcp__<server:hash>__<tool:hash>`), repo-relative paths, counts,
   commit hashes and **command keys**. Without excerpts a key contains only
   words from a fixed public vocabulary (`pytest`, `npm run build`, `git
   commit`); every project-specific name in it (an unknown executable, a
@@ -560,7 +562,10 @@ Transcripts contain secrets. The engine therefore:
   connection-string fields (`AccountKey=`, `SharedAccessKey=`, `Password=`);
   `mysql -pSECRET` / `sshpass -p SECRET`; SendGrid keys (`SG.x.y`); prose
   such as "the password is x"; `docker login -p x`; assignments to names
-  ending in `_KEY`, `_ID`, `_SALT` ... (`SECRET_KEY = '...'`); e-mail
+  ending in `_KEY`, `_ID`, `_SALT` ... (`SECRET_KEY = '...'`); upper-case
+  environment-style names with `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD` or
+  `KEY` anywhere in them (`SECRET_KEY_BASE=x`, `SIGNING_KEY=x`); `vault
+  login X`, `htpasswd -b file user X`, `net use ... /user:u X`; e-mail
   addresses (not `user@8.8.4.4`: an IP host is not a mailbox); private
   network addresses (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) and host
   names ending in `.internal`, `.local`, `.corp` or `.lan` (`db.internal`,

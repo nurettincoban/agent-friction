@@ -32,7 +32,7 @@ promise. Every option has a CLI flag: `transcripts` is `-t`, `since`/`until` are
 | --- | --- | --- |
 | `repo` | required | Repository root. |
 | `transcripts` | `None` | Files or directories (searched recursively for `*.jsonl`). `None` auto-discovers Claude Code transcripts for the repo, its subdirectories, worktrees and parent directories (see methodology, Discovery). The format of each file is detected from its first lines. |
-| `since`, `until` | `None` | Only **events** whose own timestamp lies inside this window, both ends inclusive (naive datetimes are UTC). The filter is per event, not per session or file: a session that straddles a boundary contributes only its events inside it; an event without a timestamp inherits the previous event's. Events of the same session *before* `since` are still read as context (which files the agent had edited when a correction arrives, which run was red before an edit), but nothing that happened there is counted, exposed or listed. Git commits are filtered by author date. |
+| `since`, `until` | `None` | Only **events** whose own timestamp lies inside this window: `since <= ts < until` (naive datetimes are UTC). `until` is exclusive, so a scan `until` a moment and a scan `since` the same moment never share an event. The filter is per event, not per session or file: a session that straddles a boundary contributes only its events inside it; an event without a timestamp inherits the previous event's. Events of the same session *before* `since` are still read as context (which files the agent had edited when a correction arrives, which run was red before an edit), but nothing that happened there is counted, exposed or listed. Git commits are filtered by author date. |
 | `include_git` | `True` | Add `human-rework` from `git log`. Silently unavailable outside a git repo. |
 | `include_excerpts` | `True` | `False` removes everything verbatim: excerpts become `null` and recommendations stop quoting prompts, search patterns, error lines and reasons. Repo paths remain, but a path the agent only *guessed* is not a repo path: from the first component that neither exists in the repository now nor was ever read, edited or written successfully in the transcripts, each component is shown as `<path:6 hex digits>` (`src/<path:1f0c2a>/<path:9b7e44>`; the same name always gives the same placeholder). The directory in a command key (`npm test (web/)`) is kept: the command ran there, so it existed; command keys keep only publicly known words, and project-specific names in them become hash placeholders such as `make <target:37bd73>` (methodology, Attribution). |
 | `max_evidence` | `5` | Evidence items per hotspot. |
@@ -184,7 +184,8 @@ was fixed only if its target still has exposure there.
 | `signal` | Signal id. |
 | `session_id` | Transcript session, or `git:<sha>` of the agent commit when no analysed session made it. |
 | `timestamp` | ISO-8601 UTC; `null` only for generic events without `ts`. |
-| `summary` | What happened, built from structure only: tool name, repo-relative path, normalized command name, counts, commit hashes. Never contains prompts, search patterns, command arguments or output. |
+| `trailing` | `true` on a `command-failure` that is the last thing that happened in its session (no later tool call, no later human message): the session was still running or was abandoned, and nothing shows whether the failure was resolved. It counts like any other event. The key is absent otherwise. *Addition within schema version 1.* |
+| `summary` | What happened, built from structure only: tool name (without excerpts, a name that is not a built-in tool of a known agent is shown as `<tool:hash>`, an MCP tool as `mcp__<server:hash>__<tool:hash>`), repo-relative path, normalized command name, counts, commit hashes. Never contains prompts, search patterns, command arguments or output. |
 | `excerpt` | Redacted, truncated transcript text (error output, the command, the human's words, the search pattern), or `null`. Always `null` with `--no-excerpts`, and always `null` for `probable-correction` (a guess never quotes the human). May contain newlines. |
 | `source` | Where to look the event up: `claude-code:<repo name>/<session file>.jsonl` (never the project directory), a generic transcript file as it was passed (home as `~`; a file that could only be named by an absolute path is named relative to the working directory or to the `--transcripts` directory it was found in, `logs/nightly/run.jsonl`, or else by its file name), or `"git"`. `null` for transcript evidence with `--no-excerpts`. |
 | `line` | 1-based line number in `source` (int). For git evidence, the short hash of the human commit (str, 8 hex digits), so that `git:<line>` is something `git show` accepts. |
@@ -214,6 +215,10 @@ additions:
 Without excerpts (`key_mode: "pseudonymized"`), project-specific words of a
 key become hash placeholders (`make <target:37bd73>`); `<inline>`, `<stdin>`
 and the directory suffix, a repo path like any other, are kept as they are.
+Tool names in summaries are treated the same way: built-in tools (`Read`,
+`Edit`, `Bash`, `Grep`, `WebFetch`, `Task`, ... and the generic format's
+operation words) keep their names, any other name becomes `<tool:hash>`, and
+an MCP tool `mcp__<server>__<tool>` becomes `mcp__<server:hash>__<tool:hash>`.
 
 ## Generic transcript format
 
@@ -273,9 +278,10 @@ are kept.
 of it is stored or emitted. It is used for two things: its `ts` marks that
 the agent was active (a failed call is then timed up to the agent's next
 message instead of only its own duration), and if the agent's last message
-before a `user_message` has a question mark in its final paragraph, a reply
-that opens with "No, ...", "Not quite" or "Stop." is read as an answer rather
-than a correction. A `tool_call` whose `tool` is a question tool (`ask_user`,
+before a `user_message` ends by offering something or asking for a choice
+("Should I ...?", "Do you want ...?", "A or B?"; not a closing "Anything
+else?"), a reply that opens with "No, ...", "Not quite" or "Stop." is read as
+an answer rather than a correction. A `tool_call` whose `tool` is a question tool (`ask_user`,
 `AskUserQuestion`, ...) has the same effect.
 
 ```jsonl

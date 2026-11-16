@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from agent_friction import __version__, signals
-from agent_friction.attribution import public_key
+from agent_friction.attribution import public_key, public_tool
 from agent_friction.discovery import encode_cwd
 from agent_friction.engine import (
     AnalyzeOptions,
@@ -1940,3 +1940,87 @@ def test_background_failures_score_like_foreground_ones(tmp_path: Path) -> None:
     assert "document-the-command" in [r["id"] for r in back["recommendations"]]
     # the reported ends are not calls the agent made
     assert out["totals"]["tool_calls"] == 4 * 7
+
+
+def test_no_excerpts_hides_project_tool_names(tmp_path: Path) -> None:
+    refused = "Claude requested permissions to use {}, but you haven't granted it yet."
+    sessions = []
+    for i in range(3):
+        s = Session(f"s{i}").user("go")
+        s.tool("mcp__SECRETMCP__do", {"x": 1}, refused.format("mcp__SECRETMCP__do"), is_error=True)
+        s.reject("mcp__SECRETMCP__do", {"x": 2})
+        s.tool(
+            "WebFetch", {"url": "https://example.com"}, refused.format("WebFetch"), is_error=True
+        )
+        s.edit("/repo/src/a.py", error=builders.EDIT_NOT_FOUND)
+        sessions.append(s)
+    generic = tmp_path / "g.jsonl"
+    rows: list[dict[str, Any]] = []
+    for i in range(3):
+        base = {"session": f"g{i}", "cwd": "/repo", "tool": "acme_secret_editor"}
+        call = {**base, "kind": "tool_call", "op": "edit", "path": "src/a.py"}
+        rows += [
+            {"session": f"g{i}", "kind": "user_message", "text": "go", "cwd": "/repo"},
+            {**call, "id": 1, "old": "a", "new": "b"},
+            {**base, "kind": "tool_result", "id": 1, "error": "edit_not_found"},
+            {**call, "id": 2, "old": "c", "new": "d"},
+            {**base, "kind": "tool_result", "id": 2, "error": "rejected"},
+        ]
+    generic.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    files = [s.save(tmp_path / "t" / s.session_id) for s in sessions] + [generic]
+
+    def run(**kw: Any) -> str:
+        options = AnalyzeOptions(repo=Path("/repo"), transcripts=files, include_git=False, **kw)
+        return json.dumps(analyze(options))
+
+    full, bare = run(), run(include_excerpts=False)
+    for name in ("SECRETMCP", "mcp__SECRETMCP__do", "acme_secret_editor"):
+        assert name in full and name not in bare, name
+    server, tool = public_tool("mcp__SECRETMCP__do")[5:].split("__")
+    assert re.fullmatch(r"<server:[0-9a-f]{6}>", server) and re.fullmatch(
+        r"<tool:[0-9a-f]{6}>", tool
+    )
+    assert f"The user declined mcp__{server}__{tool}" in bare
+    assert f"{public_tool('acme_secret_editor')} on " in bare
+    # built-in tools keep their names, and a tool without a target is named once
+    assert "Edit on " in bare and "WebFetch on WebFetch" not in full + bare
+    assert "WebFetch was denied by permission settings" in bare
+    assert all(public_tool(name) == name for name in ("Read", "MultiEdit", "Bash", "edit", "shell"))
+
+
+def test_until_is_exclusive_so_two_windows_never_share_an_event(tmp_path: Path) -> None:
+    midnight = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    s = Session("s0", start=midnight - timedelta(seconds=9)).user("go")
+    s.bash("pytest", "1 failed", exit_code=1, took=5)  # called at -5s, red at midnight sharp
+    s.tick(60).bash("pytest", "1 failed", exit_code=1)
+
+    def events(**window: Any) -> int:
+        total: int = scan(tmp_path, [s], **window)["totals"]["friction_events"]
+        return total
+
+    assert events() == 2
+    assert events(until=midnight) == 0 and events(since=midnight) == 2
+    assert events(until=midnight + timedelta(seconds=1)) == 1
+    assert events(until=midnight) + events(since=midnight) == events()
+
+
+def test_a_trailing_red_run_is_marked_in_its_evidence(tmp_path: Path) -> None:
+    s = Session("s0").user("go").bash("pytest", "1 failed", exit_code=1)
+    s.tick(30).bash("pytest", "1 failed", exit_code=1)
+    (command,) = scan(tmp_path, [s])["commands"]
+    first, last = sorted(command["evidence"], key=lambda e: e["line"])
+    assert "trailing" not in first and last["trailing"] is True
+    assert command["events"] == 2  # it still counts
+
+
+def test_the_activation_step_is_what_the_advice_names(tmp_path: Path) -> None:
+    missing = "Traceback\nModuleNotFoundError: No module named 'flask'"
+    sessions = []
+    for i in range(4):
+        s = Session(f"s{i}").user("run the tests").bash("pytest", missing, exit_code=1)
+        sessions.append(s.bash("source .venv/bin/activate && pytest", "5 passed"))
+    (command,) = scan(tmp_path, sessions)["commands"]
+    (advice,) = command["recommendations"]
+    assert advice["id"] == "document-the-setup-step"
+    assert advice["setup"] == "source .venv/bin/activate" and "`pytest`" in advice["title"]
+    assert "run `source .venv/bin/activate` before `pytest`" in advice["detail"]

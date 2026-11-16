@@ -213,7 +213,7 @@ Native adapters for other agents are welcome; see [CONTRIBUTING.md](https://gith
 `scan -f json` produces a versioned document (`schema_version: 1`) described field by field in
 [docs/schema.md](https://github.com/nurettincoban/agent-friction/blob/main/docs/schema.md). Build dashboards or bots on it: within a schema version fields are only
 added, never removed or re-typed. Until 1.0 the project is alpha, so new fields can still arrive
-in any release; they are listed in the CHANGELOG.
+in any release; from 0.1.0 on, each one is listed in the CHANGELOG.
 
 ## Limitations
 

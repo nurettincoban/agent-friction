@@ -133,6 +133,24 @@ _RULES: tuple[_Rule, ...] = (
         r"\1[REDACTED]",
     ),
     (
+        # `SECRET_KEY_BASE="two words"`, `SIGNING_KEY=hunter2`: an environment-style name
+        # with SECRET, TOKEN, PASSWORD, PASSWD or KEY anywhere in it
+        "env-quoted",
+        re.compile(
+            r"\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|KEY)[A-Z0-9_]*=)([\"'])"
+            r"(?!\[REDACTED)[^\"'\n]{4,}\2"
+        ),
+        r"\1\2[REDACTED]\2",
+    ),
+    (
+        "env-assignment",
+        re.compile(
+            r"\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|KEY)[A-Z0-9_]*=)"
+            r"(?![\"']?\[REDACTED)(?![\"'$])([^\s\"',;&]{4,})"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
         "cookie",
         re.compile(r"(?i)\b((?:set-)?cookie[\"']?\s*[:=]\s*[\"']?)[^\n\"']+"),
         r"\1[REDACTED:cookie]",
@@ -157,6 +175,32 @@ _RULES: tuple[_Rule, ...] = (
     (
         "login-password-flag",
         re.compile(r"(\blogin\b[^\n|;&]*?\s(?:-p|--password)(?:\s+|=))(?!\[REDACTED)(\S+)"),
+        r"\1[REDACTED]",
+    ),
+    (
+        # `vault login s.Abc123`: the token is the positional argument
+        "vault-login",
+        re.compile(r"(\bvault\s+login\s+(?:-\S+\s+)*)(?!\[REDACTED)(?![-\w]+=)([^\s-]\S*)"),
+        r"\1[REDACTED]",
+    ),
+    (
+        # `htpasswd -b file user pass`: with -b the password is on the command line
+        "htpasswd",
+        re.compile(r"(\bhtpasswd\s+(?:-\w+\s+)*-\w*b\w*\s+(?:-\w+\s+)*\S+\s+\S+\s+)(\S+)"),
+        r"\1[REDACTED]",
+    ),
+    (
+        # `net use Z: \\\\host\\share pass /user:x` and `net use ... /user:x pass`
+        "net-use",
+        re.compile(r"(?i)(\bnet\s+use\b[^\n|;&]*?/user:\S+\s+)(?!\[REDACTED)([^\s/]\S*)"),
+        r"\1[REDACTED]",
+    ),
+    (
+        "net-use-positional",
+        re.compile(
+            r"(?i)(\bnet\s+use\s+(?:\S+:\s+)?\\\\\S+\s+)(?!\[REDACTED)([^\s/*]\S*)"
+            r"(?=\s+/user:)"
+        ),
         r"\1[REDACTED]",
     ),
     (

@@ -9,6 +9,7 @@ from agent_friction.report._common import (
     all_items,
     collect_recommendations,
     dropped_note,
+    fmt_lost,
     fmt_minutes,
     plural,
     signal_titles,
@@ -57,6 +58,10 @@ def _in_repo_calls(totals: dict[str, Any]) -> int:
     """Tool calls inside the repo; older results only have the all-calls count."""
     value = totals.get("tool_calls_in_repo", totals.get("tool_calls", 0))
     return int(value or 0)
+
+
+def _lost_phrase(minutes: float) -> str:
+    return f"~{fmt_minutes(minutes)} lost" if minutes > 0 else "no time estimate"
 
 
 def bar(score: float, width: int = 10) -> str:
@@ -117,7 +122,7 @@ def _hotspot_rows(
             + st.heat(score, f"{bar(score)} {score:>5.1f}")
             + f" {_truncate(str(h.get('path', '')), path_w):<{path_w}}"
             + f" {h.get('sessions', 0):>4} {h.get('events', 0):>6}"
-            + f" {fmt_minutes(float(h.get('est_minutes_lost', 0))):>7}  "
+            + f" {fmt_lost(float(h.get('est_minutes_lost', 0))):>7}  "
             + st.dim(f"{conf_mark} ")
             + sig
         )
@@ -209,6 +214,7 @@ def render_terminal(
     out.append(
         st.dim(
             "Per-row time can overlap (one stall can involve a file and a command); "
+            "n/a means the evidence carries no time estimate; "
             "the total counts each minute once."
         )
     )
@@ -251,7 +257,7 @@ def render_detail(
         + st.dim(
             f"  · {plural(int(item.get('sessions', 0)), 'session')}"
             f" · {plural(int(item.get('events', 0)), 'event')}"
-            f" · ~{fmt_minutes(float(item.get('est_minutes_lost', 0)))} lost"
+            f" · {_lost_phrase(float(item.get('est_minutes_lost', 0)))}"
             f" · {item.get('confidence', 'low')} confidence"
         )
     )
@@ -283,6 +289,7 @@ def render_detail(
             out.append(
                 f"  {st.cyan(ts)} {st.dim('session ' + sess)}  "
                 f"{titles.get(str(ev.get('signal')), ev.get('signal'))}: {ev.get('summary', '')}"
+                + (st.yellow(" (unresolved at end of session)") if ev.get("trailing") else "")
             )
             excerpt = ev.get("excerpt")
             if excerpt:
@@ -306,7 +313,7 @@ def render_dir_detail(
         st.heat(score, f"{bar(score)} {score:.1f}/100")
         + st.dim(
             f"  · {plural(int(node.get('events', 0)), 'event')}"
-            f" · ~{fmt_minutes(float(node.get('est_minutes_lost', 0)))} lost"
+            f" · {_lost_phrase(float(node.get('est_minutes_lost', 0)))}"
         ),
         "",
     ]

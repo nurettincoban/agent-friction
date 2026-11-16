@@ -262,3 +262,31 @@ def test_a_secret_value_is_redacted_whole(text: str, secret: str, expected: str)
 def test_an_ampersand_still_ends_a_query_parameter() -> None:
     assert redact.redact("https://x.test/?token=abcd1234&user=bob").endswith("[REDACTED]&user=bob")
     assert redact.redact("auth-flow: we need to rework it") == "auth-flow: we need to rework it"
+
+
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        ("SECRET_KEY_BASE=plainwordsecret bin/rails s", "plainwordsecret"),
+        ("export SIGNING_KEY=hunter2", "hunter2"),
+        ("SIGNING_KEY='hunter two' make sign", "hunter two"),
+        ("MY_TOKEN_V2=abcd1234 ./deploy", "abcd1234"),
+        ("DB_PASSWD_RO=plainword psql", "plainword"),
+        ("vault login s.AbCdEf123456", "s.AbCdEf123456"),
+        ("htpasswd -b /etc/nginx/.htpasswd bob hunter2", "hunter2"),
+        ("htpasswd -cb users bob hunter2", "hunter2"),
+        ("net use Z: \\\\files\\share hunter2 /user:bob", "hunter2"),
+        ("net use \\\\files\\share /user:corp\\bob hunter2", "hunter2"),
+    ],
+)
+def test_env_style_names_and_login_commands(text: str, secret: str) -> None:
+    masked = redact.redact(text)
+    assert secret not in masked and "[REDACTED" in masked, masked
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["PATH=/usr/bin make", "KEYS=1", "NODE_ENV=production npm test", "vault login -method=oidc"],
+)
+def test_env_rules_leave_ordinary_assignments_alone(text: str) -> None:
+    assert redact.redact(text) == text
