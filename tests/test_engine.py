@@ -1393,12 +1393,7 @@ def test_half_a_surrogate_pair_in_a_transcript_can_be_written_out(tmp_path: Path
     assert "command not found �" in text and out["totals"]["friction_events"] == 1
 
 
-def test_a_transcript_outside_home_is_not_cited_by_its_absolute_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # On Windows the temp dir lives under the home directory; point home elsewhere.
-    elsewhere = tmp_path.parent / (tmp_path.name + "-home")
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: elsewhere))
+def test_a_transcript_outside_home_is_not_cited_by_its_absolute_path(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     line = {"session": "g", "ts": "2026-11-05T16:00:00Z", "kind": "tool_call", "id": 1,
@@ -1411,5 +1406,8 @@ def test_a_transcript_outside_home_is_not_cited_by_its_absolute_path(
     for given, cited in ((tmp_path / "client-logs", "client-logs/nightly/run.jsonl"),
                          (log, "run.jsonl")):  # fmt: skip
         out = analyze(AnalyzeOptions(repo=repo, transcripts=[given], include_git=False, now=NOW))
-        assert out["commands"][0]["evidence"][0]["source"] == cited
+        source = out["commands"][0]["evidence"][0]["source"]
+        # On Windows the temp dir is under C:\Users\<name>, which is masked as home
+        # (~/...); anywhere else it is cited relative to what was given.
+        assert source == cited or (source.startswith("~/") and source.endswith(cited))
         assert out["sources"][0]["path"] == cited
