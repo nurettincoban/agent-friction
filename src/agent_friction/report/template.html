@@ -141,6 +141,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     if (text !== undefined && text !== null) e.textContent = String(text);
     return e;
   }
+  function plural(n, word) { n = Number(n) || 0; return n + " " + word + (n === 1 ? "" : "s"); }
   function mins(m) {
     m = Number(m) || 0;
     // Same rules as fmt_minutes in report/_common.py: round half up.
@@ -171,12 +172,13 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
   document.getElementById("subtitle").textContent =
     (w.start || w.end ? String(w.start || "…").slice(0, 10) + " → " + String(w.end || "…").slice(0, 10) + " · " : "") +
     "generated " + String(R.generated_at || "").slice(0, 16).replace("T", " ");
-  [["sessions", "agent sessions"], ["tool_calls", "tool calls"], ["friction_events", "friction events"],
-   ["est_minutes_lost", "est. time lost"], ["corrections", "human corrections"], ["files_affected", "files affected"]]
+  [["sessions", "agent session", "agent sessions"], ["tool_calls", "tool call", "tool calls"],
+   ["friction_events", "friction event", "friction events"], ["est_minutes_lost", "est. time lost", "est. time lost"],
+   ["corrections", "human correction", "human corrections"], ["files_affected", "file affected", "files affected"]]
     .forEach(function (p) {
       var box = el("div", { class: "stat" });
       box.appendChild(el("b", null, p[0] === "est_minutes_lost" ? mins(t[p[0]]) : (t[p[0]] || 0)));
-      box.appendChild(el("span", null, p[1]));
+      box.appendChild(el("span", null, Number(t[p[0]]) === 1 ? p[1] : p[2]));
       document.getElementById("stats").appendChild(box);
     });
 
@@ -186,8 +188,8 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     detail.textContent = "";
     detail.appendChild(el("div", { class: "sub" }, h.kind === "command" ? "command" : h.kind === "dir" ? "directory" : "file"));
     detail.appendChild(el("h3", { class: "mono" }, h.path));
-    detail.appendChild(el("div", { class: "sub" }, "score " + Number(h.score).toFixed(1) + " · " + h.sessions +
-      " sessions · " + h.events + " events · ~" + mins(h.est_minutes_lost) + " lost · " + h.confidence + " confidence"));
+    detail.appendChild(el("div", { class: "sub" }, "score " + Number(h.score).toFixed(1) + " · " + plural(h.sessions, "session") +
+      " · " + plural(h.events, "event") + " · ~" + mins(h.est_minutes_lost) + " lost · " + h.confidence + " confidence"));
     if (h.why) detail.appendChild(el("p", null, h.why));
     var chips = el("div");
     topSignals(h, 99).forEach(function (s) { chips.appendChild(el("span", { class: "chip", title: s[0] }, (titles[s[0]] || s[0]) + " × " + s[1])); });
@@ -214,7 +216,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     detail.textContent = "";
     detail.appendChild(el("div", { class: "sub" }, "directory"));
     detail.appendChild(el("h3", { class: "mono" }, (n.path || ".") + "/"));
-    detail.appendChild(el("div", { class: "sub" }, "score " + Number(n.score).toFixed(1) + " · " + n.events + " events · ~" + mins(n.est_minutes_lost) + " lost"));
+    detail.appendChild(el("div", { class: "sub" }, "score " + Number(n.score).toFixed(1) + " · " + plural(n.events, "event") + " · ~" + mins(n.est_minutes_lost) + " lost"));
   }
 
   // Squarified treemap
@@ -321,6 +323,13 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
       reset();
     });
   });
+  // With no time lost anywhere, areas by time would only reflect event counts: size by score.
+  var anyTime = (R.hotspots || []).concat(R.commands || []).some(function (h) { return Number(h.est_minutes_lost) > 0; });
+  if (!anyTime) {
+    sizeBy = "score";
+    Array.prototype.forEach.call(document.querySelectorAll("[data-size]"), function (o) { o.setAttribute("aria-pressed", String(o.dataset.size === "score")); });
+    document.getElementById("sizelabel").textContent = "area = score (no time lost was recorded)";
+  }
   reset();
   var resizeTimer;
   window.addEventListener("resize", function () { clearTimeout(resizeTimer); resizeTimer = setTimeout(function () { draw(stack[stack.length - 1]); }, 120); });

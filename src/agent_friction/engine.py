@@ -504,8 +504,10 @@ class _Analysis:
 
     def _in_repo(self, stream: Stream) -> bool:
         resolver = self.resolver
+        # Where nothing says where the session ran (no cwd recorded), only a tool call
+        # places it here; a session of prose alone touched no repository.
         return any(
-            resolver.contains(event.cwd)
+            (resolver.contains(event.cwd) if event.cwd else event.kind == model.TOOL_CALL)
             or resolver.resolve(event.path, event.cwd) is not None
             or (event.command is not None and signals.runs_inside(resolver, event))
             for event in stream.events

@@ -2397,3 +2397,120 @@ def test_instructions_to_a_subagent_are_turn_boundaries(tmp_path: Path) -> None:
     for i in range(3, 6):
         s.edit(A, f"a{i}", f"b{i}").bash("pytest", "1 failed in 1s", exit_code=1)
     assert by_signal(detect(s, tmp_path), signals.NO_CONVERGENCE) == []
+
+
+# ---- round 11 -----------------------------------------------------------------------------
+
+HEREDOC = "python3 - <<'EOF'\nimport pathlib\npathlib.Path('src/a.py').write_text('x = 1')\nEOF"
+SCRIPTED_CHANGES = [
+    HEREDOC,
+    "python -c \"open('src/a.py', 'w').write('x = 1')\"",
+    "node -e \"require('fs').writeFileSync('src/a.js', 'x')\"",
+    "python scripts/patch.py",
+    "npx jscodeshift -t rename.js src/",
+    "comby 'foo(:[a])' 'bar(:[a])' .go",
+    "mv src/a.py src/b.py",
+    "cp src/a.py src/b.py",
+    "rm src/a.py",
+    "git mv src/a.py src/b.py",
+    "git rm src/a.py",
+    "npm install left-pad",
+    "uv run ruff format .",
+    "./scripts/regenerate.sh",
+]
+NO_CHANGES = ["cat src/a.py", "git status", "ls -la", "grep -rn foo src", "ruff check .", "mypy"]
+
+
+@pytest.mark.parametrize("change", SCRIPTED_CHANGES)
+def test_a_change_made_by_a_command_is_a_change(tmp_path: Path, change: str) -> None:
+    fixed = Session().user("go").bash("npm test", "1 failing", exit_code=1)
+    fixed.bash(change, "").bash("npm test", "3 passing")
+    assert detect(fixed, tmp_path) == []  # red -> change -> green: the loop working
+
+    loop = Session().user("go")
+    for _ in range(3):
+        loop.bash("npm test", "1 failing", exit_code=1).bash(change, "")
+    found = detect(loop, tmp_path)
+    assert by_signal(found, signals.RETRY_LOOP) == []  # each run was a new attempt
+    assert len(by_signal(found, signals.COMMAND_FAILURE)) == 3  # ... and still red at the end
+
+    polled = Session().user("go")  # not "waiting for something": something was done
+    for _ in range(3):
+        polled.bash("curl -sf localhost:3000/health", "", exit_code=7)
+    polled.bash(change, "").bash("curl -sf localhost:3000/health", "ok")
+    assert len(by_signal(detect(polled, tmp_path), signals.RETRY_LOOP)) == 1
+
+
+@pytest.mark.parametrize("command", NO_CHANGES)
+def test_looking_or_checking_is_not_a_change(tmp_path: Path, command: str) -> None:
+    flaky = Session().user("go").bash("npm test", "1 failing", exit_code=1)
+    flaky.bash(command, "").bash("npm test", "3 passing")
+    assert [f.signal for f in detect(flaky, tmp_path)] == [signals.COMMAND_FAILURE]
+
+    loop = Session().user("go")
+    for _ in range(3):
+        loop.bash("npm test", "1 failing", exit_code=1).bash(command, "")
+    assert len(by_signal(detect(loop, tmp_path), signals.RETRY_LOOP)) == 1
+
+    polled = Session().user("go")
+    for _ in range(3):
+        polled.bash("curl -sf localhost:3000/health", "", exit_code=7).bash(command, "")
+    polled.bash("curl -sf localhost:3000/health", "ok")
+    assert detect(polled, tmp_path) == []  # still just waiting
+
+
+def test_a_possible_change_is_not_an_edit_and_never_its_own_fix(tmp_path: Path) -> None:
+    # a script that failed changed nothing we can assume
+    failed = Session().user("go")
+    for _ in range(3):
+        failed.bash("npm test", "1 failing", exit_code=1)
+        failed.bash("python scripts/patch.py", "Traceback\nKeyError: 'x'", exit_code=1)
+    loops = by_signal(detect(failed, tmp_path), signals.RETRY_LOOP)
+    assert ("command", "npm test") in [k for loop in loops for k in keys(loop)]
+
+    # the command that went green is not what fixed it
+    again = Session().user("go").bash("python scripts/gen.py", "boom", exit_code=1)
+    again.bash("python scripts/gen.py", "ok")
+    assert [f.signal for f in detect(again, tmp_path)] == [signals.COMMAND_FAILURE]
+
+    # ... but a script that ran earlier on the same line is
+    same_line = Session().user("go").bash("npm test", "1 failing", exit_code=1)
+    same_line.bash("python scripts/patch.py && npm test", "3 passing")
+    assert detect(same_line, tmp_path) == []
+
+    # rounds of "run a script, run the check" are not counted as edit-and-run rounds:
+    # nobody saw an edit, so no-convergence is not claimed and no file is named
+    rounds = Session().user("go")
+    for _ in range(6):
+        rounds.bash("python scripts/patch.py", "").bash("npm test", "1 failing", exit_code=1)
+    found = detect(rounds, tmp_path)
+    assert by_signal(found, signals.NO_CONVERGENCE) == []
+    assert all(t.kind == "command" for f in found for t in f.targets)
+
+
+def test_a_wrapped_formatter_is_an_edit_and_an_aggregate_goes_green_on_a_summary(
+    tmp_path: Path,
+) -> None:
+    s = Session().user("go")
+    s.bash("make check 2>&1 | tail -2", "1 file would be reformatted\nmake: *** [lint] Error 1")
+    s.bash(
+        "uv run ruff format . | tail -1 && make check 2>&1 | tail -2 && git status --short",
+        "1 file reformatted, 58 files left unchanged\n....   [100%]\n770 passed in 3.04s\n M a.py",
+    )
+    assert detect(s, tmp_path) == []
+    # a summary another step on the line could have printed proves nothing about `make`
+    other = Session().user("go")
+    other.bash("make check 2>&1 | tail -2", "1 failed in 1s\nmake: *** [test] Error 1")
+    other.edit(A).bash("make check 2>&1 | tail -1; pytest -q tests/test_a.py | tail -1", "1 passed")
+    assert [f.signal for f in detect(other, tmp_path)] == [signals.COMMAND_FAILURE]
+
+
+def test_inline_and_stdin_keys_carry_the_directory_too(tmp_path: Path) -> None:
+    s = Session(cwd="/repo/web").user("go")
+    s.bash("python3 - <<'EOF'\nraise SystemExit(1)\nEOF", "", exit_code=1)
+    s.bash("node -e 'process.exit(1)'", "", exit_code=1)
+    found = detect(s, tmp_path)
+    assert [keys(f) for f in found] == [
+        [("command", "python <stdin> (web/)")],
+        [("command", "node <inline> (web/)")],
+    ]

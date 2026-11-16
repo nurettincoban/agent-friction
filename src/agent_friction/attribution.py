@@ -1088,19 +1088,52 @@ _GIT_REWRITES = frozenset(
 )
 
 
+#: Calls with which ad-hoc code writes, moves or deletes files (Python, Node, Ruby, shell).
+WRITE_CALL_RE = re.compile(
+    r"\bwrite_text\b|\bwrite_bytes\b|\.write\(|\.writelines\("
+    r"|\bopen\([^)\n]*,\s*['\"][wax]b?\+?['\"]|\bopen\([^)\n]*mode\s*=\s*['\"][wax]"
+    r"|\bwriteFile(?:Sync)?\b|\bappendFile(?:Sync)?\b|\bfs\.(?:write|rename|unlink|rm|copyFile)"
+    r"|\bFile\.(?:write|open|rename|delete)\b|\bshutil\.(?:copy\w*|move|rmtree)\b"
+    r"|\bos\.(?:replace|rename|remove|unlink|makedirs)\b|\.unlink\(|\.rename\(|\.replace\([^,)]*\)$"
+    r"|\.touch\(|\bfileinput\b|\bjson\.dump\(|\byaml\.(?:safe_)?dump\(",
+    re.M,
+)
+#: Tools whose whole purpose is to rewrite source files.
+CODEMOD_PROGRAMS = frozenset(
+    {"jscodeshift", "comby", "codemod", "sd", "rpl", "pyupgrade", "autoflake", "autopep8"}
+    | {"2to3", "libcst", "ast-grep", "sg", "semgrep", "rector", "ts-morph", "fastmod", "gofix"}
+    | {"unimport", "add-trailing-comma", "docformatter", "yapf", "dprint", "taplo"}
+)
+#: File commands that change the tree when pointed at project files.
+_TREE_PROGRAMS = frozenset({"mv", "cp", "rm", "ln", "install", "rsync", "unzip", "tar", "truncate"})
+_GIT_TREE_KEYS = frozenset({"git mv", "git rm", "git clean"})
+
+
 def is_shell_edit(parsed: ParsedCommand, command: str) -> bool:
     """True if a shell command line rewrites files in place (as far as its words tell).
 
     ``sed -i``, ``perl -pi``, formatters (``ruff format``, ``black``,
     ``prettier --write``, ``gofmt -w``, ``cargo fmt``), ``--fix``/``--write``
-    flags, ``patch``, ``git apply/checkout/restore/stash``, ``tee`` and ``>``
-    redirections to a file. Such a command is a change, like an Edit.
+    flags, ``patch``, ``git apply/checkout/restore/stash/mv/rm``, codemods
+    (``jscodeshift``, ``comby``), ``mv``/``cp``/``rm`` on project files,
+    ``tee`` and ``>`` redirections to a file, and inline or heredoc code that
+    calls something that writes (``python3 - <<EOF ... write_text ... EOF``,
+    ``node -e "fs.writeFileSync(...)"``). Such a command is a change, like an Edit.
     """
+    if any(is_inline_code(s.key) for s in parsed.steps) and WRITE_CALL_RE.search(command):
+        return True
     for step in parsed.steps:
         args = step.args
         flags = set(args)
         program = step.program
         if flags & _WRITE_FLAGS:
+            return True
+        words = step.key.split()
+        if program in CODEMOD_PROGRAMS or (words and words[-1] in CODEMOD_PROGRAMS):
+            return True
+        if step.key in _GIT_TREE_KEYS:
+            return True
+        if program in _TREE_PROGRAMS and any(_is_source_target(a) for a in args if a[:1] != "-"):
             return True
         if program in ("sed", "gsed") and any(a == "--in-place" or a[:2] == "-i" for a in args):
             return True
@@ -1115,6 +1148,11 @@ def is_shell_edit(parsed: ParsedCommand, command: str) -> bool:
                 return True
         elif command_role(step.key) == "format" and not flags & _CHECK_FLAGS:
             return True
+        # `uv run ruff format .`: the key stops at the tool behind the wrapper
+        if words and words[-1] in args and not flags & _CHECK_FLAGS:
+            follows = args[args.index(words[-1]) + 1 : args.index(words[-1]) + 2]
+            if follows and command_role(f"{words[-1]} {follows[0]}") == "format":
+                return True
     tokens = _tokenize(command)
     for index, token in enumerate(tokens):
         target = tokens[index + 1] if index + 1 < len(tokens) else ""
@@ -1124,6 +1162,24 @@ def is_shell_edit(parsed: ParsedCommand, command: str) -> bool:
 
 
 _SCRATCH_RE = re.compile(r"\.(?:log|out|txt|tmp|pid|err)$|^&|^/dev/|^/tmp/|^/var/|^\$TMP", re.I)
+
+
+#: Commands that only show or send something; nothing local is different afterwards.
+REPORT_ONLY_KEYS = frozenset(
+    {"docker logs", "docker compose logs", "kubectl logs", "git fetch", "git push"}
+)
+
+
+def may_change_files(key: str) -> bool:
+    """Could a successful run of ``key`` have changed something, as far as its name tells?
+
+    Everything that is not a check: a script, a generator, a build, an install,
+    a commit. Tests, linters and type checkers (and aggregate targets that run
+    them) only report; a formatter or ``--fix`` run is recognised separately.
+    """
+    if not key or is_aggregate_check(key) or key in REPORT_ONLY_KEYS:
+        return False
+    return command_role(key) not in ("test", "lint", "typecheck")
 
 
 def _is_source_target(target: str) -> bool:

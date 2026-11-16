@@ -240,3 +240,25 @@ def test_netrc_webhooks_and_openssl_passwords(text: str) -> None:
 )
 def test_those_rules_leave_ordinary_text_alone(text: str) -> None:
     assert redact.redact(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "secret", "expected"),
+    [
+        ("X-Api-Key: Tr0ub4dor&3", "&3", "X-Api-Key: [REDACTED]"),
+        ("curl -H 'X-Api-Key: Tr0ub4dor&3' u", "&3", "curl -H 'X-Api-Key: [REDACTED]' u"),
+        ('curl -H "X-Auth-Token: a b&c" u', "b&c", 'curl -H "X-Auth-Token: [REDACTED]" u'),
+        ("Api-Key: zz&y\nnext line", "zz&y", "Api-Key: [REDACTED]\nnext line"),
+        ("PASSWORD='ab&cd ef' ./run", "cd ef", "PASSWORD='[REDACTED]' ./run"),
+        ('{"password": "ab cd&e", "user": "bob"}', "cd&e", '"[REDACTED]", "user": "bob"}'),
+        ("token: ab&cd rest", "&cd", "token: [REDACTED] rest"),
+    ],
+)
+def test_a_secret_value_is_redacted_whole(text: str, secret: str, expected: str) -> None:
+    out = redact.redact(text)
+    assert secret not in out and expected in out
+
+
+def test_an_ampersand_still_ends_a_query_parameter() -> None:
+    assert redact.redact("https://x.test/?token=abcd1234&user=bob").endswith("[REDACTED]&user=bob")
+    assert redact.redact("auth-flow: we need to rework it") == "auth-flow: we need to rework it"

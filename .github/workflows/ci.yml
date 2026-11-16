@@ -57,8 +57,15 @@ jobs:
       - run: uv run pytest --cov --cov-report=term --cov-fail-under=90
 
   package:
-    name: Build and smoke-test the wheel
-    runs-on: ubuntu-latest
+    name: Build and smoke-test the wheel (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -67,12 +74,14 @@ jobs:
       - run: uv build
       - name: Install wheel in a clean venv and run it
         run: |
-          uv venv /tmp/smoke
-          uv pip install --python /tmp/smoke/bin/python dist/*.whl
-          /tmp/smoke/bin/agent-friction --version
-          /tmp/smoke/bin/agent-friction scan tests/fixtures/shopfront --transcripts tests/fixtures/transcripts --repo-alias /home/dev/shopfront --no-git -o /tmp/smoke.html
-          grep -q "schema_gen.py" /tmp/smoke.html
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+          uv venv "$RUNNER_TEMP/smoke"
+          if [ "$RUNNER_OS" = "Windows" ]; then bin="$RUNNER_TEMP/smoke/Scripts"; else bin="$RUNNER_TEMP/smoke/bin"; fi
+          uv pip install --python "$RUNNER_TEMP/smoke" dist/*.whl
+          "$bin/agent-friction" --version
+          "$bin/agent-friction" scan tests/fixtures/shopfront --transcripts tests/fixtures/transcripts --repo-alias /home/dev/shopfront --no-git -o "$RUNNER_TEMP/smoke.html"
+          grep -q "schema_gen.py" "$RUNNER_TEMP/smoke.html"
+      - if: runner.os == 'Linux'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist
           path: dist/

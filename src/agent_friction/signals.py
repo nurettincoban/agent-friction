@@ -30,6 +30,7 @@ from agent_friction.attribution import (
     is_replacement,
     is_setup_command,
     is_shell_edit,
+    may_change_files,
     normalize_argv,
     objectionable_step,
     parse_command,
@@ -148,9 +149,11 @@ CATALOG: tuple[SignalDef, ...] = (
     SignalDef(
         USER_CORRECTION,
         "User correction",
-        "A human prompt that follows agent work and opens with an unambiguous correction "
-        '("No, …", "I told you …", "revert that", "still failing", "you broke …"), or with '
-        "two weaker cues together. Single weak cues and friendly follow-ups do not count.",
+        "A human prompt that follows agent work and is worded as a correction of it "
+        '("No, …", "I told you …", "revert that", "still failing", "you broke …"), '
+        "corroborated by behaviour: the agent had changed files, and the human names one of "
+        "them or the agent then changes one of them again. Wording alone, or two weaker cues "
+        "together, is only a probable correction.",
         "Human attention is the most expensive resource in the loop; a correction means the "
         "agent's work on these files had to be redirected by hand.",
         "Files the agent touched in the preceding turn that the message names; otherwise "
@@ -162,7 +165,10 @@ CATALOG: tuple[SignalDef, ...] = (
         RETRY_LOOP,
         "Retry loop",
         f"The same command line failed {RETRY_LOOP_MIN_FAILURES} or more times in a row in "
-        "one session with identical arguments, no success and no file change in between.",
+        "one session with identical arguments, with no success of that command and nothing "
+        "changed in between: no edit, and no other command that could have changed files (a "
+        "script, an install, a move). Dropped as waiting if the same line then passes with "
+        "nothing changed.",
         "The failure output did not tell the agent what to do, so it kept guessing.",
         "The normalized command.",
         3.0,
@@ -170,9 +176,9 @@ CATALOG: tuple[SignalDef, ...] = (
     SignalDef(
         NO_CONVERGENCE,
         "No convergence",
-        f"Within one turn the agent edited files and re-ran the same command "
-        f"{NO_CONVERGENCE_MIN_CYCLES} or more times, the command failed every time, and the "
-        "turn ended with it still failing.",
+        f"Within one turn the agent ran the same command {NO_CONVERGENCE_MIN_CYCLES} or more "
+        "times, each run after a file change since the previous one, every run failed as an "
+        "ordinary failure, and the turn ended with the command still failing.",
         "Edit, run, red, again and again without ever going green: the agent could not "
         "work out what the check wants.",
         "The normalized command, and the files edited between the runs (the "
@@ -182,7 +188,8 @@ CATALOG: tuple[SignalDef, ...] = (
     SignalDef(
         TOOL_REJECTED,
         "Tool call declined",
-        "The human declined a tool call the agent proposed.",
+        "The human declined a tool call the agent proposed. Declining a plan or a question "
+        "is not counted.",
         "The agent wanted to do something a human considered wrong or unsafe here.",
         "The file the tool targeted, or the normalized command for shell calls.",
         2.5,
@@ -190,8 +197,8 @@ CATALOG: tuple[SignalDef, ...] = (
     SignalDef(
         USER_INTERRUPT,
         "User interrupt",
-        "The human interrupted the agent mid-turn (not counted when it merely accompanies "
-        "a declined tool call).",
+        "The human interrupted the agent after it had made at least one tool call in the "
+        "turn. The interrupt that accompanies a declined tool call is not counted again.",
         "The human saw the agent going wrong and stopped it.",
         "The target of the agent's most recent tool call in that turn.",
         2.5,
@@ -210,7 +217,8 @@ CATALOG: tuple[SignalDef, ...] = (
         EDIT_REVERT,
         "Edit reverted",
         "An edit exactly undid an earlier successful edit to the same file in the same "
-        "session (or a write restored an earlier version of the file).",
+        "session, or a write restored an earlier version of the file. Taking out lines that "
+        "were only added and then run successfully (a debug print) is not counted.",
         "Work on this file went in a circle.",
         "The file being edited.",
         2.0,
@@ -218,10 +226,12 @@ CATALOG: tuple[SignalDef, ...] = (
     SignalDef(
         COMMAND_FAILURE,
         "Command failure",
-        "A shell command exited non-zero. Failures that look like setup or invocation "
-        "problems (command not found, missing module, bad arguments, …) count fully; other "
-        f"failures, such as a test that legitimately fails, count at {ORDINARY_FAILURE_WEIGHT}. "
-        "Read-only inspection commands (ls, grep, …) are ignored.",
+        "A shell command failed: it exited non-zero or, where the exit status belongs to a "
+        "pipe or a later step, its own output says so. Setup and invocation errors (command "
+        "not found, missing module, bad arguments, …) count fully; ordinary failures, such as "
+        f"a test that fails, count at {ORDINARY_FAILURE_WEIGHT}. A red run followed by a change "
+        "and a green run of the same job is dropped. Read-only inspection commands (ls, grep, "
+        "…) are ignored.",
         "Agents guess how to build, test and run things; a wrong guess burns a round trip "
         "every session until the right command is written down.",
         "The normalized command. Ordinary failures are also attributed to repo files named "
@@ -243,7 +253,8 @@ CATALOG: tuple[SignalDef, ...] = (
         EDIT_THRASH,
         "Edit thrash",
         f"One file received {EDIT_THRASH_MIN_EDITS} or more successful edits within a single "
-        "user turn.",
+        "turn in which something also went wrong: an edit miss, a stale edit or a reverted "
+        "edit on that file, or a failed command or retry loop in the turn.",
         "Many small edits to one file in one go usually means trial and error rather than "
         "a plan. Weak signal on its own.",
         "The file being edited.",
@@ -273,9 +284,10 @@ CATALOG: tuple[SignalDef, ...] = (
     SignalDef(
         PROBABLE_CORRECTION,
         "Probable correction",
-        "A human prompt that is worded like a correction but is not backed by behaviour "
-        "(no file named, the agent did not go back to what it had changed), or that only "
-        "contains two weaker cues. It may be an ordinary follow-up request.",
+        "A human prompt that is worded like a correction but is not corroborated by "
+        "behaviour (the agent had changed nothing, or the human names no changed file and "
+        "the agent did not go back to what it had changed), or that only contains two or more "
+        "weaker cues. It may be an ordinary follow-up request.",
         "Possibly a redirect by a human. Kept apart from corrections so that a guess never "
         "inflates their count; never quoted, never the basis of a recommendation.",
         f"Split evenly over the files edited in the preceding turn (the {CORRECTION_MAX_FILES} "
@@ -293,7 +305,8 @@ CATALOG: tuple[SignalDef, ...] = (
     SignalDef(
         PATH_MISS,
         "Path miss",
-        "The agent tried to read or edit a path that does not exist.",
+        "The agent tried to read or edit a path that does not exist. A read of a missing "
+        "file that the agent then creates in the same session is not recorded.",
         "The agent expected something to live here; the layout or naming misled it.",
         "The non-existent path (so repeated wrong guesses add up).",
         1.0,
@@ -301,7 +314,8 @@ CATALOG: tuple[SignalDef, ...] = (
     SignalDef(
         SEARCH_MISS,
         "Search miss",
-        "A Grep or Glob search returned nothing.",
+        "A Grep or Glob search returned nothing. A search that only confirms a name is free "
+        "before the agent creates it is not recorded.",
         "The agent looked for a name that is not there; repeated misses in one place "
         "point at vocabulary the codebase does not use.",
         "The file or directory that was searched.",
@@ -311,7 +325,7 @@ CATALOG: tuple[SignalDef, ...] = (
         READ_LOOP,
         "Read loop",
         f"The same range of a file was read {READ_LOOP_MIN_READS} or more times in one "
-        "session with no edit to it in between.",
+        "session with no successful edit to it in between.",
         "The agent keeps going back to this file without making progress. Weak signal.",
         "The file being read.",
         0.5,
@@ -500,6 +514,19 @@ def step_verdicts(cmd: ParsedCommand, output: str) -> dict[str, str]:
         verdict = key_verdict(step.key, output)
         if verdict is not None and verdicts.get(step.key) != "red":
             verdicts[step.key] = verdict
+    # `ruff format . && make check | tail -2 && git status`: an aggregate target has no
+    # summary line of its own. It ran green when nothing in the output is red and the
+    # output shows a passing summary that no other step on the line could have printed.
+    steps = _candidates(cmd)
+    aggregates = {s.key for s in steps if is_aggregate_check(s.key)} - set(verdicts)
+    if len(aggregates) == 1 and not RED_OUTPUT_RE.search(output):
+        (aggregate,) = aggregates
+        taken = {command_role(s.key) for s in steps if s.key != aggregate}
+        for role in ("test", "lint", "typecheck", "build"):
+            green = VERDICT_SIGNATURES[role][1]
+            if role not in taken and green is not None and green.search(output):
+                verdicts[aggregate] = "green"
+                break
     return verdicts
 
 
@@ -1625,11 +1652,18 @@ class _Detector:
                 interval=_capped_back(reverted_at, now) or self._round_trip(action),
             )
 
-    def _on_change(self, path: str = "", span: tuple[float, float] | None = None) -> None:
-        """Files changed (an edit, a write, or a shell command that rewrites files)."""
+    def _on_change(
+        self, path: str = "", span: tuple[float, float] | None = None, certain: bool = True
+    ) -> None:
+        """Files changed (an edit, a write, or a shell command that rewrites files).
+
+        ``certain=False``: a command ran that *may* have changed something. It ends
+        streaks and lets a later green run count as a fix, but it is not an edit.
+        """
         state = self.state
-        state.changes += 1
-        state.change_log.append((state.changes, path, span))
+        if certain:
+            state.changes += 1
+            state.change_log.append((state.changes, path, span))
         # A change turns the red runs so far into red -> edit -> (maybe) green, unless they
         # were a retry loop: re-running a failing command three times with nothing changed
         # is friction whatever happens afterwards.
@@ -1763,6 +1797,31 @@ class _Detector:
         cmd = action.cmd
         if cmd is None:
             return
+        # Any command that ran and is not itself a check (a script, a generator, an
+        # install, a commit) may have changed something. That is enough to end a "nothing
+        # changed in between" streak and to make a later green run a fix; it is not
+        # counted as an edit, and no file is named.
+        before: list[Step] = []
+        after: list[Step] = []
+        edit = result.ok and is_shell_edit(cmd, action.call.command or "")
+        ran = not cmd.inspection and result.error in ("", model.ERR_EXIT, model.ERR_OTHER)
+        if ran and not edit:
+            steps = _candidates(cmd)
+            if not result.ok:
+                # in a failed line, only what demonstrably ran before the step that failed
+                blamed, sure = self._blamed_step(cmd, result.output)
+                steps = steps[: steps.index(blamed)] if sure and blamed in steps else []
+            # `python fix.py && pytest`: the script ran before the check on the same line.
+            # The command the line is judged by is never its own fix, so it counts after.
+            at = next((i for i, step in enumerate(steps) if step.key == cmd.key), len(steps))
+            before, after = steps[:at], steps[at:]
+        if any(may_change_files(step.key) for step in before):
+            self._on_change(certain=False)
+        self._judge_shell(action, cmd, result)
+        if any(may_change_files(step.key) for step in after):
+            self._on_change(certain=False)
+
+    def _judge_shell(self, action: _Action, cmd: ParsedCommand, result: Event) -> None:
         state = self.state
         key = cmd.key
         located: Step | None = self._primary(action)

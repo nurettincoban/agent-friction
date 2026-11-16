@@ -792,7 +792,7 @@
     {
       "attribution": "Files the agent touched in the preceding turn that the message names; otherwise split evenly over the files it edited in that turn (the 5 most recent).",
       "count": 4,
-      "description": "A human prompt that follows agent work and opens with an unambiguous correction (\"No, …\", \"I told you …\", \"revert that\", \"still failing\", \"you broke …\"), or with two weaker cues together. Single weak cues and friendly follow-ups do not count.",
+      "description": "A human prompt that follows agent work and is worded as a correction of it (\"No, …\", \"I told you …\", \"revert that\", \"still failing\", \"you broke …\"), corroborated by behaviour: the agent had changed files, and the human names one of them or the agent then changes one of them again. Wording alone, or two weaker cues together, is only a probable correction.",
       "id": "user-correction",
       "severity": 4.0,
       "title": "User correction",
@@ -801,7 +801,7 @@
     {
       "attribution": "The normalized command.",
       "count": 0,
-      "description": "The same command line failed 3 or more times in a row in one session with identical arguments, no success and no file change in between.",
+      "description": "The same command line failed 3 or more times in a row in one session with identical arguments, with no success of that command and nothing changed in between: no edit, and no other command that could have changed files (a script, an install, a move). Dropped as waiting if the same line then passes with nothing changed.",
       "id": "retry-loop",
       "severity": 3.0,
       "title": "Retry loop",
@@ -810,7 +810,7 @@
     {
       "attribution": "The normalized command, and the files edited between the runs (the 3 most edited, split evenly).",
       "count": 0,
-      "description": "Within one turn the agent edited files and re-ran the same command 4 or more times, the command failed every time, and the turn ended with it still failing.",
+      "description": "Within one turn the agent ran the same command 4 or more times, each run after a file change since the previous one, every run failed as an ordinary failure, and the turn ended with the command still failing.",
       "id": "no-convergence",
       "severity": 3.0,
       "title": "No convergence",
@@ -819,7 +819,7 @@
     {
       "attribution": "The file the tool targeted, or the normalized command for shell calls.",
       "count": 1,
-      "description": "The human declined a tool call the agent proposed.",
+      "description": "The human declined a tool call the agent proposed. Declining a plan or a question is not counted.",
       "id": "tool-rejected",
       "severity": 2.5,
       "title": "Tool call declined",
@@ -828,7 +828,7 @@
     {
       "attribution": "The target of the agent's most recent tool call in that turn.",
       "count": 1,
-      "description": "The human interrupted the agent mid-turn (not counted when it merely accompanies a declined tool call).",
+      "description": "The human interrupted the agent after it had made at least one tool call in the turn. The interrupt that accompanies a declined tool call is not counted again.",
       "id": "user-interrupt",
       "severity": 2.5,
       "title": "User interrupt",
@@ -846,7 +846,7 @@
     {
       "attribution": "The file being edited.",
       "count": 2,
-      "description": "An edit exactly undid an earlier successful edit to the same file in the same session (or a write restored an earlier version of the file).",
+      "description": "An edit exactly undid an earlier successful edit to the same file in the same session, or a write restored an earlier version of the file. Taking out lines that were only added and then run successfully (a debug print) is not counted.",
       "id": "edit-revert",
       "severity": 2.0,
       "title": "Edit reverted",
@@ -855,7 +855,7 @@
     {
       "attribution": "The normalized command. Ordinary failures are also attributed to repo files named on the command line; setup/invocation errors are not (the files are not the cause).",
       "count": 9,
-      "description": "A shell command exited non-zero. Failures that look like setup or invocation problems (command not found, missing module, bad arguments, …) count fully; other failures, such as a test that legitimately fails, count at 0.3. Read-only inspection commands (ls, grep, …) are ignored.",
+      "description": "A shell command failed: it exited non-zero or, where the exit status belongs to a pipe or a later step, its own output says so. Setup and invocation errors (command not found, missing module, bad arguments, …) count fully; ordinary failures, such as a test that fails, count at 0.3. A red run followed by a change and a green run of the same job is dropped. Read-only inspection commands (ls, grep, …) are ignored.",
       "id": "command-failure",
       "severity": 2.0,
       "title": "Command failure",
@@ -873,7 +873,7 @@
     {
       "attribution": "The file being edited.",
       "count": 1,
-      "description": "One file received 6 or more successful edits within a single user turn.",
+      "description": "One file received 6 or more successful edits within a single turn in which something also went wrong: an edit miss, a stale edit or a reverted edit on that file, or a failed command or retry loop in the turn.",
       "id": "edit-thrash",
       "severity": 1.5,
       "title": "Edit thrash",
@@ -900,7 +900,7 @@
     {
       "attribution": "Split evenly over the files edited in the preceding turn (the 5 most recent).",
       "count": 1,
-      "description": "A human prompt that is worded like a correction but is not backed by behaviour (no file named, the agent did not go back to what it had changed), or that only contains two weaker cues. It may be an ordinary follow-up request.",
+      "description": "A human prompt that is worded like a correction but is not corroborated by behaviour (the agent had changed nothing, or the human names no changed file and the agent did not go back to what it had changed), or that only contains two or more weaker cues. It may be an ordinary follow-up request.",
       "id": "probable-correction",
       "severity": 1.5,
       "title": "Probable correction",
@@ -918,7 +918,7 @@
     {
       "attribution": "The non-existent path (so repeated wrong guesses add up).",
       "count": 1,
-      "description": "The agent tried to read or edit a path that does not exist.",
+      "description": "The agent tried to read or edit a path that does not exist. A read of a missing file that the agent then creates in the same session is not recorded.",
       "id": "path-miss",
       "severity": 1.0,
       "title": "Path miss",
@@ -927,7 +927,7 @@
     {
       "attribution": "The file or directory that was searched.",
       "count": 6,
-      "description": "A Grep or Glob search returned nothing.",
+      "description": "A Grep or Glob search returned nothing. A search that only confirms a name is free before the agent creates it is not recorded.",
       "id": "search-miss",
       "severity": 1.0,
       "title": "Search miss",
@@ -936,7 +936,7 @@
     {
       "attribution": "The file being read.",
       "count": 1,
-      "description": "The same range of a file was read 3 or more times in one session with no edit to it in between.",
+      "description": "The same range of a file was read 3 or more times in one session with no successful edit to it in between.",
       "id": "read-loop",
       "severity": 0.5,
       "title": "Read loop",

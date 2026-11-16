@@ -438,6 +438,8 @@ def _utf8_safe(stream: TextIO) -> TextIO:
 
 
 def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    if args.output is not None and str(args.output) == "-":
+        args.output = None  # `-o -` means standard output, as usual
     fmt = args.format
     if args.output is not None and args.output.is_dir():
         stderr.write(f"agent-friction: {args.output} is a directory; pass a file name\n")

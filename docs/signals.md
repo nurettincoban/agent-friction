@@ -50,6 +50,12 @@ else is dropped. "Turn" means the agent's work between two human prompts.
 
 ## `user-correction` — User correction
 
+> **In short:** A human prompt that follows agent work and is worded as a
+> correction of it ("No, …", "I told you …", "revert that", "still failing",
+> "you broke …"), corroborated by behaviour: the agent had changed files, and
+> the human names one of them or the agent then changes one of them again.
+> Wording alone, or two weaker cues together, is only a probable correction.
+
 **What:** a human prompt that (a) is not the first prompt of the session,
 (b) follows at least one tool call by the agent, and (c) refers to the agent
 or to the work it just finished in one of the ways below. Only the
@@ -232,6 +238,12 @@ corrections is a lower bound.
 
 ## `probable-correction` — Probable correction
 
+> **In short:** A human prompt that is worded like a correction but is not
+> corroborated by behaviour (the agent had changed nothing, or the human
+> names no changed file and the agent did not go back to what it had
+> changed), or that only contains two or more weaker cues. It may be an
+> ordinary follow-up request.
+
 **What:** a human prompt that is worded like a correction (see
 [`user-correction`](#user-correction--user-correction)) but is not
 corroborated by behaviour, or that only contains two or more weaker cues
@@ -250,11 +262,17 @@ is always `null`, with or without `--no-excerpts`.
 
 ## `retry-loop` — Retry loop
 
+> **In short:** The same command line failed 3 or more times in a row in one
+> session with identical arguments, with no success of that command and
+> nothing changed in between: no edit, and no other command that could have
+> changed files (a script, an install, a move). Dropped as waiting if the
+> same line then passes with nothing changed.
+
 **What:** the same command line fails 3 or more times in a row within a
 session, with **identical arguments** (after collapsing whitespace and
-dropping leading `VAR=value` assignments), no success of that command and no
-file change in between. One event per loop; its summary carries the final
-count.
+dropping leading `VAR=value` assignments), no success of that command and
+nothing changed in between (see below for what counts as a change). One event
+per loop; its summary carries the final count.
 
 Narrowing a failure down is progress, not a loop: `pytest`, then `pytest
 tests/test_a.py -x -vv`, then `pytest tests/test_a.py::test_total --tb=long`
@@ -263,13 +281,43 @@ are three different invocations and are not counted.
 Edit, run the tests, see red, edit again, run again is the normal development
 loop, not a retry loop: every successful edit starts the count again. What is
 counted is re-running a failing command with nothing changed on disk (other
-working directory, the same thing again). Any successful edit counts as a
-change, whichever file it touches; we do not try to judge whether the edit
-was relevant. So does a shell command that rewrites files: `sed -i`, `perl
--pi`, a formatter (`ruff format`, `black`, `prettier --write`, `gofmt -w`,
-`cargo fmt`), a `--fix` / `--write` flag, `patch`, `git apply | checkout |
-restore | stash`, and `>` / `tee` / heredoc writes to a file that is not a
-log or under `/tmp`.
+working directory, the same thing again).
+
+**What counts as a change.** We do not try to judge whether a change was
+relevant, only whether something was, or may have been, changed:
+
+1. *An edit:* any successful Edit/Write, whichever file it touches.
+2. *A shell command that rewrites files* (`is_shell_edit`): `sed -i`, `perl
+   -pi`, a formatter (`ruff format`, `black`, `prettier --write`, `gofmt -w`,
+   `cargo fmt`, also behind `uv run` / `npx` / `python -m`), a `--fix` /
+   `--write` flag, `patch`, `git apply | checkout | restore | stash | mv | rm
+   | clean`, a codemod (`jscodeshift`, `comby`, `ast-grep`, `pyupgrade`, ...;
+   `CODEMOD_PROGRAMS`), `mv` / `cp` / `rm` / `ln` / `rsync` / `tar` / `unzip`
+   with an argument that is not a log or under `/tmp`, `>` / `tee` writes to
+   such a file, and inline or piped code that calls something that writes:
+   `python3 - <<'EOF' ... write_text(...) ... EOF`, `python -c "open(p,
+   'w')..."`, `node -e "fs.writeFileSync(...)"` (`WRITE_CALL_RE`:
+   `write_text`, `write_bytes`, `open(..., 'w' | 'a' | 'x')`, `.write(`,
+   `writeFile[Sync]`, `fs.write | rename | unlink | rm`, `File.write`,
+   `shutil.copy | move | rmtree`, `os.replace | rename | remove`, `.unlink(`,
+   `.rename(`, `json.dump(`).
+3. *A command that may have changed something:* any other command that ran
+   to completion and is not a look and not a check. That is: not a read-only
+   inspection command (`ls`, `cat`, `grep`, `git status | diff | log`, ...),
+   not a test runner, linter or type checker, and not an aggregate target
+   that runs them (`make check`). `python scripts/patch.py`,
+   `./scripts/regenerate.sh`, `npm install`, `make generate`, `git commit`,
+   `docker compose up` all qualify; commands that only show or send
+   something (`git push`, `git fetch`, `docker logs`; `REPORT_ONLY_KEYS`) do
+   not. Nobody saw what such a command did, so it
+   is treated as "something possibly changed" and nothing more: it ends the
+   streak of identical failures and lets a later green run count as a fix,
+   but it is not an edit. It names no file, does not count as a round for
+   `no-convergence`, and does not corroborate a correction. In a failed line
+   only the steps that demonstrably ran before the failing one count
+   (`python fix.py && pytest`), and the command a line is judged by is never
+   its own fix: `python gen.py` red, `python gen.py` green is a failure that
+   went away by itself, not red, fix, green.
 
 A retry loop is *derived from* command failures. For confidence it is not a
 second kind of evidence next to them (see methodology). Once a loop is recorded it stays, together with its
@@ -277,11 +325,13 @@ failures, even if the command goes green after a later edit: the three runs
 with nothing changed already happened.
 
 **Waiting is not a loop.** If the very same command line fails 2 or more
-times and then *succeeds*, with no file change and no install/setup command
-in between, the agent was waiting for something outside the session: `gh pr
+times and then *succeeds*, with no change of any of the three kinds above in
+between, the agent was waiting for something outside the session: `gh pr
 checks` until CI is done, `curl -sf localhost:8000/health` until a server is
-up. The loop and its failures are dropped. A loop that never passes, or that
-passes only after an install or a change, stays.
+up. The loop and its failures are dropped. Looking around while waiting (`cat
+server.log`, `git status`) keeps it a wait. A loop that never passes, or that
+passes only after a change or a command that may have changed something,
+stays: then something was done about it.
 
 **Why:** the failure output did not lead the agent to a fix.
 
@@ -289,9 +339,33 @@ passes only after an install or a change, stays.
 
 **False negatives:** a flaky test that fails twice and then passes untouched
 looks exactly like waiting and is dropped (a single red run followed by green
-stays on the record as an ordinary failure).
+stays on the record as an ordinary failure). "May have changed something" is
+generous by design: three identical failures with an unrelated `git commit`
+or `docker restart db` between them are not a loop, although
+nothing relevant changed. The rule prefers missing such a loop to reporting
+the far more common red, script, red, script, green as one.
+
+**What still gets through (false positives):**
+
+- *Changes the transcript does not show.* A fix made by the human in their
+  editor, by another agent or session, by a file watcher, or by a subagent
+  whose transcript is a separate stream, is invisible to the stream that
+  re-ran the command. Its failures stay on the record, and three of them in
+  a row are a retry loop.
+- *Commands that are named like a check but change things.* `make test` that
+  regenerates fixtures first, `pytest --snapshot-update`, `npm test -- -u`, a
+  linter with an auto-fix configured in its settings and no `--fix` on the
+  command line: by name these only report, so they are not a change.
+- *Checks that never go green in the stream.* A check that is still red when
+  the session (or the subagent) ends stays as ordinary failures, also when
+  somebody else made it green afterwards.
 
 ## `no-convergence` — No convergence
+
+> **In short:** Within one turn the agent ran the same command 4 or more
+> times, each run after a file change since the previous one, every run
+> failed as an ordinary failure, and the turn ended with the command still
+> failing.
 
 **What:** within one turn the agent ran the same command 4 or more times,
 each of those runs came after a file change since the previous one (an
@@ -351,6 +425,9 @@ reasons; a long-running refactoring that keeps a suite red on purpose.
 
 ## `tool-rejected` — Tool call declined
 
+> **In short:** The human declined a tool call the agent proposed. Declining
+> a plan or a question is not counted.
+
 **What:** the human declined a proposed tool call (Claude Code records this as
 a tool result starting "The user doesn't want to proceed with this tool use").
 The reason, if the human typed one, is kept as the excerpt.
@@ -373,6 +450,10 @@ unattributed.
 
 ## `user-interrupt` — User interrupt
 
+> **In short:** The human interrupted the agent after it had made at least
+> one tool call in the turn. The interrupt that accompanies a declined tool
+> call is not counted again.
+
 **What:** a `[Request interrupted by user]` marker while the agent had made at
 least one tool call in the turn. The marker that accompanies a declined tool
 call is not counted again.
@@ -388,6 +469,11 @@ says nothing about `pytest`): the event goes to the files edited in the turn
 ran out of time.
 
 ## `human-rework` — Human rework (git)
+
+> **In short:** A commit attributed to an agent changed a file, and the next
+> commit touching that file, made by a human within the rework window,
+> rewrote lines the agent commit had written or is described as a fix or
+> revert. A human continuing work elsewhere in the file does not count.
 
 **What:** a commit attributed to an agent changed a file, the *next* commit
 touching that file was made by a human within the rework window (14
@@ -451,6 +537,9 @@ renamed files; only the newest 400 candidate commits have their patches read.
 
 ## `edit-miss` — Edit miss
 
+> **In short:** An edit failed because the text to replace was not found in
+> the file, or matched several places.
+
 **What:** an edit failed because the text to replace was not found in the
 file, or matched several places.
 
@@ -460,6 +549,11 @@ whitespace), or the file has repeated blocks that are hard to target.
 **Attribution:** the file being edited.
 
 ## `edit-revert` — Edit reverted
+
+> **In short:** An edit exactly undid an earlier successful edit to the same
+> file in the same session, or a write restored an earlier version of the
+> file. Taking out lines that were only added and then run successfully (a
+> debug print) is not counted.
 
 **What:** a successful edit whose (old, new) strings are exactly the (new,
 old) strings of an earlier successful edit to the same file in the same
@@ -488,6 +582,13 @@ in a later session; an abandoned attempt that only added lines and was run
 successfully once before being removed (read as debugging).
 
 ## `command-failure` — Command failure
+
+> **In short:** A shell command failed: it exited non-zero or, where the exit
+> status belongs to a pipe or a later step, its own output says so. Setup and
+> invocation errors (command not found, missing module, bad arguments, …)
+> count fully; ordinary failures, such as a test that fails, count at 0.3. A
+> red run followed by a change and a green run of the same job is dropped.
+> Read-only inspection commands (ls, grep, …) are ignored.
 
 **What:** a shell command exits non-zero (or the tool reports an error).
 
@@ -557,6 +658,11 @@ successfully once before being removed (read as debugging).
     `--fix`, i.e. green. The first step with a red verdict is the one that
     failed; a step whose own passing summary appears ran green and closes
     its own red, fix, green loop even when another step of the line is red;
+    an aggregate target on such a line (`ruff format . && make check | tail
+    -2 && git status`), which has no summary line of its own, ran green when
+    nothing in the output is red and the output shows a passing test, lint,
+    type-check or build summary that no other step of the line could have
+    printed;
     and a setup error counts only if the output pins it on a step (the shell
     names the program, or the step's own signature is present). Text that
     merely looks like an error somewhere in the output of such a line is
@@ -580,12 +686,15 @@ successfully once before being removed (read as debugging).
   whatever they print; only a missing or non-executable interpreter (exit
   126/127) is a setup error. Inline code never gets "document the command".
 - *Red, fix, green is not counted at all:* an ordinary failure that is
-  followed by a file change (an edit, or a shell command that rewrites files,
-  see `retry-loop`) and then by a success of the same command, **or of
+  followed by a change (an edit, a shell command that rewrites files, or any
+  command that may have changed something such as a patch script or an
+  install; see ["What counts as a change"](#retry-loop--retry-loop)) and
+  then by a success of the same command, **or of
   another command doing the same job** (`pytest tests/test_a.py` red, edit,
   `make test` green), is dropped. That is the development loop doing its job. An ordinary
-  failure stays on the record when the command goes green with no edit in
-  between (flaky, or fixed by something other than code), never goes green
+  failure stays on the record when the command goes green with nothing but
+  looks and other checks in between (flaky, or fixed outside the transcript),
+  never goes green
   in the session, or was part of a [retry loop](#retry-loop--retry-loop).
 - *Test-first development is red, fix, green too:* a setup/invocation error
   that names what is missing (`No module named 'app.newfeat'`, `can't open
@@ -675,6 +784,10 @@ error.
 
 ## `edit-thrash` — Edit thrash
 
+> **In short:** One file received 6 or more successful edits within a single
+> turn in which something also went wrong: an edit miss, a stale edit or a
+> reverted edit on that file, or a failed command or retry loop in the turn.
+
 **What:** 6 or more successful edits to one file within a single turn **in
 which something also went wrong**: an edit miss, a stale edit or a reverted
 edit *on that file*, or a failed command or retry loop in the turn. A miss on
@@ -696,6 +809,9 @@ confidence.
 
 ## `file-too-large` — File too large to read
 
+> **In short:** A read was refused because the file exceeds what the harness
+> returns in one piece.
+
 **What:** a read was refused because the file exceeds what the harness
 returns in one piece ("File content (31245 tokens) exceeds maximum allowed
 tokens").
@@ -707,6 +823,10 @@ will hit the same wall in every session.
 file or documenting where its important parts are.
 
 ## `permission-denied` — Permission denied
+
+> **In short:** A tool call was refused by permission settings, a hook or a
+> safety check before it ran. No human was asked, and the command or edit
+> never happened.
 
 **What:** a tool call that was refused before it ran, by something other than
 a human saying no: a missing permission ("Claude requested permissions to use
@@ -737,6 +857,9 @@ treated as a failed call.
 
 ## `stale-edit` — Stale edit
 
+> **In short:** An edit or write was refused because the file had not been
+> read first, or changed on disk after it was read.
+
 **What:** an edit or write was refused because the file had not been read
 first, or was modified on disk after the agent read it.
 
@@ -747,6 +870,10 @@ mostly agent sloppiness and is recorded with a separate variant.
 **Attribution:** the file.
 
 ## `path-miss` — Path miss
+
+> **In short:** The agent tried to read or edit a path that does not exist. A
+> read of a missing file that the agent then creates in the same session is
+> not recorded.
 
 **What:** a read or edit of a path that does not exist. A read of a missing
 file that the agent then creates with a write in the same session (checking
@@ -769,6 +896,9 @@ output (somebody said it is there).
 **Attribution:** the non-existent path itself.
 
 ## `search-miss` — Search miss
+
+> **In short:** A Grep or Glob search returned nothing. A search that only
+> confirms a name is free before the agent creates it is not recorded.
 
 **What:** a Grep or Glob search that returned nothing.
 
@@ -799,6 +929,9 @@ unless the same pattern missed in two or more sessions (agents keep looking
 for a name that is not there).
 
 ## `read-loop` — Read loop
+
+> **In short:** The same range of a file was read 3 or more times in one
+> session with no successful edit to it in between.
 
 **What:** the same range of the same file is read 3 or more times in a session
 with no successful edit to that file in between. Paging through a file with

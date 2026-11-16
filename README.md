@@ -205,8 +205,12 @@ within a schema version.
 - Time lost is a floor, not a measurement of human time.
 - When a command's exit status is hidden (`pytest | tail`, `cmd; echo done`), the verdict comes
   from its output. If the filter cut the summary line away, the run counts as neither red nor green.
-- Agents that edit mostly through shell commands (heredocs, scripts) leave fewer traces of
-  edit friction, so edit signals undercount for them.
+- Changes made by commands are inferred, not seen. `sed -i`, formatters, `--fix`, codemods,
+  `mv`/`cp`/`rm` and inline scripts that write files count as edits; any other command that is
+  neither a look nor a check counts as "may have changed something", enough to end a retry loop
+  or make the next green run a fix. Changes made outside the transcript (your editor, another
+  agent) are missed, so a check someone else fixed can still show as failing. Agents that edit
+  mostly through shell commands also leave fewer traces of edit friction.
 
 Reports of wrong or missed hotspots are the most valuable contribution you can make:
 [open one here](https://github.com/nurettincoban/agent-friction/issues/new?template=false_positive.yml).

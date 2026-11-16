@@ -76,7 +76,7 @@ by repository or time window, so `0` marks an empty, binary or foreign file.
 | `totals` | object | See below. |
 | `signals` | list | The full catalog with counts, including zeros. |
 | `hotspots` | list | File hotspots, sorted by score (desc), events (desc), path. |
-| `commands` | list | Command hotspots, same shape, `kind: "command"`, `path` is the normalized command. |
+| `commands` | list | Command hotspots, same shape, `kind: "command"`, `path` is the normalized command ([forms](#forms-of-a-command-key)). |
 | `directories` | list | Directories that events were attributed to directly (searches scoped to a directory), same shape, `kind: "dir"`, `path` without trailing slash, `"."` for the repo root. *Addition to the base contract.* |
 | `tree` | object | Directory roll-up of all file and directory events. |
 | `exposure` | object | How many sessions touched each target, friction or not. See below. *Addition to the base contract.* |
@@ -190,6 +190,22 @@ Recursive nodes: `name`, `path` (`""` for the root), `kind` (`"dir"` or
 path; empty for files). A directory's numbers cover every event beneath it,
 each counted once; its `exposure_sessions` counts every session that touched
 anything beneath it. Commands are not in the tree.
+
+### Forms of a command key
+
+A key is the program and the words that say what it does, without arguments:
+`pytest`, `npm test`, `make check`, `uv run pytest`, `git push`. Three
+additions:
+
+| Form | Meaning |
+| --- | --- |
+| `python <inline>` | Code given on the command line: `python -c '...'`, `node -e '...'`, `ruby -e`, `perl -e`, `bun -e`, `php -r`. The interpreter's name is kept (`node <inline>`). |
+| `python <stdin>` | An interpreter told to read its script from standard input (`-`): `python3 - <<'EOF' ... EOF`, `echo ... \| python -`, `node - < x.js` (`node <stdin>`). |
+| `npm test (web/)` | A tool that works on the directory it is run in, run in a subdirectory of the repo: the repo-relative directory follows in parentheses, with a trailing slash. The suffix combines with the other two forms: `python <stdin> (web/)`, `python <inline> (tools/gen/)`. No suffix means the repo root. |
+
+Without excerpts (`key_mode: "pseudonymized"`), project-specific words of a
+key become hash placeholders (`make <target:37bd73>`); `<inline>`, `<stdin>`
+and the directory suffix, a repo path like any other, are kept as they are.
 
 ## Generic transcript format
 

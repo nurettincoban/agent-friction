@@ -94,6 +94,36 @@ _RULES: tuple[_Rule, ...] = (
         r"\1[REDACTED]",
     ),
     (
+        # `X-Api-Key: Tr0ub4dor&3`: a header value runs to the end of the line or the quote
+        "header",
+        re.compile(
+            rf"(?i)\b((?:(?:\w+-)+(?:{_SECRET_KEY_WORDS})(?:-\w+)*"  # a hyphenated name
+            rf"|(?:{_SECRET_KEY_WORDS})(?:-(?:key|token|secret|id|signature|value))+"
+            r"|api-key|access-key|private-key)"
+            r":[ \t]+)(?!\[REDACTED)([^\n\"']+)"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
+        # `PASSWORD='ab&cd ef'`, `"password": "ab cd"`: a quoted value ends at its quote
+        "quoted-assignment",
+        re.compile(
+            rf"(?i)\b([\w-]*(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"
+            r"[\"']?\s*[:=]\s*)([\"'])(?!\[REDACTED)[^\"'\n]{4,}\2"
+        ),
+        r"\1\2[REDACTED]\2",
+    ),
+    (
+        # `token: ab&cd`: only in `key=value&other=...` does `&` end the value
+        "colon-assignment",
+        re.compile(
+            rf"(?i)\b([\w-]*(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"
+            r"[\"']?\s*:\s*[\"']?)"
+            r"(?!\[REDACTED)([^\s\"',;]{4,})"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
         "assignment",
         re.compile(
             rf"(?i)\b([\w-]*(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"

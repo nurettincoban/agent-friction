@@ -344,3 +344,8 @@ def test_agent_commit_flag_validates_regex() -> None:
 def test_scan_of_a_missing_repo_says_so() -> None:
     code, _, err = run("scan", "/no/such/repo/anywhere")
     assert code == EXIT_ERROR and "does not exist" in err
+
+
+def test_output_dash_is_stdout() -> None:
+    code, out, _ = run("scan", *INPUT, "-f", "json", "-o", "-")
+    assert code == EXIT_OK and json.loads(out)["schema_version"] == 1

@@ -490,14 +490,17 @@ follow one rule: anything that looks like a home directory becomes `~`.
   run of the same job is not counted, and ordinary failures never produce a
   recommendation. Other ordinary failures are down-weighted, not removed: a
   session that ends red, or a flaky test, still adds a little score. A retry
-  loop needs three identical failing invocations with no change in between,
-  and is dropped as *waiting* if the same invocation then passes untouched
-  (which also hides a flaky test that fails twice in a row).
+  loop needs three identical failing invocations with no change, and no
+  command that may have changed something, in between, and is dropped as
+  *waiting* if the same invocation then passes untouched (which also hides a
+  flaky test that fails twice in a row).
 - **Only tool calls are seen.** Edit signals (`edit-miss`, `edit-revert`,
   `edit-thrash`, `stale-edit`) come from the harness's edit and write tools.
   An agent that changes files mostly through the shell (heredocs, `python -
   <<EOF` scripts, `sed`) leaves no such events: its files look quiet, and
-  only its command failures and the humans' reactions are visible.
+  only its command failures and the humans' reactions are visible. Such
+  commands are known to be changes (next point), but not which lines of
+  which file they changed.
 - **A resumed session is one session.** When a transcript replays the lines
   of an earlier one under a new session id (Claude Code's resume), both files
   count as the earlier session. A session continued without replayed lines
@@ -506,10 +509,19 @@ follow one rule: anything that looks like a home directory becomes `~`.
   removes lines that were only added and were run successfully once (a debug
   print). A deliberate experiment that replaces code and is taken back is
   counted although nothing went wrong.
-- **Changes made by shell commands are recognised by name.** `sed -i`,
-  formatters and `--fix` flags count as edits; a script that rewrites files
-  (`python tools/fix_imports.py`) does not, so a red run it fixes stays on
-  the record.
+- **Changes made by shell commands are assumed, not seen.** `sed -i`,
+  formatters, `--fix` flags, codemods, `mv`/`cp`/`rm`/`git mv` and inline
+  code that calls a write function count as edits. Any other command that
+  ran and is neither a look nor a check (`python tools/fix_imports.py`, `npm
+  install`, `git commit`) counts as "may have changed something": enough to
+  end a retry loop and to make the next green run a fix, never enough to
+  name a file. This errs towards forgiving: a failure that went away after
+  an unrelated command is read as fixed. It still misses changes made
+  outside the transcript (the human's editor, another agent or subagent, a
+  watcher) and changes made by commands named like checks (`pytest
+  --snapshot-update`, a `make test` that regenerates files): there, red
+  runs stay on the record and three in a row are a retry loop. See
+  `retry-loop` in [signals](signals.md).
 - **Time needs agent activity.** One round trip is measured to the agent's
   next tool call or message. In the generic format, without
   `assistant_message` events, a failure that ends a turn claims only the

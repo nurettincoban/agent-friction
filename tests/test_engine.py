@@ -1205,3 +1205,30 @@ def test_no_convergence_time_is_the_red_runs_not_the_span(tmp_path: Path) -> Non
     assert 7.5 <= row["est_minutes_lost"] <= 9  # 3 x 5 red runs of 30 s, plus the edits between
     (stretch,) = [e for e in row["evidence"] if e["signal"] == "no-convergence"][:1]
     assert 150 <= stretch["est_seconds_lost"] <= 180
+
+
+# ---- round 11 -------------------------------------------------------------------------------
+
+
+def test_a_session_of_prose_with_no_location_touched_no_repository(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    ts = "2026-11-05T16:00:0{}Z"
+    lines = [
+        {"session": "chat", "ts": ts.format(0), "kind": "user_message", "text": "what is a monad"},
+        {"session": "chat", "ts": ts.format(1), "kind": "assistant_message", "text": "a monoid"},
+        # no cwd either, but a tool call: as before, it is taken to have run here
+        {"session": "work", "ts": ts.format(2), "kind": "user_message", "text": "go"},
+        {"session": "work", "ts": ts.format(3), "kind": "tool_call", "id": 1, "op": "shell",
+         "command": "make build"},
+        {"session": "work", "ts": ts.format(4), "kind": "tool_result", "id": 1,
+         "exit_code": 127, "output": "sh: 1: make: not found"},
+        # prose only, but recorded in the repo: counted
+        {"session": "here", "ts": ts.format(5), "kind": "user_message", "text": "hello",
+         "cwd": str(repo)},
+    ]  # fmt: skip
+    log = tmp_path / "log.jsonl"
+    log.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+    out = analyze(AnalyzeOptions(repo=repo, transcripts=[log], include_git=False, now=NOW))
+    assert out["totals"]["sessions"] == 2
+    assert out["sources"][0]["sessions_outside_repo"] == 1
