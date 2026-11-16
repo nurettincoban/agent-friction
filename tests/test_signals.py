@@ -3064,3 +3064,67 @@ def test_a_plain_rerun_that_passes_is_remembered(tmp_path: Path) -> None:
     # an edit in between is the development loop
     s = Session().user("go").bash("npm test", "Tests: 1 failed", exit_code=1).edit(A)
     assert detect(s.bash("npm test", "Tests: 11 passed"), tmp_path) == []
+
+
+# ---- round 17 ------------------------------------------------------------------------
+
+LAUNCHED = "Command running in background with ID: {}"
+CONFTEST = "ImportError while loading conftest\nModuleNotFoundError: No module named 'yaml'"
+
+
+def background(s: Session, command: str, task: str, ended: str | None = None) -> Session:
+    s.tool("Bash", {"command": command, "run_in_background": True}, LAUNCHED.format(task))
+    if ended is not None:
+        s.tool("BashOutput", {"bash_id": task}, ended)
+    return s
+
+
+def test_a_background_launch_is_neither_red_nor_green(tmp_path: Path) -> None:
+    # red in the foreground, then only launched again: nothing is known to have passed
+    s = Session().user("go").bash("pytest -q", CONFTEST, exit_code=4)
+    background(s, "pip install pyyaml", "b0")
+    background(s, "pytest -q", "b1")
+    (found,) = detect(s, tmp_path)
+    assert found.detail["variant"] == "invocation"
+    assert not {"fixed_by_setup", "recovered_by", "rerun_green"} & found.detail.keys()
+    # the same launches in the foreground would have closed it
+    s = Session().user("go").bash("pytest -q", CONFTEST, exit_code=4)
+    s.bash("pip install pyyaml", "ok").bash("pytest -q", "3 passed")
+    assert detect(s, tmp_path)[0].detail["fixed_by_setup"] == "pip install"
+
+
+def test_how_a_background_command_ended_is_judged_like_a_foreground_run(tmp_path: Path) -> None:
+    failed = "<status>failed</status>\n<exit_code>{}</exit_code>\n<stdout>\n{}\n</stdout>"
+    s = Session().user("go")
+    background(s, "pytest -q", "b1", failed.format(4, CONFTEST))
+    background(s, "npm run dev", "b2", failed.format(1, "Error: listen EADDRINUSE :::3000"))
+    background(s, "make build", "b3", "<status>completed</status>\n<exit_code>0</exit_code>")
+    first, second = detect(s, tmp_path)
+    assert keys(first) == [("command", "pytest")] and first.detail["variant"] == "invocation"
+    assert "ModuleNotFoundError" in first.excerpt and first.excerpt.startswith("$ pytest -q")
+    assert keys(second) == [("command", "npm run dev")]
+    assert second.detail["environment"] == "port"
+    # a reported green end is a green run: red, edit, green in the background is the loop
+    s = Session().user("go").bash("pytest -q", "1 failed", exit_code=1).edit(A)
+    background(s, "pytest -q", "b1", "<status>completed</status>\n<exit_code>0</exit_code>")
+    assert detect(s, tmp_path) == []
+
+
+def test_a_missing_module_the_agent_just_imported_is_its_own_bug(tmp_path: Path) -> None:
+    missing = (
+        "ImportError while loading conftest\nE   ModuleNotFoundError: No module named 'tenacity'"
+    )
+
+    def session(added: str) -> Session:
+        s = Session().user("add retries").edit(A, "import os", added)
+        return s.bash("pytest -q", missing, exit_code=4)
+
+    (found,) = detect(session("import os\nimport tenacity"), tmp_path)
+    assert found.detail["variant"] == "ordinary"
+    (found,) = detect(session("import os\nfrom tenacity import retry"), tmp_path)
+    assert found.detail["variant"] == "ordinary"
+    # an edit that has nothing to do with it leaves the failure what it is: a setup problem
+    (found,) = detect(session("import os\nimport json  # tenacity later"), tmp_path)
+    assert found.detail["variant"] == "invocation"
+    s = Session().user("go").bash("pytest -q", missing, exit_code=4)
+    assert detect(s, tmp_path)[0].detail["variant"] == "invocation"

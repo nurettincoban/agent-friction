@@ -7,6 +7,7 @@ import re
 from datetime import datetime, timezone
 
 from agent_friction import model
+from agent_friction.model import Event
 
 #: Stored tool output is clipped to this many characters (head and tail are kept).
 MAX_OUTPUT_CHARS = 4000
@@ -105,6 +106,90 @@ def clip_output(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
         return text
     head = limit // 4
     return text[:head] + "\n…\n" + text[-(limit - head) :]
+
+
+#: Statuses of a background command that say how it ended (not "running", not "killed":
+#: stopping a server the agent started is not a failure of the server).
+_FINISHED = frozenset({"completed", "failed", "error", "exited", "done", "success"})
+_FAILED = frozenset({"failed", "error"})
+OUTCOME_SUFFIX = "#outcome"
+
+
+def pair_background(events: list[Event]) -> list[Event]:
+    """Give commands launched in the background the outcome that was reported later.
+
+    The acknowledgement of a launch says nothing about how the command ended, so it
+    is marked ``background`` (outcome unknown). When the outcome arrives
+    (``BACKGROUND_OUTCOME``: a poll of the task, a notification), it becomes a
+    call and a result of the launched command at that point of the transcript, to be
+    judged like a foreground run. Outcomes of tasks that no shell call launched, and
+    of tasks that were killed or are still running, are dropped.
+    """
+    calls: dict[str, Event] = {}
+    launched: dict[str, Event] = {}
+    reported: dict[str, Event] = {}
+    out: list[Event] = []
+    for event in events:
+        if event.kind == model.TOOL_CALL:
+            calls[event.call_id] = event
+            if event.background and event.op == model.OP_SHELL:
+                launched[event.call_id] = event
+        elif event.kind == model.TOOL_RESULT:
+            call = calls.get(event.call_id)
+            launch = call is not None and call.op == model.OP_SHELL
+            if launch and call is not None and (call.background or event.background):
+                event.background = call.background = True
+                launched[event.call_id] = call
+                if event.task_id:
+                    launched[event.task_id] = call
+            else:
+                event.background = False
+        elif event.kind == model.BACKGROUND_OUTCOME:
+            poll = calls.get(event.call_id)
+            task = event.task_id or (poll.task_id if poll is not None else "")
+            started = launched.get(task)
+            status = event.task_status.lower()
+            if started is None or (status not in _FINISHED and event.exit_code is None):
+                continue
+            if status in ("killed", "stopped", "running", "cancelled", "canceled"):
+                continue
+            earlier = reported.get(started.call_id)
+            if earlier is not None:
+                if not earlier.output and event.output:
+                    earlier.output = event.output  # the notification came before the log
+                continue
+            code = event.exit_code
+            failed = bool(code) or (status in _FAILED and code is None) or not event.ok
+            call_id = started.call_id + OUTCOME_SUFFIX
+            out.append(
+                Event(
+                    kind=model.TOOL_CALL,
+                    line=event.line,
+                    ts=event.ts,
+                    cwd=started.cwd,
+                    call_id=call_id,
+                    op=model.OP_SHELL,
+                    tool=started.tool,
+                    command=started.command,
+                    derived=True,
+                )
+            )
+            result = Event(
+                kind=model.TOOL_RESULT,
+                line=event.line,
+                ts=event.ts,
+                cwd=started.cwd,
+                call_id=call_id,
+                ok=not failed,
+                error=model.ERR_EXIT if failed else "",
+                exit_code=code if code is not None else (1 if failed else 0),
+                output=event.output,
+            )
+            reported[started.call_id] = result
+            out.append(result)
+            continue
+        out.append(event)
+    return out
 
 
 _AMBIGUOUS_RE = re.compile(r"Found (\d+) matches of the string to replace", re.I)

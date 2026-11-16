@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import bisect
 import dataclasses
+import hashlib
 import json
 import os
 import re
@@ -21,7 +22,7 @@ from typing import Any
 
 from agent_friction import __version__, gitsignals, model, recommend, redact, scoring, signals
 from agent_friction.adapters import claude_code, parse_transcript
-from agent_friction.attribution import PathResolver, public_key
+from agent_friction.attribution import PUBLIC_HASH_DIGITS, PathResolver, public_key
 from agent_friction.discovery import (
     claude_config_dirs,
     discover_repo_transcripts,
@@ -517,6 +518,7 @@ class _Analysis:
         self.unreadable: list[tuple[Path, str]] = []
         self.third_party_events = 0
         self._ignored: set[str] | None = None
+        self.existed: set[str] = set()  # paths (and their parents) the agent really used
 
     # ---- repository knowledge --------------------------------------------------------
 
@@ -619,6 +621,55 @@ class _Analysis:
             kept.append(finding)
         return kept
 
+    def public_path(self, rel: str) -> str:
+        """``rel`` as it may be shown without excerpts.
+
+        Repo paths are shown in such a report; a path the agent only guessed is not a
+        repo path but text the agent wrote. From the first component that is neither
+        on disk nor known to have existed (a successful read, edit or write went
+        through it), every component becomes ``<path:hash>``.
+        """
+        if rel in ("", "."):
+            return rel
+        parts = rel.split("/")
+        shown: list[str] = []
+        real = True
+        for depth, part in enumerate(parts, 1):
+            prefix = "/".join(parts[:depth])
+            real = real and (prefix in self.existed or self._disk_is_file(prefix) is not None)
+            digest = hashlib.sha256(part.encode()).hexdigest()[:PUBLIC_HASH_DIGITS]
+            shown.append(part if real else f"<path:{digest}>")
+        return "/".join(shown)
+
+    def _public_target(self, kind: str, key: str) -> str:
+        # A command key names the directory it ran in (`npm test (web/)`). That the
+        # command ran there shows the directory existed: it is not a guess.
+        return key if kind == model.COMMAND else self.public_path(key)
+
+    def _hide_guessed_paths(
+        self, findings: Sequence[Finding], exposure: dict[tuple[str, str], set[str]]
+    ) -> None:
+        """Without excerpts, no path that exists only in the agent's guess is shown."""
+        for finding in findings:
+            for index, target in enumerate(finding.targets):
+                shown = self._public_target(target.kind, target.key)
+                if shown != target.key:
+                    finding.summary = finding.summary.replace(target.key, shown)
+                    finding.targets[index] = Target(target.kind, shown, target.share)
+        for kind, key in list(exposure):
+            shown = self._public_target(kind, key)
+            if shown != key:
+                exposure.setdefault((kind, shown), set()).update(exposure.pop((kind, key)))
+
+    def in_repo_call(self, event: model.Event) -> bool:
+        """Did this tool call act inside the repository (not on a neighbouring one)?"""
+        resolver = self.resolver
+        if event.op == model.OP_SHELL:
+            return signals.runs_inside(resolver, event)
+        if event.path is not None:
+            return resolver.resolve(event.path, event.cwd) is not None
+        return resolver.contains(event.cwd) if event.cwd else True
+
     def is_known_file(self, rel: str) -> bool:
         return rel in self.touched or self._disk_is_file(rel) is True
 
@@ -702,6 +753,7 @@ class _Analysis:
         streams = [s for item in parsed for s in item.streams]
         self.source_labels = {str(item.path): self.source_label(item) for item in parsed}
         for stream in streams:
+            asked: dict[str, str] = {}
             for event in stream.events:
                 if event.kind == model.TOOL_CALL and event.op in (
                     model.OP_READ,
@@ -711,6 +763,10 @@ class _Analysis:
                     rel = self.resolver.resolve(event.path, event.cwd)
                     if rel:
                         self.touched.add(rel)
+                        asked[event.call_id] = rel
+                elif event.kind == model.TOOL_RESULT and event.ok and event.call_id in asked:
+                    parts = asked[event.call_id].split("/")
+                    self.existed.update("/".join(parts[:d]) for d in range(1, len(parts) + 1))
 
         self.episodes = episode_starts(streams)
         ctx = signals.DetectContext(
@@ -805,6 +861,8 @@ class _Analysis:
         for finding in findings:
             finding.episode = self.unit(finding.session_id, finding.ts)
         findings = self._drop_third_party(findings, exposure)
+        if not options.include_excerpts:
+            self._hide_guessed_paths(findings, exposure)
         _attribute_interrupted_commands(findings)
         for one_off in _settle_command_fixes(findings):
             low, high = one_off.run or (0.0, 0.0)
@@ -982,7 +1040,18 @@ class _Analysis:
                 "sessions": len({s.session_id for s in streams}),
                 "episodes": len({self.unit(s.session_id, e.ts) for s in streams for e in s.events}),
                 "tool_calls": sum(
-                    1 for s in streams for e in s.events if e.kind == model.TOOL_CALL
+                    1
+                    for s in streams
+                    for e in s.events
+                    if e.kind == model.TOOL_CALL and not e.derived
+                ),
+                # ... of which those that acted inside this repository: a session started
+                # in a parent directory also works on its neighbours
+                "tool_calls_in_repo": sum(
+                    1
+                    for s in streams
+                    for e in s.events
+                    if e.kind == model.TOOL_CALL and not e.derived and self.in_repo_call(e)
                 ),
                 "friction_events": len(findings),
                 "est_minutes_lost": scoring.lost_minutes(findings),

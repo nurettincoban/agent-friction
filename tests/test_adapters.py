@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_friction import model
-from agent_friction.adapters import claude_code, detect_format, generic, parse_transcript
+from agent_friction.adapters import claude_code, common, detect_format, generic, parse_transcript
 from agent_friction.adapters.common import classify_error, parse_ts, rejection_reason
 from tests import builders
 from tests.builders import Session
@@ -395,3 +395,116 @@ def test_powershell_is_a_shell(tmp_path: Path) -> None:
         (model.OP_SHELL, "npm test"),
     ]
     assert calls[2].op != model.OP_SHELL and not calls[2].command
+
+
+# ---- round 17: commands launched in the background ------------------------------------
+
+LAUNCHED = "Command running in background with ID: {}"
+POLL_FAILED = "<status>failed</status>\n\n<exit_code>{}</exit_code>\n\n<stderr>\n{}\n</stderr>"
+
+
+def shell_events(s: Session, tmp_path: Path) -> list[tuple[str, object, object, object]]:
+    (stream,) = parse_transcript(s.save(tmp_path)).streams
+    assert not [e for e in stream.events if e.kind == model.BACKGROUND_OUTCOME]
+    calls = {e.call_id: e for e in stream.events if e.kind == model.TOOL_CALL}
+    return [
+        (calls[e.call_id].command or "", e.background, e.ok, e.exit_code)
+        for e in stream.events
+        if e.kind == model.TOOL_RESULT and calls[e.call_id].op == model.OP_SHELL
+    ]
+
+
+def test_a_background_launch_is_not_an_outcome_and_its_end_is_read(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.tool("Bash", {"command": "npm run dev", "run_in_background": True}, LAUNCHED.format("b1"))
+    s.tool("BashOutput", {"bash_id": "b1"}, "<status>running</status>\n<stdout>starting</stdout>")
+    s.tool("BashOutput", {"bash_id": "b1"}, POLL_FAILED.format(1, "Error: listen EADDRINUSE"))
+    s.tool("BashOutput", {"bash_id": "b1"}, POLL_FAILED.format(1, "Error: listen EADDRINUSE"))
+    assert shell_events(s, tmp_path) == [
+        ("npm run dev", True, True, None),  # the launch: outcome unknown
+        ("npm run dev", False, False, 1),  # ... and how it ended, once
+    ]
+    (stream,) = parse_transcript(s.save(tmp_path)).streams
+    ended = [e for e in stream.events if e.derived]
+    assert len(ended) == 1 and ended[0].call_id.endswith(common.OUTCOME_SUFFIX)
+    assert [e.output for e in stream.events if e.call_id == ended[0].call_id][-1] == (
+        "Error: listen EADDRINUSE"
+    )
+
+
+def test_background_outcomes_from_notifications_and_other_tools(tmp_path: Path) -> None:
+    # a notification first (no output), the log later: one outcome, with the log
+    s = Session().user("go")
+    s.tool(
+        "Bash",
+        {"command": "npm run build"},  # sent to the background by the user, not by a flag
+        LAUNCHED.format("b7"),
+        tool_use_result={"stdout": "", "backgroundTaskId": "b7"},
+    )
+    s.user(
+        "<task-notification>\n<task-id>b7</task-id>\n<status>failed</status>\n"
+        "<summary>Background command failed with exit code 127</summary>\n</task-notification>"
+    )
+    s.tool(
+        "TaskOutput",
+        {"task_id": "b7"},
+        "<task_id>b7</task_id>\n<status>failed</status>\n<exit_code>127</exit_code>\n"
+        "<output>\nsh: 1: vite: not found\n</output>",
+    )
+    assert shell_events(s, tmp_path) == [
+        ("npm run build", True, True, None),
+        ("npm run build", False, False, 127),
+    ]
+    (stream,) = parse_transcript(s.save(tmp_path)).streams
+    assert "sh: 1: vite: not found" in [e.output for e in stream.events if e.kind == "tool_result"]
+    assert not [e for e in stream.events if e.kind == model.USER_MESSAGE and "task-id" in e.text]
+    # completed with exit code 0 is a green run; killed or still running is no outcome
+    s = Session().user("go")
+    s.tool("Bash", {"command": "make build", "run_in_background": True}, LAUNCHED.format("a"))
+    s.tool("BashOutput", {"bash_id": "a"}, "<status>completed</status>\n<exit_code>0</exit_code>")
+    s.tool("Bash", {"command": "npm run dev", "run_in_background": True}, LAUNCHED.format("b"))
+    s.tool("KillShell", {"shell_id": "b"}, "Successfully killed shell: b")
+    s.tool("BashOutput", {"bash_id": "b"}, "<status>killed</status>\n<exit_code>137</exit_code>")
+    assert shell_events(s, tmp_path) == [
+        ("make build", True, True, None),
+        ("make build", False, True, 0),
+        ("npm run dev", True, True, None),
+    ]
+    # the same tags in the output of an ordinary command, or about an unknown task, are text
+    s = Session().user("go")
+    s.tool("Bash", {"command": "cat status.xml"}, "<status>failed</status><exit_code>3</exit_code>")
+    s.tool("TaskOutput", {"task_id": "agent-9"}, "<status>failed</status><exit_code>1</exit_code>")
+    assert shell_events(s, tmp_path) == [("cat status.xml", False, True, None)]
+
+
+def test_generic_background_commands(tmp_path: Path) -> None:
+    lines = [
+        {"session": "s", "kind": "user_message", "text": "go"},
+        {"session": "s", "kind": "tool_call", "id": 1, "op": "shell", "command": "npm run dev",
+         "background": True},
+        {"session": "s", "kind": "tool_result", "id": 1, "output": "started"},
+        {"session": "s", "kind": "tool_result", "of": 1, "exit_code": 1, "output": "EADDRINUSE"},
+        {"session": "s", "kind": "tool_call", "id": 2, "op": "shell", "command": "make watch",
+         "background": True},
+        {"session": "s", "kind": "tool_result", "of": 2, "status": "killed"},
+        {"session": "s", "kind": "tool_result", "of": 99, "exit_code": 1},
+        {"session": "s", "kind": "tool_call", "id": 3, "op": "read", "path": "a",
+         "background": True},
+    ]  # fmt: skip
+    path = tmp_path / "g.jsonl"
+    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+    parsed = parse_transcript(path)
+    (stream,) = parsed.streams
+    assert parsed.skipped_lines == 0
+    results = [e for e in stream.events if e.kind == model.TOOL_RESULT]
+    assert [(e.background, e.ok, e.exit_code, e.output) for e in results] == [
+        (True, True, None, "started"),
+        (False, False, 1, "EADDRINUSE"),
+    ]
+    calls = [e for e in stream.events if e.kind == model.TOOL_CALL]
+    assert [(e.command, e.background, e.derived) for e in calls] == [
+        ("npm run dev", True, False),
+        ("npm run dev", False, True),
+        ("make watch", True, False),
+        (None, False, False),
+    ]

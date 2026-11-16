@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,8 @@ from agent_friction import model, recommend, redact, signals
 from agent_friction.guidance import Guidance, Mention, path_terms
 from agent_friction.model import Finding, Target
 from agent_friction.recommend import FileFacts, file_facts
+
+needs_symlinks = pytest.mark.skipif(sys.platform == "win32", reason="needs symlink privileges")
 
 
 def finding(signal: str, session: str = "s1", fid: int = 0, **detail: str) -> Finding:
@@ -436,6 +439,7 @@ def test_nested_files_apply_to_what_lies_beneath_them(tmp_path: Path) -> None:
     assert guide.mentions(["npm test"], "../web") == []
 
 
+@needs_symlinks
 def test_only_small_text_files_inside_the_repo_are_read(tmp_path: Path) -> None:
     from agent_friction import guidance
 
@@ -444,7 +448,7 @@ def test_only_small_text_files_inside_the_repo_are_read(tmp_path: Path) -> None:
     repo = write(tmp_path / "repo", {"CLAUDE.md": "use make test\n"})
     (repo / "AGENTS.md").symlink_to(repo / "CLAUDE.md")  # one file, cited once
     (repo / ".cursorrules").symlink_to(outside)
-    assert cited(Guidance(repo).mentions(["make test"])) == ["AGENTS.md:1"]
+    assert cited(Guidance(repo).mentions(["make test"])) == ["CLAUDE.md:1"]
     (repo / "CLAUDE.md").write_text("x" * guidance.MAX_FILE_BYTES + "\nuse make test\n")
     assert Guidance(repo).mentions(["make test"]) == []
     (repo / "CLAUDE.md").write_bytes(b"\x00\x01 make test\n")
@@ -526,3 +530,61 @@ def test_a_command_humans_keep_stopping_is_about_the_command() -> None:
     assert "Humans stopped `npm run e2e` while it was running 3 times in 3" in str(rec["detail"])
     (on_file,) = recommend.recommend(model.FILE, "a.py", stops, FileFacts(True, 10))
     assert on_file["title"] == "Tell agents what to check before acting here"
+
+
+def test_more_instruction_files_and_one_level_of_imports(tmp_path: Path) -> None:
+    repo = write(
+        tmp_path / "repo",
+        {
+            "CLAUDE.md": "# Project\nSee @docs/testing.md and @./docs/style.md for details.\n"
+            "Mail @maintainer or a@b.dev.\n```\n@docs/fenced.md\n```\n@../outside.md\n",
+            "docs/testing.md": "Run make test.\nMore: @docs/deeper.md\n",
+            "docs/style.md": "\nuse make test\n",
+            "docs/deeper.md": "make test\n",
+            "docs/fenced.md": "make test\n",
+            "CLAUDE.local.md": "make test (mine)\n",
+            "GEMINI.md": "make test\n",
+            ".windsurfrules": "make test\n",
+            ".claude/rules/python/tests.md": "always make test\n",
+            ".claude/rules/notes.txt": "make test\n",
+            "AGENTS.md": "See @docs/deeper.md\n",
+        },
+    )
+    write(tmp_path, {"outside.md": "make test\n"})
+    guide = Guidance(repo)
+    assert guide.files()[:5] == [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "docs/testing.md",  # imported by CLAUDE.md; its own imports are not followed
+        "docs/style.md",
+        "CLAUDE.local.md",
+    ]
+    assert not {"docs/deeper.md", "docs/fenced.md", "outside.md"} & set(guide.files())
+    assert ".claude/rules/python/tests.md" in guide.files()
+    assert ".claude/rules/notes.txt" not in guide.files()
+    assert cited(guide.mentions(["make test"])) == [
+        "docs/testing.md:1",
+        "docs/style.md:2",
+        "CLAUDE.local.md:1",
+    ]
+    for name in ("docs/testing.md", "docs/style.md", "CLAUDE.md", "CLAUDE.local.md"):
+        (repo / name).unlink()
+    assert cited(Guidance(repo).mentions(["make test"])) == [
+        "GEMINI.md:1",
+        ".windsurfrules:1",
+        ".claude/rules/python/tests.md:1",
+    ]
+
+
+def test_the_exception_is_quoted_not_the_summary_after_it() -> None:
+    output = (
+        "$ pytest -q\nExit code 2\n==== ERRORS ====\n"
+        "E   RuntimeError: fixture 'db' not found\n1 error in 0.10s"
+    )
+    failures = [
+        finding(signals.COMMAND_FAILURE, f"s{i}", variant="invocation", excerpt=output)
+        for i in range(2)
+    ]
+    (rec,) = recommend.recommend(model.COMMAND, "pytest", failures, None, quote)
+    assert "Typical output: \"RuntimeError: fixture 'db' not found\"." in str(rec["detail"])
+    assert "1 error in" not in str(rec["detail"])

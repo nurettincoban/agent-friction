@@ -18,8 +18,19 @@ from pathlib import Path, PurePosixPath
 ROOT_FILES: tuple[str, ...] = (
     "AGENTS.md",
     "CLAUDE.md",
+    "CLAUDE.local.md",
+    "GEMINI.md",
     ".github/copilot-instructions.md",
     ".cursorrules",
+    ".windsurfrules",
+)
+#: Directories whose Markdown files are rules for Claude Code, at any depth.
+CLAUDE_RULES_DIR = ".claude/rules"
+#: Files whose ``@path`` lines pull other files in (followed one level, inside the repo).
+IMPORTING_FILES = frozenset({"CLAUDE.md", "CLAUDE.local.md"})
+MAX_IMPORTS = 20
+_IMPORT_RE = re.compile(
+    r"(?:^|\s)@((?:\./|\.\./)?[\w][\w./-]*\.[A-Za-z]{1,8}|\./[\w./-]+)(?=$|[\s),.;:])"
 )
 #: Instruction files also read in the directories above a hotspot.
 NESTED_FILES: tuple[str, ...] = ("AGENTS.md", "CLAUDE.md")
@@ -88,6 +99,7 @@ class Guidance:
         self._lines: dict[str, list[tuple[int, str]]] = {}
         self._seen: set[Path] = set()
         self._cursor: list[str] | None = None
+        self._imports: dict[str, list[str]] = {}
 
     def _read(self, rel: str) -> list[tuple[int, str]]:
         """The searchable lines of ``rel``; empty if it is missing, large or not text."""
@@ -127,7 +139,45 @@ class Guidance:
                 except OSError:
                     found = []
                 self._cursor = [f"{CURSOR_RULES_DIR}/{name}" for name in found[:MAX_CURSOR_RULES]]
+                try:
+                    rules = sorted(
+                        p.relative_to(self.repo).as_posix()
+                        for p in (self.repo / CLAUDE_RULES_DIR).rglob("*.md")
+                        if p.is_file()
+                    )
+                except (OSError, ValueError):
+                    rules = []
+                self._cursor += rules[:MAX_CURSOR_RULES]
         return self._cursor
+
+    def _imported(self, rel: str) -> list[str]:
+        """Files that ``rel`` (a CLAUDE.md) pulls in with ``@path`` lines, one level deep."""
+        if rel.rsplit("/", 1)[-1] not in IMPORTING_FILES:
+            return []
+        if rel not in self._imports:
+            base = PurePosixPath(rel).parent
+            found: list[str] = []
+            fenced = False
+            for _, line in self._read(rel):
+                if line.lstrip().startswith("```"):
+                    fenced = not fenced
+                if fenced:
+                    continue
+                for target in _IMPORT_RE.findall(line):
+                    parts: list[str] = []
+                    for part in (base / target).parts:
+                        if part == "..":
+                            if not parts:
+                                parts = [".."]
+                                break
+                            parts.pop()
+                        elif part != ".":
+                            parts.append(part)
+                    path = "/".join(parts)
+                    if path and not path.startswith("..") and path != rel and path not in found:
+                        found.append(path)
+            self._imports[rel] = found[:MAX_IMPORTS]
+        return self._imports[rel]
 
     def files(self, near: str = "") -> list[str]:
         """Instruction files that apply to the repo-relative path ``near``."""
@@ -138,7 +188,11 @@ class Guidance:
         for depth in range(1, len(parts) + 1):
             directory = "/".join(parts[:depth])
             names.extend(f"{directory}/{name}" for name in NESTED_FILES)
-        return names
+        with_imports: list[str] = []
+        for name in names:
+            with_imports.append(name)
+            with_imports.extend(self._imported(name))
+        return list(dict.fromkeys(with_imports))
 
     def mentions(self, terms: list[str], near: str = "") -> list[Mention]:
         """Where the files that apply to ``near`` name any of ``terms``."""

@@ -111,8 +111,11 @@ agent-friction compare before.json after.json
 ```
 
 `compare` measures each file and command against the sessions that actually touched it (events per
-10 exposed sessions), so a file nobody worked on afterwards shows up as "no activity", not as
-"resolved". It ignores changes too small to mean anything, warns when either side has too few
+10 exposed sessions), so a file nobody worked on afterwards shows up as "not touched", not as
+"resolved". When the fix was "use `make test`, not `pytest`", success means agents stop running
+`pytest`, so `compare` checks the recommended command instead: if it ran cleanly afterwards, the
+old one is reported as "replaced". A fix that keeps agents away from a file (a denied edit) can
+only show as "not touched"; that is the expected outcome, not proof. It ignores changes too small to mean anything, warns when either side has too few
 sessions, and refuses to compare scans of different repositories. Both scans must use the
 same privacy mode: compare two `--no-excerpts` scans, or two scans without it.
 
@@ -132,6 +135,9 @@ tripped.
 
 Each signal is a deterministic rule over the transcript, documented with its exact definition,
 attribution rule, and known false positives in [docs/signals.md](https://github.com/nurettincoban/agent-friction/blob/main/docs/signals.md).
+A "friction event" is one firing of a signal, so the derived signals add to the count: four
+failed runs of the same line in a row are four `command-failure` events plus one `retry-loop`. Time is not
+double-counted that way; each minute is claimed once.
 
 | Signal | What happened |
 |---|---|
@@ -184,7 +190,8 @@ Transcripts contain your code and sometimes your secrets, so:
   `make <target:37bd73>`: stable, so grouping still works, but a pseudonym rather than
   anonymous, since someone who guesses the name can confirm it.
 - Even with `--no-excerpts`, reports always show your repository's file paths, its directory
-  name, and when sessions happened. Those are the map itself.
+  name, and when sessions happened. Those are the map itself. A path the agent guessed that
+  never existed becomes a hash too (`src/<path:3f9a1c>`), since it may name something private.
 
 Redaction is pattern-based: it catches secrets that look like secrets, not an opaque password
 typed as a bare argument. Skim a report before you share it outside your team, or use
@@ -204,11 +211,14 @@ Native adapters for other agents are welcome; see [CONTRIBUTING.md](https://gith
 ## Output contract
 
 `scan -f json` produces a versioned document (`schema_version: 1`) described field by field in
-[docs/schema.md](https://github.com/nurettincoban/agent-friction/blob/main/docs/schema.md). Build dashboards or bots on it; fields are only ever added
-within a schema version.
+[docs/schema.md](https://github.com/nurettincoban/agent-friction/blob/main/docs/schema.md). Build dashboards or bots on it: within a schema version fields are only
+added, never removed or re-typed. Until 1.0 the project is alpha, so new fields can still arrive
+in any release; they are listed in the CHANGELOG.
 
 ## Limitations
 
+- A command run in the background is judged by what the agent later reads of it (`BashOutput`,
+  a task notification). One that is never polled and never reports back has no outcome.
 - Heuristics, not ground truth. A red test that the agent then fixes is normal work, not
   friction, and the rules try hard not to count it; they will sometimes be wrong both ways.
   `show` exists so you can check.

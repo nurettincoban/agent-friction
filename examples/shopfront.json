@@ -68,6 +68,7 @@
           "detail": "`pytest` failed 7 times in 4 sessions; 5 times the agent then got the same job done with `make test`, and `pytest` did not work later in those sessions. Add a line to AGENTS.md such as: \"use `make test`, not `pytest`\".",
           "documented_in": [],
           "id": "use-the-working-command",
+          "replacement": "make test",
           "signals": [
             "command-failure"
           ],
@@ -1030,6 +1031,7 @@
     "sessions": 6,
     "third_party_events": 0,
     "tool_calls": 74,
+    "tool_calls_in_repo": 74,
     "unattributed_events": 0
   },
   "tree": {

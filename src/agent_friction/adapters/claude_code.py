@@ -56,6 +56,16 @@ _TOOL_OPS = {
 }
 
 
+#: Tools that ask about, or stop, a command running in the background.
+_TASK_TOOLS = frozenset({"BashOutput", "TaskOutput", "KillShell", "KillBash", "TaskStop"})
+_LAUNCHED_RE = re.compile(r"\s*Command (?:is )?running in (?:the )?background with ID: ([\w.-]+)")
+_NOTIFICATION_RE = re.compile(r"<task-notification>(.*?)</task-notification>", re.S)
+_STATUS_RE = re.compile(r"<status>\s*([\w-]+)\s*</status>")
+_EXIT_CODE_RE = re.compile(r"<exit_code>\s*(-?\d+)\s*</exit_code>|\bexit code (\d+)\b")
+_TASK_ID_RE = re.compile(r"<(?:task-id|task_id|tool-use-id)>\s*([^<\s]+)\s*</")
+_OUTPUT_RE = re.compile(r"<(stdout|stderr|output)>(.*?)</\1>", re.S)
+
+
 def _str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
@@ -137,6 +147,11 @@ def _tool_call(block: dict[str, Any], line: int, base: dict[str, Any]) -> Event 
             event.new_text = common.new_text(content)
     elif event.op == model.OP_SHELL:
         event.command = _str(inp.get("command"))
+        event.background = inp.get("run_in_background") is True
+    elif name in _TASK_TOOLS:
+        # BashOutput / TaskOutput / KillShell: which background task this asks about
+        for field in ("bash_id", "task_id", "shell_id"):
+            event.task_id = event.task_id or (_str(inp.get(field)) or "")
     elif event.op == model.OP_SEARCH:
         event.pattern = _str(inp.get("pattern"))
         event.path = _str(inp.get("path"))
@@ -182,6 +197,30 @@ def _tool_result(
             info.get("numFiles") == 0 and not info.get("numMatches")
         )
     event.output = common.clip_output(clean)
+    started = _LAUNCHED_RE.match(clean)
+    task = info.get("backgroundTaskId")
+    if started is not None or (isinstance(task, str) and task):
+        # "Command running in background with ID: ...": the launch, not the outcome
+        event.background = True
+        event.task_id = task if isinstance(task, str) and task else started.group(1)  # type: ignore[union-attr]
+    return event
+
+
+def _outcome(text: str, line: int, base: dict[str, Any], call_id: str = "") -> Event | None:
+    """How a background task ended, from a poll's result or a ``<task-notification>``."""
+    status = _STATUS_RE.search(text)
+    if status is None:
+        return None
+    event = Event(kind=model.BACKGROUND_OUTCOME, line=line, call_id=call_id, **base)
+    event.task_status = status.group(1).lower()
+    code = _EXIT_CODE_RE.search(text)
+    if code is not None:
+        event.exit_code = int(code.group(1) or code.group(2))
+    task = _TASK_ID_RE.search(text)
+    if task is not None:
+        event.task_id = task.group(1).strip()
+    parts = [body.strip() for _, body in _OUTPUT_RE.findall(text) if body.strip()]
+    event.output = common.clip_output("\n".join(parts))
     return event
 
 
@@ -226,6 +265,10 @@ def _line_events(obj: dict[str, Any], line: int) -> list[Event] | None:
             event = _user_text(content, line, base)
             if event is not None:
                 events.append(event)
+        for notice in _NOTIFICATION_RE.findall(content):
+            ended = _outcome(notice, line, base)
+            if ended is not None:
+                events.append(ended)
         return events
     if not isinstance(content, list):
         return None
@@ -237,8 +280,15 @@ def _line_events(obj: dict[str, Any], line: int) -> list[Event] | None:
             result = _tool_result(block, obj.get("toolUseResult"), line, base)
             if result is not None:
                 events.append(result)
+                polled = _outcome(_flatten(block.get("content")), line, base, result.call_id)
+                if polled is not None and not result.background:
+                    events.append(polled)
         elif block.get("type") == "text" and isinstance(block.get("text"), str):
             texts.append(block["text"])
+    for notice in _NOTIFICATION_RE.findall("\n".join(texts)):
+        ended = _outcome(notice, line, base)
+        if ended is not None:
+            events.append(ended)
     if human and texts:
         event = _user_text("\n".join(texts), line, base)
         if event is not None:
@@ -324,6 +374,8 @@ def parse_file(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFi
                         event.after_question = asking[target.sidechain]
                         asking[target.sidechain] = False
             target.events.extend(events)
+    main.events = common.pair_background(main.events)
+    side.events = common.pair_background(side.events)
     if resumed_from is not None and not in_subagent_dir:
         main.session_id = side.session_id = resumed_from
         for uuid in added:

@@ -832,6 +832,8 @@ READY_BANNER_RE = re.compile(
     r"|Development server (?:is )?running|webpack \S+ compiled",
     re.I,
 )
+#: How many of the latest edits are remembered for "did the agent just add this import?".
+ADDED_TEXTS_KEPT = 8
 #: The shell could not change directory, so what came after `cd x &&` never ran.
 _CD_FAILED_RE = re.compile(
     r"(?:^|: )cd: (?:[^\n]*: )?(?:No such file or directory|Not a directory)\s*$"
@@ -1409,6 +1411,7 @@ class _State:
     turn_shell_ok: bool | None = None
     turn_check_ok: bool | None = None  # ... and its last test/lint/build/aggregate command
     undo_asked: bool = False  # the prompt of this turn asks for an undo
+    added: list[str] = field(default_factory=list)  # text of the latest successful edits
     turn_misses: list[tuple[Finding, str]] = field(default_factory=list)
 
 
@@ -1876,6 +1879,9 @@ class _Detector:
         now = _epoch(call)
         targets = [Target(model.FILE, path)]
         self._on_change(path, _span(action))
+        if call.new_text:
+            state.added.append(call.new_text)
+            del state.added[:-ADDED_TEXTS_KEPT]
         if call.old_text:
             state.removed.append((call.old_text, call.new_text))
             del state.removed[:-REMOVED_TEXTS_KEPT]
@@ -2123,6 +2129,10 @@ class _Detector:
         cmd = action.cmd
         if cmd is None:
             return
+        if result.background:
+            # Launched in the background: this only says that it started. Neither red nor
+            # green, no fix and no recovery; its outcome, if reported, is judged then.
+            return
         # Any command that ran and is not itself a check (a script, a generator, an
         # install, a commit) may have changed something. That is enough to end a "nothing
         # changed in between" streak and to make a later green run a fix; it is not
@@ -2153,6 +2163,19 @@ class _Detector:
         self._judge_shell(action, cmd, result, edit)
         for step in after:
             self._possibly_changed(step, action.call.cwd)
+
+    def _just_imported(self, result: Event) -> bool:
+        """Is the module a failure reports missing one that a recent edit imports?"""
+        missing = missing_name(_QUOTED_LINE_RE.sub("", result.output)) or missing_name(
+            result.output
+        )
+        if missing is None or missing[0] != "module":
+            return False
+        top = re.escape(missing[1].strip("'\"").split(".")[0].split("/")[0])
+        wanted = re.compile(
+            rf"\b(?:import|from)\s+{top}\b|\brequire\(\s*['\"]{top}\b|\bfrom\s+['\"]{top}\b"
+        )
+        return bool(top) and any(wanted.search(text) for text in self.state.added)
 
     def _possibly_changed(self, step: Step, cwd: str | None) -> None:
         """``step`` ran and may have changed something (see ``may_change_files``)."""
@@ -2352,6 +2375,10 @@ class _Detector:
         if inline and code not in INVOCATION_EXIT_CODES:
             # Ad-hoc code failing says something about that code, not about how to run
             # anything here. Only a missing interpreter is a setup problem.
+            invocation = False
+        if invocation and code not in INVOCATION_EXIT_CODES and self._just_imported(result):
+            # The module that is missing is one the agent has just written an import
+            # for: the code is wrong, not the way the command is run.
             invocation = False
         hook_fixed = False
         if key == "git commit":

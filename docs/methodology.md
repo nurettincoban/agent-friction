@@ -480,9 +480,13 @@ repeating it is wasted effort, so before a recommendation is given the
 repository's instruction files are searched for what it is about
 (`guidance.py`):
 
-- **Files read:** `AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md`
-  and `.cursorrules` at the root; the files directly in `.cursor/rules/` (at
-  most 50); `AGENTS.md` and `CLAUDE.md` in every directory between the root
+- **Files read:** `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `GEMINI.md`,
+  `.github/copilot-instructions.md`, `.cursorrules` and `.windsurfrules` at
+  the root; the files directly in `.cursor/rules/` and every `*.md` under
+  `.claude/rules/` (at most 50 each); files that a `CLAUDE.md` or
+  `CLAUDE.local.md` pulls in with an `@path/to/file.md` line (one level
+  deep: imports of imported files are not followed; at most 20 per file;
+  not inside code fences; only inside the repository); `AGENTS.md` and `CLAUDE.md` in every directory between the root
   and the hotspot (for `web/src/a.ts`: `web/` and `web/src/`; for a command
   keyed `npm test (web/)`: `web/`); and the `permissions.deny` rules of
   `.claude/settings.json` and `.claude/settings.local.json` (only the lines
@@ -592,6 +596,19 @@ identify the event). All other paths (`repo.root`, generic transcript files)
 follow one rule: anything that looks like a home directory becomes `~`.
 
 ## Known limitations
+
+- **Background commands are only as visible as their reports.** A command
+  launched in the background is judged from the first `BashOutput` /
+  `TaskOutput` result or `<task-notification>` that says how it ended. If
+  the agent never asks and no notification is recorded, the command has no
+  outcome: it is neither a failure nor a success, and a server that crashed
+  unnoticed leaves no event. A notification carries no output, so a failure
+  known only from one is an ordinary failure with nothing to classify,
+  unless the agent reads the log afterwards. A report with status `running`
+  is not judged even if the output so far already shows an error, and a
+  task the agent killed is never a failure, whatever it had printed. The
+  time such a command took is not known and none is claimed for the run
+  itself.
 
 - **Heuristics, not understanding.** A correction is recognised by its
   wording plus what the agent does next; a setup error by its output. Both directions of error exist and are

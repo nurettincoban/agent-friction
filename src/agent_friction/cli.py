@@ -348,6 +348,11 @@ def _analyze(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
 
     if not repo.is_dir():
         raise AgentFrictionError(f"{repo}: not a directory (pass the repository root)")
+    for given in args.transcripts or []:
+        # Checked even with --allow-empty: a mistyped path in CI would otherwise pass every
+        # gate with a git-only report.
+        if not given.expanduser().exists():
+            raise AgentFrictionError(f"transcript path does not exist: {given}")
     result = analyze(
         AnalyzeOptions(
             repo=repo,
@@ -516,6 +521,22 @@ def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     return EXIT_OK
 
 
+def _target_in_repo(target: str, repo: Path | None) -> str:
+    """Turn an absolute or cwd-relative path inside the repo into a repo-relative one."""
+    if repo is None:
+        return target
+    candidate = Path(target).expanduser()
+    if not candidate.is_absolute():
+        if not candidate.exists():
+            return target  # a repo-relative path, a suffix, or a command
+        candidate = Path.cwd() / candidate
+    try:
+        rel = candidate.resolve().relative_to(repo.resolve())
+    except (OSError, ValueError):
+        return target
+    return rel.as_posix() if rel.parts else target
+
+
 def _cmd_show(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     if args.from_json is not None:
         result = _load_json(args.from_json)
@@ -523,8 +544,9 @@ def _cmd_show(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         args.max_evidence = max(args.max_evidence, 20)
         result = _analyze(args, args.repo)
     color = _use_color(args.color, stdout)
-    item = find_target(result, args.target)
-    node = find_dir(result, args.target)
+    target = _target_in_repo(args.target, getattr(args, "repo", None))
+    item = find_target(result, target)
+    node = find_dir(result, target)
     if item is not None and item.get("kind") != "dir":
         stdout.write(render_detail(result, item, color=color))
         return EXIT_OK

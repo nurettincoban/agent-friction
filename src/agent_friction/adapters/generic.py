@@ -30,6 +30,19 @@ def _event(obj: dict[str, Any], line: int) -> Event | None:
     if kind not in KINDS:
         return None
     event = Event(kind=kind, line=line, ts=common.parse_ts(obj.get("ts")), cwd=_str(obj.get("cwd")))
+    of = obj.get("of")
+    if kind == model.TOOL_RESULT and isinstance(of, (str, int)) and not isinstance(of, bool):
+        # how the command that call `of` launched in the background ended
+        event.kind, event.task_id = model.BACKGROUND_OUTCOME, str(of)
+        code = obj.get("exit_code")
+        if isinstance(code, int) and not isinstance(code, bool):
+            event.exit_code = code
+        event.ok = obj.get("ok") is not False
+        status = _str(obj.get("status"))
+        event.task_status = status or ("failed" if not event.ok or event.exit_code else "completed")
+        output = obj.get("output")
+        event.output = common.clip_output(output if isinstance(output, str) else "")
+        return event
     if kind in (model.TOOL_CALL, model.TOOL_RESULT):
         call_id = obj.get("id")
         if not isinstance(call_id, (str, int)) or isinstance(call_id, bool) or call_id == "":
@@ -43,6 +56,7 @@ def _event(obj: dict[str, Any], line: int) -> Event | None:
         event.command = _str(obj.get("command"))
         event.pattern = _str(obj.get("pattern"))
         event.read_range = str(obj.get("range", ""))
+        event.background = obj.get("background") is True and event.op == model.OP_SHELL
         old, new = obj.get("old"), obj.get("new")
         if isinstance(old, str) and isinstance(new, str):
             event.edits, event.insertions = common.edit_pairs([(old, new)])
@@ -155,5 +169,7 @@ def parse_file(path: Path, seen: dict[str, str] | None = None) -> ParsedFile:
             streams[key].events.append(event)
     for fingerprint in mine:
         earlier.setdefault(fingerprint, str(path))
+    for stream in streams.values():
+        stream.events = common.pair_background(stream.events)
     parsed.streams = list(streams.values())
     return parsed

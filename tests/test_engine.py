@@ -1569,6 +1569,7 @@ def test_advice_that_is_already_written_down_says_so(tmp_path: Path) -> None:
     out = story(repo=repo)
     pytest_rec = recommendation(out, "pytest", "use-the-working-command")
     assert pytest_rec["documented_in"] == [{"file": "AGENTS.md", "line": 3}]
+    assert pytest_rec["replacement"] == "make test" and "make test" in out["exposure"]["command"]
     assert pytest_rec["title"] == "`make test` is documented, yet agents run `pytest`"
     assert pytest_rec["detail"].startswith(
         "`AGENTS.md:3` already names `make test`; agents still ran `pytest` and failed 7 times "
@@ -1859,3 +1860,83 @@ def test_leftover_searches_never_become_a_pattern(tmp_path: Path) -> None:
     row = entry(out["directories"], "src")
     assert row["confidence"] == "medium" and not row["score_detail"]["capped"]
     assert [r["id"] for r in row["recommendations"]] == ["add-a-pointer"]
+
+
+# ---- round 17 ------------------------------------------------------------------------
+
+
+def test_without_excerpts_guessed_paths_are_not_shown(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("x = 1\n")
+    root = str(repo)
+    sessions = []
+    for i in range(2):
+        s = Session(f"s{i}", cwd=root).user("go")
+        s.read(f"{root}/src/ZZDIRX/missing.py", missing=True)
+        s.read(f"{root}/src/ZZDIRX/missing.py", missing=True)
+        s.edit(f"{root}/src/app.py", error=builders.EDIT_NOT_FOUND)
+        s.read(f"{root}/src/gone_since.py")  # read successfully then: it existed
+        s.edit(f"{root}/src/gone_since.py", error=builders.EDIT_NOT_FOUND)
+        sessions.append(s)
+    plain = scan(tmp_path, sessions, repo)
+    assert "src/ZZDIRX/missing.py" in [h["path"] for h in plain["hotspots"]]
+    bare = scan(tmp_path, sessions, repo, include_excerpts=False)
+    text = json.dumps(bare)
+    assert "ZZDIRX" not in text and "missing.py" not in text
+    paths = sorted(h["path"] for h in bare["hotspots"])
+    assert paths[1:] == ["src/app.py", "src/gone_since.py"]
+    assert re.fullmatch(r"src/<path:[0-9a-f]{6}>/<path:[0-9a-f]{6}>", paths[0])
+    guessed = entry(bare["hotspots"], paths[0])
+    assert guessed["signals"] == {"path-miss": 4} and paths[0] in guessed["evidence"][0]["summary"]
+    assert bare["exposure"]["file"][paths[0]] == 2
+    assert [c["path"] for c in bare["tree"]["children"][0]["children"]][-1].startswith("src/")
+    # the same guess gets the same placeholder in every report
+    assert (
+        sorted(
+            h["path"] for h in scan(tmp_path, sessions, repo, include_excerpts=False)["hotspots"]
+        )
+        == paths
+    )
+
+
+def test_tool_calls_in_the_repo_are_counted_apart(tmp_path: Path) -> None:
+    s = Session("wide", cwd="/work").user("go")
+    s.read("/work/repo/a.py").edit("/work/repo/a.py", error=builders.EDIT_NOT_FOUND)
+    s.read("/work/other/b.py").bash("ls /work/other", "b.py")
+    s.bash("cd /work/repo && make test", "ok").grep("Thing", "/work/other")
+    s.tool("TodoWrite", {"todos": []}, "ok")
+    out = scan(tmp_path, [s], Path("/work/repo"))
+    assert (out["totals"]["tool_calls"], out["totals"]["tool_calls_in_repo"]) == (7, 3)
+    inside = Session("in").user("go").read("/repo/a.py").bash("make test", "ok")
+    inside.tool("TodoWrite", {"todos": []}, "ok")
+    totals = scan(tmp_path, [inside])["totals"]
+    assert totals["tool_calls"] == totals["tool_calls_in_repo"] == 3
+
+
+def test_background_failures_score_like_foreground_ones(tmp_path: Path) -> None:
+    conftest = "ImportError while loading conftest\nModuleNotFoundError: No module named 'yaml'"
+    polled = f"<status>failed</status>\n<exit_code>4</exit_code>\n<stdout>\n{conftest}\n</stdout>"
+
+    def sessions(in_background: bool) -> list[Session]:
+        made = []
+        for i in range(4):
+            s = Session(f"s{i}").user("run the tests").bash("pytest -q", conftest, exit_code=4)
+            for k in range(3):
+                if not in_background:
+                    s.bash("pytest -q", conftest, exit_code=4)
+                    continue
+                launch = {"command": "pytest -q", "run_in_background": True}
+                s.tool("Bash", launch, f"Command running in background with ID: b{k}")
+                s.tool("BashOutput", {"bash_id": f"b{k}"}, polled)
+            made.append(s)
+        return made
+
+    (front,) = scan(tmp_path, sessions(False))["commands"]
+    out = scan(tmp_path, sessions(True))
+    (back,) = out["commands"]
+    assert back["score"] == front["score"] > 50 and back["signals"] == front["signals"]
+    assert [r["id"] for r in back["recommendations"]] == [r["id"] for r in front["recommendations"]]
+    assert "document-the-command" in [r["id"] for r in back["recommendations"]]
+    # the reported ends are not calls the agent made
+    assert out["totals"]["tool_calls"] == 4 * 7

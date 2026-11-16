@@ -53,6 +53,12 @@ class Style:
         return self.green(text)
 
 
+def _in_repo_calls(totals: dict[str, Any]) -> int:
+    """Tool calls inside the repo; older results only have the all-calls count."""
+    value = totals.get("tool_calls_in_repo", totals.get("tool_calls", 0))
+    return int(value or 0)
+
+
 def bar(score: float, width: int = 10) -> str:
     """A fixed-width bar for a 0-100 score, using eighth blocks for resolution."""
     score = max(0.0, min(100.0, score))
@@ -142,7 +148,7 @@ def render_terminal(
     out.append(
         st.dim(
             f"{who}"
-            f" · {plural(int(totals.get('tool_calls', 0)), 'tool call')}"
+            f" · {plural(_in_repo_calls(totals), 'tool call')}"
             f" · {plural(int(totals.get('friction_events', 0)), 'friction event')}"
             f" · ~{fmt_minutes(float(totals.get('est_minutes_lost', 0)))} lost"
             f" · {plural(int(totals.get('corrections', 0)), 'human correction')}{span}"
@@ -153,7 +159,7 @@ def render_terminal(
     hotspots = list(result.get("hotspots", []))[:top]
     commands = list(result.get("commands", []))[:top]
     if not hotspots and not commands and not result.get("directories"):
-        calls = int(totals.get("tool_calls", 0))
+        calls = _in_repo_calls(totals)
         if int(totals.get("friction_events", 0)):
             out.append(st.green("No hotspot: no file, directory, or command collected friction."))
         else:

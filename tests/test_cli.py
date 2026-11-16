@@ -471,3 +471,17 @@ def test_more_than_fifty_hotspots_are_all_kept(tmp_path: Path) -> None:
 def test_option_abbreviations_are_rejected(capsys: pytest.CaptureFixture[str]) -> None:
     code, _, _ = run("scan", *INPUT, "--no-exc")
     assert code == EXIT_USAGE and "unrecognized arguments: --no-exc" in capsys.readouterr().err
+
+
+def test_show_accepts_an_absolute_or_cwd_relative_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    target = (FIXTURES / "shopfront" / "api" / "openapi.yaml").resolve()
+    code, out, _ = run("show", str(target), "--repo", *INPUT)
+    assert code == EXIT_OK and "file: api/openapi.yaml" in out
+    monkeypatch.chdir(FIXTURES / "shopfront" / "api")
+    code, out, _ = run("show", "openapi.yaml", "--repo", *INPUT)
+    assert code == EXIT_OK and "file: api/openapi.yaml" in out
+
+
+def test_missing_transcript_path_is_an_error_even_with_allow_empty(tmp_path: Path) -> None:
+    code, _, err = run("scan", str(tmp_path), "-t", str(tmp_path / "nope"), "--allow-empty")
+    assert code == EXIT_ERROR and "transcript path does not exist" in err

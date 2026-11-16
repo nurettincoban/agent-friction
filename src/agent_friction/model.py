@@ -22,6 +22,10 @@ INTERRUPT = "interrupt"
 #: The agent wrote prose. Only the time is kept (the text never leaves the parser): it
 #: marks agent activity, so that waiting for a human is not mistaken for lost time.
 AGENT_MESSAGE = "agent_message"
+#: How a command launched in the background ended. Parsers emit it where the outcome is
+#: reported; ``adapters.common.pair_background`` turns it into a call and a result of the
+#: launched command, and no detector ever sees it.
+BACKGROUND_OUTCOME = "background_outcome"
 
 # Canonical tool operations
 OP_READ = "read"
@@ -108,6 +112,14 @@ class Event:
     #: The result is the harness's own error message, not output of the tool.
     harness_error: bool = False
     synthetic: bool = False  # slash command etc.: a turn boundary, never a correction
+    #: tool_call: the command was launched in the background. tool_result: this is only the
+    #: acknowledgement of such a launch; how the command ended is not known from it.
+    background: bool = False
+    #: The background task or shell a launch started, a poll asks about, an outcome is of.
+    task_id: str = ""
+    task_status: str = ""  # background_outcome: "completed", "failed", "killed", ...
+    #: tool_call: not a call the agent made, but the reported end of a background command.
+    derived: bool = False
     after_question: bool = False  # the agent's last words before this message were a question
 
 

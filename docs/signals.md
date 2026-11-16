@@ -787,6 +787,30 @@ successfully once before being removed (read as debugging).
   advice. They are never among the dropped runs: `totals.dropped_red_runs`
   counts red runs that an edit fixed, one-off fixes, and commands that are
   not tests and were polled until they passed.
+- *Commands launched in the background:* a shell call with
+  `run_in_background: true` (or one the user sent to the background) answers
+  at once with "Command running in background with ID: ...". That answer is
+  **not an outcome**: the launch is neither red nor green, closes no red,
+  fix, green loop, credits no setup step and recovers nothing. How the
+  command ended is read from what reports it later: the result of a
+  `BashOutput` / `TaskOutput` call for that id (`<status>failed</status>`,
+  `<exit_code>4</exit_code>`, the output), or a `<task-notification>`
+  message (status, and the exit code in its summary). The first such report
+  is treated as a run of the launched command at that point, with that exit
+  status and output, and is classified like any foreground run (setup
+  error, environment failure, ordinary failure, or green). The event cites
+  the line of the report. A task that was killed (`KillShell`, status
+  `killed`) or is still running has no outcome and is not judged: stopping
+  a server one started is not a failure of the server. In the generic
+  format: `background: true` on the call and a later result with `of`
+  (schema).
+- *An import the agent just wrote:* a `ModuleNotFoundError` / `Cannot find
+  module` for a module that one of the agent's last 8 successful edits
+  imports (`import x`, `from x import`, `require('x')`, `from 'x'`) is the
+  new code being wrong, not the command being run wrongly: it is an ordinary
+  failure, not a setup/invocation error, and never leads to "document how to
+  run". (A missing interpreter or program, exit 126/127, stays a setup
+  error.)
 - *A time-boxed start is not a failure:* `timeout 10 npm run dev` that exits
   124 (the time ran out) after printing that it was up (`ready in 300 ms`,
   `Local: http://...`, `listening on`, `compiled successfully`, `Application

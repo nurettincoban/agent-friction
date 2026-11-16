@@ -227,6 +227,7 @@ class _Rules:
         detail: str,
         based_on: Sequence[str],
         already: Already | None = None,
+        **named: str,
     ) -> None:
         """Record a recommendation, in its "already documented" form where that applies.
 
@@ -258,6 +259,8 @@ class _Rules:
                 "detail": detail,
                 "signals": sorted(set(based_on)),
                 "documented_in": [m.as_dict() for m in mentions],
+                # what the advice names, as data: `replacement`, `setup` (command keys)
+                **named,
             }
         )
 
@@ -717,6 +720,7 @@ class _Rules:
                 f'"use {code(fix)}, not {code(key)}".',
                 [signals.COMMAND_FAILURE],
                 self._use_instead(fix, key, failures),
+                replacement=fix,
             )
         elif setups and setups[0][1] >= MIN_EVENTS:
             setup, count = setups[0]
@@ -736,6 +740,7 @@ class _Rules:
                     f"or have {code(key)} run the step itself. (If that line is newer than "
                     "these sessions, give it time first.)",
                 ),
+                setup=setup,
             )
         elif len(environment) >= MIN_EVENTS:
             self.environment(key, environment)
@@ -882,12 +887,21 @@ def _command_key(finding: Finding) -> str:
 _NOISE_LINE_RE = re.compile(r"^(?:\$ |exit code \d+|traceback|\s*file \"|\s*at )", re.I)
 
 
+_PYTEST_PREFIX_RE = re.compile(r"^E\s+")
+_EXCEPTION_LINE_RE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Warning)\b[:(]?")
+
+
 def _error_line(finding: Finding) -> str:
     """The most telling line of a failed command's output: the last invocation-error line."""
     lines = [ln.strip() for ln in finding.excerpt.splitlines() if ln.strip()]
+    # pytest prefixes the lines of an error with "E": the exception is what to quote
+    lines = [_PYTEST_PREFIX_RE.sub("", ln) for ln in lines]
     for line in reversed(lines):
         if signals.INVOCATION_ERROR_RE.search(line) and not line.startswith("$ "):
             return line
+    for line in reversed(lines):
+        if _EXCEPTION_LINE_RE.match(line):
+            return line  # rather than the "1 error in 0.1s" that follows it
     for line in reversed(lines):
         if not _NOISE_LINE_RE.match(line):
             return line
