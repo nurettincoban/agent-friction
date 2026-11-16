@@ -184,6 +184,10 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
   document.getElementById("subtitle").textContent =
     (w.start || w.end ? String(w.start || "…").slice(0, 10) + " → " + String(w.end || "…").slice(0, 10) + " · " : "") +
     "generated " + utc(R.generated_at);
+  (R.recommendations || []).forEach(function (r) {
+    var box = el("div", { class: "rec sub" }); box.appendChild(el("b", null, r.title)); box.appendChild(el("span", null, r.detail));
+    document.getElementById("stats").insertAdjacentElement("afterend", box);
+  });
   if (Number(t.dropped_red_runs) > 0) {
     document.getElementById("stats").insertAdjacentElement("afterend", el("p", { class: "sub" },
       "Not counted: " + plural(t.dropped_red_runs, "failed run") + " of normal work (the agent fixed the failure, or was only waiting and polled until it passed; ~" +

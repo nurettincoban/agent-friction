@@ -266,3 +266,48 @@ def test_set_of_labelled_signals_is_the_catalog() -> None:
     assert scoring.count_signal("no-convergence", 3) == (
         "3 edit-and-run stretches that never went green"
     )
+
+
+# ---- round 25 ------------------------------------------------------------------------
+
+
+def test_tails() -> None:
+    assert scoring.binomial_tail(0, 5, 0.1) == 1.0 and scoring.binomial_tail(6, 5, 0.1) == 0.0
+    assert scoring.binomial_tail(1, 1, 0.05) == pytest.approx(0.05)
+    assert scoring.binomial_tail(2, 2, 0.05) == pytest.approx(0.0025)
+    assert scoring.binomial_tail(3, 30, 0.05) == pytest.approx(0.188, abs=0.001)
+    assert scoring.poisson_tail(0, 2.0) == 1.0 and scoring.poisson_tail(1, 0.0) == 0.0
+    assert scoring.poisson_tail(1, 0.05) == pytest.approx(0.0488, abs=0.0001)
+    assert scoring.poisson_tail(3, 1.5) == pytest.approx(0.191, abs=0.001)
+
+
+def test_a_file_is_above_the_baseline_only_when_it_clearly_is() -> None:
+    # (visits, visits with the signal, events)
+    assert scoring.baseline({"a": (30, 3, 3)}).above == ()  # 3 of 30 is the assumed 5%
+    assert scoring.baseline({"a": (4, 2, 2)}).above == ("a",)
+    assert scoring.baseline({"a": (1, 1, 1)}).above == ()  # once, in the one visit
+    assert scoring.baseline({"a": (1, 1, 40)}).above == ("a",)  # a burst is not background
+    # the same 3 of 10 stands out in a quiet repository and not in a noisy one
+    quiet = {f"f{i}": (20, 0, 0) for i in range(10)} | {"a": (10, 3, 3)}
+    noisy = {f"f{i}": (20, 3, 3) for i in range(10)} | {"a": (10, 3, 3)}
+    assert scoring.baseline(quiet).above == ("a",)
+    base = scoring.baseline(noisy)
+    assert base.above == () and (base.visits, base.hit_visits, base.events) == (210, 33, 33)
+    assert base.files == 11 and base.rate == 0.157
+    # ... and a file far above a noisy repository's rate still does
+    noisy["a"] = (10, 9, 14)
+    assert scoring.baseline(noisy).above == ("a",)
+    # many files tested: one modest p-value among them is what chance produces
+    crowd = {f"f{i}": (25, 2, 2) for i in range(30)} | {"a": (8, 3, 3)}
+    assert scoring.baseline(crowd).above == ()
+    assert scoring.baseline({}).above == () and scoring.baseline({}).rate == 0.0
+
+
+def test_a_finding_within_the_baseline_is_weak() -> None:
+    miss = finding(signals.EDIT_MISS)
+    assert not scoring.is_weak(miss)
+    miss.detail[scoring.WITHIN_BASELINE] = "1"
+    assert scoring.is_weak(miss) and scoring.weak_only([miss])
+    correction = finding(signals.USER_CORRECTION)
+    correction.detail[scoring.WITHIN_BASELINE] = "1"  # not a mechanical signal: no effect
+    assert not scoring.is_weak(correction)

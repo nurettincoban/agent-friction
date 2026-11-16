@@ -12,6 +12,7 @@ from agent_friction.report._common import (
     fmt_lost,
     fmt_minutes,
     plural,
+    repo_recommendations,
     signal_titles,
     top_signals,
     unattributed_heading,
@@ -91,6 +92,17 @@ def _details(h: dict[str, Any], titles: dict[str, str]) -> list[str]:
     return out
 
 
+def _repo_section(result: dict[str, Any]) -> list[str]:
+    repo_recs = repo_recommendations(result)
+    if not repo_recs:
+        return []
+    lines = ["## Across the repository", ""]
+    for rec in repo_recs:
+        title = _html_escape(str(rec.get("title", "")))
+        lines.append(f"- **{title}** {_html_escape(str(rec.get('detail', '')))}")
+    return [*lines, ""]
+
+
 def _unattributed(result: dict[str, Any]) -> list[str]:
     heading = unattributed_heading(result)
     if heading is None:
@@ -155,6 +167,7 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
         else:
             out += ["No recurring friction found.", ""]
         out += _unattributed(result)
+        out += _repo_section(result)
         note = dropped_note(result)
         if note:
             out += [f"_{note}_", ""]
@@ -171,6 +184,7 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
             detail = _html_escape(str(rec.get("detail", "")))
             out.append(f"{i}. {_code(h.get('path'))}: **{title}** {detail}")
         out.append("")
+    out += _repo_section(result)
 
     if hotspots:
         out += ["## Files where agents struggle", "", *_table(hotspots, "File"), ""]

@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from agent_friction import __version__, signals
+from agent_friction import __version__, scoring, signals
 from agent_friction.attribution import public_key, public_tool
 from agent_friction.discovery import encode_cwd
 from agent_friction.engine import (
@@ -24,7 +24,7 @@ from agent_friction.engine import (
 )
 from agent_friction.errors import AgentFrictionError
 from tests import builders, fixture_story
-from tests.builders import Session
+from tests.builders import Session, by_signal, detect
 
 NOW = datetime(2026, 11, 15, 12, 0, tzinfo=timezone.utc)
 SCHEMA = "src/shopfront/api/schema_gen.py"
@@ -2657,3 +2657,92 @@ def test_the_repositorys_own_name_stays_readable_without_excerpts(tmp_path: Path
     assert evidence and all(e["source"] is None and e["line"] is None for e in evidence)
     full = analyze(options)
     assert all(e["line"] > 0 for row in full["commands"] for e in row["evidence"])
+
+
+def _noisy_repo(
+    tmp_path: Path, sessions: int, rate: float, hot: int = 0, seed: int = 7
+) -> tuple[Path, list[Path]]:
+    """Healthy sessions over 15 files; before each edit a miss with probability ``rate``.
+
+    In the first ``hot`` sessions the agent also misses twice on ``src/hot.py``.
+    """
+    import random
+
+    rng = random.Random(seed)
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    names = [f"src/mod_{i:02d}.py" for i in range(15)]
+    for name in [*names, "src/hot.py"]:
+        (repo / name).write_text("x = 1\n" * 40)
+    files = []
+    for i in range(sessions):
+        s = Session(f"s{i:03d}", cwd=str(repo)).user("do the task")
+        for _ in range(6):
+            name = rng.choice(names)
+            s.read(f"{repo}/{name}")
+            if rng.random() < rate:
+                s.edit(f"{repo}/{name}", error=builders.EDIT_NOT_FOUND)
+            s.edit(f"{repo}/{name}")
+        if i < hot:
+            s.read(f"{repo}/src/hot.py")
+            s.edit(f"{repo}/src/hot.py", error=builders.EDIT_NOT_FOUND)
+            s.edit(f"{repo}/src/hot.py", error=builders.EDIT_NOT_FOUND)
+            s.edit(f"{repo}/src/hot.py")
+        s.bash("pytest -q", "5 passed in 0.1s")
+        files.append(s.save(tmp_path / "t" / f"s{i:03d}"))
+    return repo, files
+
+
+def test_uniform_background_noise_is_one_fact_not_a_pattern_per_file(tmp_path: Path) -> None:
+    repo, files = _noisy_repo(tmp_path, 60, 0.06)
+    out = analyze(AnalyzeOptions(repo=repo, transcripts=files, include_git=False, now=NOW))
+    assert out["totals"]["friction_events"] >= 15 and out["totals"]["strong_events"] == 0
+    assert len(out["hotspots"]) >= 8
+    for row in out["hotspots"]:
+        assert row["recommendations"] == [] and row["confidence"] == "low"
+        assert row["score"] <= scoring.WEAK_ONLY_SCORE_CAP
+    (item,) = out["recommendations"]
+    assert item["id"] == "note-the-background-rate" and item["signals"] == ["edit-miss"]
+    assert item["above"] == [] and item["events"] == out["totals"]["friction_events"]
+    assert item["title"] == (
+        f"Edit misses run at {100 * item['hit_visits'] / item['visits']:.0f}% of file visits "
+        "across the repository"
+    )
+    assert "No file is clearly above that rate" in item["detail"]
+    assert "formatter" not in item["detail"] and 0.04 < item["rate"] < 0.12
+
+
+def test_a_file_clearly_above_the_noise_still_gets_its_advice(tmp_path: Path) -> None:
+    repo, files = _noisy_repo(tmp_path, 40, 0.06, hot=8)
+    out = analyze(AnalyzeOptions(repo=repo, transcripts=files, include_git=False, now=NOW))
+    top = out["hotspots"][0]
+    assert top["path"] == "src/hot.py" and top["confidence"] == "medium"
+    assert [r["id"] for r in top["recommendations"]] == ["make-edits-land"]
+    assert top["recommendations"][0]["title"] == "Edits to this file keep missing their target"
+    assert all(row["recommendations"] == [] for row in out["hotspots"][1:])
+    (item,) = out["recommendations"]
+    assert item["above"] == ["src/hot.py"]
+    assert (
+        "1 file is clearly above that rate and has its own entry: `src/hot.py`." in item["detail"]
+    )
+
+
+def test_a_formatter_between_read_and_edit_is_the_evidence_for_saying_so(tmp_path: Path) -> None:
+    def build(s: Session) -> None:
+        s.read("/repo/a.py").edit("/repo/a.py")
+        s.bash("ruff format .", "1 file reformatted")
+        s.edit("/repo/a.py", error=builders.EDIT_NOT_FOUND)
+        s.read("/repo/a.py")
+        s.edit("/repo/a.py", error=builders.EDIT_NOT_FOUND)  # read since: plain misremembering
+
+    s = Session("s1", cwd="/repo").user("go")
+    build(s)
+    first, second = by_signal(detect(s, tmp_path), signals.EDIT_MISS)
+    assert first.detail.get("rewritten") == "1" and "rewritten" not in second.detail
+
+
+def test_too_little_of_a_signal_is_no_repository_level_item(tmp_path: Path) -> None:
+    out = story()
+    assert out["recommendations"] == []
+    schema = entry(out["hotspots"], SCHEMA)
+    assert "edit-the-source-not-the-output" in [r["id"] for r in schema["recommendations"]]

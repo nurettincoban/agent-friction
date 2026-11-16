@@ -238,3 +238,19 @@ def test_headline_counts_weak_events_apart() -> None:
     )
     assert events_phrase({"friction_events": 3, "strong_events": 3}) == "3 friction events"
     assert events_phrase({"friction_events": 1}) == "1 friction event"
+
+
+def test_repository_wide_advice_is_shown_once() -> None:
+    r = sample_result()
+    r["recommendations"] = [
+        {
+            "id": "note-the-background-rate",
+            "title": "Edit misses run at 8% of file visits across the repository",
+            "detail": "No file is clearly above that rate.",
+        }
+    ]
+    assert "Across the repository" in render_terminal(r)
+    assert "## Across the repository" in render_markdown(r)
+    assert "R.recommendations" in render_html(r)
+    r["hotspots"], r["commands"] = [], []
+    assert "Edit misses run at 8%" in render_terminal(r)

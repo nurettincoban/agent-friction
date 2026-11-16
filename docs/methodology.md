@@ -40,6 +40,23 @@ directory) if set, otherwise `~/.claude` and `~/.config/claude`.
 - Directories for the repo root, its git worktrees and their subdirectories
   are used. Because the encoding is lossy (`/a/b-c` and `/a/b/c` collide),
   each session is checked against the working directory recorded inside it.
+- **Worktrees.** The worktrees `git worktree list` reports are roots like the
+  repository, including those it calls prunable (the directory is gone, git's
+  record is not). A worktree kept *inside* the repository,
+  `<repo>/.claude/worktrees/<name>/` (Claude Code's own) or
+  `<repo>/.worktrees/<name>/`, is recognised by its path alone, whether or
+  not it still exists: such worktrees are removed after a merge, and their
+  sessions would otherwise key every file as
+  `.claude/worktrees/<name>/src/app.py` and split one hotspot into several.
+  **Limit:** a worktree that lived *outside* the repository and was removed
+  with `git worktree remove` leaves nothing to ask git about. Its sessions
+  are not read. `discovery.removed_sibling_sessions` finds the likely cases
+  by name alone (session files recorded in a directory beside the
+  repository called `<repo name>-…`, `<repo name>.…` or `<repo name>_…`
+  that no longer exists) so that the CLI can name them; passing that
+  directory as `--repo-alias` includes them (an alias takes part in
+  discovery like a root). A removed worktree with an unrelated name, or
+  somewhere else, is invisible.
 - Directories for **parent directories** of the repo are scanned too, because
   starting the agent in `~` or a monorepo root is common. A session from
   there is read only if it (or one of its subagent transcripts) contains the
@@ -104,7 +121,9 @@ it (in 10 separate episodes of work)").
 ## Attribution
 
 **Paths.** Absolute paths are matched lexically against the repo root, its
-symlink-resolved form, its git worktrees and any `repo_aliases`. A session
+symlink-resolved form, its git worktrees and any `repo_aliases`; below a
+root, a leading `.claude/worktrees/<name>/` or `.worktrees/<name>/` is
+dropped (a nested worktree is the repository, see Discovery). A session
 started *through* a symbolic link to the repository (`~/proj` for
 `/data/proj`) recorded the link's spelling: where a session's working
 directory exists on this machine and its real path is the repository's or
@@ -372,6 +391,55 @@ Rough reading: below 20 is a single incident or a rare one; 20-45 is a
 pattern worth a line in AGENTS.md; above 45 is a place where agents reliably
 struggle. Read the score together with `friction_rate` and the confidence.
 
+### The repository's base rate
+
+An edit that does not find its text, or a write refused because the file was
+not read or had changed, happens at some rate wherever agents edit files.
+Sixty healthy sessions over fifteen files with a 6% chance of a miss before
+each edit put two or three misses on most files; that is one fact about the
+repository, not a pattern in each file. So for the two mechanical signals
+that have a meaningful denominator, `edit-miss` and `stale-edit`
+(`scoring.BASELINE_SIGNALS`), a file is singled out only if it shows clearly
+more than the rest (`scoring.baseline`):
+
+- A **visit** is one session (episode) touching one file. For each file with
+  such events, the null hypothesis is the rate of the *other* files: visits
+  with the signal / visits, and events / visits. Neither is taken below
+  **5%** (`BASELINE_FLOOR`), and the floor alone is used when the other files
+  add up to fewer than 20 visits (`BASELINE_MIN_VISITS`): a small or quiet
+  repository is judged against one visit in twenty.
+- Two tails are computed: binomial, for this many visits with the signal
+  among the file's visits, and Poisson, for this many events (forty misses
+  in one session are one visit, and not background). The smaller, doubled, is
+  the file's p-value.
+- Files are selected by the Benjamini-Hochberg procedure at 0.05
+  (`BASELINE_ALPHA`), so that testing many files does not by itself produce
+  outliers.
+
+Examples against the floor: 2 visits with a miss out of 4, or 4 of 5, are
+above; 3 of 30 is not; one miss in a file's only visit is not; three misses
+in that one visit are.
+
+Events on a file that is *not* above the rate are marked `within_baseline`
+and are weak evidence from then on: they still count in the totals and in
+the score, but a file with nothing else is capped at 19, is "low"
+confidence and gets no advice, and its misses feed no recommendation.
+Generated files are exempt (one failed edit of generated output is already
+the pattern). When a signal has 5+ events in 3+ files and 3+ sessions, the
+result's top-level `recommendations` carries one repository-level item,
+`note-the-background-rate`: "Edit misses run at 8% of file visits across the
+repository", the counts, and the files that are above it.
+
+**Not covered:** `path-miss` and `search-miss` have no such denominator (the
+target of a miss is the thing that is not there, so every visit to it is a
+miss); they keep their own rules (probes and search misses are weak, advice
+needs the same path or pattern in 2+ sessions). **Limits:** the test assumes
+visits are alike; a file that is only ever read dilutes nothing but its own
+rate, while a file agents edit ten times per visit has more chances to miss
+than one edited once, and may be called above for that reason alone. With
+few visits nothing can be told apart from 5%, so a real but mild problem in
+a rarely touched file stays below the line until it recurs.
+
 ## Estimated time lost
 
 Each event may claim a wall-clock interval from transcript timestamps.
@@ -497,7 +565,7 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | --- | --- |
 | `edit-the-source-not-the-output` | the file is generated (see "Which files count as generated" below) and the transcripts show trouble editing it: 1+ `edit-miss`, `stale-edit`, `edit-revert` or corroborated `user-correction`. With a generated-file header the advice is plain ("Generated file: point agents at its source"); when only the name or the directory says so it is hedged ("Possibly a generated file: if so, ...", "judging only by its name; it carries no generated-file header, so check"). Git history alone never fires it: a lockfile bump is not an agent editing output by hand |
 | `split-or-anchor-large-file` | 2+ `edit-miss` and the file has 800+ lines, or 2+ `file-too-large` reads |
-| `make-edits-land` | 2+ `edit-miss` on a file that is neither large nor generated (wording depends on whether misses were mostly ambiguous or not-found) |
+| `make-edits-land` | 2+ `edit-miss` (above the repository's base rate, see Score) on a file that is neither large nor generated. Mostly ambiguous: "Repeated blocks: make edit targets unique". Mostly not-found: "Agents misremember this file: check what rewrites it" **only with evidence of a rewrite** (a `stale-edit` on the file, or a miss before which a command that rewrites files, such as a formatter, a fixer, `sed -i` or a commit hook, ran since the agent last read or edited the file; `rewritten` on the event); otherwise the neutral "Edits to this file keep missing their target", which asserts no cause |
 | `document-what-rewrites-this-file` | 2+ `stale-edit` of the "modified since read" kind |
 | `path-agents-expect` | 2+ `path-miss` (a read, an edit, a test command pointed at a missing test file, or a `cd` into a missing directory) |
 | `write-down-the-rule` | corroborated `user-correction` events whose attributed shares sum to 0.5 or more; quotes up to 3. "The rule the human keeps repeating" is claimed only when 2+ of the corrections share wording (two content words, or one distinctive word of 7+ letters, e.g. the same class name); otherwise the recommendation only asks whether the correction(s) reflect a standing rule. A `probable-correction` never counts |
@@ -519,6 +587,7 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `say-if-it-is-known-broken` | A command lifted out of the weak class because it stays red: it failed 2+ times and was still red at the end, in 3+ sessions (and there is no `no-convergence` event on it): "`npm run e2e` keeps ending red": say that it is known to be broken and what to run instead, or fix it. Also: the same test named as failed in 3+ sessions, none of which made it pass, and at least once before the session had changed any file ("`tests/test_legacy.py::test_old` is red session after session": fix it, or mark it as a known failure and say so); this form also appears on the test file's row |
 | `fix-the-flaky-test` | A test command failed and then passed on a plain re-run, with nothing changed in between, in 3+ sessions (variant `flaky`): "`npm test` looks flaky": fix or quarantine the flaky test, and say in AGENTS.md that a red run should be re-run once before anything is changed |
 | `pull-before-pushing` | `git push` was rejected as non-fast-forward (the remote branch had commits the local one lacked) in 3+ sessions: "tell agents to bring the branch up to date before `git push`": say in AGENTS.md to fetch and rebase (or merge) before pushing, and whether a force-push is ever acceptable. No time is claimed |
+| `note-the-background-rate` | repository-level only (top-level `recommendations`, never on a hotspot): `edit-miss` or `stale-edit` with 5+ events in 3+ files and 3+ sessions. States the rate per file visit and names the files clearly above it (see "The repository's base rate"). Mentions a rewriting command only when misses followed one |
 
 ### Which files count as generated
 

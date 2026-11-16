@@ -109,6 +109,13 @@ below makes a message a *candidate*. It becomes a correction with confidence
    `rm`, `git checkout -- <file>`, `git restore`, `git revert`, `git reset`,
    `git stash`).
 
+Three shapes of the same words are not verdicts: a **question** ("Still
+getting the error? If so edit src/app.py again": the sentence that carries
+"still ..." ends in a question mark), a problem that is **older than the
+agent's work** ("the tests are still failing on main since yesterday, can you
+look at ..."), and a **negation** ("that broke nothing as far as I can tell",
+"that broke no tests").
+
 A candidate without corroboration (nothing was changed before it, the agent
 went on to other things, or the session ends there) is not a
 `user-correction` at all. It is recorded under a separate signal,
@@ -196,7 +203,8 @@ corroborated: ...").
     asking ("just curious", "just checking", "not complaining"), an
     acknowledgement ("you removed the flag as asked, now ..."), or saying
     that the problem predates the agent ("before your change", "already
-    broken", "pre-existing", "not caused by you", "not your fault": "Still
+    broken", "pre-existing", "not caused by you", "not your fault", "since
+    yesterday", "since last week", "for days": "Still
     failing in CI on main before your change too - can you look at
     app/main.py?" is a new request): "you forgot
     nothing, great job", "I said use tabs in my last project but here spaces
@@ -234,7 +242,13 @@ corroborated: ...").
     `corroborated: followed`, attributed to the files it went back to). If
     it does not, nothing is recorded (or, where the message also carries two
     weaker cues, the probable correction those give). Naming a file is not
-    enough here. Not cues: "don't forget ...", "don't worry", "don't commit
+    enough here. One more way a correction is confirmed by behaviour: the
+    human says the work went to the **wrong place** ("wrong file", "wrong
+    module", "not in that file", "the bug is in ...") and names another
+    file, and the agent's next edit is to that file ("No, wrong file — the
+    bug is in parser.py", then an edit of `src/parser.py`): a correction
+    (`corroborated: redirected`) attributed to the file it had been editing.
+    Without the agent going to the file named it stays probable. Not cues: "don't forget ...", "don't worry", "don't commit
     yet", "use the factory instead" (may be the next step), "use tabs instead
     of spaces", "No tests are needed here", anything after praise, a
     dismissal, self-blame or "next task:", and an answer to a question the
@@ -562,10 +576,14 @@ The reason, if the human typed one, is kept as the excerpt.
 other harnesses; `QUESTION_TOOL_RE`). "Not yet, look at B first" is an answer,
 not a veto of an action. These are in no total.
 
-A *denied* line (`permission-denied`) with no destructive step and none that
-the refusal names is keyed to its **first** step (leaving out `cd`, `sleep`
-and `echo`): permission rules match a command line from its start, so `cat >>
-notes.md && uv run ruff check` was refused at `cat`.
+A *denied* line (`permission-denied`) is keyed, in this order, to the step
+the refusal names; to its **first** step if that writes a file by redirection
+(`cat >> tests/test_a.py <<EOF ... EOF && git add -A && git push` is about
+`tests/test_a.py`, whatever follows: the line never got past the write); to
+a destructive step (`git add -A && git push` is about `git push`); otherwise
+to its first step (leaving out `cd`, `sleep` and `echo`): permission rules
+match a command line from its start, so `cat notes.md && uv run ruff check`
+was refused at `cat`.
 
 **Time:** the time between the call and its result is a human reading a
 permission prompt, and is never counted, however long it took. What is
@@ -728,6 +746,23 @@ whitespace), or the file has repeated blocks that are hard to target.
 
 **Attribution:** the file being edited.
 
+**What is recorded with it:** `rewritten` when a command that rewrites files
+(a formatter, a fixer such as `--fix`, `sed -i`, a commit hook that modified
+files, a git command that changes the tree) ran after the agent last read or
+edited the file and before the miss. Only then does advice speak of something
+rewriting the file.
+
+**Base rate:** edit misses (and stale edits) happen everywhere at a low
+rate. On a file that shows no more of them than the rest of the repository
+they are weak evidence (`within_baseline`): counted, capped, and never the
+basis of advice for that file; the rate itself is reported once for the
+repository. See "The repository's base rate" in the methodology.
+
+**False positives (known):** uniform background noise that happens to pile
+up on one rarely visited file (2 misses in its 4 visits) is called above the
+rate; `rewritten` is set by any rewriting command, also one that did not
+touch this file.
+
 ## `edit-revert` — Edit reverted
 
 > **In short:** An edit exactly undid an earlier successful edit to the same
@@ -858,7 +893,10 @@ command's" below.
   command not found: x`, cmd.exe's `'x' is not recognized as an internal or
   external command` and PowerShell's `The term 'x' is not recognized as the
   name of a cmdlet, function, script file, or operable program`
-  (`CommandNotFoundException`) are the same setup/invocation error and
+  (`CommandNotFoundException`), and Windows' stand-in for a Python that is
+  not installed (`Python was not found; run without arguments to install
+  from the Microsoft Store ...`, exit code 9009, which is also cmd.exe's
+  code for any program it cannot find) are the same setup/invocation error and
   record the program (`not_found`). If the same command then runs under a
   versioned name (`python3` for `python`) or, on Windows, with the launcher
   (`py -m pytest` for `python -m pytest`; `py` and `python` share a command

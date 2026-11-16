@@ -109,7 +109,15 @@ RULE_IDS: tuple[str, ...] = (
     "say-if-it-is-known-broken",
     "fix-the-flaky-test",
     "pull-before-pushing",
+    "note-the-background-rate",
 )
+#: Events, files and sessions a mechanical signal needs before its repository-wide rate
+#: is reported as an item of its own.
+REPO_WIDE_MIN_EVENTS = 5
+REPO_WIDE_MIN_FILES = 3
+REPO_WIDE_MIN_SESSIONS = 3
+#: Files named in such an item.
+REPO_WIDE_MAX_FILES = 10
 
 
 @dataclass(frozen=True)
@@ -288,6 +296,8 @@ class _Rules:
         self.subject_name = subject_name
         self.by_signal: dict[str, list[Finding]] = {}
         for finding in findings:
+            if finding.detail.get(scoring.WITHIN_BASELINE) == "1":
+                continue  # no more than the repository's background rate: see `repo_wide`
             self.by_signal.setdefault(finding.signal, []).append(finding)
         self.quote = quote
         self.out: list[dict[str, object]] = []
@@ -573,6 +583,7 @@ class _Rules:
                 "for).",
                 [signals.FILE_TOO_LARGE],
             )
+        rewritten = [f for f in misses if f.detail.get("rewritten")]
         if len(misses) >= MIN_EVENTS and not generated and not large:
             if len(ambiguous) * 2 >= len(misses):
                 detail = (
@@ -581,16 +592,30 @@ class _Rules:
                     "factor the repetition out."
                 )
                 title = "Repeated blocks: make edit targets unique"
+            elif rewritten or self.get(signals.STALE_EDIT, "modified"):
+                seen = (
+                    f"Before {_n(len(rewritten), 'of them', 'of them')} a command that "
+                    "rewrites files (a formatter, a fixer, a commit hook) had run since the "
+                    "agent last read the file. "
+                    if rewritten
+                    else "Writes to it were also refused because it had changed on disk. "
+                )
+                detail = (
+                    f"{_n(len(misses), 'edit')} in {_n(_sessions(misses), 'session')} did not "
+                    f"find the text the agent expected. {seen}Document the formatting step, "
+                    "or run it in a hook so the agent sees the result before it edits again."
+                )
+                title = "Agents misremember this file: check what rewrites it"
             else:
                 detail = (
                     f"{_n(len(misses), 'edit')} in {_n(_sessions(misses), 'session')} did not "
-                    "find the "
-                    "text the agent expected. Usual causes: a formatter or hook rewrites the "
-                    "file after edits, unusual whitespace (tabs, CRLF), or the file changes "
-                    "under the agent. Document the formatting step, or run it in a hook so "
-                    "the agent sees the result."
+                    "find the text the agent expected, clearly more often than in the rest "
+                    "of this repository. Nothing in the transcripts shows the file being "
+                    "rewritten in between, so look at what makes its text hard to reproduce "
+                    "exactly (tabs, CRLF line endings, long or near-identical lines) and at "
+                    "whether agents edit it long after reading it."
                 )
-                title = "Agents misremember this file: check what rewrites it"
+                title = "Edits to this file keep missing their target"
             self.add("make-edits-land", title, detail, [signals.EDIT_MISS])
 
         modified = self.get(signals.STALE_EDIT, "modified")
@@ -1091,6 +1116,72 @@ def _error_line(finding: Finding) -> str:
         if not _NOISE_LINE_RE.match(line):
             return line
     return ""
+
+
+def repo_wide(
+    signal: str, base: scoring.Baseline, sessions: int, rewritten: int = 0
+) -> dict[str, object] | None:
+    """One repository-level item for a mechanical signal that is spread over many files.
+
+    Uniform background noise (an edit that misses now and then, wherever agents
+    edit) is one fact about the repository, not a pattern in each file it happened
+    to land on. ``base`` is the signal's baseline, ``sessions`` the sessions it
+    occurred in, ``rewritten`` the edit misses that followed a command which
+    rewrites files. ``None`` when there is too little of it to say anything.
+    """
+    if (
+        base.events < REPO_WIDE_MIN_EVENTS
+        or base.files < REPO_WIDE_MIN_FILES
+        or sessions < REPO_WIDE_MIN_SESSIONS
+    ):
+        return None
+    percent = f"{100.0 * base.hit_visits / base.visits:.0f}%" if base.visits else "0%"
+    if signal == signals.EDIT_MISS:
+        what, title = "edits did not find their target text", "Edit misses"
+    else:
+        what, title = "edits were refused because the file was unread or had changed", "Stale edits"
+    above = list(base.above)
+    if above:
+        shown = _and([code(path) for path in above[:REPO_WIDE_MAX_FILES]])
+        more = len(above) - REPO_WIDE_MAX_FILES
+        standing = (
+            f"{_n(len(above), 'file is', 'files are')} clearly above that rate and "
+            f"{'has its' if len(above) == 1 else 'have their'} own entry: {shown}"
+            + (f" and {more} more" if more > 0 else "")
+            + ". For the rest, what happened is no more than the repository's background "
+            "rate, so no advice is given per file."
+        )
+    else:
+        standing = (
+            "No file is clearly above that rate, so none is singled out and no advice is "
+            "given per file."
+        )
+    cause = (
+        f" Before {_n(rewritten, 'of these misses', 'of these misses')} a command that "
+        "rewrites files (a formatter, a fixer, a commit hook) had run since the agent last "
+        "read the file: making that step visible to the agent would lower the rate."
+        if rewritten and signal == signals.EDIT_MISS
+        else " If the rate is higher than you expect, look for a cause that is not tied to "
+        "one file."
+    )
+    return {
+        "id": "note-the-background-rate",
+        "title": f"{title} run at {percent} of file visits across the repository",
+        "detail": (
+            f"{base.events} {what}, in {base.hit_visits} of {base.visits} file visits (one "
+            f"session touching one file), spread over {_n(base.files, 'file')} and "
+            f"{_n(sessions, 'session')}. {standing}{cause}"
+        ),
+        "signals": [signal],
+        "documented_in": [],
+        "rate": base.rate,
+        "visits": base.visits,
+        "hit_visits": base.hit_visits,
+        "events": base.events,
+        "files": base.files,
+        "sessions": sessions,
+        "above": above,
+    }
 
 
 def recommend(

@@ -759,6 +759,7 @@ class _Analysis:
         self._is_file_cache: dict[str, bool | None] = {}
         self._facts: dict[str, recommend.FileFacts] = {}
         self.guidance = Guidance(self.repo)
+        self.repo_advice: list[dict[str, object]] = []
         self.outside: dict[Path, set[str]] = {}
         self.skipped_events: dict[str, int] = {}
         self.source_labels: dict[str, str] = {}
@@ -1159,7 +1160,55 @@ class _Analysis:
             for target in finding.targets:
                 self._expose(exposure, target.kind, target.key, finding.unit)
         self.exposure = exposure
+        self.repo_advice = self._baselines(findings)
         return self._emit(streams, findings, sources)
+
+    def _baselines(self, findings: Sequence[Finding]) -> list[dict[str, object]]:
+        """Mark mechanical events that are no more than the repository's background rate.
+
+        See ``scoring.baseline``. A generated file is exempt: there, one failed edit
+        is already somebody editing output by hand. Returns the repository-level
+        items (``recommend.repo_wide``).
+        """
+        advice: list[dict[str, object]] = []
+        visits = {
+            key: len(units) for (kind, key), units in self.exposure.items() if kind == model.FILE
+        }
+        for signal in sorted(scoring.BASELINE_SIGNALS):
+            mine: dict[str, list[Finding]] = {}
+            for finding in findings:
+                if finding.signal != signal or scoring.is_weak(finding):
+                    continue
+                for target in finding.targets:
+                    if target.kind == model.FILE:
+                        mine.setdefault(target.key, []).append(finding)
+            if not mine:
+                continue
+            counts = {
+                key: (
+                    total,
+                    len({f.unit for f in mine.get(key, ())}),
+                    len(mine.get(key, ())),
+                )
+                for key, total in visits.items()
+            }
+            base = scoring.baseline(counts)
+            above = set(base.above)
+            for key, found in mine.items():
+                if key in above or self.facts(key).generated:
+                    continue
+                for finding in found:
+                    finding.detail[scoring.WITHIN_BASELINE] = "1"
+            every = [f for found in mine.values() for f in found]
+            item = recommend.repo_wide(
+                signal,
+                base,
+                len(self.sessions_of(f.unit for f in every)),
+                len({f.fid for f in every if f.detail.get("rewritten")}),
+            )
+            if item is not None:
+                advice.append(item)
+        return advice
 
     def _expose(
         self, exposure: dict[tuple[str, str], set[str]], kind: str, key: str, session: str
@@ -1206,7 +1255,10 @@ class _Analysis:
                     "or directories that contain them."
                 )
             return files
-        files = discover_repo_transcripts(self.repo, self.roots)
+        # An alias is where the repository lived when the sessions were recorded: its
+        # project directories are this repository's too.
+        aliases = [Path(a) for a in self.options.repo_aliases if Path(a) not in self.roots]
+        files = discover_repo_transcripts(self.repo, [*self.roots, *aliases])
         if not files:
             searched = ", ".join(str(c / "projects") for c in claude_config_dirs())
             raise NoTranscriptsError(
@@ -1344,6 +1396,9 @@ class _Analysis:
                     for e in s.events
                     if e.kind == model.TOOL_CALL and not e.derived and self.in_repo_call(e)
                 ),
+                # Sessions read and set aside because nothing in them touched this
+                # repository (the sum of the sources' counts).
+                "sessions_outside_repo": sum(s.get("sessions_outside_repo", 0) for s in sources),
                 "friction_events": len(findings),
                 # ... of which those that are friction on their own: not the kinds that
                 # also accompany productive work (see ``scoring.is_weak``).
@@ -1389,6 +1444,9 @@ class _Analysis:
                     ("dir", model.DIR),
                 )
             },
+            # Advice about the repository as a whole: a mechanical signal spread evenly
+            # over many files is one fact, not a pattern in each of them.
+            "recommendations": self.repo_advice,
             "tree": self._tree(groups),
             # Events that count in the totals but belong to no file, command or
             # directory (an interrupt with no tool call to pin it on, a declined tool

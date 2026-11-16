@@ -4189,3 +4189,105 @@ def test_powershell_saying_a_path_is_not_there_is_a_path_miss(tmp_path: Path) ->
     # ... and any other error of a cmdlet is still a command failing
     denied = "Get-Content : Access to the path '/repo/src/a.py' is denied."
     assert one("Get-Content src/a.py", denied).signal == signals.COMMAND_FAILURE
+
+
+# ---- round 25 ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Still getting the error? If so edit src/a.py again",
+        "Still failing? Paste the output if it is.",
+        "the tests are still failing on main since yesterday, can you look at src/a.py",
+        "still broken for weeks, nothing to do with this - now fix src/a.py",
+        "that broke nothing as far as I can tell. continue with src/a.py",
+    ],
+)
+def test_questions_old_problems_and_negations_are_not_corrections(
+    tmp_path: Path, message: str
+) -> None:
+    assert correction_confidence(message)[0] == 0
+    s = Session().user("fix it").read(A).edit(A).user(message).read(A).edit(A)
+    assert detect(s, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Still getting the same error.",
+        "still failing in src/a.py",
+        "that broke the build, revert it",
+    ],
+)
+def test_the_same_words_as_a_verdict_still_correct(tmp_path: Path, message: str) -> None:
+    s = Session().user("fix it").read(A).edit(A).user(message).read(A).edit(A)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.USER_CORRECTION
+
+
+def test_wrong_file_and_the_agent_going_to_the_one_named_is_a_correction(tmp_path: Path) -> None:
+    other = "/repo/src/parser.py"
+    message = "No, wrong file — the bug is in parser.py"
+    s = Session().user("fix the bug").read(A).edit(A).user(message).read(other).edit(other)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", "src/a.py")]
+    assert found.detail["corroborated"] == "redirected"
+    assert "the agent then went to src/parser.py, the file the user named instead" in found.summary
+    # by path as well as by name
+    by_path = Session().user("fix the bug").read(A).edit(A)
+    by_path.user("that's the wrong module, the problem is in src/parser.py").edit(other)
+    assert detect(by_path, tmp_path)[0].detail["corroborated"] == "redirected"
+    # going somewhere the human did not name confirms nothing ...
+    astray = Session().user("fix the bug").read(A).edit(A).user(message).edit("/repo/src/lexer.py")
+    (found,) = detect(astray, tmp_path)
+    assert found.signal == signals.PROBABLE_CORRECTION
+    # ... nor does a "no" that names a file without saying the place was wrong
+    plain = Session().user("fix the bug").read(A).edit(A)
+    plain.user("No, look at parser.py first").edit(other)
+    (found,) = detect(plain, tmp_path)
+    assert found.signal == signals.PROBABLE_CORRECTION
+
+
+STORE = (
+    "Python was not found; run without arguments to install from the Microsoft Store, or "
+    "disable this shortcut from Settings > Manage App Execution Aliases."
+)
+
+
+def test_the_windows_python_stub_is_a_command_not_found(tmp_path: Path) -> None:
+    s = Session().user("go").bash("python scripts/x.py", STORE, exit_code=9009)
+    s.bash("py scripts/x.py", "ok").read(A)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["variant"] == "invocation" and found.detail["not_found"] == "python"
+    assert found.detail["works_as"] == "py"
+    assert signals.is_invocation_error(STORE, 1) and signals.is_invocation_error("", 9009)
+    # the sentence quoted inside a line is not the stub speaking
+    assert not signals.is_invocation_error(f"docs say: {STORE}", 1)
+
+
+@pytest.mark.parametrize(
+    ("command", "target"),
+    [
+        (
+            "cat >> tests/test_a.py <<'EOF'\nx\nEOF\ngit add -A && git commit -m x && git push",
+            ("file", "tests/test_a.py"),
+        ),
+        ("cat > notes.md <<EOF\nhi\nEOF\n&& git push origin main", ("file", "notes.md")),
+        # no write up front: the destructive step, as before
+        ("git add -A && git push", ("command", "git push")),
+        ("cat notes.md && git push", ("command", "git push")),
+    ],
+)
+def test_a_refused_write_followed_by_a_push_is_about_the_write(
+    tmp_path: Path, command: str, target: tuple[str, str]
+) -> None:
+    s = Session().user("go").tool("Bash", {"command": command}, DENIED_BY_SETTINGS, is_error=True)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.PERMISSION_DENIED and keys(found) == [target]
+    # what the refusal names wins over where the line starts
+    said = "Permission to use Bash with command git push has been denied."
+    named = Session().user("go")
+    named.tool("Bash", {"command": "cat > notes.md <<EOF\nhi\nEOF\ngit push"}, said, is_error=True)
+    (found,) = detect(named, tmp_path)
+    assert keys(found) == [("command", "git push")]

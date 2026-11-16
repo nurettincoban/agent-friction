@@ -43,6 +43,11 @@ def _is_abs(path: str) -> bool:
     return path.startswith("/") or bool(_DRIVE_RE.match(path))
 
 
+#: Where agents keep worktrees inside a repository: Claude Code's
+#: ``.claude/worktrees/<name>/`` and the common ``.worktrees/<name>/``.
+_NESTED_WORKTREE_RE = re.compile(r"^(?:\.claude/worktrees|\.worktrees)/[^/]+(?:/|$)")
+
+
 class PathResolver:
     """Resolve raw paths from transcripts to repo-relative POSIX paths.
 
@@ -117,7 +122,9 @@ class PathResolver:
                 return ""
             prefix = there.rstrip("/") + "/"
             if here.startswith(prefix):
-                return absolute[len(prefix) :]
+                # A worktree kept inside the repository is the repository, also after
+                # it was merged and removed: `git worktree list` no longer knows it.
+                return _NESTED_WORKTREE_RE.sub("", absolute[len(prefix) :], count=1)
         return None
 
     def chdir(self, cwd: str | None, moves: Iterable[str]) -> str | None:
@@ -1104,19 +1111,27 @@ def objectionable_step(parsed: ParsedCommand, reason: str = "") -> Step | None:
 def denied_step(parsed: ParsedCommand, said: str = "") -> Step | None:
     """The step of a command line that a permission rule or hook most plausibly refused.
 
-    A step the refusal names, or a destructive one, as for a human's objection.
-    Otherwise the **first** step: permission rules match a command line from its
-    start, so `cat >> notes.md && uv run ruff check` was refused at `cat`, not at
-    the check the line happens to end with.
+    In order: a step the refusal names; the **first** step if it writes a file by
+    redirection (`cat >> tests/test_a.py <<EOF ... && git push`: a write through the
+    shell is what such rules are there to stop, and the line never got past it); a
+    destructive step, as for a human's objection; otherwise the first step:
+    permission rules match a command line from its start, so `cat notes.md && uv
+    run ruff check` was refused at `cat`, not at the check the line ends with.
     """
     if not parsed.steps:
         return None
     words = set(re.findall(r"[\w.+-]+", said.lower()))
     named = any(s.program.lower() in words and not s.inspection for s in parsed.steps)
-    if named or _worst(parsed.steps) is not None:
+    waits = ("cd", "sleep", "true", ":")
+    first = next((s for s in parsed.steps if s.key and s.program not in waits), None)
+    if named:
         return objectionable_step(parsed, said)
-    waits = ("cd", "sleep", "echo", "true", ":")
-    return next((s for s in parsed.steps if s.key and s.program not in waits), parsed.steps[0])
+    if first is not None and written_file(first):
+        return first
+    if _worst(parsed.steps) is not None:
+        return objectionable_step(parsed, said)
+    quiet = (*waits, "echo")
+    return next((s for s in parsed.steps if s.key and s.program not in quiet), parsed.steps[0])
 
 
 def normalize_command(command: str) -> str:

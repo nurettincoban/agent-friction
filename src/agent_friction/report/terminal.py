@@ -13,6 +13,7 @@ from agent_friction.report._common import (
     fmt_lost,
     fmt_minutes,
     plural,
+    repo_recommendations,
     signal_titles,
     top_signals,
     unattributed_heading,
@@ -108,6 +109,19 @@ def _unattributed_rows(result: dict[str, Any], st: Style, width: int, limit: int
     return lines
 
 
+def _repo_rows(result: dict[str, Any], st: Style, width: int) -> list[str]:
+    items = repo_recommendations(result)
+    if not items:
+        return []
+    lines = [st.bold("Across the repository")]
+    for rec in items:
+        lines.append(f"  • {rec.get('title', '')}")
+        for line in textwrap.wrap(str(rec.get("detail", "")), width=max(40, width - 6)):
+            lines.append(st.dim(f"    {line}"))
+    lines.append("")
+    return lines
+
+
 def _hotspot_rows(
     items: list[dict[str, Any]],
     st: Style,
@@ -189,6 +203,7 @@ def render_terminal(
                 + (st.dim(" That is a small sample; check again later.") if calls < 50 else "")
             )
         out.extend(_unattributed_rows(result, st, width))
+        out.extend(_repo_rows(result, st, width))
         note = dropped_note(result)
         if note:
             out.append(st.dim(note))
@@ -212,6 +227,7 @@ def render_terminal(
         out.append("")
 
     out.extend(_unattributed_rows(result, st, width))
+    out.extend(_repo_rows(result, st, width))
 
     recs = collect_recommendations(result, limit=5)
     if recs:

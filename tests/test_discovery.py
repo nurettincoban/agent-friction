@@ -198,3 +198,89 @@ def test_sessions_recorded_through_a_symbolic_link_are_found(
     stray.symlink_to(other, target_is_directory=True)
     session(stray, "stray")
     assert discover_transcripts(real) == sorted([through_link, below_link])
+
+
+# ---- round 25 ------------------------------------------------------------------------
+
+
+def test_a_removed_worktree_inside_the_repository_is_still_the_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("x = 1\n")
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    sessions = []
+    for name, cwd in (
+        ("main", repo),
+        ("feat-a", repo / ".claude" / "worktrees" / "feat-a"),  # merged and removed since
+        ("feat-b", repo / ".worktrees" / "feat-b"),
+    ):
+        s = Session(name, cwd=str(cwd)).user("go")
+        s.edit(f"{cwd}/src/app.py", error=builders.EDIT_NOT_FOUND)
+        s.bash("pytest -q", "bash: pytest: command not found", exit_code=127)
+        sessions.append(s.save(config / "projects" / encode_cwd(cwd)))
+    assert discover_transcripts(repo) == sorted(sessions)
+    out = analyze(AnalyzeOptions(repo=repo, include_git=False))
+    assert out["totals"]["sessions"] == 3 and out["totals"]["sessions_outside_repo"] == 0
+    (hotspot,) = out["hotspots"]
+    assert (hotspot["path"], hotspot["sessions"]) == ("src/app.py", 3)
+    (command,) = out["commands"]
+    assert (command["path"], command["sessions"]) == ("pytest", 3)
+    assert "worktrees" not in str(out["directories"])
+
+
+def test_nested_worktree_paths_resolve_lexically(tmp_path: Path) -> None:
+    from agent_friction.attribution import PathResolver
+
+    resolver = PathResolver(Path("/r"))
+    assert resolver.resolve("/r/.claude/worktrees/feat-a/src/app.py") == "src/app.py"
+    assert resolver.resolve("src/app.py", "/r/.worktrees/x") == "src/app.py"
+    assert resolver.resolve("/r/.claude/worktrees/feat-a") == ""
+    assert resolver.contains("/r/.claude/worktrees/feat-a/web")
+    # the directories that hold worktrees, and other things under .claude, are themselves
+    assert resolver.resolve("/r/.claude/worktrees") == ".claude/worktrees"
+    assert resolver.resolve("/r/.claude/settings.json") == ".claude/settings.json"
+    assert resolver.resolve("/r/src/.worktrees/x/a.py") == "src/.worktrees/x/a.py"
+
+
+def test_a_prunable_worktree_is_still_a_root_and_a_removed_sibling_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+
+    def git(*args: str) -> None:
+        identity = ["-c", "user.name=T", "-c", "user.email=t@example.test"]
+        subprocess.run(
+            ["git", "-C", str(repo), *identity, *args], check=True, capture_output=True, env=env
+        )
+
+    git("init", "-q", "-b", "main")
+    git("commit", "-q", "--allow-empty", "-m", "init")
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    # deleted by hand: git still lists it (as prunable)
+    pruned = tmp_path / "repo-wt1"
+    git("worktree", "add", "-q", str(pruned), "-b", "wt1")
+    in_pruned = project(config, pruned.resolve(), "wt1")
+    shutil.rmtree(pruned)
+    assert pruned.resolve() in [p.resolve() for p in discovery.git_worktrees(repo)]
+    assert discover_transcripts(repo) == [in_pruned]
+    # removed properly: git has forgotten it, and only its name suggests what it was
+    removed = tmp_path / "repo-wt2"
+    git("worktree", "add", "-q", str(removed), "-b", "wt2")
+    project(config, removed, "wt2a")
+    project(config, removed, "wt2b")
+    git("worktree", "remove", str(removed))
+    other = tmp_path / "repo-docs"  # exists: another project, not a removed worktree
+    other.mkdir()
+    project(config, other, "docs")
+    project(config, tmp_path / "repository", "unrelated")  # not named after the repo
+    assert discover_transcripts(repo) == [in_pruned]
+    assert discovery.removed_sibling_sessions(repo) == [(str(removed), 2)]
+    # ... and naming it as an alias brings its sessions in
+    aliased = AnalyzeOptions(repo=repo, include_git=False, repo_aliases=[str(removed)])
+    assert analyze(aliased)["totals"]["sessions"] == 3

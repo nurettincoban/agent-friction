@@ -6,6 +6,11 @@ import math
 from typing import Any
 
 
+def repo_recommendations(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Advice about the repository as a whole (a background rate), not one target."""
+    return [r for r in result.get("recommendations") or [] if isinstance(r, dict)]
+
+
 def events_phrase(totals: dict[str, Any]) -> str:
     """ "34 friction events (11 weak)": weak signals alone are leads, not findings."""
     events = int(totals.get("friction_events", 0) or 0)

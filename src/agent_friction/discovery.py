@@ -49,7 +49,11 @@ def claude_config_dirs(
 
 
 def git_worktrees(repo: Path) -> list[Path]:
-    """Roots of all git worktrees of ``repo`` (empty when git is unavailable)."""
+    """Roots of all git worktrees of ``repo`` (empty when git is unavailable).
+
+    Includes entries git calls prunable (the directory is gone, the record is not):
+    their sessions are still this repository's.
+    """
     try:
         proc = subprocess.run(
             ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
@@ -69,6 +73,46 @@ def git_worktrees(repo: Path) -> list[Path]:
         for line in proc.stdout.splitlines()
         if line.startswith("worktree ") and line[len("worktree ") :].strip()
     ]
+
+
+def removed_sibling_sessions(
+    repo: Path, config_dirs: Sequence[Path] | None = None
+) -> list[tuple[str, int]]:
+    """Session files recorded in a vanished directory beside ``repo`` named after it.
+
+    ``(directory, session files)`` for Claude Code project directories whose
+    sessions ran in ``<parent of repo>/<repo name><-._ anything>`` when that
+    directory no longer exists: most likely a git worktree that was removed
+    (``git worktree remove`` leaves no trace to ask git about). Such sessions
+    are not read by a scan; passing the directory as a repo alias includes
+    them. A guess from names alone: a deleted unrelated checkout called
+    ``<repo>-old`` looks the same.
+    """
+    root = repo.absolute()
+    encoded = encode_cwd(root)
+    resolver = PathResolver(repo, repo_roots(repo)[1:])
+    found: dict[str, int] = {}
+    for config in config_dirs if config_dirs is not None else claude_config_dirs():
+        projects = config / "projects"
+        try:
+            entries = sorted(e for e in projects.iterdir() if e.is_dir())
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.name.startswith(encoded + "-"):
+                continue
+            for session in _session_files(entry):
+                cwd = _file_cwd(session)
+                if cwd is None or resolver.contains(cwd):
+                    continue  # a worktree git still knows is read like the repository
+                here = Path(cwd)
+                beside = here.parent == root.parent and re.match(
+                    re.escape(root.name) + r"[-._]", here.name
+                )
+                with contextlib.suppress(OSError):
+                    if beside and not here.exists():
+                        found[cwd] = found.get(cwd, 0) + 1
+    return sorted(found.items(), key=lambda pair: (-pair[1], pair[0]))
 
 
 def repo_roots(repo: Path, include_worktrees: bool = True) -> list[Path]:

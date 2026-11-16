@@ -380,6 +380,8 @@ INVOCATION_ERROR_RE = re.compile(
     r"|(?:zsh: )?command not found(?:: \S+)?"
     r"|.* is not recognized as an internal or external command.*"
     r"|.* is not recognized as (?:the|a) name of a cmdlet.*"
+    # Windows' stand-in for a Python that is not installed (exit 9009)
+    r"|Python was not found[;,] (?:run without arguments to install|but can be installed).*"
     r"|(?:[\w./-]+: )?(?:line \d+: )?[^\s:]+: (?:No such file or directory|Permission denied)"
     r"|.*executable file not found in \$PATH.*"
     # the interpreter could not start the program
@@ -863,7 +865,7 @@ def provides(path: str, kind: str, name: str) -> bool:
 
 
 #: Exit codes the shell itself uses for "cannot execute" and "not found".
-INVOCATION_EXIT_CODES = frozenset({126, 127})
+INVOCATION_EXIT_CODES = frozenset({126, 127, 9009})  # 9009: cmd.exe's "not recognized"
 
 
 #: The harness's own timeout notice. It opens the tool result; the same words printed
@@ -1125,6 +1127,7 @@ _NOT_FOUND_PROGRAM_RE = re.compile(
     r"(?:^|: )([^\s:]+): (?:command )?not found\s*$|command not found: (\S+)\s*$"
     r"|'([^'\n]+)' is not recognized as an internal or external command"
     r"|The term '([^'\n]+)' is not recognized as (?:the|a) name of a cmdlet"
+    r"|^(Python) was not found[;,] (?:run without arguments to install|but can be installed)"
     # a program called by its absolute path: `bash: /usr/bin/time: No such file or directory`
     r"|^(?:[\w./-]+: )?(?:line \d+: )?(/[^\s:]+): No such file or directory\s*$",
     re.M,
@@ -1161,6 +1164,7 @@ def _unfound_program(output: str) -> str:
     if match is None:
         return ""
     name = next(g for g in match.groups() if g).replace("\\", "/").rsplit("/", 1)[-1]
+    name = "python" if name == "Python" else name  # the Windows stub names the product
     return re.sub(r"\.(?:exe|cmd|bat|ps1)$", "", name, flags=re.I)
 
 
@@ -1189,7 +1193,9 @@ _SOFTENER_RE = re.compile(
     r"|as (?:asked|requested|expected|planned|discussed|agreed|i (?:asked|wanted|said))"
     # the problem predates the agent's work
     r"|before your (?:change|changes|edit|edits|commit|commits|fix|pr)|not caused by you(?:r \w+)?"
-    r"|already (?:broken|failing|red|there)|pre-?existing|not (?:related to|because of) your)\b",
+    r"|already (?:broken|failing|red|there)|pre-?existing|not (?:related to|because of) your"
+    r"|since (?:yesterday|last (?:night|week|month|\w+day)|this morning|\w+day|before)"
+    r"|for (?:days|weeks|months|a while|ages))\b",
     re.I,
 )
 #: The human names their own action or omission as the cause: "... because I hadn't
@@ -1389,7 +1395,7 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
         (
             "that broke …",
             _OPEN + r"(?:that|this|it|your (?:change|changes|edit|edits|fix|commit))"
-            r"(?: just)? (?:broke|breaks)\b",
+            r"(?: just)? (?:broke|breaks)\b(?! (?:nothing|none|no ))",
             False,
         ),
         (
@@ -1610,6 +1616,19 @@ def correction_confidence(
     return confidence, labels
 
 
+#: Where a sentence ends: not at the dot in ``src/app.py``.
+_SENTENCE_END_RE = re.compile(r"\?|!|\n|\.(?=\s|$)")
+#: The human says the work went to the wrong place: with another file named, and the
+#: agent going there next, that is a correction of the work on the file it had edited.
+_WRONG_PLACE_RE = re.compile(
+    r"\bwrong (?:file|module|place|spot|one|class|function|component|script|test|package)\b"
+    r"|\bnot (?:in )?(?:that|this) (?:file|one|module)\b"
+    r"|\b(?:bug|problem|issue|fix|change|error)(?:'s| is| was| belongs| goes| lives"
+    r"| should (?:be|go)) in\b",
+    re.I,
+)
+
+
 def _judge(
     text: str, after_question: bool, idle_seconds: float | None
 ) -> tuple[float, list[str], list[str], list[str]]:
@@ -1641,6 +1660,10 @@ def _judge(
             continue
         if label == "I told you" and _CONFIRM_TAIL_RE.search(head[match.start() :]):
             continue  # "I told you about the flag, right?" asks; it does not reproach
+        if label == "still failing":
+            ending = _SENTENCE_END_RE.search(head, match.end())
+            if ending is not None and ending.group().startswith("?"):
+                continue  # "Still getting the error? If so ...": a question, not a verdict
         strong.append(_refined(label, match.group()))
         addressed_any = addressed_any or addressed
     if strong:
@@ -1757,6 +1780,10 @@ class _Unconfirmed:
     tentative: bool = False
     #: The weaker cues the same message carries: what is left of it if nothing follows.
     fallback: str = ""
+    #: Files the human named *instead* ("wrong file, the bug is in parser.py"): repo
+    #: paths and bare file names. Going there next confirms the correction too.
+    elsewhere: frozenset[str] = frozenset()
+    redirected: bool = False
     followed: list[str] = field(default_factory=list)  # which of ``files`` it went back to
 
 
@@ -1785,6 +1812,10 @@ class _State:
     reads: dict[tuple[str, str], int] = field(default_factory=dict)
     # files the session has read or changed successfully
     had: set[str] = field(default_factory=set)
+    #: Commands so far that rewrite files (a formatter, `--fix`, `sed -i`, a commit hook),
+    #: and how many of them each file had seen when the agent last read or edited it.
+    rewrites: int = 0
+    seen_rewrites: dict[str, int] = field(default_factory=dict)
     read_findings: dict[tuple[str, str], Finding] = field(default_factory=dict)
     # (old, new) of each successful edit -> (when, successful commands so far, only added?)
     edit_history: dict[str, dict[tuple[str, str], tuple[float | None, int, bool]]] = field(
@@ -2341,7 +2372,15 @@ class _Detector:
                     targets,
                     excerpt=result.output,
                     interval=interval,
-                    detail={"variant": "not-found"},
+                    detail={
+                        "variant": "not-found",
+                        # a formatter, a fixer or a hook ran since the agent last saw it
+                        **(
+                            {"rewritten": "1"}
+                            if self.state.rewrites > self.state.seen_rewrites.get(path, 1 << 30)
+                            else {}
+                        ),
+                    },
                 )
             elif result.error == model.ERR_EDIT_AMBIGUOUS:
                 count = result.matches or 0
@@ -2391,6 +2430,7 @@ class _Detector:
         now = _epoch(call)
         targets = [Target(model.FILE, path)]
         state.had.add(path)
+        state.seen_rewrites[path] = state.rewrites
         self._on_change(path, _span(action))
         if call.new_text:
             state.added.append(call.new_text)
@@ -2400,6 +2440,15 @@ class _Detector:
             del state.removed[:-REMOVED_TEXTS_KEPT]
         self._explain_probes(path, call)
         self._confirm_correction({path}, f"the agent then changed {path} again")
+        pending = state.unconfirmed
+        if (
+            pending is not None
+            and not pending.note
+            and path not in pending.files
+            and (path in pending.elsewhere or path.rsplit("/", 1)[-1] in pending.elsewhere)
+        ):
+            pending.note = f"the agent then went to {path}, the file the user named instead"
+            pending.redirected = True
         self._note_rework({path}, action)
         if call.op == model.OP_WRITE:
             # Reading a file to see whether it exists, then creating it, is not a miss.
@@ -2480,6 +2529,8 @@ class _Detector:
         code. ``by`` names the command and says whether it is a setup step.
         """
         state = self.state
+        if not path and (by is None or not by[1]):
+            state.rewrites += 1  # not an edit tool, not a setup step: it rewrites files
         # Re-running a failing command three times with nothing changed is friction
         # whatever happens afterwards: a retry loop and its failures are never dropped.
         state.looped |= {id(f) for same in state.retry for f in state.streak.get(same, ())}
@@ -2612,6 +2663,7 @@ class _Detector:
             return
         if result.ok:
             self.state.had.add(path)
+            self.state.seen_rewrites[path] = self.state.rewrites
         if not result.ok:
             if result.error == model.ERR_MISSING:
                 self._path_miss(action, result)
@@ -3496,7 +3548,7 @@ class _Detector:
             finding.summary = self._correction_summary(
                 CORRECTION_STRONG, pending.matched, pending.note, how
             )
-            finding.detail["corroborated"] = "followed"
+            finding.detail["corroborated"] = "redirected" if pending.redirected else "followed"
             return
         finding.signal = PROBABLE_CORRECTION
         finding.excerpt = ""  # a guess is never put in anyone's mouth
@@ -3761,8 +3813,22 @@ class _Detector:
             self.state.rework = _Rework(finding, frozenset(named_changed))
         elif strong and changed:
             about = frozenset(named_changed) or changed
+            elsewhere: set[str] = set()
+            if _WRONG_PLACE_RE.search(event.text[:CORRECTION_HEAD_CHARS]):
+                for candidate in path_candidates(event.text[:CORRECTION_SCAN_CHARS].split()):
+                    rel = self.ctx.resolver.resolve(candidate, event.cwd)
+                    if "/" not in candidate and "\\" not in candidate:
+                        elsewhere.add(candidate)
+                    elif rel:
+                        elsewhere.add(rel)
             self.state.unconfirmed = _Unconfirmed(
-                finding, about, matched, how, tentative=tentative, fallback=fallback
+                finding,
+                about,
+                matched,
+                how,
+                tentative=tentative,
+                fallback=fallback,
+                elsewhere=frozenset(elsewhere - set(touched)),
             )
             self.state.rework = _Rework(finding, about)
 

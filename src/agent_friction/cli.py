@@ -86,7 +86,7 @@ def _resolve_repo(args: argparse.Namespace, err: TextIO) -> None:
     root = _find_repo_root(cwd)
     if root is not None and root != cwd:
         err.write(f"agent-friction: using the repository root {root}\n")
-    elif root is None:
+    elif root is None and getattr(args, "from_json", None) is None:
         err.write(
             f"agent-friction: note: {cwd} is not inside a git repository; mapping it as the "
             "repository (pass the repo path to choose another)\n"
@@ -375,7 +375,22 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _analyze(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
+def _note_removed_worktrees(repo: Path, err: TextIO) -> None:
+    """Sessions recorded in a vanished sibling (a removed worktree?) are not read: say so."""
+    from agent_friction.discovery import removed_sibling_sessions
+
+    try:
+        found = removed_sibling_sessions(repo.absolute())
+    except OSError:
+        return
+    for directory, count in found[:3]:
+        err.write(
+            f"agent-friction: note: {plural(count, 'session')} ran in {directory}, which no "
+            f"longer exists (a removed worktree?); pass --repo-alias {directory} to include them\n"
+        )
+
+
+def _analyze(args: argparse.Namespace, repo: Path, err: TextIO | None = None) -> dict[str, Any]:
     from agent_friction.engine import AnalyzeOptions, analyze
     from agent_friction.gitsignals import DEFAULT_AGENT_PATTERNS
 
@@ -406,6 +421,8 @@ def _analyze(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
         max_hotspots=None,
     )
     result = analyze(options)
+    if err is not None and args.transcripts is None and not args.repo_alias:
+        _note_removed_worktrees(repo, err)
     if int(result.get("totals", {}).get("sessions", 0)) == 0 and not args.allow_empty:
         from agent_friction.engine import session_directories
 
@@ -579,7 +596,7 @@ def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
             )
             return EXIT_USAGE
     fmt = fmt or "terminal"
-    result = _analyze(args, args.repo)
+    result = _analyze(args, args.repo, stderr)
     _warn_unreadable(result, stderr)
     if fmt == "json":
         text = render_json(result)
@@ -628,7 +645,7 @@ def _cmd_show(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         result = _load_json(args.from_json)
     else:
         args.max_evidence = max(args.max_evidence, 20)
-        result = _analyze(args, args.repo)
+        result = _analyze(args, args.repo, stderr)
     output = None if args.output is None or str(args.output) == "-" else args.output
     color = output is None and args.format == "text" and _use_color(args.color, stdout)
     target = _target_in_repo(args.target, getattr(args, "repo", None))

@@ -72,7 +72,24 @@ def test_edit_miss_rules_for_ordinary_files() -> None:
     assert rec["id"] == "make-edits-land" and "repeated blocks" in str(rec["detail"])
     not_found = [finding(signals.EDIT_MISS, variant="not-found") for _ in range(2)]
     (rec,) = recommend.recommend(model.FILE, "a.py", not_found, small)
-    assert "formatter" in str(rec["detail"])
+    # nothing shows the file being rewritten: no cause is asserted
+    assert rec["title"] == "Edits to this file keep missing their target"
+    assert "formatter" not in str(rec["detail"]) and "hook" not in str(rec["detail"])
+    assert "Nothing in the transcripts shows the file being rewritten" in str(rec["detail"])
+    seen = [finding(signals.EDIT_MISS, variant="not-found", rewritten="1"), not_found[0]]
+    (rec,) = recommend.recommend(model.FILE, "a.py", seen, small)
+    assert rec["title"] == "Agents misremember this file: check what rewrites it"
+    assert "Before 1 of them a command that rewrites files (a formatter" in str(rec["detail"])
+    stale = [finding(signals.STALE_EDIT, variant="modified"), *not_found]
+    (rec,) = recommend.recommend(model.FILE, "a.py", stale, small)
+    assert rec["title"] == "Agents misremember this file: check what rewrites it"
+    assert "Writes to it were also refused because it had changed on disk" in str(rec["detail"])
+    # misses that are no more than the repository's background rate ask for nothing
+    usual = [
+        finding(signals.EDIT_MISS, f"s{i}", variant="not-found", within_baseline="1")
+        for i in range(3)
+    ]
+    assert recommend.recommend(model.FILE, "a.py", usual, small) == []
     assert recommend.recommend(model.FILE, "a.py", not_found[:1], small) == []  # one-off
 
 

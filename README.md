@@ -182,23 +182,29 @@ double-counted that way; each minute is claimed once.
 | `file-too-large` | The agent could not read a file because it is too large for its context |
 | `read-loop` | The same file re-read many times without being edited |
 
-Scores are 0-100, explainable, and reproducible by hand from three factors: how severe the
-friction is, how often it **recurs** across sessions (one bad afternoon is not a pattern), and how
-**consistently** it happens in the sessions that touch that file or command at all (so a busy
-file is not penalized just for being busy). Roughly: under 20 is an incident, 20-45 a pattern,
-above 45 a reliable struggle. Red-then-green test runs with a fix in between are normal work and
-are not counted, and weak signals on their own (re-reads, many edits, an empty search) stay in
-the incident band unless the same pattern recurs across sessions. Recurrence is counted over
-episodes of work, not session ids: a long-running session (`claude --continue`) counts once for
-every time a human picked it up again after two hours or more of silence, and subagents belong to
-the episode of the agent that started them. Time lost is a floor estimate of agent time from
-timestamps (a correction claims only the rework it caused); time a person spends is never counted: not the wait before a reply, and not the
-time a permission prompt stood open. Where Claude Code records how a call was approved, a
-person-approved call claims only what followed its result; where the transcript does not say,
-the time from call to result counts up to 30 seconds, or the command's usual run time in that
-session if that is longer. Confidence (low / medium /
-high) depends on how many sessions back a hotspot and whether an independent second kind of
-evidence agrees. All of it is in
+### Reading the report
+
+- **Score (0-100).** Severity × how often it **recurs** across episodes of work × how
+  **consistently** it happens in the sessions that touch the target at all, so a busy file is not
+  penalized for being busy. Under 20 is an incident, 20-45 a pattern, above 45 a reliable
+  struggle. Every score can be reproduced by hand from its `score_detail` in `-f json`.
+- **What is not counted.** Red-then-green test runs with a fix in between are normal work. Weak
+  signals on their own (re-reads, many edits, an empty search) stay in the incident band unless
+  the same pattern recurs across sessions; the headline says how many events are weak.
+- **Episodes.** A long-running session (`claude --continue`) counts once for every time a human
+  picked it up again after two hours or more of silence. Subagents belong to the episode of the
+  agent that started them.
+- **Time lost** is a floor estimate of agent time from timestamps. A correction claims only the
+  rework it caused. Time a person spends is never counted: not the wait before a reply, and not
+  a permission prompt that stood open. Where Claude Code records how a call was approved, a
+  person-approved call claims only what followed its result; where it does not say, call to
+  result counts up to 30 seconds, or the command's usual run time in that session if longer. No
+  single event claims more than 5 minutes (a no-convergence stretch, 15). `n/a` means the
+  evidence carries no time estimate.
+- **Confidence** (low / medium / high) depends on how many sessions back a hotspot and whether an
+  independent second kind of evidence agrees.
+
+All of it is in
 [docs/methodology.md](https://github.com/nurettincoban/agent-friction/blob/main/docs/methodology.md).
 
 ## Privacy
@@ -256,8 +262,8 @@ in any release; from 0.1.0 on, each one is listed in the CHANGELOG.
   never quoted, and excluded from the headline count. It is English-only and still a heuristic,
   so treat the count as a floor.
 - Time lost is a floor, not a measurement of human time.
-- One session is a lead, not a pattern: rows seen in a single session get no advice unless a
-  human said the rule in their own words.
+- One session is a lead, not a pattern: a row seen in a single session gets advice only when it
+  scores 20 or more on its own (one long struggle) or a human said the rule in their own words.
 - When a command's exit status is hidden (`pytest | tail`, `cmd; echo done`), the verdict comes
   from its output. If the filter cut the summary line away, the run counts as neither red nor green.
 - Changes made by commands are inferred, not seen. `sed -i`, formatters, `--fix`, codemods,

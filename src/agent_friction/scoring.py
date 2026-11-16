@@ -6,12 +6,13 @@ so a score means the same thing in every run.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from agent_friction.model import Finding
 from agent_friction.signals import (
     COMMAND_FAILURE,
+    EDIT_MISS,
     EDIT_THRASH,
     HUMAN_REWORK,
     NO_CONVERGENCE,
@@ -48,6 +49,18 @@ WEAK_SIGNALS = WEAK_ALONE_SIGNALS
 #: Signals computed from other findings. Next to their source they are the same evidence
 #: counted again, so they do not add a distinct signal type for confidence.
 DERIVED_SIGNALS = {RETRY_LOOP: COMMAND_FAILURE, NO_CONVERGENCE: COMMAND_FAILURE}
+#: Mechanical signals that happen at some rate wherever agents edit files. A file is
+#: singled out for one of them only if it shows clearly more than the repository's rate.
+BASELINE_SIGNALS = frozenset({EDIT_MISS, STALE_EDIT})
+#: The rate assumed where the repository's own data shows less (or too little to say):
+#: one visit in twenty. A *visit* is one session (episode) touching one file.
+BASELINE_FLOOR = 0.05
+#: Visits to other files needed before the repository's own rate is used instead.
+BASELINE_MIN_VISITS = 20
+#: False discovery rate accepted among the files called "above the baseline".
+BASELINE_ALPHA = 0.05
+#: Marks a finding that is no more than the background rate (``Finding.detail``).
+WITHIN_BASELINE = "within_baseline"
 #: Session ids with this prefix are agent commits (git), not transcript sessions.
 GIT_SESSION_PREFIX = "git:"
 
@@ -126,6 +139,90 @@ def score_items(items: Iterable[Item], exposure_sessions: int | None = None) -> 
         friction_sessions=count,
         exposure_sessions=exposure,
         sessions=sessions,
+    )
+
+
+def binomial_tail(k: int, n: int, p: float) -> float:
+    """P(X >= k) for X ~ Binomial(n, p)."""
+    if k <= 0:
+        return 1.0
+    if k > n or p <= 0.0:
+        return 0.0
+    below = sum(math.comb(n, i) * p**i * (1.0 - p) ** (n - i) for i in range(k))
+    return max(0.0, 1.0 - below)
+
+
+def poisson_tail(k: int, mean: float) -> float:
+    """P(X >= k) for X ~ Poisson(mean)."""
+    if k <= 0:
+        return 1.0
+    if mean <= 0.0:
+        return 0.0
+    term = below = math.exp(-mean)
+    for i in range(1, k):
+        term *= mean / i
+        below += term
+    return max(0.0, 1.0 - below)
+
+
+@dataclass(frozen=True)
+class Baseline:
+    """How often one mechanical signal happens across the repository's files."""
+
+    visits: int  # sessions x files touched, summed over files
+    hit_visits: int  # ... of which those with at least one such event
+    events: int
+    files: int  # files with at least one such event
+    above: tuple[str, ...]  # files clearly above the rate, most significant first
+
+    @property
+    def rate(self) -> float:
+        return round(self.hit_visits / self.visits, 3) if self.visits else 0.0
+
+
+def baseline(counts: Mapping[str, tuple[int, int, int]]) -> Baseline:
+    """Which files show clearly more of a mechanical signal than the rest.
+
+    ``counts`` maps a file to ``(visits, visits with the signal, events)``; files
+    without the signal belong in it too (they are most of the denominator).
+
+    For each file with events, the rate of the *other* files is the null
+    hypothesis (never less than ``BASELINE_FLOOR``; the floor alone when the
+    others add up to fewer than ``BASELINE_MIN_VISITS`` visits). Two tails are
+    computed under it: binomial, for this many visits with the signal among the
+    file's visits, and Poisson, for this many events (a burst of forty misses in
+    one session is one visit). The smaller, doubled for having had two tries, is
+    the file's p-value. Files are then selected by the Benjamini-Hochberg
+    procedure at ``BASELINE_ALPHA``, so that looking at many files does not by
+    itself produce outliers.
+    """
+    visits = sum(v for v, _, _ in counts.values())
+    hits = sum(h for _, h, _ in counts.values())
+    events = sum(e for _, _, e in counts.values())
+    tested: list[tuple[float, str]] = []
+    for name, (own_visits, own_hits, own_events) in counts.items():
+        if not own_events:
+            continue
+        others = visits - own_visits
+        hit_rate = event_rate = BASELINE_FLOOR
+        if others >= BASELINE_MIN_VISITS:
+            hit_rate = max(BASELINE_FLOOR, (hits - own_hits) / others)
+            event_rate = max(BASELINE_FLOOR, (events - own_events) / others)
+        n = max(own_visits, own_hits)
+        by_visits = binomial_tail(own_hits, n, min(hit_rate, 1.0))
+        by_events = poisson_tail(own_events, n * event_rate)
+        tested.append((min(1.0, 2.0 * min(by_visits, by_events)), name))
+    tested.sort()
+    passed = 0
+    for rank, (p_value, _) in enumerate(tested, 1):
+        if p_value <= BASELINE_ALPHA * rank / len(tested):
+            passed = rank
+    return Baseline(
+        visits=visits,
+        hit_visits=hits,
+        events=events,
+        files=len(tested),
+        above=tuple(name for _, name in tested[:passed]),
     )
 
 
@@ -291,6 +388,8 @@ def is_weak(finding: Finding) -> bool:
         return detail.get("variant") == "ordinary" or "typo_of" in detail
     if finding.signal == NO_CONVERGENCE:
         return finding.detail.get("uncertain") == "1"  # its end was not seen
+    if finding.signal in BASELINE_SIGNALS and finding.detail.get(WITHIN_BASELINE) == "1":
+        return True  # no more of it than anywhere else in this repository
     if finding.signal == STALE_EDIT:
         # a new file's write refused by the harness's read-first rule
         return finding.detail.get("variant") == "unread-write"

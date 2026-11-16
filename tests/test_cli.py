@@ -439,7 +439,7 @@ def test_scan_warns_about_unreadable_transcripts(monkeypatch: pytest.MonkeyPatch
 
     real = cli._analyze
 
-    def fake(args: object, repo: Path) -> dict:  # type: ignore[type-arg]
+    def fake(args: object, repo: Path, err: object = None) -> dict:  # type: ignore[type-arg]
         result = real(args, repo)  # type: ignore[arg-type]
         result["sources"].append(
             {"kind": "unreadable", "path": "x.jsonl", "error": "permission denied"}
@@ -617,3 +617,13 @@ def test_outside_a_git_repository_says_so(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.chdir(tmp_path)
     _, _, err = run("sources", "-t", str(tmp_path / "none.jsonl"))
     assert "is not inside a git repository" in err
+
+
+def test_removed_worktree_sessions_are_pointed_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_friction import cli, discovery
+
+    monkeypatch.setattr(discovery, "removed_sibling_sessions", lambda repo: [("/w/shop-wt2", 2)])
+    err = io.StringIO()
+    cli._note_removed_worktrees(Path(), err)
+    assert "2 sessions ran in /w/shop-wt2" in err.getvalue()
+    assert "--repo-alias /w/shop-wt2" in err.getvalue()

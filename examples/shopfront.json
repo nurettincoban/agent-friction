@@ -826,6 +826,7 @@
       "why": "1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far. Only weak signals, which also accompany productive work: the score is capped at 19 and nothing is recommended."
     }
   ],
+  "recommendations": [],
   "repo": {
     "name": "shopfront",
     "root": "tests/fixtures/shopfront"
@@ -1031,6 +1032,7 @@
     "friction_events": 34,
     "probable_corrections": 1,
     "sessions": 6,
+    "sessions_outside_repo": 0,
     "strong_events": 23,
     "third_party_events": 0,
     "tool_calls": 74,
