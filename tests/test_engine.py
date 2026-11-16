@@ -1393,7 +1393,12 @@ def test_half_a_surrogate_pair_in_a_transcript_can_be_written_out(tmp_path: Path
     assert "command not found �" in text and out["totals"]["friction_events"] == 1
 
 
-def test_a_transcript_outside_home_is_not_cited_by_its_absolute_path(tmp_path: Path) -> None:
+def test_a_transcript_outside_home_is_not_cited_by_its_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # On Windows the temp dir lives under the home directory; point home elsewhere.
+    elsewhere = tmp_path.parent / (tmp_path.name + "-home")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: elsewhere))
     repo = tmp_path / "repo"
     repo.mkdir()
     line = {"session": "g", "ts": "2026-11-05T16:00:00Z", "kind": "tool_call", "id": 1,
