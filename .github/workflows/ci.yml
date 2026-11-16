@@ -73,6 +73,8 @@ jobs:
           python-version: "3.12"
       - run: uv build
       - name: Install wheel in a clean venv and run it
+        env:
+          MSYS_NO_PATHCONV: "1" # keep Git Bash on Windows from rewriting /home/dev/shopfront
         run: |
           uv venv "$RUNNER_TEMP/smoke"
           if [ "$RUNNER_OS" = "Windows" ]; then bin="$RUNNER_TEMP/smoke/Scripts"; else bin="$RUNNER_TEMP/smoke/bin"; fi
