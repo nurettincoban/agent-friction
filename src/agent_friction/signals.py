@@ -26,6 +26,7 @@ from agent_friction.attribution import (
     PathResolver,
     Step,
     command_role,
+    denied_step,
     env_copy,
     is_aggregate_check,
     is_inline_code,
@@ -1562,6 +1563,8 @@ class _State:
     turn_edits: dict[str, int] = field(default_factory=dict)
     thrash: dict[str, Finding] = field(default_factory=dict)
     reads: dict[tuple[str, str], int] = field(default_factory=dict)
+    # files the session has read or changed successfully
+    had: set[str] = field(default_factory=set)
     read_findings: dict[tuple[str, str], Finding] = field(default_factory=dict)
     # (old, new) of each successful edit -> (when, successful commands so far, only added?)
     edit_history: dict[str, dict[tuple[str, str], tuple[float | None, int, bool]]] = field(
@@ -2097,14 +2100,19 @@ class _Detector:
                     if stale
                     else "the file had not been read first"
                 )
+                # A whole-file write to a path the session had never seen is not an edit
+                # of stale text: the agent was creating the file (or thought so), and the
+                # harness's read-first rule got in the way. That says nothing about the file.
+                unread = not stale and call.op == model.OP_WRITE and path not in self.state.had
+                variant = "modified" if stale else "unread-write" if unread else "not-read"
                 self._emit(
                     STALE_EDIT,
                     result,
                     f"{self._tool(call)} on {path} refused: {reason}",
                     targets,
                     excerpt=result.output,
-                    interval=interval,
-                    detail={"variant": "modified" if stale else "not-read"},
+                    interval=None if unread else interval,
+                    detail={"variant": variant},
                 )
             elif result.error == model.ERR_MISSING:
                 self._path_miss(action, result)
@@ -2120,6 +2128,7 @@ class _Detector:
         call = action.call
         now = _epoch(call)
         targets = [Target(model.FILE, path)]
+        state.had.add(path)
         self._on_change(path, _span(action))
         if call.new_text:
             state.added.append(call.new_text)
@@ -2282,6 +2291,8 @@ class _Detector:
         path = action.file
         if path is None:
             return
+        if result.ok:
+            self.state.had.add(path)
         if not result.ok:
             if result.error == model.ERR_MISSING:
                 self._path_miss(action, result)
@@ -3141,7 +3152,7 @@ class _Detector:
             # The harness quotes the whole command line in its message; only words it adds
             # can say which step was the problem. Otherwise: the destructive step.
             said = result.output.replace(call.command or "\0", " ")
-            step = objectionable_step(action.cmd, said)
+            step = denied_step(action.cmd, said)
             if self._elsewhere(step, call.cwd):
                 return
             if step is not None and step.key:
@@ -3195,6 +3206,11 @@ class _Detector:
             targets = [Target(model.FILE, rel, 1.0 / len(edited)) for rel in edited]
             if edited:
                 what += " after edits to " + ", ".join(edited)
+        elif last.result is not None and last.result.error == model.ERR_MISSING:
+            # The last thing was a look for a file that is not there. The human stopped
+            # the agent, not the file: the miss is on the record, and an interrupt on the
+            # same path would be read as a second, independent kind of evidence.
+            what, targets = "looking for a file that does not exist", []
         else:
             what = f"working on {targets[0].key}"
         # Only the call that was cut short is claimed: the turn up to it may have been fine.

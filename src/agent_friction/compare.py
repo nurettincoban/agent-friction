@@ -227,9 +227,24 @@ def _fmt_rate(rate: float | None) -> str:
 
 
 def render_compare(
-    before: dict[str, Any], after: dict[str, Any], changes: list[Change], *, markdown: bool = False
+    before: dict[str, Any],
+    after: dict[str, Any],
+    changes: list[Change],
+    *,
+    markdown: bool = False,
+    color: bool = False,
 ) -> str:
-    """Human-readable comparison, as plain text or Markdown."""
+    """Human-readable comparison, as plain text or Markdown (optionally with ANSI color)."""
+    from agent_friction.report.terminal import Style
+
+    st = Style(color and not markdown)
+    tint = {
+        "regressed": st.red,
+        "new": st.red,
+        "improved": st.green,
+        "resolved": st.green,
+        "replaced": st.green,
+    }
     groups = [
         ("regressed", "Regressed"),
         ("new", "New friction"),
@@ -253,7 +268,8 @@ def render_compare(
             continue
         any_change = True
         count = plural(len(rows), "target")
-        out.append(f"## {label} ({count})" if markdown else f"{label} ({count})")
+        heading = f"{label} ({count})"
+        out.append(f"## {heading}" if markdown else st.bold(tint.get(status, str)(heading)))
         for c in rows:
             suffix = "/" if c.kind == "dir" else ""
             name = f"$ {c.path}" if c.kind == "command" else c.path + suffix

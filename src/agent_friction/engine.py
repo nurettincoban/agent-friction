@@ -13,6 +13,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import posixpath
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ from agent_friction.attribution import (
     PathResolver,
     public_key,
     public_tool,
+    to_posix,
 )
 from agent_friction.discovery import (
     claude_config_dirs,
@@ -108,15 +110,19 @@ def _in_window(ts: datetime | None, since: datetime | None, until: datetime | No
 
 def _apply_window(
     stream: Stream, since: datetime | None, until: datetime | None
-) -> list[model.Event]:
+) -> tuple[list[model.Event], list[model.Event]]:
     """Drop events outside the window. Events without a timestamp inherit the previous one.
 
-    Returns the events *before* the window: they are not counted, but what the
-    agent did there is the context for judging the first events inside it.
+    Returns the events *before* and *after* the window: they are not counted, but
+    what the agent did before is the context for judging the first events inside
+    it, and what it did after says how the last ones ended (a red run that was
+    fixed, a command that recovered).
     """
     if since is None and until is None:
-        return []
-    kept, before = [], []
+        return [], []
+    kept: list[model.Event] = []
+    before: list[model.Event] = []
+    after: list[model.Event] = []
     last: datetime | None = None
     for event in stream.events:
         last = event.ts or last
@@ -124,8 +130,10 @@ def _apply_window(
             kept.append(event)
         elif since is not None and last is not None and last < since:
             before.append(event)
+        else:
+            after.append(event)
     stream.events = kept
-    return before
+    return before, after
 
 
 def _load(
@@ -133,14 +141,14 @@ def _load(
     since: datetime | None,
     until: datetime | None,
     unreadable: list[tuple[Path, str]] | None = None,
-) -> tuple[list[ParsedFile], dict[str, list[model.Event]]]:
-    """Parsed files cut to the window, and each stream's events from before it (by key).
+) -> tuple[list[ParsedFile], dict[str, tuple[list[model.Event], list[model.Event]]]]:
+    """Parsed files cut to the window, and each stream's events outside it (by key).
 
     Files that cannot be read are skipped and noted in ``unreadable`` with the reason.
     """
     seen: dict[str, str] = {}
     parsed: list[ParsedFile] = []
-    context: dict[str, list[model.Event]] = {}
+    context: dict[str, tuple[list[model.Event], list[model.Event]]] = {}
     for path in files:
         try:
             item = parse_transcript(path, seen)
@@ -149,9 +157,9 @@ def _load(
                 unreadable.append((path, read_error(exc)))
             continue
         for stream in item.streams:
-            before = _apply_window(stream, since, until)
-            if before and stream.events:
-                context[stream.key] = before
+            before, after = _apply_window(stream, since, until)
+            if (before or after) and stream.events:
+                context[stream.key] = (before, after)
         item.streams = [s for s in item.streams if s.events]
         parsed.append(item)
     return parsed, context
@@ -450,6 +458,32 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
         ):
             finding.detail["recurring_red"] = "1"
             finding.interval = finding.interval or finding.run
+    # A module of the repository itself that cannot be imported, and the agent gives up
+    # there: once, perhaps the code was broken. Ending session after session, it is how
+    # the command is run here that is wrong.
+    stranded = [
+        f
+        for f in findings
+        if f.signal == signals.COMMAND_FAILURE
+        and "own_module" in f.detail
+        and f.detail.get("never_green")
+        and f.detail.get("variant") == "ordinary"
+    ]
+    ended: dict[str, set[str]] = {}
+    for finding in stranded:
+        for key in _command_keys(finding):
+            ended.setdefault(key, set()).add(finding.unit)
+    for finding in stranded:
+        if not any(
+            len(ended.get(key, ())) >= RECURRING_RED_MIN_SESSIONS for key in _command_keys(finding)
+        ):
+            continue
+        del finding.detail["own_module"]
+        finding.detail["variant"] = "invocation"
+        finding.targets = [t for t in finding.targets if t.kind == model.COMMAND]
+        finding.weight = 1.0
+        finding.interval = finding.interval or finding.run
+        finding.summary = finding.summary.replace("ordinary failure", "setup/invocation error")
     return dropped
 
 
@@ -505,6 +539,42 @@ def list_transcripts(options: AnalyzeOptions) -> list[Path]:
     or an explicitly given file that is not a JSONL transcript.
     """
     return _Analysis(options)._transcript_files()
+
+
+def session_directories(
+    options: AnalyzeOptions, limit: int = 5, *, mask_home: bool = True
+) -> list[tuple[str, int]]:
+    """Where the sessions that did *not* touch the repository ran: ``(directory, sessions)``.
+
+    For "found transcripts, but no agent session touched this repository": the
+    working directories of the sessions that were set aside, most frequent
+    first (then by name), at most ``limit``, with the home directory shown as
+    ``~``. If one of them is where the repository used to live, it is what
+    ``repo_aliases`` (``--repo-alias``) wants. The time window is not applied.
+    ``mask_home=False`` gives the paths as recorded, for a message printed on the
+    machine running the scan (a ``~`` would name the wrong home there).
+    """
+    analysis = _Analysis(options)
+    seen: dict[str, str] = {}
+    sessions: dict[str, set[str]] = {}
+    for path in analysis._transcript_files():
+        try:
+            item = parse_transcript(path, seen)
+        except (OSError, ValueError):
+            continue
+        for stream in item.streams:
+            if analysis._in_repo(stream):
+                continue
+            cwds = [event.cwd for event in stream.events if event.cwd]
+            if not cwds:
+                continue
+            # a session is named after the directory it spent most of its events in
+            common = max(dict.fromkeys(cwds), key=cwds.count)
+            folded = posixpath.normpath(to_posix(common))
+            shown = analysis.display_path(folded) if mask_home else folded
+            sessions.setdefault(shown, set()).add(stream.session_id)
+    ranked = sorted(sessions.items(), key=lambda pair: (-len(pair[1]), pair[0]))
+    return [(directory, len(ids)) for directory, ids in ranked[:limit]]
 
 
 def inspect_sources(options: AnalyzeOptions) -> list[dict[str, Any]]:
@@ -610,7 +680,9 @@ def _source_root(item: ParsedFile) -> Path:
 class _Analysis:
     def __init__(self, options: AnalyzeOptions) -> None:
         self.options = options
-        self.repo = options.repo.expanduser().absolute()
+        # `..` and `sub/..` are folded once, here: the name and the root shown are those
+        # of the directory itself. Symbolic links are kept (their targets are roots too).
+        self.repo = Path(os.path.normpath(options.repo.expanduser().absolute()))
         self.since = _utc(options.since)
         self.until = _utc(options.until)
         roots = repo_roots(self.repo)
@@ -899,19 +971,21 @@ class _Analysis:
         exposure: dict[tuple[str, str], set[str]] = {}
         for stream in streams:
             detection = signals.detect_stream(stream, ctx)
-            before = context.get(stream.key)
-            if before:
+            outside = context.get(stream.key)
+            if outside:
                 # Judge the window with what happened before it in view (the edit a
-                # correction refers to, the red run an edit answers), but count and
-                # expose only what lies inside it.
-                first = stream.events[0].line
-                whole = dataclasses.replace(stream, events=[*before, *stream.events])
+                # correction refers to, the red run an edit answers) and what happened
+                # after it (the fix, the recovery), but count and expose only what lies
+                # inside it.
+                before, after = outside
+                inside = {event.line for event in stream.events}
+                whole = dataclasses.replace(stream, events=[*before, *stream.events, *after])
                 full = signals.detect_stream(whole, ctx)
                 detection = dataclasses.replace(
                     detection,
-                    findings=[f for f in full.findings if f.line >= first],
+                    findings=[f for f in full.findings if f.line in inside],
                     skipped_events=full.skipped_events,
-                    dropped=[d for d in full.dropped if d[0] >= first],
+                    dropped=[d for d in full.dropped if d[0] in inside],
                 )
             findings.extend(detection.findings)
             dropped.extend(detection.dropped)
@@ -951,6 +1025,9 @@ class _Analysis:
                     # A lockfile or generated file is rewritten by tools as a matter of
                     # course: a human `chore: bump` after an agent commit is not rework.
                     and not any(self.facts(t.key).generated for t in f.targets)
+                    # ... and a file that has since been renamed away or deleted is not
+                    # a place anyone can act on.
+                    and all(self.facts(t.key).exists for t in f.targets)
                 ]
                 # A commit made during a transcript session is that session's work, not a
                 # separate one. Agent commits never add exposure on their own.

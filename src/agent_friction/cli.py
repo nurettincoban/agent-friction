@@ -275,6 +275,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="read a saved `scan -f json` result instead of scanning",
     )
     show.add_argument("--color", choices=("auto", "always", "never"), default="auto")
+    show.add_argument(
+        "-f",
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="text (default), or json: the matching hotspot and directory entries",
+    )
+    show.add_argument("-o", "--output", type=Path, help="write to FILE instead of stdout")
     _add_input_options(show)
 
     cmp_ = sub.add_parser(
@@ -317,6 +325,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="compare scans whose repository names differ (e.g. after a rename)",
     )
+    cmp_.add_argument("--color", choices=("auto", "always", "never"), default="auto")
     cmp_.add_argument(
         "--allow-overlap",
         action="store_true",
@@ -362,36 +371,87 @@ def _analyze(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
         # gate with a git-only report.
         if not given.expanduser().exists():
             raise AgentFrictionError(f"transcript path does not exist: {given}")
-    result = analyze(
-        AnalyzeOptions(
-            repo=repo,
-            transcripts=args.transcripts,
-            since=args.since,
-            until=args.until,
-            include_git=not args.no_git,
-            include_excerpts=not args.no_excerpts,
-            max_evidence=args.max_evidence,
-            repo_aliases=tuple(args.repo_alias),
-            rework_window_days=args.rework_days,
-            agent_commit_patterns=(
-                [*DEFAULT_AGENT_PATTERNS, *args.agent_commit] if args.agent_commit else None
-            ),
-            bot_commit_patterns=[f"^author: .*(?:{p})" for p in args.bot_author],
-            allow_no_transcripts=args.allow_empty,
-            # Every hotspot goes into the result: JSON, HTML, compare and show need the whole
-            # list; --top only trims the terminal and Markdown views.
-            max_hotspots=None,
-        )
+    options = AnalyzeOptions(
+        repo=repo,
+        transcripts=args.transcripts,
+        since=args.since,
+        until=args.until,
+        include_git=not args.no_git,
+        include_excerpts=not args.no_excerpts,
+        max_evidence=args.max_evidence,
+        repo_aliases=tuple(args.repo_alias),
+        rework_window_days=args.rework_days,
+        agent_commit_patterns=(
+            [*DEFAULT_AGENT_PATTERNS, *args.agent_commit] if args.agent_commit else None
+        ),
+        bot_commit_patterns=[f"^author: .*(?:{p})" for p in args.bot_author],
+        allow_no_transcripts=args.allow_empty,
+        # Every hotspot goes into the result: JSON, HTML, compare and show need the whole
+        # list; --top only trims the terminal and Markdown views.
+        max_hotspots=None,
     )
+    result = analyze(options)
     if int(result.get("totals", {}).get("sessions", 0)) == 0 and not args.allow_empty:
+        from agent_friction.engine import session_directories
+
         window = " in the selected time window" if (args.since or args.until) else ""
+        where = ""
+        try:
+            seen = session_directories(options, limit=3, mask_home=False)
+        except AgentFrictionError:
+            seen = []
+        if seen:
+            listed = ", ".join(f"{d} ({plural(n, 'session')})" for d, n in seen)
+            where = (
+                f" The sessions in these transcripts ran in {listed}; if one of those is this "
+                f"repository on another machine, pass --repo-alias {seen[0][0]}."
+            )
         raise AgentFrictionError(
             f"found transcripts, but no agent session touched {repo.resolve()}{window}, "
             "so there is nothing to analyse. Check the repo path, --since/--until, or "
-            "--repo-alias (if sessions were recorded at another path). "
+            "--repo-alias (if sessions were recorded at another path)." + where + " "
             "Pass --allow-empty to produce an empty report anyway."
         )
     return result
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _row_problem(data: dict[str, Any]) -> str | None:
+    """The first field compare and show rely on that is missing or has the wrong type."""
+    for key in ("hotspots", "commands", "directories"):
+        rows = data.get(key)
+        if rows is None and key == "directories":
+            continue
+        if not isinstance(rows, list):
+            return f"{key} is not a list"
+        for i, row in enumerate(rows):
+            where = f"{key}[{i}]"
+            if not isinstance(row, dict):
+                return f"{where} is not an object"
+            if not isinstance(row.get("path"), str):
+                return f"{where}.path is missing or not a string"
+            if not _is_int(row.get("events")):
+                return f"{where}.events is missing or not an integer"
+            for field in ("sessions", "exposure_sessions", "episodes"):
+                if field in row and not _is_int(row[field]):
+                    return f"{where}.{field} is not an integer"
+            for field in ("score", "est_minutes_lost"):
+                value = row.get(field, 0)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return f"{where}.{field} is not a number"
+            if not isinstance(row.get("recommendations", []), list):
+                return f"{where}.recommendations is not a list"
+    exposure = data.get("exposure")
+    if exposure is not None:
+        if not isinstance(exposure, dict):
+            return "exposure is not an object"
+        for kind, table in exposure.items():
+            if not isinstance(table, dict) or not all(_is_int(v) for v in table.values()):
+                return f"exposure.{kind} is not a map of integers"
+    return None
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -423,17 +483,16 @@ def _load_json(path: Path) -> dict[str, Any]:
         )
     if data["schema_version"] == 1 and not (
         isinstance(data.get("totals"), dict)
-        and isinstance(data["totals"].get("sessions"), int)
+        and _is_int(data["totals"].get("sessions"))
         and all(isinstance(data.get(k), list) for k in ("hotspots", "commands"))
-        and all(
-            isinstance(item, dict) and isinstance(item.get("events", 0), int)
-            for k in ("hotspots", "commands", "directories")
-            for item in (data.get(k) or [])
-        )
     ):
         raise AgentFrictionError(
             f"{path}: not an agent-friction result (make one with `scan -f json`)"
         )
+    if data["schema_version"] == 1:
+        problem = _row_problem(data)
+        if problem:
+            raise AgentFrictionError(f"{path}: not a valid scan: {problem}")
     if data["schema_version"] != 1:
         raise AgentFrictionError(
             f"{path}: schema_version {data['schema_version']} is not supported by "
@@ -554,30 +613,39 @@ def _cmd_show(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     else:
         args.max_evidence = max(args.max_evidence, 20)
         result = _analyze(args, args.repo)
-    color = _use_color(args.color, stdout)
+    output = None if args.output is None or str(args.output) == "-" else args.output
+    color = output is None and args.format == "text" and _use_color(args.color, stdout)
     target = _target_in_repo(args.target, getattr(args, "repo", None))
     item = find_target(result, target)
     node = find_dir(result, target)
-    if item is not None and item.get("kind") != "dir":
-        stdout.write(render_detail(result, item, color=color))
+    if item is None and node is None:
+        stderr.write(
+            f"agent-friction: no friction recorded for {args.target!r}. "
+            "Run `agent-friction scan` to list hotspots.\n"
+        )
+        return EXIT_ERROR
+    if args.format == "json":
+        doc = {
+            "schema_version": result.get("schema_version", 1),
+            "target": target,
+            "hotspot": item,
+            "directory": node,
+        }
+        _write(json.dumps(doc, indent=2, sort_keys=True) + "\n", output, stdout)
         return EXIT_OK
-    if node is not None or item is not None:
+    if item is not None and item.get("kind") != "dir":
+        text = render_detail(result, item, color=color)
+    else:
         # A directory: its rolled-up subtree first, then friction attributed to the
         # directory itself (for example searches that came back empty there).
-        if node is not None:
-            stdout.write(render_dir_detail(result, node, color=color))
+        text = render_dir_detail(result, node, color=color) if node is not None else ""
         if item is not None:
-            stdout.write(
+            text += (
                 "\nFriction attributed to the directory itself "
                 "(for example searches in it that found nothing):\n\n"
-            )
-            stdout.write(render_detail(result, item, color=color))
-        return EXIT_OK
-    stderr.write(
-        f"agent-friction: no friction recorded for {args.target!r}. "
-        "Run `agent-friction scan` to list hotspots.\n"
-    )
-    return EXIT_ERROR
+            ) + render_detail(result, item, color=color)
+    _write(text, output, stdout)
+    return EXIT_OK
 
 
 def _event_span(result: dict[str, Any]) -> tuple[datetime | None, datetime | None]:
@@ -685,7 +753,8 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         }
         text = json.dumps(doc, indent=2, sort_keys=True) + "\n"
     else:
-        text = render_compare(before, after, changes, markdown=fmt == "markdown")
+        color = output is None and fmt in (None, "text") and _use_color(args.color, stdout)
+        text = render_compare(before, after, changes, markdown=fmt == "markdown", color=color)
     _write(text, output, stdout)
     if (
         args.fail_on_regression

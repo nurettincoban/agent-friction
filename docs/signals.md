@@ -506,6 +506,11 @@ The reason, if the human typed one, is kept as the excerpt.
 other harnesses; `QUESTION_TOOL_RE`). "Not yet, look at B first" is an answer,
 not a veto of an action. These are in no total.
 
+A *denied* line (`permission-denied`) with no destructive step and none that
+the refusal names is keyed to its **first** step (leaving out `cd`, `sleep`
+and `echo`): permission rules match a command line from its start, so `cat >>
+notes.md && uv run ruff check` was refused at `cat`.
+
 **Time:** the time between the call and its result is a human reading a
 permission prompt, and is never counted, however long it took. What is
 claimed is the time from the human's answer to the next thing in the
@@ -541,6 +546,10 @@ call is not counted again.
 was a shell command, the command is *not* blamed (stopping a running `pytest`
 says nothing about `pytest`): the event goes to the files edited in the turn
 (the 5 most recent, split evenly), or is unattributed if there are none.
+If that call was a read of a file that does not exist, the interrupt is
+unattributed too: the miss is already on that path as a `path-miss`, and the
+human stopping the agent is not a second, independent kind of evidence about
+a file that is not there.
 
 *Unless it keeps happening.* The event remembers which command was stopped
 (detail `interrupted`). A command that humans stop in 3 or more sessions is
@@ -570,6 +579,13 @@ days by default), **and** that human commit either
 - *says it is a repair:* its subject starts with or contains `fix`, `fixes`,
   `fixed`, `revert`, `undo`, `rollback`, `hotfix`, `regression`, `broke`,
   `broken`, `oops`, `mistake` (`FIX_SUBJECT_RE`).
+
+A commit whose subject says a tool rewrote the files (`style: ...`, `format:
+...`, `lint: ...`, "run black", "apply prettier", "reformat ...", `gofmt`,
+`ruff format`; `MECHANICAL_SUBJECT_RE`) is never rework, at any size: five
+files reformatted after an agent touched them are a formatter run. And rework
+on a file that no longer exists in the working tree (renamed away or deleted
+since) is not reported: there is nothing left to act on.
 
 A human commit whose subject announces new work (`feat: ...`, `add ...`,
 `implement ...`, `introduce ...`, `support ...`, `new ...`;
@@ -1005,6 +1021,12 @@ successfully once before being removed (read as debugging).
   followed by `./bin/zebractl ...` succeeding records `works_as:
   ./bin/zebractl`, and the advice is "use `./bin/zebractl`, not `zebractl`"
   (without excerpts the directory is kept and the name pseudonymized).
+- *The repository's own module, session after session:* a failure that
+  names a module of the repository as missing (`No module named 'app'` under
+  `ImportError while loading conftest`) stays ordinary when the session ends
+  red: perhaps the code was broken. When the same command ends that way in 3
+  or more episodes of work, it is promoted to a setup/invocation error like
+  the cases above: it is how the command is run here that is wrong.
 - *The wrong runner:* an ordinary failure followed, with nothing changed in
   between, by a green run of **another command for the same job** (`pnpm
   test` after a red `yarn test`, `make test` after `go test ./...`), where
@@ -1223,6 +1245,12 @@ first, or was modified on disk after the agent read it.
 **Why:** "modified since read" means something else rewrites the file: a
 formatter, a watcher, a code generator, another agent. "Not read first" is
 mostly agent sloppiness and is recorded with a separate variant.
+
+**A new file is not stale.** A whole-file *write* refused as "not read" to a
+path the session had neither read nor changed before (variant `unread-write`)
+is the agent creating a file and the harness's read-first rule getting in the
+way. It is kept as weak evidence only: it claims no time, and on its own it
+never makes a hotspot or advice.
 
 **Attribution:** the file.
 

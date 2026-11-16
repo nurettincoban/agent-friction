@@ -174,7 +174,14 @@ def render_terminal(
         if int(totals.get("friction_events", 0)):
             out.append(st.green("No hotspot: no file, directory, or command collected friction."))
         elif not sessions:
-            out.append(st.green("No recurring friction found in the git history."))
+            out.append(
+                st.green("No recurring friction found in the git history.")
+                if git_on
+                else st.green(
+                    "No recurring friction: no agent session touched this repository "
+                    "in this window."
+                )
+            )
         else:
             out.append(
                 st.green(f"No recurring friction found in {plural(calls, 'tool call')}.")

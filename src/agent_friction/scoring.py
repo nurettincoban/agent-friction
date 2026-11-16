@@ -21,6 +21,7 @@ from agent_friction.signals import (
     RETRY_LOOP,
     SEARCH_MISS,
     SEVERITY,
+    STALE_EDIT,
 )
 
 #: Mean session points at which the severity factor reaches 1 - 1/e (about 0.63).
@@ -288,6 +289,9 @@ def is_weak(finding: Finding) -> bool:
         return detail.get("variant") == "ordinary" or "typo_of" in detail
     if finding.signal == NO_CONVERGENCE:
         return finding.detail.get("uncertain") == "1"  # its end was not seen
+    if finding.signal == STALE_EDIT:
+        # a new file's write refused by the harness's read-first rule
+        return finding.detail.get("variant") == "unread-write"
     if finding.signal == PATH_MISS:
         return finding.detail.get("probe") == "1"  # looking for an optional README, .env, ...
     return finding.signal in WEAK_ALONE_SIGNALS

@@ -119,6 +119,25 @@ def _located(key: str) -> str:
     return f"{code(match.group(1))} in {code(match.group(2))}"
 
 
+def _place(key: str) -> str:
+    """The directory a display key says its command ran in (``web/``), or ``""``."""
+    match = _IN_DIRECTORY_RE.match(key)
+    return match.group(2) if match else ""
+
+
+def _typed(key: str, place: str) -> str:
+    """``key`` as it is typed in ``place``: without the ``(web/)`` suffix of a display key."""
+    match = _IN_DIRECTORY_RE.match(key)
+    if match is not None and match.group(2) == place:
+        return code(match.group(1))
+    return _located(key)
+
+
+def _agents_line(place: str, sentence: str) -> str:
+    """A line proposed for AGENTS.md: a display key is not something one can type."""
+    return f"in {code(place)}, {sentence}" if place else sentence
+
+
 def _sessions(findings: Sequence[Finding]) -> int:
     return len({f.session_id for f in findings})
 
@@ -737,7 +756,8 @@ class _Rules:
                 f"Tell agents to use {code(form)}",
                 f"{code(key)} failed {_in_sessions(invocation)} with setup or invocation "
                 f"errors; {_times(count)} the same command then ran as {code(form)}, with no "
-                f'file edited in between. Add a line to AGENTS.md such as: "use {code(form)}", '
+                "file edited in between. Add a line to AGENTS.md such as: "
+                f'"{_agents_line(_place(key), "use " + _typed(form, _place(key)))}", '
                 + (
                     "or add the option where the command is defined."
                     if form.startswith(key)
@@ -766,7 +786,11 @@ class _Rules:
                 f"{code(key)} failed {_in_sessions(failures)}; {_times(count)} the agent then "
                 f"got the same job done with {code(fix)}, and {code(key)} did not work later in "
                 f"those sessions. Add a line to AGENTS.md such as: "
-                f'"use {code(fix)}, not {code(key)}".',
+                + '"'
+                + _agents_line(
+                    _place(key), f"use {_typed(fix, _place(key))}, not {_typed(key, _place(key))}"
+                )
+                + '".',
                 [signals.COMMAND_FAILURE],
                 self._use_instead(fix, key, failures),
                 replacement=fix,
@@ -774,19 +798,22 @@ class _Rules:
         elif setups:
             setup, count = setups[0]
             steps = [name for name, _ in setups]
+            place = _place(key)
             if len(setups) == 1:
                 helped = f"{_times(count)} it worked after the agent ran {code(setup)}"
-                line = f"run {code(setup)} before {code(key)}"
+                line = f"run {_typed(setup, place)} before {_typed(key, place)}"
             else:
                 each = [f"{code(name)} ({_times(n)})" for name, n in setups]
                 helped = "it worked after the agent ran " + _and(each)
-                line = f"run {', then '.join(code(name) for name in steps)} before {code(key)}"
+                then = ", then ".join(_typed(name, place) for name in steps)
+                line = f"run {then} before {_typed(key, place)}"
             named = _and([code(name) for name in steps])
             self.add(
                 "document-the-setup-step",
                 f"Document the setup {code(key)} needs",
                 f"{code(key)} failed {_in_sessions(failures)}; {helped}. "
-                f'Say so in AGENTS.md ("{line}"), or make the environment ready before the '
+                f'Say so in AGENTS.md ("{_agents_line(place, line)}"), or make the environment '
+                "ready before the "
                 "agent starts.",
                 [signals.COMMAND_FAILURE],
                 (

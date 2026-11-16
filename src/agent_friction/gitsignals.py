@@ -331,6 +331,17 @@ SWEEP_SUBJECT_RE = re.compile(
 )
 
 
+#: Subjects that say a tool rewrote the files: a formatter or linter run, at any size.
+MECHANICAL_SUBJECT_RE = re.compile(
+    r"^\s*(?:style|format|fmt|lint)(?:\([^)]*\))?!?:"
+    r"|\b(?:run|ran|apply|applied|via|with) (?:black|prettier|ruff(?: format)?|gofmt|rustfmt"
+    r"|isort|eslint --fix|clang-format|autopep8|yapf|biome|dprint)\b"
+    r"|\b(?:re-?format\w*|auto-?format\w*|gofmt|rustfmt|ruff format|clang-format)\b"
+    r"|^\s*(?:black|prettier|formatting|lint(?:ing)?|whitespace)\s*$",
+    re.I,
+)
+
+
 def is_sweep(commit: Commit) -> bool:
     """A human commit that reformats or mechanically rewrites the whole repo.
 
@@ -339,7 +350,11 @@ def is_sweep(commit: Commit) -> bool:
     in total (within 20 %). Such a commit touches the agent's lines like
     everybody else's and says nothing about them.
     """
-    if commit.is_agent or len(commit.files) <= SWEEP_MIN_FILES:
+    if commit.is_agent:
+        return False
+    if MECHANICAL_SUBJECT_RE.search(commit.subject):
+        return True  # `style: run black` over five files is a formatter all the same
+    if len(commit.files) <= SWEEP_MIN_FILES:
         return False
     if FIX_SUBJECT_RE.search(commit.subject):
         return False

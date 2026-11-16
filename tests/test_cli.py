@@ -4,6 +4,7 @@ import io
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -402,7 +403,28 @@ def test_compare_rejects_damaged_entries(tmp_path: Path) -> None:
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps(data), encoding="utf-8")
     code, _, err = run("compare", "--allow-overlap", str(saved), str(bad))
-    assert code == EXIT_ERROR and "not an agent-friction result" in err
+    assert code == EXIT_ERROR and "commands[0] is not an object" in err
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    [
+        (lambda d: d["hotspots"][0].pop("events"), "hotspots[0].events is missing"),
+        (lambda d: d["hotspots"][0].update(sessions="3"), "hotspots[0].sessions is not an"),
+        (lambda d: d["commands"][0].update(score=None), "commands[0].score is not a number"),
+        (lambda d: d["hotspots"][1].pop("path"), "hotspots[1].path is missing"),
+        (lambda d: d["exposure"]["file"].update(x="2"), "exposure.file is not a map"),
+    ],
+)
+def test_compare_names_the_damaged_field(tmp_path: Path, damage: Any, message: str) -> None:
+    saved = tmp_path / "scan.json"
+    run("scan", *INPUT, "-o", str(saved))
+    data = json.loads(saved.read_text(encoding="utf-8"))
+    damage(data)
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps(data), encoding="utf-8")
+    code, _, err = run("compare", "--allow-overlap", str(saved), str(bad))
+    assert code == EXIT_ERROR and message in err and "Traceback" not in err
 
 
 def test_package_root_exports_the_python_api() -> None:
@@ -547,3 +569,37 @@ def test_sources_names_copies_and_encodings(tmp_path: Path) -> None:
     code, out, _ = run("sources", str(tmp_path), "-t", str(tmp_path))
     assert code == EXIT_OK
     assert "repeat an earlier file" in out and "read as utf-16" in out
+
+
+def test_show_json_and_output_file(tmp_path: Path) -> None:
+    saved = tmp_path / "r.json"
+    run("scan", *INPUT, "-o", str(saved))
+    code, out, _ = run("show", "pytest", "--from", str(saved), "-f", "json")
+    doc = json.loads(out)
+    assert code == EXIT_OK and doc["hotspot"]["path"] == "pytest" and doc["directory"] is None
+    target = tmp_path / "detail.txt"
+    code, out, _ = run("show", "src/shopfront", "--from", str(saved), "-o", str(target))
+    assert code == EXIT_OK and out == "" and "directory: src/shopfront" in target.read_text()
+
+
+def test_compare_accepts_color(tmp_path: Path) -> None:
+    saved = tmp_path / "a.json"
+    run("scan", *INPUT, "-o", str(saved))
+    data = json.loads(saved.read_text(encoding="utf-8"))
+    data["hotspots"][0]["events"] = 1
+    after = tmp_path / "b.json"
+    after.write_text(json.dumps(data), encoding="utf-8")
+    code, out, _ = run("compare", "--allow-overlap", "--color", "always", str(saved), str(after))
+    assert code == EXIT_OK and "\033[" in out
+    assert "\033[" not in run("compare", "--allow-overlap", str(saved), str(after))[1]
+
+
+def test_no_session_in_repo_names_where_sessions_ran() -> None:
+    code, _, err = run(
+        "scan",
+        str(FIXTURES / "shopfront"),
+        "--transcripts",
+        str(FIXTURES / "transcripts"),
+        "--no-git",
+    )
+    assert code == EXIT_ERROR and "--repo-alias /home/dev/shopfront" in err

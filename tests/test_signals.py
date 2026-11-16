@@ -80,7 +80,7 @@ def test_time_estimate_is_capped(tmp_path: Path) -> None:
 
 def test_stale_edit_variants(tmp_path: Path) -> None:
     s = Session().user("go")
-    s.write(A, error=builders.NOT_READ)
+    s.edit(A, error=builders.NOT_READ)
     s.edit(A, error=builders.STALE)
     found = by_signal(detect(s, tmp_path), signals.STALE_EDIT)
     assert [f.detail["variant"] for f in found] == ["not-read", "modified"]
@@ -3521,3 +3521,41 @@ def test_the_tests_a_red_run_names_are_kept(tmp_path: Path) -> None:
     go = Session().user("go").bash("go test ./...", "--- FAIL: TestOld (0.00s)\nFAIL", exit_code=1)
     (failure,) = detect(go, tmp_path)
     assert failure.detail["failed_tests"] == "TestOld" and failure.detail["failed_test_files"] == ""
+
+
+# ---- round 21 ----------------------------------------------------------------------------
+
+
+def test_a_new_file_refused_by_the_read_first_rule_is_weak(tmp_path: Path) -> None:
+    new = Session().user("go").write("/repo/src/new.py", error=builders.NOT_READ)
+    (refused,) = detect(new, tmp_path)
+    assert refused.signal == signals.STALE_EDIT and refused.detail["variant"] == "unread-write"
+    assert scoring.is_weak(refused) and refused.interval is None
+    # a file the session had read or changed is the real thing
+    known = Session().user("go").read(A).write(A, error=builders.NOT_READ)
+    (stale,) = detect(known, tmp_path)
+    assert stale.detail["variant"] == "not-read" and not scoring.is_weak(stale)
+
+
+def test_an_interrupt_after_a_missing_read_is_not_about_that_path(tmp_path: Path) -> None:
+    s = Session().user("go").read("/repo/src/nope.py", missing=True).interrupt()
+    miss, stop = detect(s, tmp_path)
+    assert miss.signal == signals.PATH_MISS and keys(miss) == [("file", "src/nope.py")]
+    assert stop.signal == signals.USER_INTERRUPT and stop.targets == []
+    assert "a file that does not exist" in stop.summary
+    # after a read that worked, the file is what the agent was on
+    s = Session().user("go").read(A).interrupt()
+    (stop,) = detect(s, tmp_path)
+    assert keys(stop) == [("file", "src/a.py")]
+
+
+def test_a_denied_chain_is_keyed_to_its_first_step(tmp_path: Path) -> None:
+    refused = "Claude requested permissions to use Bash, but you haven't granted it yet."
+    for line, key in (
+        ("cat >> notes.md <<'EOF'\nhi\nEOF\nuv run ruff check .", "cat"),
+        ("cd api && sleep 2 && npm run build && npm test", "npm run build (api/)"),
+        ("npm run build && git push -f origin main", "git push"),  # the destructive step
+    ):
+        s = Session().user("go").tool("Bash", {"command": line}, refused, is_error=True)
+        (denied,) = detect(s, tmp_path)
+        assert keys(denied) == [("command", key)], line

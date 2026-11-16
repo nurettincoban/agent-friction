@@ -935,6 +935,24 @@ def objectionable_step(parsed: ParsedCommand, reason: str = "") -> Step | None:
     return next((s for s in parsed.steps if s.key == parsed.key), parsed.steps[-1])
 
 
+def denied_step(parsed: ParsedCommand, said: str = "") -> Step | None:
+    """The step of a command line that a permission rule or hook most plausibly refused.
+
+    A step the refusal names, or a destructive one, as for a human's objection.
+    Otherwise the **first** step: permission rules match a command line from its
+    start, so `cat >> notes.md && uv run ruff check` was refused at `cat`, not at
+    the check the line happens to end with.
+    """
+    if not parsed.steps:
+        return None
+    words = set(re.findall(r"[\w.+-]+", said.lower()))
+    named = any(s.program.lower() in words and not s.inspection for s in parsed.steps)
+    if named or _worst(parsed.steps) is not None:
+        return objectionable_step(parsed, said)
+    waits = ("cd", "sleep", "echo", "true", ":")
+    return next((s for s in parsed.steps if s.key and s.program not in waits), parsed.steps[0])
+
+
 def normalize_command(command: str) -> str:
     """Shorthand for ``parse_command(command).key``."""
     return parse_command(command).key

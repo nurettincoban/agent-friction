@@ -2308,3 +2308,92 @@ def test_a_host_that_cannot_be_resolved_is_the_environment(tmp_path: Path) -> No
     (advice,) = row["recommendations"]
     assert advice["id"] == "document-the-environment"
     assert advice["title"] == "Say what `curl` can reach from where agents work"
+
+
+# ---- round 21 ----------------------------------------------------------------------------
+
+
+def test_a_repo_given_with_dots_has_its_own_name(tmp_path: Path) -> None:
+    repo = tmp_path / "shop"
+    (repo / "src").mkdir(parents=True)
+    s = Session("s0", cwd=str(repo)).user("go").edit(f"{repo}/a.py", error=builders.EDIT_NOT_FOUND)
+    path = s.save(tmp_path / "t")
+    for given in (repo / "src" / "..", repo / "." / "src" / ".." / "."):
+        out = analyze(AnalyzeOptions(repo=given, transcripts=[path], include_git=False))
+        assert out["repo"]["name"] == "shop" and not out["repo"]["root"].endswith("..")
+        assert out["tree"]["name"] == "shop" and out["totals"]["friction_events"] == 1
+        assert out["sources"][0]["path"] == "claude-code:shop"
+
+
+def test_a_window_judges_its_events_with_what_came_after(tmp_path: Path) -> None:
+    """Red before the cut, fixed after it: the development loop, in either scan."""
+    cut = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    s = Session("s0", start=cut - timedelta(minutes=10)).user("fix the bug")
+    s.bash("make check", "1 failed", exit_code=1)  # fixed after the cut: red, edit, green
+    s.bash("pytest", "ModuleNotFoundError: No module named 'yaml'", exit_code=1)  # set up after
+    s.edit("/repo/src/a.py", error=builders.EDIT_NOT_FOUND)  # friction, before the cut
+    s.tick(600)
+    s.edit("/repo/src/a.py").bash("make check", "ok")
+    s.bash("pip install pyyaml", "ok").bash("pytest", "5 passed")
+    s.bash("npm test", "Tests: 1 failed", exit_code=1).user("thanks")  # friction, after the cut
+
+    def totals(**window: Any) -> tuple[int, int, list[str]]:
+        out = scan(tmp_path, [s], **window)
+        rows = sorted(row["path"] for row in out["commands"])
+        return out["totals"]["friction_events"], out["totals"]["dropped_red_runs"], rows
+
+    full, before, after = totals(), totals(until=cut), totals(since=cut)
+    assert full == (3, 1, ["npm test", "pytest"])
+    assert before == (2, 1, ["pytest"]) and after == (1, 0, ["npm test"])
+    assert before[0] + after[0] == full[0] and before[1] + after[1] == full[1]
+    # the failure that a later setup step fixed is still told so
+    out = scan(tmp_path, [s], until=cut)
+    assert "setup" in out["commands"][0]["evidence"][0]["summary"]
+    assert out["totals"]["tool_calls"] == 3  # what came after is context, never counted
+
+
+def test_an_unresolved_import_of_the_repos_own_module_recurring(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "__init__.py").write_text("")
+    conftest = (
+        "ImportError while loading conftest '/r/tests/conftest.py'.\n"
+        "E   ModuleNotFoundError: No module named 'app'"
+    )
+
+    def sessions(count: int) -> list[Session]:
+        return [
+            Session(f"s{i}", cwd=str(repo)).user("go").bash("pytest", conftest, exit_code=4)
+            for i in range(count)
+        ]
+
+    (row,) = scan(tmp_path / "four", sessions(4), repo)["commands"]
+    assert row["score"] > 19 and row["recommendations"][0]["id"] == "document-the-command"
+    (row,) = scan(tmp_path / "two", sessions(2), repo)["commands"]
+    assert row["score"] <= 19 and row["recommendations"] == []
+
+
+def test_advice_quotes_commands_as_they_are_typed(tmp_path: Path) -> None:
+    def build(s: Session) -> None:
+        s.bash("npm test", "Error: Cannot find module 'jest'\nRequire stack:", exit_code=1)
+        s.bash("npm install", "added 5 packages").bash("npm test", "Tests: 5 passed")
+
+    (row,) = _commands(tmp_path, build, cwd="/repo/web")
+    (advice,) = row["recommendations"]
+    assert row["path"] == "npm test (web/)" and advice["setup"] == "npm install (web/)"
+    assert '("in `web/`, run `npm install` before `npm test`")' in advice["detail"]
+
+
+def test_where_the_sessions_that_missed_the_repo_ran(tmp_path: Path) -> None:
+    from agent_friction.engine import session_directories
+
+    home = str(Path.home())
+    sessions = [Session(f"old{i}", cwd=f"{home}/work/old-name").user("go") for i in range(3)]
+    sessions.append(Session("other", cwd="/srv/other").user("go"))
+    sessions.append(Session("here", cwd="/repo").user("go"))
+    files = [s.edit(f"{s.cwd}/a.py").save(tmp_path / "t" / s.session_id) for s in sessions]
+    options = AnalyzeOptions(repo=Path("/repo"), transcripts=files, include_git=False)
+    assert session_directories(options) == [("~/work/old-name", 3), ("/srv/other", 1)]
+    assert session_directories(options, limit=1) == [("~/work/old-name", 3)]
+    aliased = dataclasses.replace(options, repo_aliases=[f"{home}/work/old-name"])
+    assert session_directories(aliased) == [("/srv/other", 1)]

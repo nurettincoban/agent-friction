@@ -311,3 +311,18 @@ def test_a_commit_that_announces_new_work_is_rework_only_right_away(repo: Repo) 
         assert gitsignals.FEATURE_SUBJECT_RE.search(subject), subject
     for subject in ("more human work", "address review", "tidy the adapter"):
         assert not gitsignals.FEATURE_SUBJECT_RE.search(subject), subject
+
+
+def test_a_formatter_commit_is_not_rework_at_any_size(repo: Repo) -> None:
+    by_agent = lines(BASE, l3="agent 3")
+    names = [f"f{n}.py" for n in range(5)]
+    repo.commit(1, "init", dict.fromkeys(names, BASE))
+    repo.commit(2, f"agent work\n\n{CLAUDE}", dict.fromkeys(names, by_agent))
+    repo.commit(3, "style: run black", {n: lines(by_agent, l3="agent  3") for n in names})
+    history = gitsignals.read_history(repo.path)
+    assert gitsignals.is_sweep(history.commits[-1])
+    assert gitsignals.find_rework(history.commits, hunks=gitsignals.HunkReader(repo.path)) == []
+    for subject in ("format: prettier", "Run prettier", "reformat the adapters", "lint(api): x"):
+        assert gitsignals.MECHANICAL_SUBJECT_RE.search(subject), subject
+    for subject in ("restyle the login page", "fix the linter config", "black background"):
+        assert not gitsignals.MECHANICAL_SUBJECT_RE.search(subject), subject
