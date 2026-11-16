@@ -2635,9 +2635,7 @@ def test_the_alias_hint_names_the_sessions_root_not_where_it_spent_its_time(
         ("/srv/third", 1),
     ]
     # unmasked paths come back with forward slashes, which --repo-alias accepts on any OS
-    assert session_directories(options, limit=1, mask_home=False) == [
-        (old.replace("\\", "/"), 2)
-    ]
+    assert session_directories(options, limit=1, mask_home=False) == [(old.replace("\\", "/"), 2)]
 
 
 def test_the_repositorys_own_name_stays_readable_without_excerpts(tmp_path: Path) -> None:
