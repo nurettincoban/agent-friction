@@ -121,6 +121,10 @@ class Event:
     #: tool_call: not a call the agent made, but the reported end of a background command.
     derived: bool = False
     after_question: bool = False  # the agent's last words before this message were a question
+    #: tool_result: did a human have to approve the call before it ran? ``True`` (the
+    #: time until the result includes the human's), ``False`` (permission settings let it
+    #: through at once) or ``None`` when the transcript does not say.
+    prompted: bool | None = None
 
 
 @dataclass

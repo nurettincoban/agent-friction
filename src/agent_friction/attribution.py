@@ -401,6 +401,24 @@ class Step:
     #: Its output never reaches the transcript: ``>/dev/null 2>&1``, ``&>/dev/null``.
     #: Nothing in the line's output can then be this step's verdict.
     silenced: bool = False
+    #: The file its standard output is redirected into (``cat > notes.md <<EOF``), if any.
+    into: str = ""
+    #: Wrappers stripped in front of the program, by base name (``time``, ``sudo``).
+    wrappers: tuple[str, ...] = ()
+
+
+#: Programs that, with their output redirected into a file (or, for ``tee``, given one),
+#: are a way of writing that file and nothing else.
+FILE_WRITERS = frozenset({"cat", "tee", "echo", "printf"})
+
+
+def written_file(step: Step) -> str:
+    """The file ``step`` writes if it is a plain write: ``cat > f <<EOF``, ``tee f``."""
+    if step.program not in FILE_WRITERS:
+        return ""
+    if step.program == "tee":
+        return next((a for a in step.args if not a.startswith("-")), "")
+    return step.into
 
 
 @dataclass(frozen=True)
@@ -453,6 +471,7 @@ class _Segment(list[str]):
 
     out_null = False
     err_null = False
+    into = ""
 
     def redirect(self, fd: str, operator: str, target: str) -> None:
         null = target == "/dev/null"
@@ -469,6 +488,7 @@ class _Segment(list[str]):
             self.err_null = null
         elif fd in ("", "1"):
             self.out_null = null
+            self.into = "" if null else target
 
 
 def _segments(tokens: Sequence[str]) -> list[_Segment]:
@@ -795,7 +815,24 @@ def _steps(command: str, depth: int = 0, moves: tuple[str, ...] = ()) -> list[St
         )
         where = (*moves, *_own_directory(program, words[1:]))
         silenced = segment.out_null and segment.err_null
-        steps.append(Step(key, program, tuple(words[1:]), inspection, significant, where, silenced))
+        args = tuple(words[1:])
+        stripped = segment[: max(len(segment) - len(words), 0)]
+        wrappers = tuple(
+            name for name in (w.rsplit("/", 1)[-1] for w in stripped) if name in WRAPPER_PROGRAMS
+        )
+        steps.append(
+            Step(
+                key,
+                program,
+                args,
+                inspection,
+                significant,
+                where,
+                silenced,
+                segment.into,
+                wrappers,
+            )
+        )
     return steps
 
 

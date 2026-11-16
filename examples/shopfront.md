@@ -1,6 +1,6 @@
 # Agent friction map: shopfront
 
-6 agent sessions analysed · 34 friction events · ~9m lost · 4 human corrections · 5 files affected
+6 agent sessions analysed · 34 friction events (11 weak) · ~9m lost · 4 human corrections · 5 files affected
 
 _Not counted: 1 failed run of normal work (the agent fixed the failure, or was only waiting and polled until it passed; ~6s of run time)._
 

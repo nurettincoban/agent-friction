@@ -36,7 +36,7 @@ from agent_friction.discovery import (
     expand_transcript_paths,
     repo_roots,
 )
-from agent_friction.errors import AgentFrictionError, NoTranscriptsError
+from agent_friction.errors import AgentFrictionError, BadTranscriptError, NoTranscriptsError
 from agent_friction.guidance import Guidance
 from agent_friction.model import Finding, ParsedFile, Stream, Target
 
@@ -85,8 +85,10 @@ class AnalyzeOptions:
     #: commits are never human rework, in addition to ``gitsignals.DEFAULT_BOT_PATTERNS``.
     bot_commit_patterns: Sequence[str] = field(default_factory=tuple)
     git_max_commits: int = gitsignals.DEFAULT_MAX_COMMITS
-    #: With no transcripts at all, analyse git history alone instead of raising (needs
-    #: ``include_git`` and a readable git history).
+    #: With no transcripts at all, do not raise ``NoTranscriptsError``: analyse the git
+    #: history alone, and where there is none either (no repository, no commits,
+    #: ``include_git=False``) return an empty, valid result. A transcript path that
+    #: does not exist, or a file that is no transcript, is still an error.
     allow_no_transcripts: bool = False
 
 
@@ -946,8 +948,10 @@ class _Analysis:
         missing: NoTranscriptsError | None = None
         try:
             files = self._transcript_files()
+        except BadTranscriptError:
+            raise  # a mistyped path is a mistake, not an empty scan
         except NoTranscriptsError as exc:
-            if not (options.allow_no_transcripts and options.include_git):
+            if not options.allow_no_transcripts:
                 raise
             missing, files = exc, []
         parsed, context = _load(files, self.since, self.until, self.unreadable)
@@ -1070,8 +1074,9 @@ class _Analysis:
                 source["note"] = history.reason
             sources.append(source)
             self.git_used = history.available
-        if missing is not None and not self.git_used:
-            raise missing  # neither transcripts nor git history: nothing to analyse
+        # Neither transcripts nor git history: with ``allow_no_transcripts`` that is an
+        # empty result (no sessions, empty lists), not an error.
+        del missing
 
         for finding in findings:
             finding.episode = self.unit(finding.session_id, finding.ts)
@@ -1121,9 +1126,9 @@ class _Analysis:
             for given in options.transcripts:
                 path = Path(given).expanduser()
                 if not path.exists():
-                    raise NoTranscriptsError(f"Transcript path does not exist: {given}")
+                    raise BadTranscriptError(f"Transcript path does not exist: {given}")
                 if path.is_file() and os.access(path, os.R_OK) and not _looks_like_jsonl(path):
-                    raise NoTranscriptsError(
+                    raise BadTranscriptError(
                         f"{given} is not a JSONL transcript: none of its first "
                         f"{JSONL_PROBE_LINES} lines is a JSON object{_encoding_note(path)}. "
                         "Pass Claude Code "
@@ -1277,6 +1282,9 @@ class _Analysis:
                     if e.kind == model.TOOL_CALL and not e.derived and self.in_repo_call(e)
                 ),
                 "friction_events": len(findings),
+                # ... of which those that are friction on their own: not the kinds that
+                # also accompany productive work (see ``scoring.is_weak``).
+                "strong_events": sum(1 for f in findings if not scoring.is_weak(f)),
                 "est_minutes_lost": scoring.lost_minutes(findings),
                 # Red runs that were seen and deliberately not reported: the development
                 # loop (red, change, green), waiting, one-off fixes. Not friction.

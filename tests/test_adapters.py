@@ -587,3 +587,21 @@ def test_implausible_timestamps_count_as_missing() -> None:
     assert parse_ts(f"{ahead}-06-01T00:00:00Z") is not None  # a clock that runs a little fast
     assert parse_ts(f"{ahead + 1}-01-01T00:00:00Z") is None
     assert parse_ts(float("nan")) is None and parse_ts(float("inf")) is None
+
+
+def test_permission_decisions_say_whether_a_person_was_asked(tmp_path: Path) -> None:
+    from tests.builders import Session
+
+    def results(decision: object) -> list[bool | None]:
+        s = Session().user("go")
+        s.decision = decision  # type: ignore[assignment]
+        s.bash("make test", "ok")
+        parsed = parse_transcript(s.save(tmp_path / str(abs(hash(str(decision))))))
+        return [e.prompted for st in parsed.streams for e in st.events if e.kind == "tool_result"]
+
+    assert results({"decision": "accept", "source": "config"}) == [False]
+    assert results({"decision": "accept", "source": "config", "reasonType": "rule"}) == [False]
+    assert results({"decision": "accept", "source": "user"}) == [True]
+    assert results({"decision": "accept", "source": "prompt"}) == [True]
+    assert results(None) == [None] and results({"decision": "accept"}) == [None]
+    assert results("accept") == [None]

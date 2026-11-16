@@ -28,6 +28,36 @@ All thresholds are named constants in `src/agent_friction/signals.py`.
 | `search-miss` | 1.0 | transcript |
 | `read-loop` | 0.5 | transcript |
 
+### At a glance
+
+One row per signal: what fires it, where the event lands, and what it counts
+for. The full rules, with every exception, are in the sections below
+(`command-failure` is the longest by far; its section starts with its own
+summary).
+
+| Signal | Fires when | Attributed to | Weight · time claimed |
+| --- | --- | --- | --- |
+| [user-correction](#user-correction--user-correction) | a human message worded as a correction of the agent's work, or an instruction redirecting it, **and** the agent had changed files and the human names one or the agent changes one again | the file named or gone back to | 4.0 · the rework that followed |
+| [retry-loop](#retry-loop--retry-loop) | the same command line fails 3+ times in a row with nothing changed in between | the command | 3.0 · none |
+| [no-convergence](#no-convergence--no-convergence) | 4+ rounds of edit and red re-run of the same check without it going green | the command and the files edited | 3.0 · the red runs and edits (max 15 min), only if seen in 2+ sessions |
+| [tool-rejected](#tool-rejected--tool-call-declined) | a human declines a tool call at the permission prompt | the file, or the step objected to | 2.5 · from the answer to the agent's next step |
+| [user-interrupt](#user-interrupt--user-interrupt) | a human interrupts the agent mid-turn | what the cut-short call was working on | 2.5 · the call that was cut short |
+| [edit-miss](#edit-miss--edit-miss) | an edit's old text is not in the file, or matches several places | the file | 2.0 · one round trip, or until the edit lands |
+| [edit-revert](#edit-revert--edit-reverted) | the agent takes back its own edit, unasked | the file | 2.0 · from the edit to the revert |
+| [command-failure](#command-failure--command-failure) | a shell command fails: a setup/invocation error, an environment failure (service, credentials, variable, port, disk, network), a flaky test, or an ordinary failure. Red, edit, green is dropped | the command (and files named on its line, for an ordinary failure) | 2.0 · one round trip; an *ordinary* failure counts 0.3 and claims nothing |
+| [human-rework](#human-rework--human-rework-git) | the next commit on a file after an agent commit is a human's, rewrites the agent's lines or calls itself a fix, within the window | the file | 1.5 · none |
+| [edit-thrash](#edit-thrash--edit-thrash) | 6+ successful edits to one file in a turn in which something also went wrong | the file | 1.5 (weak) · none |
+| [permission-denied](#permission-denied--permission-denied) | permission settings, a hook or the harness refuse a call | the file, or the command step refused | 1.5 · one round trip |
+| [stale-edit](#stale-edit--stale-edit) | a write is refused because the file changed since it was read, or was never read | the file | 1.0 · one round trip |
+| [probable-correction](#probable-correction--probable-correction) | correction wording that behaviour does not corroborate, or two weaker cues | the files changed just before, if any | 1.5 × 0.4 (weak) · none |
+| [file-too-large](#file-too-large--file-too-large-to-read) | a read is refused because the file is too big | the file | 1.0 · one round trip |
+| [path-miss](#path-miss--path-miss) | a read, edit, test command or `cd` is pointed at a path that does not exist | the missing path | 1.0 · one round trip (a routine probe: weak, none) |
+| [search-miss](#search-miss--search-miss) | a Grep or Glob search returns nothing | the directory searched | 1.0 (weak) · none |
+| [read-loop](#read-loop--read-loop) | the same range of a file is read 3+ times in a turn with no edit in between | the file | 0.5 (weak) · none |
+
+Time is the agent's only: the time a person spent at a permission prompt or
+before replying is never claimed (methodology, "Estimated time lost").
+
 Severities are ordered by one principle: a human having to step in costs more
 than the agent wasting its own round trips, and a failure that provably
 repeats costs more than one that might be routine.
@@ -259,7 +289,15 @@ adds to a user turn (`<ide_opened_file>`, `<ide_selection>`,
 `<ide_diagnostics>`, `<system-reminder>`, `<local-command-*>`,
 `<user-prompt-submit-hook>`, ...) are removed before the prompt is read,
 quoted or used for attribution: a file the IDE reports as open is not a file
-the human named. The phrase lists are English only; the test
+the human named. What another agent wrote into a user turn (`<teammate-message
+...>`, `<agent-message ...>`: a teammate, a coordinating session) is not a
+human's either: it starts a new turn, but is never a correction, never
+quoted, and its envelope is not text. Words the human typed next to it are
+read as usual. In a session that works on more than one repository, a
+correction is not this repository's when every file the agent had just
+changed lies outside it, or when the human names a path outside it and the
+agent had changed nothing here: it is dropped, not listed as unattributed.
+The phrase lists are English only; the test
 suite pins them against a corpus of 50+ corrections and 80+ benign prompts
 (thanks, praise, questions, next-step requests, new tasks that describe bugs,
 feature requests that contain "undo" or "wrong"; `tests/test_signals.py`).
@@ -534,7 +572,9 @@ permission prompt, and is never counted, however long it took. What is
 claimed is the time from the human's answer to the next thing in the
 transcript (at most the usual cap); nothing if nothing follows.
 
-**Attribution:** the file the tool targeted, or the normalized shell command.
+**Attribution:** the file the tool targeted, or the normalized shell command
+(a file written by redirection, `cat > notes.md <<EOF` or `tee notes.md`,
+counts as that file, as for `permission-denied`).
 For a chain of commands it is the step the human most plausibly objected to,
 in this order: a step whose program the stated reason names; the first
 destructive step (`rm`, `mv`, `dd`, `git push`, `git reset`, ...); the first
@@ -740,6 +780,23 @@ successfully once before being removed (read as debugging).
 
 **What:** a shell command exits non-zero (or the tool reports an error).
 
+The cases, in the order of the rules below:
+
+| Case | Variant | Counts | Becomes advice when |
+| --- | --- | --- | --- |
+| The command never got to do its job (not found, missing module, bad arguments, install failed) | `invocation` | 1.0, one round trip | 2+ events: the working form, the setup step, or "document the command" |
+| Something around it was missing (service, credentials, variable, port, disk, network) | `environment` | 1.0, one round trip | 2+ events: `document-the-environment` |
+| It ran and exited non-zero (a red test, a lint finding, a rejected push) | `ordinary` | 0.3, no time; alone it only makes a capped lead | it stays red in 3+ sessions, names the same red test in 3+ sessions, or the push is rejected in 3+ sessions |
+| Red, then green on a plain re-run with nothing changed, in 3+ sessions | `flaky` | 1.0, the run | always: `fix-the-flaky-test` |
+| Red, an edit, green (also by another command for the same job) | dropped (`dropped_red_runs`) | nothing | never |
+| Red, a setup step with no file edited, green | kept, `fixed_by_setup` | 1.0, until it passed | 2+ events: `document-the-setup-step` |
+| Failed, then passed untouched 3+ times, or a probe of a starting server | dropped (waiting) | nothing | never |
+| Read-only inspection (`ls`, `grep`, `git status`), a `cd` that failed, a time-boxed server start | not a failure (a failed `cd` is a `path-miss`) | nothing | never |
+
+Which step of a line is blamed, and how a status hidden behind a pipe is
+judged, is under "Which step printed it" and "The exit status may not be the
+command's" below.
+
 - *Setup/invocation errors* count fully (weight 1.0): exit codes 126/127, or
   an output **line** with the shape the shell, interpreter or tool itself
   prints when the command never got to do its job: `bash: x: command not
@@ -750,7 +807,7 @@ successfully once before being removed (read as debugging).
   `error Command "test" not found.`, `ERR_PNPM_NO_SCRIPT`, npm's `Unsupported
   engine` / `EBADENGINE` (the wrong Node version is a setup problem),
   `fatal: not a git repository`, `curl: (N) ...`, and install/build failures
-  (`npm error code E401 | ERESOLVE | ...`, `Failed to build ...`, `error:
+  (`npm error code ERESOLVE | ETARGET | ...`, `Failed to build ...`, `error:
   subprocess-exited-with-error`, `ERROR: Failed building wheel`, `No solution
   found when resolving dependencies`). The full list is
   `INVOCATION_ERROR_RE`. The harness's own `Command timed out after ...`
@@ -1309,7 +1366,10 @@ allowed: either a routine command is missing from the allow-list (the agent
 stalls on it in every session), or the agent does not know a boundary.
 
 **Attribution:** the file the tool targeted, or the normalized shell command
-(for a chain, the step chosen as for `tool-rejected`: a step the refusal
+(a shell step that only writes a file by redirection, `cat > notes.md
+<<EOF`, `cat >> notes.md`, `tee notes.md`, is a write to that file and is
+attributed to it, not to `cat`; outside the repository it is not recorded;
+for a chain, the step chosen as for `tool-rejected`: a step the refusal
 names in words of its own, else the first destructive step, so `ls build; rm
 -f build/out.bin` is keyed to `rm`. The harness usually quotes the whole
 command line in its message; that quotation is ignored when looking for the

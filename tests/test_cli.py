@@ -249,7 +249,7 @@ def test_inverted_window_is_a_usage_error() -> None:
 
 def test_output_into_missing_directory_is_an_error(tmp_path: Path) -> None:
     code, _, err = run("scan", *INPUT, "-o", str(tmp_path / "missing" / "x.html"))
-    assert code == EXIT_USAGE and "does not exist" in err
+    assert code == EXIT_ERROR and "does not exist" in err
 
 
 def test_sources_with_explicit_transcripts() -> None:

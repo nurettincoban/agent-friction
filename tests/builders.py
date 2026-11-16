@@ -72,6 +72,8 @@ class Session:
         self.branch = branch
         self.salt = "side" if sidechain else "main"  # keeps line uuids unique per file
         self.lines: list[str] = []
+        #: ``permissionDecision`` written on every tool result from now on, if set.
+        self.decision: dict[str, Any] | None = None
         self._count = 0
         self._parent: str | None = None
 
@@ -165,6 +167,8 @@ class Session:
         extra: dict[str, Any] = {}
         if tool_use_result is not None:
             extra["toolUseResult"] = tool_use_result
+        if self.decision is not None:
+            extra["permissionDecision"] = self.decision
         self._line("user", {"role": "user", "content": [block]}, **extra)
         return self
 

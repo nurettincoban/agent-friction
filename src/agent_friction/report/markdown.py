@@ -8,6 +8,7 @@ from typing import Any
 from agent_friction.report._common import (
     collect_recommendations,
     dropped_note,
+    events_phrase,
     fmt_lost,
     fmt_minutes,
     plural,
@@ -140,7 +141,7 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
         f"# Agent friction map: {repo.get('name', '?')}",
         "",
         f"{plural(int(totals.get('sessions', 0)), 'agent session')} analysed · "
-        f"{plural(int(totals.get('friction_events', 0)), 'friction event')} · "
+        f"{events_phrase(totals)} · "
         f"~{fmt_minutes(float(totals.get('est_minutes_lost', 0)))} lost · "
         f"{plural(int(totals.get('corrections', 0)), 'human correction')} · "
         f"{plural(int(totals.get('files_affected', 0)), 'file')} affected",

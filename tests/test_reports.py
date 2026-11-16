@@ -227,3 +227,14 @@ def test_git_only_empty_state_and_utc_labels() -> None:
     item = find_target(r, "src/shop/generated/schema.py")
     assert item is not None
     assert " UTC" in render_detail(r, item) and " UTC" in render_markdown(r)
+
+
+def test_headline_counts_weak_events_apart() -> None:
+    from agent_friction.report._common import events_phrase
+
+    assert (
+        events_phrase({"friction_events": 34, "strong_events": 23})
+        == "34 friction events (11 weak)"
+    )
+    assert events_phrase({"friction_events": 3, "strong_events": 3}) == "3 friction events"
+    assert events_phrase({"friction_events": 1}) == "1 friction event"

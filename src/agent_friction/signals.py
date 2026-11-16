@@ -10,6 +10,7 @@ from __future__ import annotations
 import fnmatch
 import posixpath
 import re
+import statistics
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -41,6 +42,7 @@ from agent_friction.attribution import (
     parse_command,
     path_candidates,
     setup_label,
+    written_file,
 )
 from agent_friction.model import Event, Finding, Stream, Target
 
@@ -86,6 +88,9 @@ ORDINARY_FAILURE_WEIGHT = 0.3
 RECOVERY_LOOKAHEAD = 5
 #: Per-event cap for the time-lost estimate, in seconds.
 TIME_CAP_SECONDS = 300.0
+#: Where a transcript does not say whether a person had to approve a call, the time from
+#: call to result counts at most this long (or the command's usual run time, if longer).
+UNATTENDED_RUN_SECONDS = 30.0
 #: Only the start of a user message is inspected for correction phrases.
 CORRECTION_HEAD_CHARS = 280
 #: A correction with no named file is split over at most this many recently edited files.
@@ -1117,9 +1122,24 @@ DEV_SERVER_RE = re.compile(
 _NOT_FOUND_PROGRAM_RE = re.compile(
     r"(?:^|: )([^\s:]+): (?:command )?not found\s*$|command not found: (\S+)\s*$"
     r"|'([^'\n]+)' is not recognized as an internal or external command"
-    r"|The term '([^'\n]+)' is not recognized as (?:the|a) name of a cmdlet",
+    r"|The term '([^'\n]+)' is not recognized as (?:the|a) name of a cmdlet"
+    # a program called by its absolute path: `bash: /usr/bin/time: No such file or directory`
+    r"|^(?:[\w./-]+: )?(?:line \d+: )?(/[^\s:]+): No such file or directory\s*$",
     re.M,
 )
+#: `...; echo "exit $?"`: the line prints the status its own exit code no longer shows.
+_STATUS_ECHO_RE = re.compile(r"\becho\s+(?:-\w+\s+)*[\"']?[^\"';|&\n]*\$\?")
+_ECHOED_STATUS_RE = re.compile(
+    r"^\s*(?:exit(?: ?code| status)?|status|rc|code|EXIT)\s*[:=]?\s*(\d{1,3})\s*$", re.M | re.I
+)
+
+
+def echoed_status(command: str, output: str) -> int | None:
+    """The exit status a line printed for itself with ``echo "exit $?"``, if it did."""
+    if len(_STATUS_ECHO_RE.findall(command)) != 1:
+        return None
+    found = _ECHOED_STATUS_RE.findall(output)
+    return int(found[-1]) if len(found) == 1 else None
 
 
 def _unfound_program(output: str) -> str:
@@ -1851,6 +1871,7 @@ class _Detector:
         self.exposed: set[tuple[str, str]] = set()  # every target the agent went near
         self.exposed_in: set[tuple[str, str, str]] = set()  # ... and in which episode
         self.skipped_events = 0  # events a detector could not handle (never fatal)
+        self._durations: dict[str, list[tuple[_Action, float]]] = {}
         #: Red runs taken off the record: (transcript line, seconds the run took, reason)
         self.dropped: list[tuple[int, float, str]] = []
         self.state = _State()
@@ -1923,10 +1944,43 @@ class _Detector:
             return [Target(model.COMMAND, label)]
         return []
 
+    def _started(self, action: _Action) -> float | None:
+        """When the call began to cost the agent's time, as far as that can be known.
+
+        Between a call and its result lies the tool's own run time and, where a
+        person had to approve the call first, that person's time. The second is
+        never counted:
+
+        * the transcript says the call was let through by the permission settings
+          (``prompted`` is False): the whole of call to result is the tool's;
+        * it says a person approved it: nothing before the result is claimed;
+        * it does not say: call to result counts up to the larger of
+          ``UNATTENDED_RUN_SECONDS`` and the median time the same command (or tool)
+          took in its other runs of the session. A run that took far longer than
+          that was most likely waiting at a prompt.
+        """
+        called, ended = _epoch(action.call), _epoch(action.result)
+        result = action.result
+        if called is None or ended is None or result is None or ended <= called:
+            return called
+        if result.prompted is False:
+            return called
+        if result.prompted:
+            return ended
+        others = [
+            d for a, d in self._durations.get(self._duration_key(action), ()) if a is not action
+        ]
+        bound = max(statistics.median(others) if others else 0.0, UNATTENDED_RUN_SECONDS)
+        return max(called, ended - bound)
+
+    @staticmethod
+    def _duration_key(action: _Action) -> str:
+        return action.cmd.key if action.cmd is not None else f"tool:{action.call.tool}"
+
     def _round_trip(self, action: _Action) -> tuple[float, float] | None:
         """From a call until the next transcript event: the cost of one wasted round trip."""
         end = action.next_any if action.next_any is not None else _epoch(action.result)
-        return _capped(_epoch(action.call), end)
+        return _capped(self._started(action), end)
 
     def _recover(self, finding: Finding, action: _Action) -> None:
         """Extend a failure's interval up to the successful ``action`` that resolved it."""
@@ -2068,7 +2122,15 @@ class _Detector:
     # ---- main loop -------------------------------------------------------------------
 
     def run(self) -> list[Finding]:
-        for item in self._items():
+        items = self._items()
+        for item in items:
+            # how long each command took, for `_started`
+            if isinstance(item, _Action) and item.result is not None:
+                called, ended = _epoch(item.call), _epoch(item.result)
+                if called is not None and ended is not None and not item.result.prompted:
+                    key = self._duration_key(item)
+                    self._durations.setdefault(key, []).append((item, ended - called))
+        for item in items:
             try:
                 self._step(item)
             except Exception:  # one odd event must never end the scan
@@ -2694,6 +2756,12 @@ class _Detector:
             ok = verdict != "red"
         elif hidden:
             verdict = output_verdict(result.output, self.ctx.first_party)
+            # `cmd; echo "exit $?"`: the line says how its one command ended
+            echoed = echoed_status(action.call.command or "", result.output)
+            if echoed:
+                verdict = "red"
+            elif echoed == 0 and verdict is None:
+                verdict = "green"
             ok = verdict != "red"
         unknown = hidden and verdict is None
         if ran:
@@ -2874,6 +2942,8 @@ class _Detector:
             # box: the agent only wanted to see it start.
             return
         code = None if hidden else result.exit_code
+        if hidden and not several:
+            code = echoed_status(action.call.command or "", result.output) or None
         if cmd.inspection:
             # Probing (ls, cat, git status, ...) is not friction, whatever it answers.
             # `docker ps` that cannot reach the daemon answered nothing, though.
@@ -2898,6 +2968,10 @@ class _Detector:
         if step is not None and step.key:
             key = step.key
             located = step
+            missing_wrapper = _unfound_program(result.output)
+            if missing_wrapper in step.wrappers and missing_wrapper != step.program:
+                # `/usr/bin/time -v pytest`: what could not be found is `time`
+                key, invocation = missing_wrapper, True
         inline = is_inline_code(key)
         if inline and code not in INVOCATION_EXIT_CODES:
             # Ad-hoc code failing says something about that code, not about how to run
@@ -3021,7 +3095,7 @@ class _Detector:
             interval=self._round_trip(action) if invocation or environment else None,
             detail=detail,
         )
-        finding.run = _capped(_epoch(call), _epoch(result))
+        finding.run = _capped(self._started(action), _epoch(result))
         state.key_of[id(finding)] = key
         state.changes_at[id(finding)] = state.changes
         if "own_module" in detail:
@@ -3077,7 +3151,9 @@ class _Detector:
         # ... and a shell that could not find a program names it, wherever it stood.
         name = _unfound_program(output)
         if name:
-            named = next((s for s in cmd.steps if s.key and name in (s.program, s.key)), None)
+            named = next(
+                (s for s in cmd.steps if s.key and name in (s.program, s.key, *s.wrappers)), None
+            )
             if named is not None:
                 step, certain = named, True
         return step, certain
@@ -3209,7 +3285,7 @@ class _Detector:
                 if span is not None and not fresh:
                     cycle.spans.append(span)  # an edit between two red runs
         cycle.seen = state.changes
-        run = _span(action)
+        run = _capped(self._started(action), _epoch(action.result))
         if run is not None:
             cycle.spans.append(run)
         cycle.judged = cycle.judged or hidden
@@ -3349,6 +3425,20 @@ class _Detector:
             pending.how,
         )
 
+    def _written(self, step: Step | None, cwd: str | None) -> str | None:
+        """The repo file a refused shell step would have written, by redirection.
+
+        ``cat > notes.md <<EOF``, ``cat >> notes.md`` and ``tee notes.md`` are writes
+        to that file under another tool's name: what was refused is the write, not
+        ``cat``. ``""`` if the step is no such write, ``None`` if its file lies
+        outside the repository.
+        """
+        raw = written_file(step) if step is not None else ""
+        if not raw or any(ch in raw for ch in "$`*?"):
+            return ""
+        rel = self.ctx.resolver.resolve(raw, self._where(step, cwd))
+        return rel or None
+
     def _on_rejected(self, action: _Action, result: Event) -> None:
         call = action.call
         if QUESTION_TOOL_RE.search(call.tool):
@@ -3365,6 +3455,10 @@ class _Detector:
                 return
             if step is not None and step.key:
                 targets = [Target(model.COMMAND, self._label(step.key, step, call.cwd))]
+            written = self._written(step, call.cwd)
+            if written is None:
+                return
+            targets = [Target(model.FILE, written)] if written else targets
         tool = self._tool(call)
         what = targets[0].key if targets else ""
         what = f"`{what}`" if targets and targets[0].kind == model.COMMAND else what
@@ -3403,6 +3497,10 @@ class _Detector:
                 return
             if step is not None and step.key:
                 targets = [Target(model.COMMAND, self._label(step.key, step, call.cwd))]
+            written = self._written(step, call.cwd)
+            if written is None:
+                return  # `cat > /tmp/notes <<EOF`: a write to a file outside the repo
+            targets = [Target(model.FILE, written)] if written else targets
         by = {"hook": "a hook", "blocked": "the harness"}.get(result.reason, "permission settings")
         tool = self._tool(call)
         what = targets[0].key if targets else ""
@@ -3514,6 +3612,23 @@ class _Detector:
                 by_name = [f for f in touched if f.rsplit("/", 1)[-1] == candidate]
                 hits = by_name if len(by_name) == 1 else []
             named.extend(h for h in hits if h not in named)
+        # A session that works on several repositories at once: a correction about work
+        # done next door is not this repository's. That is the case when every file the
+        # agent had changed lies outside, or when the human names a path outside and
+        # the agent had changed nothing here (or had been busy out there too).
+        resolver = self.ctx.resolver
+        away = [
+            a
+            for a in self.state.turn
+            if a.file is None and a.call.path and resolver.outside(a.call.path, a.call.cwd)
+        ]
+        changed_away = any(a.call.op in (model.OP_EDIT, model.OP_WRITE) for a in away)
+        names_away = not named and any(
+            ("/" in c or "\\" in c) and resolver.outside(c, event.cwd)
+            for c in path_candidates(event.text[:CORRECTION_SCAN_CHARS].split())
+        )
+        if not named and ((changed_away and not edited) or (names_away and (away or not edited))):
+            return
         targets: list[Target]
         edited_all = list(edited)
         if named:

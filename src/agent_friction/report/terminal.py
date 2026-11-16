@@ -9,6 +9,7 @@ from agent_friction.report._common import (
     all_items,
     collect_recommendations,
     dropped_note,
+    events_phrase,
     fmt_lost,
     fmt_minutes,
     plural,
@@ -160,7 +161,7 @@ def render_terminal(
         st.dim(
             f"{who}"
             f" · {plural(_in_repo_calls(totals), 'tool call')}"
-            f" · {plural(int(totals.get('friction_events', 0)), 'friction event')}"
+            f" · {events_phrase(totals)}"
             f" · ~{fmt_minutes(float(totals.get('est_minutes_lost', 0)))} lost"
             f" · {plural(int(totals.get('corrections', 0)), 'human correction')}{span}"
         )

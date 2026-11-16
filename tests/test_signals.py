@@ -3554,7 +3554,7 @@ def test_an_interrupt_after_a_missing_read_is_not_about_that_path(tmp_path: Path
 def test_a_denied_chain_is_keyed_to_its_first_step(tmp_path: Path) -> None:
     refused = "Claude requested permissions to use Bash, but you haven't granted it yet."
     for line, key in (
-        ("cat >> notes.md <<'EOF'\nhi\nEOF\nuv run ruff check .", "cat"),
+        ("cat notes.md && uv run ruff check .", "cat"),
         ("cd api && sleep 2 && npm run build && npm test", "npm run build (api/)"),
         ("npm run build && git push -f origin main", "git push"),  # the destructive step
     ):
@@ -3859,3 +3859,133 @@ def test_red_after_the_agents_own_change_is_marked(tmp_path: Path) -> None:
     )
     first, second = by_signal(detect(s, tmp_path), signals.COMMAND_FAILURE)
     assert "after_edit" not in first.detail and second.detail["after_edit"] == "1"
+
+
+# ---- round 23 ------------------------------------------------------------------------------
+
+CONFIG = {"decision": "accept", "source": "config"}
+DENIED_BY_SETTINGS = "Claude requested permissions to use Bash, but you haven't granted it yet."
+
+
+@pytest.mark.parametrize(
+    ("decision", "seconds"),
+    [(CONFIG, 284), ({"decision": "accept", "source": "user"}, 14), (None, 44)],
+)
+def test_a_round_trip_never_includes_a_persons_time_at_the_prompt(
+    tmp_path: Path, decision: dict[str, str] | None, seconds: float
+) -> None:
+    s = Session().user("go")
+    s.decision = decision
+    s.bash("terraform plan", "Error: No valid credential sources found", exit_code=1, took=270)
+    s.tick(10).read(A)
+    (found,) = detect(s, tmp_path)
+    assert found.interval is not None
+    assert found.interval[1] - found.interval[0] == pytest.approx(seconds)
+
+
+def test_a_failed_edit_that_waited_at_a_prompt_claims_what_followed(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.decision = {"decision": "accept", "source": "prompt"}
+    call = s.call("Edit", {"file_path": A, "old_string": "a", "new_string": "b"})
+    s.result(call, builders.EDIT_NOT_FOUND, is_error=True, took=120)
+    s.tick(6).read(A)
+    (miss,) = detect(s, tmp_path)
+    assert miss.interval is not None
+    assert miss.interval[1] - miss.interval[0] == pytest.approx(10)  # 6 s + 4 s of thinking
+
+
+def test_a_message_from_another_agent_is_not_a_human_correction(tmp_path: Path) -> None:
+    wrapped = '<teammate-message teammate_id="lead" summary="x">No, that is wrong, revert that.'
+    wrapped += "</teammate-message>"
+    s = Session().user("go").edit(A, "a", "b").say("done").user(wrapped).edit(A, "b", "a")
+    found = detect(s, tmp_path)
+    assert by_signal(found, signals.USER_CORRECTION) == []
+    assert by_signal(found, signals.PROBABLE_CORRECTION) == []
+    # ... but it does start a new turn, like any instruction
+    assert [f.signal for f in found] == [signals.EDIT_REVERT]
+    # what the human typed next to it is the human's, and the envelope is never quoted
+    s = Session().user("go").edit(A, "a", "b").say("done")
+    s.user('<agent-message from="peer">status: ok</agent-message>\nNo, that is wrong, revert that.')
+    s.edit(A, "b", "a")
+    (found_one,) = by_signal(detect(s, tmp_path), signals.USER_CORRECTION)
+    assert found_one.detail["quote"] == "No, that is wrong, revert that."
+
+
+def test_a_correction_about_work_in_another_repository_is_not_ours(tmp_path: Path) -> None:
+    wrong = "No, that is wrong, revert that in repoB"
+    # started above both repositories: read here, edited next door
+    s = Session(cwd="/").user("go").read(A).edit("/repoB/x.py", "a", "b").say("done")
+    s.user(wrong).edit("/repoB/x.py", "b", "a")
+    assert detect(s, tmp_path) == []
+    # the human names a path next door, and nothing was changed here
+    s = Session(cwd="/").user("go").read(A).say("done").user("No, that's wrong: fix /repoB/x.py")
+    assert detect(s, tmp_path) == []
+    # nothing was edited anywhere and nothing outside is named: still on record
+    s = Session(cwd="/").user("go").read(A).say("done").user("No, that is wrong.")
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.PROBABLE_CORRECTION and found.targets == []
+    # an edit here keeps the correction here, whatever else was touched
+    s = Session(cwd="/").user("go").edit(A, "a", "b").edit("/repoB/x.py").say("done")
+    s.user("No, that is wrong.").edit(A, "b", "c")
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", "src/a.py")]
+
+
+@pytest.mark.parametrize(
+    ("command", "target"),
+    [
+        ("cat > notes.md <<'EOF'\nhi\nEOF", ("file", "notes.md")),
+        ("cat >> docs/notes.md <<'EOF'\nhi\nEOF\nuv run ruff check .", ("file", "docs/notes.md")),
+        ("echo hi | tee notes.md", ("file", "notes.md")),
+        ("cd web && cat > a.txt <<EOF\nx\nEOF", ("file", "web/a.txt")),
+        ("cat notes.md", ("command", "cat")),
+        ("cat a.txt b.txt > /dev/null", ("command", "cat")),
+    ],
+)
+def test_a_refused_redirected_write_is_about_the_file(
+    tmp_path: Path, command: str, target: tuple[str, str]
+) -> None:
+    s = Session().user("go").tool("Bash", {"command": command}, DENIED_BY_SETTINGS, is_error=True)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.PERMISSION_DENIED and keys(found) == [target]
+    if target[0] == "file":
+        assert found.summary.startswith(f"Bash on {target[1]} was denied")
+    # a file outside the repository is nobody's here
+    away = Session().user("go")
+    away.tool("Bash", {"command": "cat > /tmp/x <<EOF\nhi\nEOF"}, DENIED_BY_SETTINGS, is_error=True)
+    assert detect(away, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "code", "key", "variant"),
+    [
+        (
+            '( /usr/bin/time -v mytool scan . ; echo "exit $?" ); ls; which time',
+            "bash: line 1: /usr/bin/time: No such file or directory\nexit 127\nREADME.md",
+            0,
+            "time",
+            "invocation",
+        ),
+        ("time -v pytest", "bash: time: command not found", 127, "time", "invocation"),
+        ('mytool run; echo "exit $?"', "exit 127", 0, "mytool", "invocation"),
+        ('pytest -q; echo "exit $?"', "some output\nexit 1", 0, "pytest", "ordinary"),
+        # the wrapper is there and the command behind it failed: the command's failure
+        ("time pytest -q", "1 failed in 0.2s\nreal 0m0.2s", 1, "pytest", "ordinary"),
+    ],
+)
+def test_a_missing_wrapper_and_an_echoed_status(
+    tmp_path: Path, command: str, output: str, code: int, key: str, variant: str
+) -> None:
+    s = Session().user("go").bash(command, output, exit_code=code).read(A)
+    (found,) = detect(s, tmp_path)
+    assert keys(found)[0] == ("command", key) and found.detail["variant"] == variant
+
+
+def test_an_echoed_zero_is_a_pass(tmp_path: Path) -> None:
+    s = Session().user("go").bash('pytest -q; echo "exit $?"', "some output\nexit 0").read(A)
+    assert detect(s, tmp_path) == []
+    assert signals.echoed_status('make; echo "exit $?"', "exit 2") == 2
+    assert signals.echoed_status('make; echo "rc=$?"', "rc=0") == 0
+    # no echo of the status in the line, or more than one answer: nothing is read into it
+    assert signals.echoed_status("make test", "exit 2") is None
+    assert signals.echoed_status('a; echo "exit $?"; b; echo "exit $?"', "exit 1\nexit 0") is None

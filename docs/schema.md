@@ -45,7 +45,7 @@ promise. Every option has a CLI flag: `transcripts` is `-t`, `since`/`until` are
 | `agent_commit_patterns` | `None` | Regexes (case-insensitive, multiline) matched against `author: Name <email>\n<commit message>`; replaces the defaults. |
 | `bot_commit_patterns` | `()` | Extra regexes, matched the same way against `author: Name <email>`, for automation whose commits are never human rework (added to `gitsignals.DEFAULT_BOT_PATTERNS`: `[bot]` authors, dependabot, renovate, pre-commit-ci, github-actions, ...). |
 | `git_max_commits` | `5000` | Newest commits read from the current branch. |
-| `allow_no_transcripts` | `False` | `True`: if no transcript is found but git history is readable (and `include_git` is on), analyse git history alone (`human-rework` only) instead of raising. |
+| `allow_no_transcripts` | `False` | `True`: finding no transcript is not an error. If git history is readable (and `include_git` is on) it is analysed alone (`human-rework` only); if there is none either (not a repository, no commits yet, `include_git=False`), the result is empty but valid: `totals.sessions` 0, empty `hotspots`/`commands`/`directories`/`unattributed`, `settings` as given, `sources` holding at most the git entry with its `note`. Still raised (`BadTranscriptError`, a `NoTranscriptsError`): a transcript path that does not exist, or a file that is not a transcript. |
 
 `analyze` raises `agent_friction.engine.NoTranscriptsError` (a subclass of
 `agent_friction.errors.AgentFrictionError`) when no transcript file is found.
@@ -117,6 +117,7 @@ by repository or time window, so `0` marks an empty, binary or foreign file.
 | `tool_calls` | Tool calls in those sessions. |
 | `tool_calls_in_repo` | Those of `tool_calls` that acted inside this repository: a file tool on a path in it, a shell command whose judged step runs in it, any other tool called from a working directory in it. Equal to `tool_calls` unless a session was started in a parent directory and also worked on neighbouring projects. This is the number to put next to the friction counts. Reported ends of background commands are in neither count. *Addition to the base contract.* |
 | `friction_events` | All detected events, equal to the sum of `signals[].count`. |
+| `strong_events` | Those of `friction_events` that are friction on their own. Not counted: evidence that is routine by itself and only becomes a lead when it piles up (`scoring.is_weak`): ordinary command failures (a red test, a rejected push), mistyped commands, search misses, probable corrections, read loops, edit thrash, routine probes for optional files, a `no-convergence` stretch whose end was not seen, a first write refused by the read-first rule. Ordinary failures that the engine lifted out of that class (a standing red test, a command that stays red session after session, a push rejected in 3+ sessions) count. `friction_events - strong_events` is how much of the headline is routine. *Addition within schema version 1.* |
 | `est_minutes_lost` | Union of all claimed intervals, in minutes (1 decimal). |
 | `dropped_red_runs` | Failed commands that were seen and deliberately **not** reported as friction: red runs of the development loop (red, edit, green), commands the agent was only waiting on (failed, then passed untouched), and red runs that went green after a one-off command. They are in no hotspot, signal count or `friction_events`; the number says how much was looked at and set aside. Mistyped commands are not in it: they stay events, as weak evidence. *Addition to the base contract.* |
 | `dropped_minutes` | What those runs took, from call to result, in minutes (1 decimal). A sum of run times, not lost time: it is not part of `est_minutes_lost`. *Addition to the base contract.* |
@@ -296,6 +297,7 @@ Common fields:
 | `output` | Tool output or error text (used for excerpts and to classify command failures). |
 | `matches` | Number of search results; `0` marks a search miss (alternatively `"empty": true`). |
 | `reason` | What the human said when declining (`error: "rejected"`). |
+| `prompted` | Optional boolean: `true` if a person had to approve the call before it ran (the time from call to result then includes theirs and is not counted as lost), `false` if it ran at once. Omitted: unknown, and call to result counts up to a bound (methodology, "Estimated time lost"). |
 
 `user_message` needs `text`. `interrupt` needs nothing else.
 

@@ -38,6 +38,13 @@ _HARNESS_TAGS = (
     r"system-reminder|ide_opened_file|ide_selection|ide_diagnostics|ide_[a-z_]+"
     r"|local-command-[a-z]+|user-prompt-submit-hook|command-stdout|command-stderr"
     r"|bash-input|bash-stdout|bash-stderr|task-notification|user-memory-input|post-tool-use-hook"
+    r"|system-note|session-context|tools-used-before-summary"
+)
+#: Envelopes around what *another agent* wrote into a user turn (a teammate in a team, a
+#: coordinating or peer session). It starts a turn like a prompt does, but nobody typed
+#: it: it is never a correction, is never quoted, and the tag is not text.
+_PEER_RE = re.compile(
+    r"<((?:teammate|agent|peer|coordinator)-message)\b[^>]*>.*?(?:</\1>|\Z)", re.S
 )
 _REMINDER_RE = re.compile(rf"<({_HARNESS_TAGS})\b[^>]*>.*?</\1>", re.S)
 
@@ -226,8 +233,13 @@ def _outcome(text: str, line: int, base: dict[str, Any], call_id: str = "") -> E
 
 def _user_text(text: str, line: int, base: dict[str, Any]) -> Event | None:
     stripped = _REMINDER_RE.sub("", text).strip()
+    from_peer = _PEER_RE.search(stripped) is not None
+    stripped = _PEER_RE.sub("", stripped).strip()
     if not stripped:
-        return None
+        # another agent's message alone: a new turn, with no human words in it
+        return (
+            Event(kind=model.USER_MESSAGE, line=line, synthetic=True, **base) if from_peer else None
+        )
     if stripped.startswith(INTERRUPT_PREFIX):
         return Event(kind=model.INTERRUPT, line=line, text=stripped, **base)
     if stripped.startswith(COMMAND_PREFIXES):
@@ -235,6 +247,18 @@ def _user_text(text: str, line: int, base: dict[str, Any]) -> Event | None:
     if stripped.startswith(WRAPPER_PREFIXES) or common.HOOK_FEEDBACK_RE.match(stripped):
         return None
     return Event(kind=model.USER_MESSAGE, line=line, text=stripped, **base)
+
+
+def _prompted(decision: object) -> bool | None:
+    """Was the call approved by a person? From the line's ``permissionDecision``.
+
+    ``{"decision": "accept", "source": "config"}`` is the permission settings (or
+    the mode, or a hook) deciding at once. Any other source is somebody answering
+    a prompt. ``None`` when the line carries no decision.
+    """
+    if not isinstance(decision, dict) or not isinstance(decision.get("source"), str):
+        return None
+    return bool(decision["source"].casefold() != "config")
 
 
 def _line_events(obj: dict[str, Any], line: int) -> list[Event] | None:
@@ -279,6 +303,7 @@ def _line_events(obj: dict[str, Any], line: int) -> list[Event] | None:
         if block.get("type") == "tool_result":
             result = _tool_result(block, obj.get("toolUseResult"), line, base)
             if result is not None:
+                result.prompted = _prompted(obj.get("permissionDecision"))
                 events.append(result)
                 polled = _outcome(_flatten(block.get("content")), line, base, result.call_id)
                 if polled is not None and not result.background:

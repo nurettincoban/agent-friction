@@ -71,6 +71,8 @@ def _event(obj: dict[str, Any], line: int) -> Event | None:
         code = obj.get("exit_code")
         if isinstance(code, int) and not isinstance(code, bool):
             event.exit_code = code
+        if isinstance(obj.get("prompted"), bool):
+            event.prompted = obj["prompted"]
         declared = obj.get("error")
         ok = obj.get("ok")
         failed = ok is False or (ok is None and (bool(declared) or bool(event.exit_code)))

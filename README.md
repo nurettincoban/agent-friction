@@ -20,7 +20,7 @@ with the evidence quoted so you can check it yourself.
 ```console
 $ agent-friction scan
 agent-friction · shopfront
-6 sessions · 74 tool calls · 34 friction events · ~9m lost · 4 human corrections
+6 sessions · 74 tool calls · 34 friction events (11 weak) · ~9m lost · 4 human corrections
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals
@@ -120,14 +120,34 @@ sessions, refuses to compare scans of different repositories, and refuses scans 
 (a later scan without `--since` contains the earlier one, which would only dilute it). Both scans must use the
 same privacy mode: compare two `--no-excerpts` scans, or two scans without it.
 
-### In CI
+### For a team, and in CI
 
-Both gates exit with code 3, so they can fail a job:
+Transcripts live on the machines where the agents ran (`~/.claude/projects/<encoded path>/` for
+Claude Code), not in the repository, so a CI runner has none of its own. To map a whole team:
+
+1. Each developer copies their project's transcript directory to a shared place. It holds
+   prompts and command output, so treat it like any log of internal work, or share
+   `agent-friction scan --no-excerpts -f json` results instead when only the numbers matter.
+2. Scan the pooled directory, naming every path the repository was checked out at:
 
 ```sh
-agent-friction scan --since 30d --fail-on 45              # any hotspot scoring 45 or more
+agent-friction scan --transcripts pooled/ \
+  --repo-alias /home/ana/src/shop --repo-alias /Users/ben/work/shop --repo-alias 'C:\dev\shop'
+```
+
+If you leave an alias out, the error lists the directories the sessions ran in and suggests the
+`--repo-alias` to add.
+
+Both gates exit with code 3, so they can fail a job wherever transcripts are available (a
+scheduled job over the pooled directory, or a developer's machine before a release):
+
+```sh
+agent-friction scan --transcripts pooled/ --repo-alias /home/ana/src/shop --since 30d --fail-on 45
 agent-friction compare before.json after.json --fail-on-regression
 ```
+
+`--allow-empty` makes "nothing to analyse" a report instead of an error, for jobs that may run
+before any transcripts arrive.
 
 Exit codes: `0` ok, `1` error (for example no transcripts found), `2` bad arguments, `3` gate
 tripped.
@@ -170,7 +190,11 @@ the incident band unless the same pattern recurs across sessions. Recurrence is 
 episodes of work, not session ids: a long-running session (`claude --continue`) counts once for
 every time a human picked it up again after two hours or more of silence, and subagents belong to
 the episode of the agent that started them. Time lost is a floor estimate of agent time from
-timestamps (a correction claims only the rework it caused); waiting for a human is never counted. Confidence (low / medium /
+timestamps (a correction claims only the rework it caused); time a person spends is never counted: not the wait before a reply, and not the
+time a permission prompt stood open. Where Claude Code records how a call was approved, a
+person-approved call claims only what followed its result; where the transcript does not say,
+the time from call to result counts up to 30 seconds, or the command's usual run time in that
+session if that is longer. Confidence (low / medium /
 high) depends on how many sessions back a hotspot and whether an independent second kind of
 evidence agrees. All of it is in
 [docs/methodology.md](https://github.com/nurettincoban/agent-friction/blob/main/docs/methodology.md).

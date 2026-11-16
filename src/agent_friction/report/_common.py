@@ -6,6 +6,16 @@ import math
 from typing import Any
 
 
+def events_phrase(totals: dict[str, Any]) -> str:
+    """ "34 friction events (11 weak)": weak signals alone are leads, not findings."""
+    events = int(totals.get("friction_events", 0) or 0)
+    text = plural(events, "friction event")
+    strong = totals.get("strong_events")
+    if isinstance(strong, int) and 0 <= strong < events:
+        text += f" ({events - strong} weak)"
+    return text
+
+
 def fmt_lost(minutes: float) -> str:
     """A row's time lost; "n/a" when its evidence carries no time estimate at all."""
     return fmt_minutes(minutes) if minutes > 0 else "n/a"

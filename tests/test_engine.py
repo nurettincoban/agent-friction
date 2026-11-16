@@ -758,11 +758,34 @@ def test_git_only_analysis_when_allowed(tmp_path: Path, monkeypatch: pytest.Monk
     assert hotspot["signals"] == {"human-rework": 1} and hotspot["confidence"] == "low"
     assert (hotspot["sessions"], hotspot["agent_commits"]) == (1, 1)
     assert hotspot["why"].startswith("1 friction event in 1 agent commit (")
-    # nothing at all to analyse is still an error
-    with pytest.raises(NoTranscriptsError):
-        analyze(AnalyzeOptions(repo=tmp_path, now=NOW, allow_no_transcripts=True))
-    with pytest.raises(NoTranscriptsError):
-        analyze(AnalyzeOptions(repo=repo, allow_no_transcripts=True, include_git=False))
+    # nothing at all to analyse: an empty result, since that was allowed
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    subprocess.run(["git", "init", "-q", str(tmp_path / "bare")], check=True, env=env)
+    (tmp_path / "none").mkdir()
+    (tmp_path / "no-logs").mkdir()
+    for options in (
+        AnalyzeOptions(repo=bare, now=NOW, allow_no_transcripts=True),  # no commits yet
+        AnalyzeOptions(repo=tmp_path / "none", now=NOW, allow_no_transcripts=True),  # no git
+        AnalyzeOptions(repo=repo, allow_no_transcripts=True, include_git=False),
+        AnalyzeOptions(
+            repo=repo,
+            transcripts=[tmp_path / "no-logs"],
+            allow_no_transcripts=True,
+            include_git=False,
+        ),
+    ):
+        empty = analyze(options)
+        assert empty["totals"]["sessions"] == 0 and empty["totals"]["friction_events"] == 0
+        assert empty["hotspots"] == [] and empty["commands"] == [] and empty["unattributed"] == []
+        assert empty["settings"]["git"] is False and empty["schema_version"] == 1
+        with pytest.raises(NoTranscriptsError):
+            analyze(dataclasses.replace(options, allow_no_transcripts=False))
+    # a path that is not there is a mistake, allowed-empty or not
+    with pytest.raises(NoTranscriptsError, match="does not exist"):
+        analyze(
+            AnalyzeOptions(repo=repo, transcripts=[tmp_path / "typo"], allow_no_transcripts=True)
+        )
 
 
 def test_ordinary_sessions_get_no_advice_about_commands(tmp_path: Path) -> None:
@@ -1367,6 +1390,7 @@ def test_a_command_that_fixed_it_once_is_a_coincidence_twice_is_a_setup_step(
 
 def test_red_runs_that_were_not_reported_are_counted(tmp_path: Path) -> None:
     def body(s: Session) -> None:
+        s.decision = {"decision": "accept", "source": "config"}  # nobody was asked
         s.bash("pytest", "1 failed in 1s", exit_code=1, took=60)  # red, edit, green
         s.edit(str(tmp_path / "repo" / "a.py")).bash("pytest", "4 passed")
         for _ in range(2):  # waiting for a server
@@ -2507,3 +2531,59 @@ def test_a_test_red_only_after_the_agents_own_change_is_not_a_standing_failure(
 
     (row,) = _commands(tmp_path / "rounds", rounds)
     assert [r["id"] for r in row["recommendations"]] == ["explain-the-failing-check"]
+
+
+# ---- round 23 ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("decision", "minutes"),
+    [
+        # let through by the permission settings: the run time is the command's
+        ({"decision": "accept", "source": "config"}, 4.7),
+        # a person approved it: only what followed the result
+        ({"decision": "accept", "source": "user"}, 0.2),
+        # the transcript does not say: call to result counts up to 30 s
+        (None, 0.7),
+    ],
+)
+def test_time_at_a_permission_prompt_is_not_lost_time(
+    tmp_path: Path, decision: dict[str, str] | None, minutes: float
+) -> None:
+    denied = "Error: No valid credential sources found"
+    sessions = []
+    for i in range(2):
+        s = Session(f"s{i}", cwd="/repo").user("go")
+        s.decision = decision
+        s.bash("terraform plan", denied, exit_code=1, took=270).tick(10).read("/repo/a.py")
+        sessions.append(s)
+    (row,) = scan(tmp_path, sessions)["commands"]
+    # two events, each in its own session
+    assert row["est_minutes_lost"] == pytest.approx(2 * minutes, abs=0.11)
+
+
+def test_an_unknown_wait_is_bounded_by_the_commands_usual_run_time(tmp_path: Path) -> None:
+    denied = "Error: No valid credential sources found"
+    s = Session(cwd="/repo").user("go")
+    for _ in range(3):
+        s.bash("terraform plan", "No changes.", took=90)
+    s.bash("terraform plan", denied, exit_code=1, took=270).tick(10).read("/repo/a.py")
+    (found,) = builders.detect(s, tmp_path)
+    assert found.interval is not None
+    assert found.interval[1] - found.interval[0] == pytest.approx(90 + 14)
+
+
+def test_strong_events_leave_out_what_is_routine_on_its_own(tmp_path: Path) -> None:
+    def session(i: int) -> Session:
+        s = Session(f"s{i}", cwd="/repo").user("go")
+        s.bash("pytest", "1 failed in 1s", exit_code=1).read("/repo/a.py")  # a red test
+        s.grep("Nothing", "/repo/src")  # a search that found nothing
+        s.edit("/repo/src/a.py", error=builders.EDIT_NOT_FOUND)  # an edit that missed
+        return s
+
+    totals = scan(tmp_path, [session(0), session(1)])["totals"]
+    assert (totals["friction_events"], totals["strong_events"]) == (6, 2)
+    quiet = scan(
+        tmp_path / "q", [Session(cwd="/repo").user("go").bash("pytest", "1 failed", exit_code=1)]
+    )
+    assert (quiet["totals"]["friction_events"], quiet["totals"]["strong_events"]) == (1, 0)

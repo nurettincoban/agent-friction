@@ -522,7 +522,8 @@ def _write(text: str, output: Path | None, stdout: TextIO) -> None:
             raise AgentFrictionError(f"cannot write the report: {exc.strerror or exc}") from None
         return
     if not output.parent.is_dir():
-        raise UsageError(f"{output.parent}: directory does not exist")
+        # Exit 1 like any other file that cannot be written (read-only, full disk).
+        raise AgentFrictionError(f"cannot write {output}: {output.parent} does not exist")
     try:
         output.write_text(text, encoding="utf-8", errors="replace")
     except OSError as exc:  # read-only dir, full disk, file locked by another program

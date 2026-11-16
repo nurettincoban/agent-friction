@@ -17,7 +17,10 @@ constants live next to the code that uses them and are listed here.
    human reply offered something or asked for a choice (in its final
    paragraph, or with a question/choice tool). Of the text of an edit only hashes are kept, plus
    one bit: whether it only added text. Harness and IDE blocks inside user
-   turns (`<system-reminder>`, `<ide_opened_file>`, ...) are stripped.
+   turns (`<system-reminder>`, `<ide_opened_file>`, ...) are stripped, and a
+   message from another agent (`<teammate-message>`, `<agent-message>`) only
+   marks a new turn. Of a tool result's `permissionDecision` one bit is kept:
+   whether the permission settings let the call through or a person did.
 3. **Detect.** Deterministic rules turn events into friction events
    ([signal catalog](signals.md)). Git history adds `human-rework`. An event
    a detector cannot handle is skipped and counted
@@ -379,6 +382,7 @@ nanoseconds according to their size.
 | `command-failure` (setup/invocation) | one round trip; extended to the end of the command that recovered it (the same command succeeding, or a replacement doing the same job, within the next 5 shell calls of the turn) only if every tool call in between failed too |
 | `command-failure` (ordinary) | none |
 | `path-miss`, `file-too-large`, `permission-denied` | one round trip (a `path-miss` that is a routine probe for an optional file: none) |
+| any interval that starts at a call | starts later where a person had to approve the call: see "A person's time at a permission prompt" below |
 | `tool-rejected` | from the human's answer to the next event in the transcript; the time the permission prompt was open (call to result) is a human's time and is never counted |
 | `search-miss`, `probable-correction` | none: weak signals never claim time |
 | `edit-revert` | from the original edit to the revert if both are in the same turn; otherwise one round trip |
@@ -403,6 +407,24 @@ Every interval is capped at **5 minutes** (`no-convergence`: 15). `est_minutes_l
 a tree node or the whole report is the length of the **union** of its
 intervals (merged per transcript stream), so overlapping events are never
 counted twice.
+
+**A person's time at a permission prompt is never the agent's.** Between a
+call and its result lies the tool's own run time and, where somebody had to
+approve the call first, the time the prompt stood open. Only the first is
+claimed, wherever an interval starts at a call (a round trip, a red run):
+
+- Claude Code records how each call was let through (`permissionDecision` on
+  the result line). `"source": "config"` is the permission settings, the mode
+  or a hook deciding at once: call to result is the tool's time and counts.
+  Any other source is a person answering: nothing before the result is
+  claimed, only result to next activity.
+- Where the transcript does not say (older Claude Code versions, generic
+  logs without `prompted`), call to result counts **up to the larger of 30
+  seconds (`UNATTENDED_RUN_SECONDS`) and the median call-to-result time of
+  the same command's (or tool's) other runs in the session**. A `terraform
+  plan` that failed 270 s after it was called, in a session where it
+  otherwise takes 20 s, claims 30 s of them plus the time to the next
+  activity.
 
 **Weak evidence claims no time.** Search misses, probable corrections,
 ordinary command failures, probes for optional files, and a `no-convergence`
@@ -629,6 +651,15 @@ identify the event). All other paths (`repo.root`, generic transcript files)
 follow one rule: anything that looks like a home directory becomes `~`.
 
 ## Known limitations
+
+- **Prompt time is known only where the transcript records it.** Without a
+  `permissionDecision` (or `prompted`) the split between "the command ran"
+  and "the prompt stood open" is a bound, not a measurement: a failing
+  command that honestly ran for minutes, in a session with no other run of
+  it to compare with, is counted at 30 seconds, and a prompt answered within
+  30 seconds is counted as run time. A person-approved call claims nothing
+  before its result, although the tool also ran for part of that time. Both
+  err towards claiming less.
 
 - **Background commands are only as visible as their reports.** A command
   launched in the background is judged from the first `BashOutput` /
