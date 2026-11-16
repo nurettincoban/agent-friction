@@ -330,9 +330,10 @@ def _base64_sub(match: re.Match[str]) -> str:
 
 _ENTROPY_RE = re.compile(rf"[A-Za-z0-9+_=-]{{{ENTROPY_MIN_LENGTH},}}")
 _HOME_RES = (
+    # Windows first: in C:/Users/me the POSIX rule would otherwise leave "C:~"
+    re.compile(r"\b[A-Za-z]:[\\/]Users[\\/][^\\/\s:\"'`<>|]+"),
     re.compile(r"(?<![\w.~-])/(?:home|Users)/[^/\s:\"'`<>|]+"),
     re.compile(r"(?<![\w.~-])/root(?=/|\b)"),
-    re.compile(r"\b[A-Za-z]:[\\/]Users[\\/][^\\/\s:\"'`<>|]+"),
 )
 
 #: Names of the redaction rules, in application order (documented in methodology.md).

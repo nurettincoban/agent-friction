@@ -290,3 +290,7 @@ def test_env_style_names_and_login_commands(text: str, secret: str) -> None:
 )
 def test_env_rules_leave_ordinary_assignments_alone(text: str) -> None:
     assert redact.redact(text) == text
+
+
+def test_windows_home_with_forward_slashes_leaves_no_drive() -> None:
+    assert redact.redact_home("C:/Users/runneradmin/work/x", home="/nowhere") == "~/work/x"
