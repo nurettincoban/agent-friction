@@ -581,10 +581,15 @@ def test_a_human_bumping_a_generated_file_is_not_rework(tmp_path: Path) -> None:
         commit(day, "feat: use it\n\nCo-Authored-By: Claude <noreply@anthropic.com>", f"a{day}")
         commit(day + 1, "chore: bump", f"h{day}")
     out = analyze(AnalyzeOptions(repo=repo, allow_no_transcripts=True, now=NOW))
-    # lockfiles and generated files were regenerated, not repaired: only the source counts
-    (hotspot,) = out["hotspots"]
-    assert hotspot["path"] == "app.py" and hotspot["signals"] == {"human-rework": 2}
-    assert out["totals"]["friction_events"] == 2
+    # lockfiles and compiled artefacts (by name) were regenerated, not repaired. They are
+    # set aside, and the report says how many. A file that only *says* it is generated
+    # stays: people do rewrite such files by hand.
+    assert sorted(h["path"] for h in out["hotspots"]) == ["app.py", "schema.py"]
+    assert all(h["signals"] == {"human-rework": 2} for h in out["hotspots"])
+    assert out["totals"]["friction_events"] == 4
+    (git,) = out["sources"]
+    assert git["rework_set_aside"] == 6
+    hotspot = entry(out["hotspots"], "app.py")
     # git-only evidence: nothing claims that sessions happened or that anything was edited
     assert [r["id"] for r in hotspot["recommendations"]] == ["learn-from-rework"]
     text = json.dumps(hotspot["recommendations"])
@@ -953,7 +958,7 @@ def test_sources_never_show_the_encoded_project_directory(tmp_path: Path) -> Non
     bare = analyze(dataclasses.replace(options, include_excerpts=False))
     (evidence,) = bare["hotspots"][0]["evidence"]
     assert evidence["source"] is None and evidence["session_id"] == "11111111-aaaa"
-    assert evidence["line"] > 0 and bare["sources"][0]["path"] == "claude-code:repo"
+    assert evidence["line"] is None and bare["sources"][0]["path"] == "claude-code:repo"
 
 
 def test_one_home_rule_for_every_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1597,18 +1602,24 @@ def test_advice_that_is_already_written_down_says_so(tmp_path: Path) -> None:
     assert pytest_rec["title"] == "`make test` is documented, yet agents run `pytest`"
     assert pytest_rec["detail"].startswith(
         "`AGENTS.md:3` already names `make test`; agents still ran `pytest` and failed 7 times "
-        "in 4 sessions. Another line will not help. Enforce it: a hook or permission rule"
+        "in 4 sessions. Check that the cited line tells agents to use `make test` here. If it "
+        "does, another line will not help; the next step is to enforce it: a hook or permission"
     )
+    assert pytest_rec["documented_as"] == "instruction"
     assert "Add a line to AGENTS.md" not in pytest_rec["detail"]
     schema = recommendation(out, SCHEMA, "edit-the-source-not-the-output")
     assert schema["documented_in"] == [{"file": "AGENTS.md", "line": 3}]
     assert schema["title"] == "Generated file: telling agents was not enough"
-    assert schema["detail"].startswith("`AGENTS.md:3` already mentions this file, yet agents")
+    assert schema["detail"].startswith(
+        "`AGENTS.md:3` already has an instruction about this file, yet agents"
+    )
+    assert "Check that the cited line says not to edit it by hand." in schema["detail"]
     assert "Say in AGENTS.md" not in schema["detail"]
     # other documentable advice about the same file keeps its text and gains a note
     rule = recommendation(out, SCHEMA, "write-down-the-rule")
     assert rule["documented_in"] == schema["documented_in"]
-    assert "Note that `AGENTS.md:3` already mentions this file" in rule["detail"]
+    assert "(Also mentioned at `AGENTS.md:3`: check whether it already says" in rule["detail"]
+    assert rule["documented_as"] == "mention"
     # ... advice that is not about documentation is left alone
     split = recommendation(out, SCHEMA, "split-or-anchor-large-file")
     assert split["documented_in"] == [] and "already" not in split["detail"]
@@ -2587,3 +2598,61 @@ def test_strong_events_leave_out_what_is_routine_on_its_own(tmp_path: Path) -> N
         tmp_path / "q", [Session(cwd="/repo").user("go").bash("pytest", "1 failed", exit_code=1)]
     )
     assert (quiet["totals"]["friction_events"], quiet["totals"]["strong_events"]) == (1, 0)
+
+
+# ---- round 24 ------------------------------------------------------------------------------
+
+
+def test_the_alias_hint_names_the_sessions_root_not_where_it_spent_its_time(
+    tmp_path: Path,
+) -> None:
+    from agent_friction.engine import session_directories
+
+    home = str(Path.home())
+    old = f"{home}/work/old-name"
+    # started at the root, worked in web/: the root is what an alias must name
+    web = Session("web", cwd=old).user("go").bash("ls", "x")
+    web.cwd = f"{old}/web"
+    for _ in range(4):
+        web.bash("npm test", "ok")
+    # started in the home directory and moved in: the files say where the project is
+    moved = Session("moved", cwd=home).user("go").bash("ls", "x")
+    moved.cwd = f"{old}/web"
+    moved.edit(f"{old}/src/a.py").edit(f"{old}/web/b.ts")
+    # no file touched and nothing but the home directory above: where it worked
+    bare = Session("bare", cwd=home).user("go").bash("ls", "x")
+    bare.cwd = "/srv/other/api"
+    bare.bash("make", "ok").bash("make", "ok")
+    # an excursion to /tmp does not make /tmp the root
+    trip = Session("trip", cwd="/srv/third").user("go").bash("ls", "x").bash("ls", "x")
+    trip.cwd = "/tmp"
+    trip.bash("ls", "x")
+    files = [s.save(tmp_path / "t" / s.session_id) for s in (web, moved, bare, trip)]
+    options = AnalyzeOptions(repo=Path("/repo"), transcripts=files, include_git=False)
+    assert session_directories(options) == [
+        ("~/work/old-name", 2),
+        ("/srv/other/api", 1),
+        ("/srv/third", 1),
+    ]
+    assert session_directories(options, limit=1, mask_home=False) == [(old, 2)]
+
+
+def test_the_repositorys_own_name_stays_readable_without_excerpts(tmp_path: Path) -> None:
+    repo = tmp_path / "shop_front"
+    repo.mkdir()
+    sessions = []
+    for i in range(3):
+        s = Session(f"s{i}", cwd=str(repo)).user("go")
+        s.bash("shop-front serve", "bash: shop-front: command not found", exit_code=127)
+        s.bash("zebractl sync", "bash: zebractl: command not found", exit_code=127)
+        sessions.append(s.read(f"{repo}/a.py").save(tmp_path / "t" / f"s{i}"))
+    options = AnalyzeOptions(repo=repo, transcripts=sessions, include_git=False, now=NOW)
+    bare = analyze(dataclasses.replace(options, include_excerpts=False))
+    paths = sorted(row["path"] for row in bare["commands"])
+    assert paths[1] == "shop-front" and re.fullmatch(r"<tool:\w+>", paths[0])
+    assert "zebractl" not in json.dumps(bare)
+    # evidence names no transcript there, and so no line of one either
+    evidence = [e for row in bare["commands"] for e in row["evidence"]]
+    assert evidence and all(e["source"] is None and e["line"] is None for e in evidence)
+    full = analyze(options)
+    assert all(e["line"] > 0 for row in full["commands"] for e in row["evidence"])

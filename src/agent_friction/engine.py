@@ -15,7 +15,7 @@ import json
 import os
 import posixpath
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,6 +26,7 @@ from agent_friction.adapters import claude_code, parse_transcript
 from agent_friction.attribution import (
     PUBLIC_HASH_DIGITS,
     PathResolver,
+    is_windows_path,
     public_key,
     public_tool,
     to_posix,
@@ -562,16 +563,54 @@ def list_transcripts(options: AnalyzeOptions) -> list[Path]:
     return _Analysis(options)._transcript_files()
 
 
+_FILE_OPS = (model.OP_READ, model.OP_EDIT, model.OP_WRITE)
+
+
+def _session_root(cwds: list[str], files: list[str], too_wide: Callable[[str], bool]) -> str:
+    """The recorded working directory that looks most like the session's repository root."""
+
+    def fold(path: str) -> str:
+        return posixpath.normpath(to_posix(path)).rstrip("/").casefold() or "/"
+
+    def above(parent: str, child: str) -> bool:
+        return child == parent or child.startswith(parent.rstrip("/") + "/")
+
+    usual = max(dict.fromkeys(cwds), key=cwds.count)
+    distinct = list(dict.fromkeys(cwds))
+    narrow = [c for c in distinct if not too_wide(c)] or distinct
+    absolute = [fold(f) for f in files if f.startswith(("/", "~")) or is_windows_path(f)]
+    holding = [c for c in narrow if absolute and all(above(fold(c), f) for f in absolute)]
+    if holding:
+        return max(holding, key=lambda c: len(fold(c)))  # the deepest that holds every file
+    if absolute:
+        # no recorded directory holds them all (`cd web` came first): the directory the
+        # files share, if the session worked beneath it
+        shared = posixpath.commonpath(absolute) if len({f[:1] for f in absolute}) == 1 else ""
+        spelled = posixpath.normpath(to_posix(usual))
+        cut = "/".join(spelled.split("/")[: len(shared.split("/"))]) if shared else ""
+        if cut and fold(cut) == shared and above(shared, fold(usual)) and not too_wide(cut):
+            return cut
+    over = [c for c in narrow if above(fold(c), fold(usual))]
+    return min(over, key=lambda c: len(fold(c))) if over else usual
+
+
 def session_directories(
     options: AnalyzeOptions, limit: int = 5, *, mask_home: bool = True
 ) -> list[tuple[str, int]]:
     """Where the sessions that did *not* touch the repository ran: ``(directory, sessions)``.
 
     For "found transcripts, but no agent session touched this repository": the
-    working directories of the sessions that were set aside, most frequent
+    root directories of the sessions that were set aside, most frequent
     first (then by name), at most ``limit``, with the home directory shown as
     ``~``. If one of them is where the repository used to live, it is what
     ``repo_aliases`` (``--repo-alias``) wants. The time window is not applied.
+
+    A session's root is a guess at its repository root, since that is what an
+    alias must name: of the working directories the session recorded, the
+    deepest one that holds every file it read or edited; with no such file, the
+    shortest one above the directory it spent most of its events in (an agent
+    starts at the root and ``cd``s down). The home directory and ``/`` are passed
+    over when the session recorded anything below them.
     ``mask_home=False`` gives the paths as recorded, for a message printed on the
     machine running the scan (a ``~`` would name the wrong home there).
     """
@@ -589,8 +628,11 @@ def session_directories(
             cwds = [event.cwd for event in stream.events if event.cwd]
             if not cwds:
                 continue
-            # a session is named after the directory it spent most of its events in
-            common = max(dict.fromkeys(cwds), key=cwds.count)
+            common = _session_root(
+                cwds,
+                [e.path for e in stream.events if e.path and e.op in _FILE_OPS],
+                lambda c: analysis.display_path(c) in ("~", "/"),
+            )
             folded = posixpath.normpath(to_posix(common))
             # Mask the home in the recorded spelling: a Windows path folded to
             # C:/Users/... first would come out as "C:~/...".
@@ -763,9 +805,14 @@ class _Analysis:
 
         Repo paths are shown everywhere else in such a report, so a script of the
         repository (``scripts/deploy.sh``) stays readable in a command key too.
+        So is the repository's own name, which every report carries in its title: a
+        command called like the project (``shopfront serve``) keeps that word.
         """
+        own = re.sub(r"[-_.]", "-", self.repo.name).casefold()
 
         def in_repo(word: str) -> bool:
+            if own and re.sub(r"[-_.]", "-", word).casefold() == own:
+                return True
             rel = word[2:] if word.startswith("./") else word
             return (
                 "/" in word and not word.startswith(("/", "~")) and self._disk_is_file(rel) is True
@@ -885,7 +932,12 @@ class _Analysis:
 
     def facts(self, rel: str) -> recommend.FileFacts:
         if rel not in self._facts:
-            self._facts[rel] = recommend.file_facts(self.repo, rel)
+            # `build/`, `gen/`, `out/` hold build output only where git does not track
+            # them: one question to git per such path, and only for those.
+            untracked = recommend.in_output_directory(rel) and gitsignals.is_untracked(
+                self.repo, rel
+            )
+            self._facts[rel] = recommend.file_facts(self.repo, rel, untracked)
         return self._facts[rel]
 
     # ---- text helpers ----------------------------------------------------------------
@@ -1040,7 +1092,7 @@ class _Analysis:
                 "available": history.available,
             }
             if history.available:
-                rework = [
+                candidates = [
                     f
                     for f in gitsignals.find_rework(
                         history.commits,
@@ -1048,13 +1100,24 @@ class _Analysis:
                         gitsignals.HunkReader(self.repo),
                     )
                     if _in_window(f.ts, self.since, self.until)
-                    # A lockfile or generated file is rewritten by tools as a matter of
-                    # course: a human `chore: bump` after an agent commit is not rework.
-                    and not any(self.facts(t.key).generated for t in f.targets)
                     # ... and a file that has since been renamed away or deleted is not
                     # a place anyone can act on.
                     and all(self.facts(t.key).exists for t in f.targets)
                 ]
+                # A lockfile or a compiled artefact (by its name: `uv.lock`, `*_pb2.py`,
+                # `*.min.js`) is rewritten by tools as a matter of course: a human
+                # `chore: bump` after an agent commit is not rework. Set aside, and
+                # counted. A "generated" header alone never sets rework aside: people do
+                # rewrite such files by hand, and that is worth knowing.
+                rework = [
+                    f
+                    for f in candidates
+                    if not any(
+                        self.facts(t.key).generated_by == recommend.GENERATED_BY_NAME
+                        for t in f.targets
+                    )
+                ]
+                source["rework_set_aside"] = len(candidates) - len(rework)
                 # A commit made during a transcript session is that session's work, not a
                 # separate one. Agent commits never add exposure on their own.
                 committed = {c.session_id: c.date for c in history.commits if c.is_agent}
@@ -1436,8 +1499,15 @@ class _Analysis:
             "summary": self.clean(finding.summary),
             "excerpt": text,
             "source": self.cited_source(finding),
-            # a transcript line; for git evidence, the short hash of the human's commit
-            "line": finding.detail.get("human_commit", 0) if _is_git(finding) else finding.line,
+            # a transcript line; for git evidence, the short hash of the human's commit;
+            # nothing when the transcript itself is not named (a line of what?)
+            "line": (
+                finding.detail.get("human_commit", 0)
+                if _is_git(finding)
+                else finding.line
+                if self.cited_source(finding) is not None
+                else None
+            ),
             # what this event alone claims; a hotspot's minutes are the union, not the sum
             "est_seconds_lost": round(
                 sum(end - start for start, end in scoring.claimed(finding)), 1

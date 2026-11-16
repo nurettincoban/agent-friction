@@ -22,9 +22,9 @@ Directories where agents search in vain (the directory itself; show <dir> rolls 
 
 What to fix first
   1. src/shopfront/api/schema_gen.py: Generated file: point agents at its source
-     This file looks generated (judging by a "code generated" marker), yet agents ran into trouble
-     editing it directly 7 times in 4 sessions. Say in AGENTS.md which source to change and which
-     command regenerates it, and consider denying direct edits to it.
+     This file says it is generated (it starts with a generated-file header), yet agents ran into
+     trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md which source to change
+     and which command regenerates it, and consider denying direct edits to it.
   2. pytest: Tell agents to use `make test`
      `pytest` failed 7 times in 4 sessions; 5 times the agent then got the same job done with
      `make test`, and `pytest` did not work later in those sessions. Add a line to AGENTS.md such

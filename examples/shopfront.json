@@ -469,7 +469,7 @@
       "path": "src/shopfront/api/schema_gen.py",
       "recommendations": [
         {
-          "detail": "This file looks generated (judging by a \"code generated\" marker), yet agents ran into trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md which source to change and which command regenerates it, and consider denying direct edits to it.",
+          "detail": "This file says it is generated (it starts with a generated-file header), yet agents ran into trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md which source to change and which command regenerates it, and consider denying direct edits to it.",
           "documented_in": [],
           "id": "edit-the-source-not-the-output",
           "signals": [

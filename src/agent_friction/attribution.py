@@ -846,17 +846,11 @@ def _masked(command: str, program: str) -> bool:
 _MASKING = frozenset({"|", "|&", "||", "&"})
 
 
-def _status_masked(command: str, program: str, depth: int = 0) -> bool:
-    """Is the exit status of the last ``program`` step hidden by what follows it?
-
-    ``pytest | tail -5``, ``pytest; echo done`` and ``pytest || true`` report the
-    status of ``tail``, ``echo`` and (at worst) ``true``. ``pytest && echo ok``
-    does not hide a failure, and ``set -o pipefail`` restores a pipeline's.
-    """
-    tokens = _tokenize(command)
-    pieces: list[tuple[list[str], str]] = []  # (words of a simple command, operator after it)
+def _pieces(command: str) -> list[tuple[list[str], str]]:
+    """The simple commands of a line: (words, operator after it)."""
+    pieces: list[tuple[list[str], str]] = []
     current: list[str] = []
-    for token in tokens:
+    for token in _tokenize(command):
         if token in _SEPARATORS:
             if current and token not in ("(", ")"):
                 pieces.append((current, token))
@@ -867,6 +861,71 @@ def _status_masked(command: str, program: str, depth: int = 0) -> bool:
         current.append(token)
     if current:
         pieces.append((current, ""))
+    return pieces
+
+
+#: Programs that print a file given as an argument (``sed -n``, ``grep pattern file``).
+FILE_READERS = frozenset(
+    {"cat", "head", "tail", "less", "more", "nl", "bat", "grep", "egrep", "fgrep", "rg", "sed"}
+    | {"awk"}
+)
+_PATTERN_FIRST = frozenset({"grep", "egrep", "fgrep", "rg", "sed", "awk"})
+
+
+def _program_of(words: list[str]) -> tuple[str, list[str]]:
+    segments = _segments(words)
+    stripped = _strip_prefixes(segments[0]) if segments else []
+    if not stripped:
+        return "", []
+    return _program_name(stripped[0]).rsplit("/", 1)[-1], stripped[1:]
+
+
+def status_is_last_steps(command: str) -> bool:
+    """Does the line end in ``; step``, so that its exit status is that step's alone?"""
+    try:
+        pieces = [p for p in _pieces(command) if _program_of(p[0])[0]]
+    except (IndexError, ValueError, RecursionError):
+        return False
+    return len(pieces) > 1 and pieces[-2][1] == ";"
+
+
+def prints_another_file(command: str) -> bool:
+    """Does a later step of the line print a file that nothing earlier on the line names?
+
+    ``make build; cat docs/troubleshooting.md`` prints the document after the build's
+    own output, and the two cannot be told apart. ``pytest > out.log 2>&1; tail out.log``
+    prints what the test run wrote: that is the run's own output.
+    """
+    try:
+        pieces = _pieces(command)
+    except (IndexError, ValueError, RecursionError):
+        return False
+    seen: list[str] = []
+    for position, (words, _) in enumerate(pieces):
+        program, args = _program_of(words)
+        piped = position > 0 and pieces[position - 1][1] in ("|", "|&")
+        if position > 0 and seen and not piped and program in FILE_READERS:
+            files = [a for a in args if not a.startswith("-") and a not in ("<", ">", ">>")]
+            if program in _PATTERN_FIRST:
+                files = files[1:]
+            if program in ("head", "tail"):
+                files = [f for f in files if not f.isdigit()]
+            earlier = " ".join(seen)
+            if any(f.rsplit("/", 1)[-1] not in earlier for f in files):
+                return True
+        if program:
+            seen.extend(words)
+    return False
+
+
+def _status_masked(command: str, program: str, depth: int = 0) -> bool:
+    """Is the exit status of the last ``program`` step hidden by what follows it?
+
+    ``pytest | tail -5``, ``pytest; echo done`` and ``pytest || true`` report the
+    status of ``tail``, ``echo`` and (at worst) ``true``. ``pytest && echo ok``
+    does not hide a failure, and ``set -o pipefail`` restores a pipeline's.
+    """
+    pieces = _pieces(command)
     index = -1
     for position, (words, _) in enumerate(pieces):
         stripped = _strip_prefixes(_segments(words)[0] if _segments(words) else [])

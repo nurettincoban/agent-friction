@@ -6,7 +6,7 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 
 ## What to fix first
 
-1. `src/shopfront/api/schema_gen.py`: **Generated file: point agents at its source** This file looks generated (judging by a "code generated" marker), yet agents ran into trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md which source to change and which command regenerates it, and consider denying direct edits to it.
+1. `src/shopfront/api/schema_gen.py`: **Generated file: point agents at its source** This file says it is generated (it starts with a generated-file header), yet agents ran into trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md which source to change and which command regenerates it, and consider denying direct edits to it.
 2. `pytest`: **Tell agents to use `make test`** `pytest` failed 7 times in 4 sessions; 5 times the agent then got the same job done with `make test`, and `pytest` did not work later in those sessions. Add a line to AGENTS.md such as: "use `make test`, not `pytest`".
 3. `src/shopfront/checkout/service.py`: **Write down the rule the human keeps repeating** A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint."
 4. `src/shopfront`: **Point agents to what they are searching for** Agents searched under src/shopfront/ and found nothing 5 times in 2 sessions. They looked for `RefundPolicy` (2x), `**/*policy*.py`, `DiscountPolicy`. If the concept exists under another name or elsewhere, add a pointer in AGENTS.md (or a comment/alias where agents look). If it does not exist, say so.
@@ -48,7 +48,7 @@ Only friction in the directory itself (searches that found nothing there); `agen
 
 **Recommendations**
 
-- **Generated file: point agents at its source** This file looks generated (judging by a "code generated" marker), yet agents ran into trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md which source to change and which command regenerates it, and consider denying direct edits to it.
+- **Generated file: point agents at its source** This file says it is generated (it starts with a generated-file header), yet agents ran into trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md which source to change and which command regenerates it, and consider denying direct edits to it.
 - **Large file: split it or add unique anchors** 6 edits failed to locate the target in this 1031-line file (2 matched several places, 4 matched nothing) across 4 sessions. Split it into smaller modules, or give repeated blocks unique nearby text (section comments, distinct names) so an edit can be targeted.
 - **Write down the rule the human keeps repeating** A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "No, stop hand-editing src/shopfront/api/schema_gen.py. It is generated: change api/openapi.yaml and run make codegen." / "That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml."
 

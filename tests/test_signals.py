@@ -3989,3 +3989,203 @@ def test_an_echoed_zero_is_a_pass(tmp_path: Path) -> None:
     # no echo of the status in the line, or more than one answer: nothing is read into it
     assert signals.echoed_status("make test", "exit 2") is None
     assert signals.echoed_status('a; echo "exit $?"; b; echo "exit $?"', "exit 1\nexit 0") is None
+
+
+# ---- round 24 ------------------------------------------------------------------------
+
+TROUBLESHOOTING = (
+    "# Troubleshooting\n\n"
+    "make: *** No rule to make target 'tset'.  Stop.\n"
+    " ERR_PNPM_NO_SCRIPT  Missing script: tset\n"
+    "If you see `bash: foo: command not found`, install foo.\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("command", "output"),
+    [
+        ("make build; cat docs/troubleshooting.md", "built ok\n" + TROUBLESHOOTING),
+        ("pnpm build && cat docs/troubleshooting.md", "built ok\n" + TROUBLESHOOTING),
+        ("make build || head -20 docs/troubleshooting.md", TROUBLESHOOTING),
+        ("pytest -q; sed -n 1,40p docs/ci.md", "ok\n1 failed in 0.1s is what CI printed"),
+        (
+            "make build; grep -n rule docs/troubleshooting.md",
+            "built\n3:If you see: No rule to make target, check the Makefile.",
+        ),
+        # words inside a line are not the tool's own error line
+        ("make build | tail -3", "see the docs: No rule to make target means a typo"),
+        ("pnpm build | tail -3", "docs: ERR_PNPM_NO_SCRIPT means the script is missing"),
+    ],
+)
+def test_a_document_printed_after_a_command_is_not_its_verdict(
+    tmp_path: Path, command: str, output: str
+) -> None:
+    s = Session().user("go").bash(command, output).read(A)
+    assert detect(s, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "code", "variant"),
+    [
+        ("make tset | tail -3", "make: *** No rule to make target 'tset'.  Stop.", 0, "invocation"),
+        ("gmake tset", "gmake[1]: *** No rule to make target 'tset'.  Stop.", 2, "invocation"),
+        ("pnpm tset | tail", " ERR_PNPM_NO_SCRIPT  Missing script: tset", 0, "invocation"),
+        # the file printed is the one the command wrote: that is its own output
+        (
+            "pytest -q > out.log 2>&1; tail -5 out.log",
+            "FAILED tests/test_a.py::test_x - assert 1 == 2\n1 failed in 0.1s",
+            0,
+            "ordinary",
+        ),
+        (
+            "mytool build > out.log 2>&1; cat out.log",
+            "bash: mytool: command not found",
+            0,
+            "invocation",
+        ),
+        # a pipe into a reader prints the command's output, not a file
+        ("pytest -q 2>&1 | grep -v warning", "1 failed in 0.1s", 0, "ordinary"),
+    ],
+)
+def test_the_tools_own_error_line_still_counts(
+    tmp_path: Path, command: str, output: str, code: int, variant: str
+) -> None:
+    s = Session().user("go").bash(command, output, exit_code=code).read(A)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.COMMAND_FAILURE and found.detail["variant"] == variant
+
+
+def test_which_step_owns_the_exit_status() -> None:
+    from agent_friction import attribution
+
+    assert attribution.status_is_last_steps("pytest -q; which time")
+    assert attribution.status_is_last_steps("( time mytool . ); ls; command -v time")
+    assert not attribution.status_is_last_steps("pytest -q && which time")
+    assert not attribution.status_is_last_steps("pytest -q | tail")
+    assert not attribution.status_is_last_steps("pytest -q")
+    assert attribution.prints_another_file("make; cat docs/x.md")
+    assert attribution.prints_another_file("make || tail -n 20 docs/x.md")
+    assert attribution.prints_another_file("make; grep -n rule docs/x.md")
+    assert not attribution.prints_another_file("make > x.log; cat x.log")
+    assert not attribution.prints_another_file("make 2>&1 | tee x.log; tail -3 x.log")
+    assert not attribution.prints_another_file("make | grep rule")
+    assert not attribution.prints_another_file("make; tail -5")
+    assert not attribution.prints_another_file("cat docs/x.md")
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "code", "expected"),
+    [
+        # the exit status is that of the question asked afterwards
+        ("mytool scan .; which time", "scanned 3 files", 1, None),
+        ("mytool scan .; command -v jq", "scanned 3 files", 1, None),
+        ("pytest -q; ls nothere", "3 passed in 0.2s\nls: cannot access 'nothere'", 2, None),
+        (
+            "( /usr/bin/time -v mytool scan . ); ls; which time",
+            "bash: line 1: /usr/bin/time: No such file or directory\nREADME.md",
+            1,
+            ("time", "invocation", "hidden"),
+        ),
+        # ... while the output still says what the command before it did
+        ("pytest -q; which time", "1 failed in 0.2s", 1, ("pytest", "ordinary", "hidden")),
+        # with `&&` the later step never ran: the status is the command's own
+        ("pytest -q && which time", "1 failed in 0.2s", 1, ("pytest", "ordinary", "")),
+    ],
+)
+def test_a_failed_question_at_the_end_is_not_the_commands_failure(
+    tmp_path: Path, command: str, output: str, code: int, expected: tuple[str, str, str] | None
+) -> None:
+    s = Session().user("go").bash(command, output, exit_code=code).read(A)
+    found = detect(s, tmp_path)
+    if expected is None:
+        assert found == []
+        return
+    (one,) = found
+    key, variant, status = expected
+    assert keys(one)[0] == ("command", key) and one.detail["variant"] == variant
+    assert one.detail.get("status", "") == status
+    assert ("exit 1" in one.summary) == (not status)
+
+
+LOOKS = ("ls .venv/bin", "which pytest", "cat pyproject.toml", "git status", "pip list", "ls")
+
+
+@pytest.mark.parametrize("looks", [0, 2, 6])
+def test_looking_around_does_not_use_up_the_look_ahead(tmp_path: Path, looks: int) -> None:
+    s = Session().user("go").bash("pytest -q", "bash: pytest: command not found", exit_code=127)
+    for command in LOOKS[:looks]:
+        s.bash(command, "x")
+    s.bash(".venv/bin/pytest -q", "3 passed in 0.1s").read(A)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["works_as"] == ".venv/bin/pytest"
+    # six other jobs in between: whatever passes afterwards is no longer its fix
+    far = Session().user("go").bash("pytest -q", "bash: pytest: command not found", exit_code=127)
+    for command in ("npm run build", "make docs", "cargo build", "go build ./...", "make x"):
+        far.bash(command, "ok")
+    far.bash(".venv/bin/pytest -q", "3 passed in 0.1s").read(A)
+    (found,) = detect(far, tmp_path)
+    assert "works_as" not in found.detail
+
+
+def test_a_command_that_works_by_its_local_path(tmp_path: Path) -> None:
+    conftest = (
+        "ImportError while loading conftest '/repo/tests/conftest.py'.\n"
+        "E   ModuleNotFoundError: No module named 'requests'"
+    )
+    s = Session().user("go").bash("pytest -q", conftest, exit_code=4)
+    s.bash("ls .venv/bin", "pytest").bash("which pytest", "/usr/bin/pytest")
+    s.bash(".venv/bin/pytest -q", "3 passed in 0.1s").read(A)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["works_with"] == ".venv/bin/pytest"
+    # a red test that goes green by another path is a test going green
+    red = Session().user("go").bash("pytest -q", "1 failed in 0.2s", exit_code=1)
+    red.bash(".venv/bin/pytest -q", "3 passed in 0.1s").read(A)
+    assert all("works_with" not in f.detail for f in detect(red, tmp_path))
+    # ... and an edit in between means the edit may have fixed it
+    edited = Session().user("go").bash("pytest -q", conftest, exit_code=4)
+    edited.edit(A).bash(".venv/bin/pytest -q", "3 passed in 0.1s").read(A)
+    assert all("works_with" not in f.detail for f in detect(edited, tmp_path))
+
+
+def powershell_missing(cmdlet: str, path: str) -> str:
+    return (
+        f"{cmdlet} : Cannot find path '{path}' because it does not exist.\n"
+        "At line:1 char:1\n"
+        f"    + CategoryInfo          : ObjectNotFound: ({path}:String) [{cmdlet}], "
+        "ItemNotFoundException"
+    )
+
+
+def test_powershell_saying_a_path_is_not_there_is_a_path_miss(tmp_path: Path) -> None:
+    def one(command: str, output: str, **kw: object) -> Finding:
+        s = Session().user("go").bash(command, output, exit_code=1).read(A)
+        (found,) = detect(s, tmp_path, **kw)  # type: ignore[arg-type]
+        return found
+
+    read = one(
+        "Get-Content src/missing.py", powershell_missing("Get-Content", "/repo/src/missing.py")
+    )
+    assert read.signal == signals.PATH_MISS and keys(read) == [("file", "src/missing.py")]
+    assert read.summary == "`Get-Content` was pointed at src/missing.py, which does not exist"
+    assert read.detail == {"variant": "command"} and not scoring.is_weak(read)
+    # PowerShell 7 prints no space before the colon; an alias is named as typed
+    seven = "gc: Cannot find path '/repo/src/missing.py' because it does not exist."
+    assert one("gc src/missing.py | Select-Object -First 5", seven).signal == signals.PATH_MISS
+    # asking whether something is there is a question, as with `ls`
+    listing = one("Get-ChildItem src/nodir", powershell_missing("Get-ChildItem", "/repo/src/nodir"))
+    assert listing.detail == {"variant": "command", "probe": "1"} and scoring.is_weak(listing)
+    assert listing.summary.endswith("(a look at whether it is there)")
+    optional = one("Get-Content README.md", powershell_missing("Get-Content", "/repo/README.md"))
+    assert optional.detail.get("probe") == "1"
+    moved = one("Set-Location web", powershell_missing("Set-Location", "/repo/web"))
+    assert moved.detail == {"variant": "directory"} and keys(moved) == [("file", "web")]
+    # a path that is there after all, or outside the repository, is nobody's miss ...
+    there = Session().user("go")
+    there.bash(
+        "Get-Content src/a.py", powershell_missing("Get-Content", "/repo/src/a.py"), exit_code=1
+    )
+    there.bash("Get-Content /etc/x", powershell_missing("Get-Content", "/etc/x"), exit_code=1)
+    assert detect(there.read(A), tmp_path) == []
+    # ... and any other error of a cmdlet is still a command failing
+    denied = "Get-Content : Access to the path '/repo/src/a.py' is denied."
+    assert one("Get-Content src/a.py", denied).signal == signals.COMMAND_FAILURE

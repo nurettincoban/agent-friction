@@ -92,8 +92,10 @@ runner, an old checkout), add `--repo-alias /that/path`.
 Before it suggests a line for `AGENTS.md`, it checks `AGENTS.md`, `CLAUDE.md` (including nested
 ones), `.github/copilot-instructions.md`, `.cursorrules`, `.cursor/rules/` and the deny rules in
 `.claude/settings.json`. If the advice is already written down and agents still trip over it, it
-says so ("`AGENTS.md:3` already names `make test`, yet agents run `pytest`") and suggests
-enforcing it (a hook, a permission rule, a wrapper) instead of adding another line. See
+says so ("`AGENTS.md:3` already names `make test`, yet agents run `pytest`"), asks you to
+confirm the cited line really says this, and then suggests enforcing it (a hook, a permission
+rule, a wrapper) instead of adding another line. A line that only mentions the command or file
+in passing is cited as "also mentioned", and the usual advice stays. See
 [What the repository already says](https://github.com/nurettincoban/agent-friction/blob/main/docs/methodology.md#what-the-repository-already-says).
 
 Dependencies and build output (`node_modules`, `.venv`, `site-packages`, git-ignored directories)

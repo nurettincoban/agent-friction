@@ -218,6 +218,29 @@ def ignored_directories(repo: Path, directories: Sequence[str]) -> set[str]:
     return {d.strip("/") for d in proc.stdout.split("\0") if d.strip("/")}
 
 
+def is_untracked(repo: Path, rel: str) -> bool:
+    """True if git knows ``repo`` and does not track ``rel`` (ignored, or never added).
+
+    False for a tracked path, and also where nothing can be said: no git, not a
+    repository. Never raises.
+    """
+    command = ["git", "-C", str(repo), "ls-files", "--error-unmatch", "--", rel]
+    try:
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=GIT_TIMEOUT_SECONDS,
+            check=False,
+            env={**os.environ, "LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0"},
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    return proc.returncode == 1 and "did not match any file" in proc.stderr
+
+
 Range = tuple[int, int]  # half-open line range [start, end)
 
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")

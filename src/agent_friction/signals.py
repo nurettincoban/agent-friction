@@ -41,7 +41,9 @@ from agent_friction.attribution import (
     objectionable_step,
     parse_command,
     path_candidates,
+    prints_another_file,
     setup_label,
+    status_is_last_steps,
     written_file,
 )
 from agent_friction.model import Event, Finding, Stream, Target
@@ -85,6 +87,7 @@ RETRY_LOOP_MIN_FAILURES = 3
 #: Weight of a command failure that does not look like a setup/invocation problem.
 ORDINARY_FAILURE_WEIGHT = 0.3
 #: Shell calls after a failure in which a different successful command counts as its fix.
+#: Read-only inspection in between is not counted.
 RECOVERY_LOOKAHEAD = 5
 #: Per-event cap for the time-lost estimate, in seconds.
 TIME_CAP_SECONDS = 300.0
@@ -394,11 +397,10 @@ INVOCATION_ERROR_RE = re.compile(
     r"|Error: No such (?:command|option)\b.*"
     r"|Usage: .*\n(?:.*\n)*?.*Error: .*"
     # the project is not set up the way the command assumes
-    r"|make(?:\[\d+\])?: \*\*\* No rule to make target .*"
-    r"|.*No rule to make target .*"
+    r"|[\w.-]*make[\w.-]*(?:\[\d+\])?: \*\*\* No rule to make target .*"
     r"|npm (?:ERR!|error) (?:Missing script|enoent|code ENOENT).*"
     r"|error Command \"[^\"\n]+\" not found\.?"
-    r"|.*ERR_PNPM_NO_SCRIPT.*"
+    r"|\s*(?:ERROR\s+)?ERR_PNPM_NO_SCRIPT\b.*"
     r"|npm (?:ERR!|error) (?:code EBADENGINE|engine Unsupported engine|notsup Unsupported engine).*"
     r"|error .*: The engine \"\w+\" is incompatible with this module\..*"
     r"|fatal: not a git repository.*"
@@ -1127,6 +1129,17 @@ _NOT_FOUND_PROGRAM_RE = re.compile(
     r"|^(?:[\w./-]+: )?(?:line \d+: )?(/[^\s:]+): No such file or directory\s*$",
     re.M,
 )
+#: PowerShell saying that a path is not there: ``Get-Content : Cannot find path
+#: 'C:\\repo\\src\\a.py' because it does not exist.`` (5.1) or ``Get-Content: Cannot ...`` (7).
+_PS_MISSING_RE = re.compile(
+    r"^(?:([A-Za-z][\w-]*) ?: )?Cannot find path '([^'\n]+)' because it does not exist", re.M
+)
+#: Cmdlets (and their aliases) that ask whether something is there or list a directory:
+#: a miss is the answer to a question, like ``ls`` of a directory that is not there.
+_PS_LISTING = frozenset(
+    {"get-childitem", "gci", "dir", "ls", "get-item", "gi", "test-path", "resolve-path", "rvpa"}
+)
+_PS_MOVING = frozenset({"set-location", "sl", "cd", "chdir", "push-location", "pushd"})
 #: `...; echo "exit $?"`: the line prints the status its own exit code no longer shows.
 _STATUS_ECHO_RE = re.compile(r"\becho\s+(?:-\w+\s+)*[\"']?[^\"';|&\n]*\$\?")
 _ECHOED_STATUS_RE = re.compile(
@@ -2535,6 +2548,38 @@ class _Detector:
         if action.call.op == model.OP_READ:
             self.state.missing_reads.setdefault(action.file, []).append(finding)
 
+    def _powershell_miss(self, action: _Action, result: Event) -> bool:
+        """``Cannot find path '...' because it does not exist``: a miss on that path.
+
+        True if the result was such a message (whether or not the path is ours): the
+        cmdlet did not fail as a command, it was pointed at something that is not there.
+        """
+        found = _PS_MISSING_RE.search(result.output)
+        if found is None or result.ok:
+            return False
+        cmdlet = found.group(1) or ""
+        rel = self.ctx.resolver.resolve(found.group(2), action.call.cwd)
+        if not rel or self.ctx.exists(rel) or self.ctx.is_known_file(rel):
+            return True  # outside the repo, or there after all
+        rel = rel.rstrip("/")
+        moving = cmdlet.lower() in _PS_MOVING
+        listing = cmdlet.lower() in _PS_LISTING or PROBE_FILE_RE.search(rel) is not None
+        name = f"`{self.ctx.command_key(cmdlet)}`" if cmdlet else "A PowerShell command"
+        detail = {"variant": "directory"} if moving else {"variant": "command"}
+        if listing and not moving:
+            detail["probe"] = "1"
+        self._emit(
+            PATH_MISS,
+            result,
+            f"{name} was pointed at {rel}, which does not exist"
+            + (" (a look at whether it is there)" if "probe" in detail else ""),
+            [Target(model.FILE, rel)],
+            excerpt=result.output,
+            interval=None if "probe" in detail else self._round_trip(action),
+            detail=detail,
+        )
+        return True
+
     def _cd_miss(self, action: _Action, result: Event, name: str) -> None:
         """A `cd` into a directory that is not there: a miss on that path."""
         cmd = action.cmd
@@ -2725,7 +2770,10 @@ class _Detector:
         def shown(name: str) -> str:
             return self._label(name, located, action.call.cwd)
 
-        state.pending = [(f, k, n - 1) for f, k, n in state.pending if n > 1]
+        # Looking around (`ls .venv/bin`, `which pytest`, `cat pyproject.toml`) is how
+        # the agent finds the command that works: it does not use up the look-ahead.
+        spent = 0 if cmd.inspection else 1
+        state.pending = [(f, k, n - spent) for f, k, n in state.pending if n > spent]
         if edit:
             self._on_change()  # `sed -i`, a formatter, `--fix`: a change like any edit
         # `pytest | tail -5` exits with the status of `tail`. Exit 0 is then no verdict:
@@ -2733,11 +2781,29 @@ class _Detector:
         ok = result.ok
         verdict: str | None = None
         hidden = result.ok and cmd.masked and not cmd.inspection
+        line = action.call.command or ""
+        if (
+            not result.ok
+            and result.error == model.ERR_EXIT
+            and result.exit_code not in INVOCATION_EXIT_CODES
+            and not cmd.inspection
+            and cmd.steps
+            and cmd.steps[-1].inspection
+            and cmd.steps[-1] is not located
+            and status_is_last_steps(line)
+        ):
+            # `pytest; which time`: the status is that of the `which`, a question asked
+            # afterwards. What the command before it did, only its output can say.
+            hidden = True
+        # ... and a document printed by a later step (`...; cat docs/troubleshooting.md`)
+        # is not the command's own output: an error in it may be the document's, and
+        # the two cannot be told apart. Nothing is read into such output.
+        quoted = hidden and prints_another_file(line)
         ran = not cmd.inspection and result.error in ("", model.ERR_EXIT, model.ERR_OTHER)
         # In `ruff check .; mypy; pytest` every step prints its own verdict. Each is judged
         # by its own summary line; one red step does not make the others red.
         several = len({s.key for s in _candidates(cmd)}) > 1
-        own = step_verdicts(cmd, result.output) if ran and several else {}
+        own = step_verdicts(cmd, result.output) if ran and several and not quoted else {}
         red_step: Step | None = None
         setup_error: bool | None = None  # for a hidden status: was it a setup error?
         if hidden and several:
@@ -2746,8 +2812,10 @@ class _Detector:
             red_step = next((s for s in _candidates(cmd) if own.get(s.key) == "red"), None)
             setup_error = False
             own_module = own_module_missing(result.output, self.ctx.first_party)
-            if red_step is None and (
-                own_module or is_invocation_error(result.output, None, self.ctx.first_party)
+            if (
+                red_step is None
+                and not quoted
+                and (own_module or is_invocation_error(result.output, None, self.ctx.first_party))
             ):
                 blamed, sure = self._blamed_step(cmd, result.output)
                 if sure and blamed is not None and own.get(blamed.key) != "green":
@@ -2755,7 +2823,7 @@ class _Detector:
             verdict = "red" if red_step is not None else own.get(key)
             ok = verdict != "red"
         elif hidden:
-            verdict = output_verdict(result.output, self.ctx.first_party)
+            verdict = None if quoted else output_verdict(result.output, self.ctx.first_party)
             # `cmd; echo "exit $?"`: the line says how its one command ended
             echoed = echoed_status(action.call.command or "", result.output)
             if echoed:
@@ -2882,6 +2950,21 @@ class _Detector:
                         and finding.detail["variant"] != "ordinary"
                     ):
                         finding.detail["works_with"] = f"{label} {flags}"
+                    # ... or by a path into the project's own environment:
+                    # `.venv/bin/pytest` where a bare `pytest` lacked the dependencies
+                    edge = r"(?:^|[\s;&|(])"
+                    word = re.escape(cmd.program)
+                    nearby = re.search(
+                        rf"{edge}((?:\.{{1,2}}/)?(?:[\w.-]+/)+){word}(?=\s|$)",
+                        action.call.command or "",
+                    )
+                    bare = re.search(rf"{edge}{word}(?=\s|$)", finding.detail["command"])
+                    if (
+                        (nearby and bare and unchanged and not unfound)
+                        and "works_with" not in finding.detail
+                        and (finding.detail["variant"] != "ordinary" or self._promote(finding))
+                    ):
+                        finding.detail["works_with"] = nearby.group(1) + label
                     # ... or with an environment activated first on the same line
                     activation = _activation(cmd, finding.detail["command"])
                     if (activation and unchanged) and (
@@ -2931,6 +3014,8 @@ class _Detector:
                 self.exposed.discard(seen)
                 self.exposed_in = {e for e in self.exposed_in if e[:2] != seen}
             self._cd_miss(action, result, next((g for g in cd_failed.groups() if g), ""))
+            return
+        if self._powershell_miss(action, result):
             return
         if (
             result.exit_code == TIMEOUT_EXIT_CODE

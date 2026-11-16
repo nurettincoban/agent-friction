@@ -2,9 +2,11 @@
 
 A recommendation to "add a line to AGENTS.md" is wasted effort when the line
 is already there. This module reads the repository's instruction files and
-answers one question: where is this path or command mentioned? Matching is
-plain text on word boundaries; nothing is interpreted, and nothing from the
-files is ever copied into the result, only ``file:line``.
+answers two questions: where is this path or command *mentioned* (plain text on
+word boundaries), and where does a line *instruct* about it (the command stands
+in command context, the path next to an instruction verb)? Nothing is
+interpreted beyond that, and nothing from the files is ever copied into the
+result, only ``file:line``.
 """
 
 from __future__ import annotations
@@ -194,27 +196,73 @@ class Guidance:
             with_imports.extend(self._imported(name))
         return list(dict.fromkeys(with_imports))
 
-    def mentions(self, terms: list[str], near: str = "", affirmed: bool = False) -> list[Mention]:
+    def mentions(
+        self, terms: list[str], near: str = "", affirmed: bool = False, context: str = ""
+    ) -> list[Mention]:
         """Where the files that apply to ``near`` name any of ``terms``.
 
         With ``affirmed``, a line that names a term only to rule it out ("Do not run
-        `make test` locally", "`make test` was removed") is not a mention: it does not
-        document the term as the thing to use.
+        `make test` locally", "`make test` was removed", "`make test` is slow") is not
+        a mention: it does not document the term as the thing to use.
+
+        ``context`` asks for more than the words being there:
+
+        * ``"command"``: a term of several words (``make test``) must stand where a
+          command stands: in backticks, in a code fence, after a ``$`` prompt, or
+          after run/use/with/via/call. "We make test data with factories" does not
+          mention ``make test``. One distinctive word (``pytest``) is enough as it is.
+        * ``"file"``: the line must also carry an instruction about the file (edit,
+          change, modify, generated, regenerate, never, don't, do not, ...). "See
+          src/schema_gen.py for an example of our style" does not instruct anything.
         """
-        patterns = [_pattern(t.strip()) for t in dict.fromkeys(terms) if usable(t)]
+        wanted = [t.strip() for t in dict.fromkeys(terms) if usable(t)]
+        patterns = [(t, _pattern(t)) for t in wanted]
         if not patterns or self.repo is None:
             return []
         found: list[Mention] = []
         for rel in self.files(near):
+            fenced = False
             for number, line in self._read(rel):
-                hits = [m for m in (p.search(line) for p in patterns) if m is not None]
+                if line.lstrip().startswith("```"):
+                    fenced = not fenced
+                    continue
+                hits = [(t, m) for t, m in ((t, p.search(line)) for t, p in patterns) if m]
                 if affirmed:
-                    hits = [m for m in hits if not _negated(line, m.start(), m.end())]
+                    hits = [(t, m) for t, m in hits if not _negated(line, m.start(), m.end())]
+                if context == "command":
+                    hits = [
+                        (t, m)
+                        for t, m in hits
+                        if " " not in t or fenced or _as_command(line, m.start())
+                    ]
+                elif context == "file":
+                    hits = hits if _INSTRUCTION_RE.search(line) else []
                 if hits:
                     found.append(Mention(rel, number))
                     if len(found) >= MAX_MENTIONS:
                         return found
         return found
+
+
+#: Words in front of a command that say "this is a command to run".
+_COMMAND_LEAD_RE = re.compile(
+    r"(?:^\s*\$\s+|\b(?:run|use|using|with|via|call|invoke|execute|try)\s+(?:the\s+)?[\"']?)$",
+    re.I,
+)
+#: Words that make a line an instruction about a file rather than a pointer to it.
+_INSTRUCTION_RE = re.compile(
+    r"\b(?:(?:hand-)?edit\w*|chang\w*|modif\w*|generated|regenerat\w*|never|don't|dont|do not"
+    r"|must not|overwrit\w*|rewrit\w*|touch\w*|read-only)\b",
+    re.I,
+)
+
+
+def _as_command(line: str, start: int) -> bool:
+    """Does the text at ``start`` stand where a command stands on ``line``?"""
+    before = line[:start]
+    if before.count("`") % 2 == 1:
+        return True  # inside a backtick span
+    return _COMMAND_LEAD_RE.search(before) is not None
 
 
 #: Words in front of a name that rule it out, and words after it that say it is gone.
@@ -226,7 +274,7 @@ _NEGATED_BEFORE_RE = re.compile(
 _NEGATED_AFTER_RE = re.compile(
     r"^[`'\")*_\s]*(?:(?:was|were|is|are|has been|have been|got)\s+(?:\w+\s+)?"
     r"(?:removed|deleted|deprecated|gone|dropped|retired|replaced|broken|disabled|forbidden"
-    r"|not\b|no longer)"
+    r"|not\b|no longer|(?:too |very |really )?(?:slow|flaky|unreliable|expensive|heavy))"
     r"|(?:no longer|does not|doesn't|will not|won't|must not|should not|is not|isn't)\b)",
     re.I,
 )

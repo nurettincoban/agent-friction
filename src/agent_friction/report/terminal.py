@@ -329,6 +329,10 @@ def render_dir_detail(
     score = float(node.get("score", 0))
     out = [
         st.bold(f"directory: {node.get('path') or '.'}/ (everything inside, rolled up)"),
+        st.dim(
+            "The score is computed afresh over all evidence inside, so it can exceed any one "
+            "file's; compare it with other directories, not with files."
+        ),
         st.heat(score, f"{bar(score)} {score:.1f}/100")
         + st.dim(
             f"  · {plural(int(node.get('events', 0)), 'event')}"

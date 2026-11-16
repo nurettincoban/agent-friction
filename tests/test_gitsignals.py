@@ -365,3 +365,22 @@ def test_a_version_bump_is_not_rework(repo: Repo) -> None:
 )
 def test_version_lines(line: str, is_version: bool) -> None:
     assert bool(gitsignals.VERSION_LINE_RE.match(line)) is is_version
+
+
+# ---- round 24 ------------------------------------------------------------------------
+
+
+def test_untracked_is_said_only_of_what_git_knows_not_to_track(repo: Repo, tmp_path: Path) -> None:
+    repo.commit(1, "init", {"build/package/Dockerfile": "FROM x\n", ".gitignore": "dist/\n"})
+    (repo.path / "dist").mkdir()
+    (repo.path / "dist" / "app.js").write_text("x\n")
+    (repo.path / "gen").mkdir()
+    (repo.path / "gen" / "new.go").write_text("package gen\n")
+    assert not gitsignals.is_untracked(repo.path, "build/package/Dockerfile")
+    assert gitsignals.is_untracked(repo.path, "dist/app.js")  # ignored
+    assert gitsignals.is_untracked(repo.path, "gen/new.go")  # never added
+    assert gitsignals.is_untracked(repo.path, "out/nothing-there.txt")
+    # where git cannot say, nothing is claimed
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert not gitsignals.is_untracked(plain, "dist/app.js")

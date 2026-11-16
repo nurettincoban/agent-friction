@@ -86,6 +86,11 @@ def _resolve_repo(args: argparse.Namespace, err: TextIO) -> None:
     root = _find_repo_root(cwd)
     if root is not None and root != cwd:
         err.write(f"agent-friction: using the repository root {root}\n")
+    elif root is None:
+        err.write(
+            f"agent-friction: note: {cwd} is not inside a git repository; mapping it as the "
+            "repository (pass the repo path to choose another)\n"
+        )
     args.repo = Path() if root is None or root == cwd else root
 
 

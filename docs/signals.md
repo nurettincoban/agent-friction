@@ -675,13 +675,15 @@ auto-formatter that rewrites the agent's lines is not rework, and the human
 commit after it is still compared with the agent commit. Add your own with
 `--bot-author REGEX` (`bot_commit_patterns`; matched against `Name <email>`).
 
-**Generated files and lockfiles are skipped.** A human commit that changes
-`package-lock.json`, `Cargo.lock`, `*_pb2.py`, a file under `dist/` or a file
-that says "DO NOT EDIT" after an agent commit touched it is a tool being
-re-run (a dependency bump, a regenerated client), not a human repairing the
-agent's lines. Files that look generated (the same test as for the
-`edit-the-source-not-the-output` recommendation: the path patterns and the
-marker in the first 2 KB) get no `human-rework` events.
+**Lockfiles and files with a generated name are set aside.** A human commit
+that changes `package-lock.json`, `Cargo.lock`, `*_pb2.py`, `*.min.js` or
+another file whose *name* only tools write, after an agent commit touched it,
+is a tool being re-run (a dependency bump, a regenerated client), not a human
+repairing the agent's lines: such files get no `human-rework` events, and
+the number of events set aside is reported (`rework_set_aside` on the git
+source). A "DO NOT EDIT" header or a `build/` directory alone does not
+exclude a file: a human who changes it after the agent did is counted (see
+"Which files count as generated" in the methodology).
 
 **Why:** agent output here needed a human follow-up soon after it landed.
 
@@ -804,7 +806,9 @@ command's" below.
   `ModuleNotFoundError: No module named ...`, `ImportError while loading
   conftest`, `can't open file`, `Cannot find module`, `error: unrecognized
   arguments`, `make: *** No rule to make target`, `npm error Missing script`, yarn's
-  `error Command "test" not found.`, `ERR_PNPM_NO_SCRIPT`, npm's `Unsupported
+  `error Command "test" not found.`, `ERR_PNPM_NO_SCRIPT` (each at the start
+  of its line, as the tool prints it: a sentence that quotes the words
+  further in is not one), npm's `Unsupported
   engine` / `EBADENGINE` (the wrong Node version is a setup problem),
   `fatal: not a git repository`, `curl: (N) ...`, and install/build failures
   (`npm error code ERESOLVE | ETARGET | ...`, `Failed to build ...`, `error:
@@ -878,6 +882,19 @@ command's" below.
     `N problems (M errors`, `npm ERR!`, or a Python traceback whose last line
     is the exception (`RED_OUTPUT_RE`). The event is recorded like any other
     command failure, with "judged from its output" in the summary;
+  - The same holds when the line ends in `; step` with a read-only step
+    (`pytest; which time`, `mytool scan .; ls out`) and exits non-zero: the
+    status is that step's own, an unanswered question and not a failure of
+    the command before it, so that command is judged from its output (and is
+    unknown if the output says nothing). With `&&` the later step never ran
+    after a failure, and the status is the command's;
+  - **not judged** if a later step of the line prints a file that nothing
+    earlier on the line names (`make build; cat docs/troubleshooting.md`,
+    `... || head -20 NOTES.md`, `...; grep -n rule docs/x.md`, `sed -n`):
+    the document's text and the command's output cannot be told apart, and a
+    document about errors quotes them. `pytest > out.log 2>&1; tail out.log`
+    prints what the run itself wrote and is judged as usual. An echoed
+    status (`; echo "exit $?"`) still counts;
   - **green** if it shows a passing summary (`N passed`, `Tests: N passed`,
     `ok pkg 0.1s`, `test result: ok`, `All checks passed`, `Success: no
     issues`, `Found 0 errors`, `Found N errors (N fixed, 0 remaining)`, `N
@@ -1204,6 +1221,15 @@ command's" below.
   the record with that. A missing third-party module (`No module named
   'yaml'`) is never created in the repo and stays a setup error. Other
   setup/invocation errors are never dropped.
+- *Looking around does not use up the look-ahead:* the "next 5 shell
+  calls" in which a passing command can explain a failure (the same command
+  under another name, by a path, with a variable or a flag, in another
+  directory, a replacement, a setup step) count only calls that do
+  something; `ls .venv/bin`, `which pytest`, `cat pyproject.toml` in between
+  are how the agent finds what works. A bare `pytest` that could not run
+  and `.venv/bin/pytest` (or `./node_modules/.bin/jest`) that then passes
+  with no file changed in between is recorded as working by that relative
+  path (`works_with`), and the advice names it.
 - *A typo the agent corrected is weak:* a setup/invocation failure followed,
   within the next 5 shell calls of the turn, by a successful command that
   differs from it in one word by an edit distance of at most 2 (`npm run
@@ -1289,7 +1315,9 @@ and reports say so. A `git commit` or `rm` that happens to succeed
 next is neither.
 
 **False positives / limits:** when the output of a chain matches no known
-step signature the step is a guess (and marked as such). A program that prints one of the anchored shapes itself
+step signature the step is a guess (and marked as such). A command that
+failed and whose line then prints an unrelated file (`pytest; cat README.md`,
+exit 0) is not judged, so that failure is missed. A program that prints one of the anchored shapes itself
 (a test runner echoing a shell error on its own line) is misread as a setup
 error.
 
@@ -1407,7 +1435,13 @@ never makes a hotspot or advice.
 
 **What:** a read or edit of a path that does not exist, a test command
 pointed at a test file that does not exist, or a `cd` into a directory that
-does not exist (variant `directory`; see `command-failure` for both). A read of a missing
+does not exist (variant `directory`; see `command-failure` for both). In
+PowerShell, a cmdlet answering `Cannot find path '...' because it does not
+exist` (`Get-Content`, `gc`, `Set-Location`, ...) is the same miss on that
+path and not a failure of the cmdlet; from a cmdlet that lists or tests
+(`Get-ChildItem`, `Get-Item`, `Test-Path`, `Resolve-Path`) it is a weak
+probe, like looking for an optional file. (A POSIX `cat` or `ls` of a
+missing path is read-only probing and is not recorded at all.) A read of a missing
 file that the agent then creates with a write in the same session (checking
 whether `CHANGELOG.md` exists before adding it) is not recorded.
 

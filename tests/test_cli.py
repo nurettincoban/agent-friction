@@ -611,3 +611,9 @@ def test_format_accepts_extension_spellings() -> None:
     assert code == EXIT_OK and out.startswith("# Agent friction map")
     code, out, _ = run("scan", *INPUT, "-f", "txt")
     assert code == EXIT_OK and out.startswith("agent-friction · ")
+
+
+def test_outside_a_git_repository_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _, _, err = run("sources", "-t", str(tmp_path / "none.jsonl"))
+    assert "is not inside a git repository" in err
