@@ -280,6 +280,7 @@ INSPECTION_PROGRAMS = frozenset(
     | {"command", "du", "df", "ps", "tree", "sleep", "kill", "pkill", "lsof", "awk", "jq"}
     | {"sed", "sort", "uniq", "cut", "tr", "less", "more", "printf", "date", "env", "printenv"}
     | {"hash", "pgrep", "pidof", "nc", "ss", "netstat", "whoami", "id", "uname", "hostname"}
+    | {"ag", "ack", "fd", "fdfind", "pg_isready", "ping", "dig", "nslookup", "host"}
 )
 #: Read-only subcommands of otherwise significant programs.
 INSPECTION_KEYS = frozenset(
@@ -639,6 +640,8 @@ def _raw_key(words: Sequence[str]) -> str:
 
 def _is_inspection(words: Sequence[str], key: str) -> bool:
     program = _program_name(words[0]).rsplit("/", 1)[-1]
+    if key == "terraform plan" and any(w.lstrip("-") == "detailed-exitcode" for w in words):
+        return True  # exit 2 means "there are changes": an answer, not a failure
     if program not in INSPECTION_PROGRAMS and key not in INSPECTION_KEYS:
         return False
     if program not in _IN_PLACE_EDITORS:
@@ -918,6 +921,25 @@ def is_setup_command(key: str) -> bool:
     if words[0] in ("git", "gh", "glab"):
         return False
     return words[0] in SUBCOMMAND_TOOLS and any(w in _SETUP_WORDS for w in words[1:])
+
+
+#: Targets and scripts that run every check of a project.
+AGGREGATE_WORDS = frozenset(
+    {"check", "checks", "ci", "verify", "validate", "all", "precommit", "pre-commit", "qa"}
+    | {"check-all", "test-all", "lint-all", "presubmit", "prepush", "pre-push"}
+)
+
+
+def is_aggregate_check(key: str) -> bool:
+    """``make check``, ``npm run ci``, ``pre-commit run``: one command for several jobs."""
+    words = key.split()
+    if not words or words[0] in ("git", "gh", "glab", "cargo", "go", "terraform"):
+        return False  # `cargo check`, `terraform validate` are single jobs of their own
+    if words[0] == "pre-commit":
+        return len(words) == 1 or words[1] == "run"
+    if command_role(words[0]) is not None:
+        return False  # `ruff check`, `biome ci`: a subcommand of one tool
+    return any(part in AGGREGATE_WORDS for part in _key_words(" ".join(words[1:])))
 
 
 def is_replacement(failed: str, other: str) -> bool:

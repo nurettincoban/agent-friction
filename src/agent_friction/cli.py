@@ -71,6 +71,8 @@ def _resolve_repo(args: argparse.Namespace, err: TextIO) -> None:
             raise UsageError("give the repo either as an argument or with --repo, not both")
         args.repo = pos
     if args.repo is not None:
+        if not args.repo.exists():
+            raise AgentFrictionError(f"{args.repo}: directory does not exist")
         return
     cwd = Path.cwd()
     root = _find_repo_root(cwd)
@@ -204,7 +206,7 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
         type=_positive_int,
         default=5,
         metavar="N",
-        help="evidence items kept per hotspot (default 5)",
+        help="evidence items kept per hotspot (default 5; 20 for show)",
     )
 
 

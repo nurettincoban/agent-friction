@@ -283,6 +283,34 @@ def reworked_lines(agent_new: Sequence[Range], human_old: Sequence[Range]) -> in
     return hits
 
 
+#: A human commit touching more files than this may be a repo-wide sweep.
+SWEEP_MIN_FILES = 20
+SWEEP_SUBJECT_RE = re.compile(
+    r"\b(?:re-?format\w*|format(?:ting|ted)?|prettier|black|ruff format|gofmt|rustfmt|isort"
+    r"|lint(?:ing)?|style|whitespace|line endings|eol|license headers?|copyright|codemod"
+    r"|rename|bump|mass|bulk|sweep)\b",
+    re.I,
+)
+
+
+def is_sweep(commit: Commit) -> bool:
+    """A human commit that reformats or mechanically rewrites the whole repo.
+
+    More than ``SWEEP_MIN_FILES`` files, not announced as a fix, and either
+    named as a mechanical change or replacing about as many lines as it adds
+    in total (within 20 %). Such a commit touches the agent's lines like
+    everybody else's and says nothing about them.
+    """
+    if commit.is_agent or len(commit.files) <= SWEEP_MIN_FILES:
+        return False
+    if FIX_SUBJECT_RE.search(commit.subject):
+        return False
+    added = sum(a for a, _ in commit.files.values())
+    deleted = sum(d for _, d in commit.files.values())
+    balanced = min(added, deleted) > 0 and min(added, deleted) / max(added, deleted) >= 0.8
+    return balanced or SWEEP_SUBJECT_RE.search(commit.subject) is not None
+
+
 def find_rework(
     commits: Sequence[Commit],
     window_days: int = DEFAULT_REWORK_WINDOW_DAYS,
@@ -300,8 +328,8 @@ def find_rework(
     last_touch: dict[str, Commit] = {}
     candidates: list[tuple[Commit, Commit, str]] = []
     for commit in commits:
-        if commit.is_bot:
-            continue  # an auto-formatter or dependency bot is nobody's rework
+        if commit.is_bot or is_sweep(commit):
+            continue  # an auto-formatter, dependency bot or repo-wide reformat is no rework
         for path in sorted(commit.files):
             previous = last_touch.get(path)
             last_touch[path] = commit

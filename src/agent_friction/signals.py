@@ -25,6 +25,7 @@ from agent_friction.attribution import (
     PathResolver,
     Step,
     command_role,
+    is_aggregate_check,
     is_inline_code,
     is_replacement,
     is_setup_command,
@@ -385,9 +386,13 @@ STEP_SIGNATURES: dict[str, re.Pattern[str]] = {
         r"|test result: FAILED|^\s*\d+ (?:failed|failing)\b|^FAILED \(",
         re.M,
     ),
-    "lint": re.compile(r"^Found \d+ errors?\b|\d+ problems? \(|^\S+:\d+:\d+: [A-Z]+\d+ ", re.M),
+    "lint": re.compile(
+        r"^Found [1-9]\d* errors?\b(?! in \d+ files?)(?! \((?:\d+ fixed, )?0 remaining\))"
+        r"|[1-9]\d* problems? \(|^\S+:\d+:\d+: [A-Z]+\d+ ",
+        re.M,
+    ),
     "typecheck": re.compile(
-        r"error TS\d+|^Found \d+ errors? in \d+ files?|^\S+:\d+: error: ", re.M
+        r"error TS\d+|^Found [1-9]\d* errors? in \d+ files?|^\S+:\d+: error: ", re.M
     ),
     "make": re.compile(r"^make(?:\[\d+\])?: \*\*\* ", re.M),
     "cargo": re.compile(r"^error(?:\[E\d+\])?: |could not compile", re.M),
@@ -397,35 +402,105 @@ STEP_SIGNATURES: dict[str, re.Pattern[str]] = {
 }
 
 
-#: Output of a check that failed, whatever the exit status says. Used only when the status
-#: is not the command's own (``pytest | tail -5``, ``make test; echo done``).
-RED_OUTPUT_RE = re.compile(
-    # pytest / unittest
+#: What each kind of check prints when it failed and when it passed: ``(red, green)``, by
+#: role or program. A ruff summary says nothing about mypy, and the other way round.
+_TEST_RED = (
     r"^(?:=+ )?(?:\d+ \w+, )*\d+ (?:failed|errors?)\b.* in [\d.]+s"
     r"|^(?:FAILED|ERROR) \S+::|^FAILED \((?:failures|errors)="
-    # jest / vitest / mocha / rspec
     r"|^Tests?:\s+.*\b\d+ failed|^Test (?:Suites|Files):?\s+.*\b\d+ failed|^\s*FAIL\s+\S+"
     r"|^\s*[1-9]\d* failing\b|\b\d+ examples?, [1-9]\d* failures?"
-    # go / cargo
-    r"|^--- FAIL|^FAIL(?:\s+\S+\s+[\d.]+s)?$|^test result: FAILED|^error(?:\[E\d+\])?: "
-    r"|could not compile"
-    # make, linters, type checkers
-    r"|^make(?:\[\d+\])?: \*\*\* |^Found [1-9]\d* errors?\b|error TS\d+"
-    r"|[1-9]\d* problems? \([1-9]\d* errors?|^npm (?:ERR!|error) "
-    r"|^\s*[1-9]\d* (?:failed|failures?)\b",
-    re.M,
+    r"|^--- FAIL|^FAIL(?:\s+\S+\s+[\d.]+s)?$|^test result: FAILED"
+    r"|^\s*[1-9]\d* (?:failed|failures?)\b"
+)
+_TEST_GREEN = (
+    r"^(?:=+ )?\d+ passed\b(?!.*\b(?:failed|error))"
+    r"|^Tests?:\s+(?!.*failed)\d+ passed|^Test (?:Suites|Files):?\s+(?!.*failed)\d+ passed"
+    r"|^ok\s+\S+\s+[\d.]+s|^PASS\b|^test result: ok|^OK(?: \(|$)|^\s*\d+ passing\b"
+    r"|\b\d+ examples?, 0 failures"
+    r"|^[.sx]+\s+\[100%\]$"  # pytest -q: the last progress line, with no F or E in it
+)
+#: ``Found 2 errors (2 fixed, 0 remaining).`` is ``ruff --fix`` having succeeded, and
+#: ``Found 3 errors in 2 files`` is mypy's line, not a linter's.
+_LINT_RED = (
+    r"^Found [1-9]\d* errors?\b(?! in \d+ files?)(?! \((?:\d+ fixed, )?0 remaining\))"
+    r"|[1-9]\d* problems? \([1-9]\d* errors?"
+)
+_LINT_GREEN = r"^All checks passed|^Found \d+ errors? \(\d+ fixed, 0 remaining\)|\b0 problems\b"
+_TYPE_RED = r"error TS\d+|^Found [1-9]\d* errors? in \d+ files?|^\S+:\d+: error: "
+_TYPE_GREEN = r"^Success: no issues|^Found 0 errors|^0 errors\b"
+_FORMAT_RED = r"^Would reformat|\bfiles? would be reformatted\b"
+_FORMAT_GREEN = r"^\d+ files? (?:already formatted|left unchanged|reformatted)"
+_BUILD_RED = (
+    r"^make(?:\[\d+\])?: \*\*\* |^error(?:\[E\d+\])?: |could not compile|^npm (?:ERR!|error) "
+)
+_BUILD_GREEN = r"^\s*Finished .*(?:dev|release|test)"
+
+
+def _signature(red: str, green: str) -> tuple[re.Pattern[str], re.Pattern[str] | None]:
+    return re.compile(red, re.M), re.compile(green, re.M) if green else None
+
+
+VERDICT_SIGNATURES: dict[str, tuple[re.Pattern[str], re.Pattern[str] | None]] = {
+    "test": _signature(_TEST_RED, _TEST_GREEN),
+    "lint": _signature(_LINT_RED, _LINT_GREEN),
+    "typecheck": _signature(_TYPE_RED, _TYPE_GREEN),
+    "format": _signature(_FORMAT_RED, _FORMAT_GREEN),
+    "build": _signature(_BUILD_RED, _BUILD_GREEN),
+    "make": _signature(r"^make(?:\[\d+\])?: \*\*\* ", ""),
+    "cargo": _signature(r"^error(?:\[E\d+\])?: |could not compile", _BUILD_GREEN),
+    "npm": _signature(r"^npm (?:ERR!|error) ", ""),
+}
+#: Output of a check that failed, whatever the exit status says. Used when the status is
+#: not the command's own (``pytest | tail -5``, ``make test; echo done``) and the line has
+#: one command, whose output may come from any tool (``make check``).
+RED_OUTPUT_RE = re.compile(
+    "|".join((_TEST_RED, _LINT_RED, _TYPE_RED, _FORMAT_RED, _BUILD_RED)), re.M
 )
 #: The last line of an uncaught Python exception.
 _TRACEBACK_END_RE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt)(?::|$)")
 #: Output of a check that passed.
 GREEN_OUTPUT_RE = re.compile(
-    r"^(?:=+ )?\d+ passed\b(?!.*\b(?:failed|error))"
-    r"|^Tests?:\s+(?!.*failed)\d+ passed|^Test (?:Suites|Files):?\s+(?!.*failed)\d+ passed"
-    r"|^ok\s+\S+\s+[\d.]+s|^PASS\b|^test result: ok|^All checks passed|^Success: no issues"
-    r"|^Found 0 errors|^OK(?: \(|$)|^\s*\d+ passing\b|\b\d+ examples?, 0 failures"
-    r"|^\d+ files? (?:already formatted|left unchanged)|^Finished .*(?:dev|release|test)",
-    re.M,
+    "|".join((_TEST_GREEN, _LINT_GREEN, _TYPE_GREEN, _FORMAT_GREEN, _BUILD_GREEN)), re.M
 )
+
+
+def key_verdict(key: str, output: str) -> str | None:
+    """``"red"``/``"green"`` if ``output`` carries that verdict *of the tool behind ``key``*.
+
+    Only the signatures of the key's own role or program are consulted, so in
+    ``ruff check .; mypy; pytest`` each step is judged by its own summary line.
+    """
+    words = key.split()
+    names = (command_role(key), words[0] if words else "")
+    found: str | None = None
+    for name in names:
+        signature = VERDICT_SIGNATURES.get(name or "")
+        if signature is None:
+            continue
+        red, green = signature
+        if red.search(output):
+            return "red"
+        if green is not None and green.search(output):
+            found = "green"
+    return found
+
+
+def _candidates(cmd: ParsedCommand) -> list[Step]:
+    return [
+        s
+        for s in cmd.steps
+        if s.key and not s.inspection and s.program not in SETUP_PROGRAMS | HOUSEKEEPING_PROGRAMS
+    ]
+
+
+def step_verdicts(cmd: ParsedCommand, output: str) -> dict[str, str]:
+    """Verdict per step key of a line with several commands, each by its own signature."""
+    verdicts: dict[str, str] = {}
+    for step in _candidates(cmd):
+        verdict = key_verdict(step.key, output)
+        if verdict is not None and verdicts.get(step.key) != "red":
+            verdicts[step.key] = verdict
+    return verdicts
 
 
 def output_verdict(output: str, first_party: Callable[[str], bool] | None = None) -> str | None:
@@ -444,6 +519,33 @@ def output_verdict(output: str, first_party: Callable[[str], bool] | None = None
     if GREEN_OUTPUT_RE.search(output):
         return "green"
     return None
+
+
+_PYTHON_NAME_RE = re.compile(r"^(?:python|pypy)[\d.]*$")
+#: Largest edit distance at which a failed command counts as a mistyped other one.
+TYPO_MAX_DISTANCE = 2
+
+
+def _distance(a: str, b: str) -> int:
+    """Levenshtein distance."""
+    row = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        previous, row[0] = row[0], i
+        for j, cb in enumerate(b, 1):
+            previous, row[j] = row[j], min(row[j] + 1, row[j - 1] + 1, previous + (ca != cb))
+    return row[-1]
+
+
+def is_typo_of(failed: str, other: str) -> bool:
+    """``npm run biuld`` for ``npm run build``: one word differs, by a slip of the keyboard."""
+    mine, theirs = failed.split(), other.split()
+    if len(mine) != len(theirs) or mine == theirs:
+        return False
+    differing = [(a, b) for a, b in zip(mine, theirs, strict=True) if a != b]
+    if len(differing) != 1:
+        return False
+    a, b = differing[0]
+    return min(len(a), len(b)) >= 4 and _distance(a, b) <= TYPO_MAX_DISTANCE
 
 
 def _step_signature(step: Step) -> list[re.Pattern[str]]:
@@ -889,6 +991,12 @@ class _Action:
     next_any: float | None = None  # time of the next transcript event after the call
 
 
+def _span(action: _Action) -> tuple[float, float] | None:
+    """A call's own duration: from the call to its result."""
+    start, end = _epoch(action.call), _epoch(action.result)
+    return (start, end) if start is not None and end is not None and end > start else None
+
+
 def _epoch(event: Event | None) -> float | None:
     return event.ts.timestamp() if event is not None and event.ts is not None else None
 
@@ -1011,7 +1119,7 @@ class _State:
     turns: int = 0
     # successful file changes so far: (number, path or "" for a shell rewrite)
     changes: int = 0
-    change_log: list[tuple[int, str]] = field(default_factory=list)
+    change_log: list[tuple[int, str, tuple[float, float] | None]] = field(default_factory=list)
     turn_changes: int = 0  # ``changes`` when the turn began
     # this turn: red runs of a command that each followed a change, never a green one
     cycles: dict[str, _Cycle] = field(default_factory=dict)
@@ -1023,6 +1131,7 @@ class _State:
     write_turns: dict[tuple[str, str], int] = field(default_factory=dict)
     emitted_at: dict[int, int] = field(default_factory=dict)
     turn_shell_ok: bool | None = None
+    turn_check_ok: bool | None = None  # ... and its last test/lint/build/aggregate command
     turn_misses: list[tuple[Finding, str]] = field(default_factory=list)
 
 
@@ -1032,11 +1141,12 @@ class _Cycle:
 
     seen: int  # ``_State.changes`` at its last run
     count: int = 0
-    first: float | None = None
-    last: float | None = None
     result: Event | None = None
     command: str = ""
     label: str = ""
+    judged: bool = False  # a red run of it was read from output, not from an exit status
+    unknown: bool = False  # its latest run showed neither red nor green
+    spans: list[tuple[float, float]] = field(default_factory=list)  # red runs, edits between
     files: dict[str, int] = field(default_factory=dict)
 
 
@@ -1171,11 +1281,16 @@ class _Detector:
             if there is not None and not resolver.contains(there):
                 return True
             cwd = there or cwd
-        if (step.program in INTERPRETERS or step.key.startswith("python ")) and step.args:
-            script = step.args[0]
-            # `python3 /tmp/scratch/repro.py`: a script that lives outside the repo
-            if not script.startswith("-") and "/" in script and resolver.outside(script, cwd):
-                return True
+        words = [step.program, *step.args]
+        for index, word in enumerate(words[:-1]):
+            name = word.rsplit("/", 1)[-1]
+            if name in INTERPRETERS or _PYTHON_NAME_RE.match(name):
+                script = words[index + 1]
+                # `python3 /tmp/scratch/repro.py`, `uv run python ~/x.py`: a script that
+                # lives outside the repo
+                if not script.startswith("-") and "/" in script and resolver.outside(script, cwd):
+                    return True
+                break
         if step.program in HOUSEKEEPING_PROGRAMS | DESTRUCTIVE_PROGRAMS:
             paths = [a for a in step.args if not a.startswith("-")]
             return bool(paths) and all(resolver.outside(path, cwd) for path in paths)
@@ -1266,6 +1381,10 @@ class _Detector:
             for finding in state.thrash.values():
                 finding.detail["ended_green"] = "1"
         for key, cycle in state.cycles.items():
+            # If the last check of the turn was green and nothing went red after it, the
+            # turn converged, whatever name the passing command went by.
+            if state.turn_check_ok:
+                break
             if cycle.count >= NO_CONVERGENCE_MIN_CYCLES and cycle.result is not None:
                 self._no_convergence(key, cycle)
         state.cycles = {}
@@ -1275,6 +1394,7 @@ class _Detector:
         state.turns += 1
         state.turn_trouble_files = set()
         state.turn_shell_ok = None
+        state.turn_check_ok = None
         state.turn_misses = []
 
     def _no_convergence(self, key: str, cycle: _Cycle) -> None:
@@ -1283,20 +1403,35 @@ class _Detector:
         files = [path for path, _ in ranked[:NO_CONVERGENCE_MAX_FILES]]
         targets = [Target(model.COMMAND, cycle.label)]
         targets += [Target(model.FILE, path, 1.0 / len(files)) for path in files]
-        interval = None
-        if cycle.first is not None and cycle.last is not None and cycle.last > cycle.first:
-            interval = (max(cycle.first, cycle.last - NO_CONVERGENCE_CAP_SECONDS), cycle.last)
+        # Its last run showed neither red nor green (`pytest | tail -1` cut the verdict
+        # off): it may well have gone green out of sight. Kept as a weak lead that claims no time.
+        uncertain = cycle.unknown
+        # Only the red runs themselves and the edits between them are claimed, newest
+        # first up to the cap: reading and thinking in between may have been useful.
+        spans: list[tuple[float, float]] = []
+        budget = NO_CONVERGENCE_CAP_SECONDS
+        for start, end in sorted(cycle.spans, reverse=True):
+            if budget <= 0 or uncertain:
+                break
+            start = max(start, end - budget)
+            spans.append((start, end))
+            budget -= end - start
         where = f" (edits to {', '.join(files)})" if files else ""
-        self._emit(
+        ending = (
+            "its later runs showed neither red nor green" if uncertain else "the turn ended red"
+        )
+        finding = self._emit(
             NO_CONVERGENCE,
             cycle.result,
             f"`{cycle.label}` was still failing after {cycle.count} rounds of "
-            f"edit and re-run{where}; the turn ended red",
+            f"edit and re-run{where}; {ending}",
             targets,
             excerpt=f"$ {cycle.command}\n{cycle.result.output}",
-            interval=interval,
             detail={"count": str(cycle.count), "command": cycle.command},
         )
+        finding.intervals = tuple(sorted(spans))
+        if uncertain:
+            finding.detail["uncertain"] = "1"
 
     def _mention(self, text: str) -> None:
         """Remember optional files that a prompt or a tool's output named."""
@@ -1423,7 +1558,7 @@ class _Detector:
         call = action.call
         now = _epoch(call)
         targets = [Target(model.FILE, path)]
-        self._on_change(path)
+        self._on_change(path, _span(action))
         if call.old_text:
             state.removed.append((call.old_text, call.new_text))
             del state.removed[:-REMOVED_TEXTS_KEPT]
@@ -1490,11 +1625,11 @@ class _Detector:
                 interval=_capped_back(reverted_at, now) or self._round_trip(action),
             )
 
-    def _on_change(self, path: str = "") -> None:
+    def _on_change(self, path: str = "", span: tuple[float, float] | None = None) -> None:
         """Files changed (an edit, a write, or a shell command that rewrites files)."""
         state = self.state
         state.changes += 1
-        state.change_log.append((state.changes, path))
+        state.change_log.append((state.changes, path, span))
         # A change turns the red runs so far into red -> edit -> (maybe) green, unless they
         # were a retry loop: re-running a failing command three times with nothing changed
         # is friction whatever happens afterwards.
@@ -1543,7 +1678,7 @@ class _Detector:
             + (" (a routine look for an optional file)" if probe else ""),
             [Target(model.FILE, action.file)],
             excerpt=result.output,
-            interval=self._round_trip(action),
+            interval=None if probe else self._round_trip(action),
             detail={"probe": "1"} if probe else None,
         )
         if action.call.op == model.OP_READ:
@@ -1615,7 +1750,7 @@ class _Detector:
             f"{call.tool} search in {where} returned nothing",
             [Target(model.FILE if is_file else model.DIR, scope or ".")],
             excerpt=f"pattern: {call.pattern}" if call.pattern else "",
-            interval=self._round_trip(action),
+            # a weak signal: it may be a lead, but it claims no time
             detail={"pattern": call.pattern or "", "scope": scope or "."},
         )
         self.state.probes.append((finding, call, scope))
@@ -1643,12 +1778,45 @@ class _Detector:
         ok = result.ok
         verdict: str | None = None
         hidden = result.ok and cmd.masked and not cmd.inspection
-        if hidden:
+        ran = not cmd.inspection and result.error in ("", model.ERR_EXIT, model.ERR_OTHER)
+        # In `ruff check .; mypy; pytest` every step prints its own verdict. Each is judged
+        # by its own summary line; one red step does not make the others red.
+        several = len({s.key for s in _candidates(cmd)}) > 1
+        own = step_verdicts(cmd, result.output) if ran and several else {}
+        red_step: Step | None = None
+        setup_error: bool | None = None  # for a hidden status: was it a setup error?
+        if hidden and several:
+            # Nothing says that anything failed at all, so a step is red only on its own
+            # evidence: its summary line, or a setup error that can be pinned on it.
+            red_step = next((s for s in _candidates(cmd) if own.get(s.key) == "red"), None)
+            setup_error = False
+            if red_step is None and is_invocation_error(result.output, None, self.ctx.first_party):
+                blamed, sure = self._blamed_step(cmd, result.output)
+                if sure and blamed is not None and own.get(blamed.key) != "green":
+                    red_step, setup_error = blamed, True
+            verdict = "red" if red_step is not None else own.get(key)
+            ok = verdict != "red"
+        elif hidden:
             verdict = output_verdict(result.output, self.ctx.first_party)
             ok = verdict != "red"
         unknown = hidden and verdict is None
+        if ran:
+            # A step that printed its own passing summary ran green, whatever came after.
+            for step_key, step_verdict in own.items():
+                if step_verdict == "green" and (step_key != key or not ok or unknown):
+                    self._went_green(step_key)
+            if result.ok:
+                # ... and so did any check whose passing summary an exit-0 command shows
+                # (`make check` printing "All checks passed!" for an earlier red `ruff`).
+                for failed_key in [k for k in state.cycles if k != key]:
+                    if key_verdict(failed_key, result.output) == "green":
+                        self._went_green(failed_key)
+        if unknown and key in state.cycles:
+            state.cycles[key].unknown = True
         if not cmd.inspection and result.error != model.ERR_INTERRUPTED and not unknown:
             state.turn_shell_ok = ok
+            if command_role(key) is not None or is_aggregate_check(key):
+                state.turn_check_ok = ok
         if ok:
             if not cmd.inspection:
                 state.ok_commands += 1
@@ -1674,18 +1842,7 @@ class _Detector:
             # red -> edit -> green is the development loop working: forget those failures,
             # also when the green run is another command doing the same job (`make test`
             # after a red `pytest tests/test_a.py`).
-            for failed_key in list(state.cycles):
-                if failed_key == key or is_replacement(failed_key, key):
-                    del state.cycles[failed_key]
-            fixed: set[int] = set()
-            for failed_key in list(state.red_then_edited):
-                if failed_key == key or is_replacement(failed_key, key):
-                    fixed |= {id(f) for f in state.red_then_edited.pop(failed_key)}
-            # Green with no change in between: those red runs stay on the record for good.
-            for failed_key in list(state.red):
-                if failed_key == key or is_replacement(failed_key, key):
-                    del state.red[failed_key]
-            self._drop(fixed)
+            self._went_green(key)
             # The command works after all, so nothing "replaced" it earlier in the session.
             for finding in state.replaced.pop(key, []):
                 finding.detail.pop("recovered_by", None)
@@ -1698,6 +1855,11 @@ class _Detector:
                     if setup:
                         finding.detail["fixed_by_setup"] = setup
                     self._recover(finding, action)
+                elif finding.detail["variant"] != "ordinary" and is_typo_of(failed_key, key):
+                    # `npm run biuld`, then `npm run build`: a slip of the keyboard that
+                    # the agent corrected itself. Nothing to document.
+                    finding.detail["typo_of"] = shown(key)
+                    finding.summary += f"; a mistyped `{shown(key)}`, which then ran"
                 elif is_setup_command(key):
                     state.setup_after[id(finding)] = shown(key)
                     waiting.append((finding, failed_key, left))
@@ -1721,15 +1883,10 @@ class _Detector:
         if result.harness_error and code is None and not timed_out:
             return  # the harness's own error message: the command was never executed
         invocation = is_invocation_error(result.output, code, self.ctx.first_party)
-        # In `a && b` the output tells which step failed; b may never have run.
-        step, certain = failing_step(cmd, result.output)
-        # ... and a shell that could not find a program names it, wherever it stood.
-        unfound = _NOT_FOUND_PROGRAM_RE.search(result.output)
-        if unfound is not None:
-            name = (unfound.group(1) or unfound.group(2)).rsplit("/", 1)[-1]
-            named = next((s for s in cmd.steps if s.key and name in (s.program, s.key)), None)
-            if named is not None:
-                step, certain = named, True
+        step, certain = self._blamed_step(cmd, result.output)
+        if red_step is not None:
+            step, certain = red_step, True
+            invocation = bool(setup_error)
         if self._elsewhere(step, call.cwd):
             return  # the step that failed ran, or only touched things, outside the repo
         if step is not None and step.key:
@@ -1804,7 +1961,7 @@ class _Detector:
         elif not invocation:
             state.red.setdefault(key, []).append(finding)
             if not inline:
-                self._red_run(key, shown(key), action, result)
+                self._red_run(key, shown(key), action, result, hidden)
         else:
             missing = missing_name(result.output)
             if missing is not None:
@@ -1825,23 +1982,69 @@ class _Detector:
             )
             state.retry[same].detail["count"] = str(run)
 
-    def _red_run(self, key: str, label: str, action: _Action, result: Event) -> None:
+    @staticmethod
+    def _blamed_step(cmd: ParsedCommand, output: str) -> tuple[Step | None, bool]:
+        """The step of a line that failed, and whether the output makes that certain."""
+        # In `a && b` the output tells which step failed; b may never have run.
+        step, certain = failing_step(cmd, output)
+        # ... and a shell that could not find a program names it, wherever it stood.
+        unfound = _NOT_FOUND_PROGRAM_RE.search(output)
+        if unfound is not None:
+            name = (unfound.group(1) or unfound.group(2)).rsplit("/", 1)[-1]
+            named = next((s for s in cmd.steps if s.key and name in (s.program, s.key)), None)
+            if named is not None:
+                step, certain = named, True
+        return step, certain
+
+    def _went_green(self, key: str) -> None:
+        """``key`` ran green: close what a green run of it, or of its job, closes.
+
+        red -> edit -> green is the development loop working, so those failures are
+        forgotten, also when the green run is another command doing the same job
+        (`make test` after a red `pytest tests/test_a.py`) or an aggregate target that
+        runs every check (`make check`, `npm run ci`, `pre-commit run`).
+        """
+        state = self.state
+
+        def closes(failed_key: str) -> bool:
+            if failed_key == key or is_replacement(failed_key, key):
+                return True
+            return is_aggregate_check(key) and command_role(failed_key) is not None
+
+        for failed_key in [k for k in state.cycles if closes(k)]:
+            del state.cycles[failed_key]
+        fixed: set[int] = set()
+        for failed_key in [k for k in state.red_then_edited if closes(k)]:
+            fixed |= {id(f) for f in state.red_then_edited.pop(failed_key)}
+        # Green with no change in between: those red runs stay on the record for good.
+        for failed_key in [k for k in state.red if closes(k)]:
+            del state.red[failed_key]
+        self._drop(fixed)
+
+    def _red_run(
+        self, key: str, label: str, action: _Action, result: Event, hidden: bool = False
+    ) -> None:
         """Count a red run that followed a change: one more round that did not converge."""
         state = self.state
         cycle = state.cycles.get(key)
+        fresh = cycle is None
         if cycle is None:
             cycle = state.cycles[key] = _Cycle(seen=state.turn_changes)
         if state.changes > cycle.seen:
             cycle.count += 1
-            for number, path in reversed(state.change_log):
+            for number, path, span in reversed(state.change_log):
                 if number <= cycle.seen:
                     break
                 if path:
                     cycle.files[path] = cycle.files.get(path, 0) + 1
+                if span is not None and not fresh:
+                    cycle.spans.append(span)  # an edit between two red runs
         cycle.seen = state.changes
-        start, end = _epoch(action.call), _epoch(result) or _epoch(action.call)
-        cycle.first = cycle.first if cycle.first is not None else start
-        cycle.last = end if end is not None else cycle.last
+        run = _span(action)
+        if run is not None:
+            cycle.spans.append(run)
+        cycle.judged = cycle.judged or hidden
+        cycle.unknown = False
         cycle.result = result
         cycle.command = action.call.command or ""
         cycle.label = label
@@ -2088,14 +2291,18 @@ class _Detector:
         # Wording alone never makes a certain correction: either the human names a file
         # the agent had just changed, or the agent goes back to one of those files next.
         changed = frozenset(edited_all)
-        strong = confidence >= CORRECTION_STRONG
+        # A verdict typed long after the agent finished may be about something else. It is
+        # still a correction if the agent then goes back to the files: behaviour decides.
+        stale = "long pause" in labels
+        strong = confidence >= CORRECTION_STRONG or stale
         named_changed = [rel for rel in named if rel in changed]
         corroborated = ""
         if not strong:
-            note = "wording only"
-        elif named_changed:
+            note = "weaker cues only, no clear correction phrase"
+        elif named_changed and not stale:
             note, corroborated = f"the user names {named_changed[0]}, which it had changed", "named"
         elif changed:
+            confidence = CORRECTION_STRONG
             note = "awaiting the agent's response"
         else:
             confidence = CORRECTION_PROBABLE
@@ -2114,8 +2321,9 @@ class _Detector:
             finding.detail["corroborated"] = corroborated
             self.state.rework = _Rework(finding, frozenset(named_changed))
         elif strong and changed:
-            self.state.unconfirmed = _Unconfirmed(finding, changed, matched, how)
-            self.state.rework = _Rework(finding, changed)
+            about = frozenset(named_changed) or changed
+            self.state.unconfirmed = _Unconfirmed(finding, about, matched, how)
+            self.state.rework = _Rework(finding, about)
 
 
 @dataclass

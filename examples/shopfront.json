@@ -254,11 +254,11 @@
     {
       "agent_commits": 0,
       "confidence": "medium",
-      "est_minutes_lost": 1.2,
+      "est_minutes_lost": 0.0,
       "events": 5,
       "evidence": [
         {
-          "est_seconds_lost": 16.0,
+          "est_seconds_lost": 0,
           "excerpt": "pattern: RefundPolicy",
           "line": 5,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
@@ -268,7 +268,7 @@
           "timestamp": "2026-10-29T14:00:06Z"
         },
         {
-          "est_seconds_lost": 16.0,
+          "est_seconds_lost": 0,
           "excerpt": "pattern: src/shopfront/**/refund*.py",
           "line": 7,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
@@ -278,7 +278,7 @@
           "timestamp": "2026-10-29T14:00:22Z"
         },
         {
-          "est_seconds_lost": 14.0,
+          "est_seconds_lost": 0,
           "excerpt": "pattern: DiscountPolicy",
           "line": 3,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
@@ -288,7 +288,7 @@
           "timestamp": "2026-11-09T15:00:06Z"
         },
         {
-          "est_seconds_lost": 14.0,
+          "est_seconds_lost": 0,
           "excerpt": "pattern: RefundPolicy",
           "line": 5,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
@@ -298,7 +298,7 @@
           "timestamp": "2026-11-09T15:00:20Z"
         },
         {
-          "est_seconds_lost": 14.0,
+          "est_seconds_lost": 0,
           "excerpt": "pattern: **/*policy*.py",
           "line": 7,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
@@ -383,13 +383,13 @@
       "events": 12,
       "evidence": [
         {
-          "est_seconds_lost": 0.0,
+          "est_seconds_lost": 0,
           "excerpt": null,
           "line": 28,
           "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
           "signal": "probable-correction",
           "source": "claude-code:shopfront/e65615b3-b6e0-5853-afdf-c13d1b54f9b5.jsonl",
-          "summary": "Probable correction (confidence 0.4; matched \"don't\", \"instead\", \"not allowed\"; wording only); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py",
+          "summary": "Probable correction (confidence 0.4; matched \"don't\", \"instead\", \"not allowed\"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py",
           "timestamp": "2026-10-26T10:08:42Z"
         },
         {
@@ -413,7 +413,7 @@
           "timestamp": "2026-11-03T09:04:16Z"
         },
         {
-          "est_seconds_lost": 0.0,
+          "est_seconds_lost": 0,
           "excerpt": "That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml.",
           "line": 10,
           "session_id": "aider-2026-11-05",
@@ -518,13 +518,13 @@
       "events": 6,
       "evidence": [
         {
-          "est_seconds_lost": 0.0,
+          "est_seconds_lost": 0,
           "excerpt": null,
           "line": 28,
           "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
           "signal": "probable-correction",
           "source": "claude-code:shopfront/e65615b3-b6e0-5853-afdf-c13d1b54f9b5.jsonl",
-          "summary": "Probable correction (confidence 0.4; matched \"don't\", \"instead\", \"not allowed\"; wording only); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py",
+          "summary": "Probable correction (confidence 0.4; matched \"don't\", \"instead\", \"not allowed\"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py",
           "timestamp": "2026-10-26T10:08:42Z"
         },
         {
@@ -538,7 +538,7 @@
           "timestamp": "2026-10-29T14:11:05Z"
         },
         {
-          "est_seconds_lost": 0.0,
+          "est_seconds_lost": 0,
           "excerpt": null,
           "line": 21,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
@@ -682,11 +682,11 @@
     {
       "agent_commits": 0,
       "confidence": "low",
-      "est_minutes_lost": 0.4,
+      "est_minutes_lost": 0.0,
       "events": 1,
       "evidence": [
         {
-          "est_seconds_lost": 26.0,
+          "est_seconds_lost": 0,
           "excerpt": "pattern: API_VERSION",
           "line": 13,
           "session_id": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
@@ -735,7 +735,7 @@
       "events": 1,
       "evidence": [
         {
-          "est_seconds_lost": 0.0,
+          "est_seconds_lost": 0,
           "excerpt": "$ pytest tests/test_refunds.py -x\nExit code 1\ntests/conftest.py:11: in engine\n    return make_engine(os.environ['DATABASE_URL'])\nE   KeyError: 'DATABASE_URL'\nERROR tests/test_checkout.py - KeyError: 'DATABASE_URL'",
           "line": 23,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
@@ -973,7 +973,7 @@
     "commands_affected": 4,
     "corrections": 4,
     "directories_affected": 1,
-    "est_minutes_lost": 11.0,
+    "est_minutes_lost": 9.4,
     "files_affected": 5,
     "friction_events": 34,
     "probable_corrections": 1,
@@ -1063,7 +1063,7 @@
                 "sessions": 1
               }
             ],
-            "est_minutes_lost": 7.1,
+            "est_minutes_lost": 5.8,
             "events": 23,
             "exposure_sessions": 6,
             "friction_rate": 1.0,
@@ -1074,7 +1074,7 @@
             "sessions": 6
           }
         ],
-        "est_minutes_lost": 7.1,
+        "est_minutes_lost": 5.8,
         "events": 23,
         "exposure_sessions": 6,
         "friction_rate": 1.0,
@@ -1088,7 +1088,7 @@
         "children": [
           {
             "children": [],
-            "est_minutes_lost": 0.4,
+            "est_minutes_lost": 0.0,
             "events": 1,
             "exposure_sessions": 2,
             "friction_rate": 0.5,
@@ -1099,7 +1099,7 @@
             "sessions": 1
           }
         ],
-        "est_minutes_lost": 0.4,
+        "est_minutes_lost": 0.0,
         "events": 1,
         "exposure_sessions": 2,
         "friction_rate": 0.5,
@@ -1135,7 +1135,7 @@
         "sessions": 1
       }
     ],
-    "est_minutes_lost": 7.5,
+    "est_minutes_lost": 5.8,
     "events": 25,
     "exposure_sessions": 6,
     "friction_rate": 1.0,

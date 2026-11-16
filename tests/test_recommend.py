@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from agent_friction import model, recommend, redact, signals
 from agent_friction.model import Finding, Target
 from agent_friction.recommend import FileFacts, file_facts
@@ -266,3 +268,36 @@ def test_inline_code_is_never_a_command_to_document() -> None:
     assert "document-the-command" not in ids(recs)
     ordinary = [finding(signals.COMMAND_FAILURE, f"s{i}", variant="ordinary") for i in range(5)]
     assert recommend.recommend(model.COMMAND, "pytest", ordinary) == []
+
+
+@pytest.mark.parametrize(
+    ("value", "span"),
+    [
+        ("plain", "`plain`"),
+        ("a`b", "``a`b``"),
+        ("``x", "``` ``x ```"),
+        ("x`", "`` x` ``"),
+        ("a``b`c", "```a``b`c```"),
+    ],
+)
+def test_code_spans_survive_backticks(value: str, span: str) -> None:
+    assert recommend.code(value) == span
+
+
+def test_a_search_pattern_with_backticks_stays_valid_markdown() -> None:
+    def miss(session: str, pattern: str) -> Finding:
+        found = finding(signals.SEARCH_MISS, session, pattern=pattern)
+        found.targets = [Target(model.DIR, "src")]
+        return found
+
+    found = [miss("s1", "a`b"), miss("s2", "a`b"), miss("s1", "``x"), miss("s2", "``x")]
+    (rec,) = recommend.recommend(model.DIR, "src", found, None, quote)
+    assert "``a`b`` (2x)" in str(rec["detail"]) and "``` ``x ``` (2x)" in str(rec["detail"])
+
+
+def test_a_typo_is_not_a_command_to_document() -> None:
+    typos = [
+        finding(signals.COMMAND_FAILURE, f"s{i}", variant="invocation", typo_of="npm run build")
+        for i in range(3)
+    ]
+    assert recommend.recommend(model.COMMAND, "npm run biuld", typos) == []

@@ -155,6 +155,8 @@ class Finding:
     targets: list[Target] = field(default_factory=list)
     weight: float = 1.0  # per-event multiplier in (0, 1], see docs/methodology.md
     interval: tuple[float, float] | None = None  # epoch seconds, for time-lost
+    #: Further pieces of claimed time, for an event made of several separate stretches.
+    intervals: tuple[tuple[float, float], ...] = ()
     stream: str = ""  # intervals are only merged within one stream
     detail: dict[str, str] = field(default_factory=dict)
     fid: int = -1

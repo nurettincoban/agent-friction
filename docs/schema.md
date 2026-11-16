@@ -164,7 +164,7 @@ was fixed only if its target still has exposure there.
 | `signals` | object | `{signal_id: count}`, most frequent first. |
 | `confidence` | str | `"low"`, `"medium"` or `"high"`. |
 | `why` | str | One sentence: counts, friction sessions out of exposure sessions, top signals, reason for the confidence. |
-| `recommendations` | list | `{id, title, detail, signals}`; `signals` lists the signal ids the rule is based on. May be empty. |
+| `recommendations` | list | `{id, title, detail, signals}`; `signals` lists the signal ids the rule is based on. May be empty. `title` and `detail` are Markdown: commands and quoted search patterns are inline code spans, fenced with more backticks than the value contains (a pattern ``a`b`` is written ```` ``a`b`` ````), so they stay valid whatever the transcript held. |
 | `evidence` | list | Up to `max_evidence` items, chronological. |
 | `score_detail` | object | The score's factors, each 0-1: `severity`, `recurrence`, `consistency` (`score` is 100 x their product, up to rounding); `mean_session_points`; `intensity` (sum of session points); `capped` (true when all evidence is weak and the score was limited to 19); and `sessions`: per session `session_id`, `weighted_events`, `points`. |
 | `file` | object | File hotspots only: `exists`, `lines` (`null` if missing or over 5 MB), `generated`. |

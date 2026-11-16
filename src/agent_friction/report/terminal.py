@@ -6,6 +6,7 @@ import textwrap
 from typing import Any
 
 from agent_friction.report._common import (
+    all_items,
     collect_recommendations,
     fmt_minutes,
     plural,
@@ -106,9 +107,11 @@ def render_terminal(
     span = ""
     if window.get("start") or window.get("end"):
         span = f" · {str(window.get('start') or '…')[:10]} → {str(window.get('end') or '…')[:10]}"
+    sessions = int(totals.get("sessions", 0))
+    who = plural(sessions, "session") if sessions else "git history only, no agent sessions"
     out.append(
         st.dim(
-            f"{plural(int(totals.get('sessions', 0)), 'session')}"
+            f"{who}"
             f" · {plural(int(totals.get('tool_calls', 0)), 'tool call')}"
             f" · {plural(int(totals.get('friction_events', 0)), 'friction event')}"
             f" · ~{fmt_minutes(float(totals.get('est_minutes_lost', 0)))} lost"
@@ -164,6 +167,8 @@ def render_terminal(
             "the total counts each minute once."
         )
     )
+    if any(int(h.get("agent_commits", 0)) for h in all_items(result)):
+        out.append(st.dim("For git evidence, sess counts the agent commits involved."))
     skipped = sum(int(s.get("skipped_lines", 0)) for s in result.get("sources", []))
     if skipped:
         out.append(

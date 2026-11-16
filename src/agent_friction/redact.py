@@ -161,6 +161,32 @@ _RULES: tuple[_Rule, ...] = (
         r"\1[REDACTED]\3",
     ),
     (
+        # ~/.netrc: ``machine host login user password s3cret``
+        "netrc",
+        re.compile(
+            r"(?im)(\bmachine\s+\S+\s+(?:login\s+\S+\s+)?password\s+"
+            r"|^\s*(?:login\s+\S+\s+)?password\s+(?=\S+\s*$))(?!\[REDACTED)(\S+)"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
+        "webhook",
+        re.compile(
+            r"(?i)https://(?:hooks\.slack\.com/(?:services|workflows|triggers)"
+            r"|(?:\w+\.)?discord(?:app)?\.com/api/webhooks)/[^\s\"'<>]+"
+        ),
+        "[REDACTED:webhook]",
+    ),
+    (
+        # ``openssl enc -k s3cret``, ``-pass pass:s3cret``, ``-passin pass:...``
+        "openssl-pass",
+        re.compile(
+            r"(\bopenssl\b[^\n|;&]*?\s-k\s+|(?<![\w-])-pass(?:in|out)?\s+pass:)"
+            r"(?!\[REDACTED)(\S+)"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
         "email",
         # the host must end in a name, so ``root@10.0.0.1`` (an ssh target) is not an email
         re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"),

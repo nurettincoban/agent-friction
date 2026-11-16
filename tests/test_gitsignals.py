@@ -272,3 +272,24 @@ def test_default_bot_patterns() -> None:
     assert bot("dependabot <49699333+dependabot@users.noreply.github.com>")
     assert bot("GitHub Actions <actions@github.com>")
     assert not bot("Dana Dev <dana@corp.test>") and not bot("Abbot Lee <abbot@corp.test>")
+
+
+def test_a_repo_wide_reformat_is_not_rework(repo: Repo) -> None:
+    names = [f"src/m{i}.py" for i in range(25)]
+    repo.commit(1, "initial", dict.fromkeys(names, BASE))
+    by_agent = lines(BASE, l3="agent 3", l4="agent 4")
+    repo.commit(2, f"feat\n\n{CLAUDE}", {names[0]: by_agent, names[1]: by_agent})
+    # every file reformatted by a human, including the agent's lines
+    swept = {n: lines(by_agent if n in names[:2] else BASE, l4="x  4") for n in names}
+    repo.commit(3, "apply the new formatter", swept)
+    human = repo.commit(4, "tidy", {names[1]: lines(swept[names[1]], l3="human 3")})
+    history = gitsignals.read_history(repo.path)
+    assert [gitsignals.is_sweep(c) for c in history.commits] == [False, False, True, False]
+    found = gitsignals.find_rework(history.commits, hunks=gitsignals.HunkReader(repo.path))
+    assert [(f.targets[0].key, f.detail["human_commit"]) for f in found] == [(names[1], human[:8])]
+
+    # a fix that happens to touch many files is still a human reacting
+    repo.commit(5, f"more\n\n{CLAUDE}", {names[2]: by_agent})
+    repo.commit(6, "fix: broken imports everywhere", {n: lines(BASE, l3="fixed") for n in names})
+    history = gitsignals.read_history(repo.path)
+    assert not gitsignals.is_sweep(history.commits[-1])

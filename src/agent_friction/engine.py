@@ -168,6 +168,28 @@ def _session_at(
     return None
 
 
+def _unclaim_single_session_stretches(findings: Sequence[Finding]) -> None:
+    """A ``no-convergence`` event claims time only where the pattern recurs.
+
+    One stuck session can be a hard task: it is a capped lead and costs nothing
+    in the totals. From two sessions on the same command or file, it counts.
+    """
+    sessions: dict[tuple[str, str], set[str]] = {}
+    stuck = [f for f in findings if f.signal == signals.NO_CONVERGENCE]
+    for finding in stuck:
+        if finding.detail.get("uncertain"):
+            continue
+        for target in finding.targets:
+            sessions.setdefault((target.kind, target.key), set()).add(finding.session_id)
+    for finding in stuck:
+        recurring = any(
+            len(sessions.get((t.kind, t.key), ())) >= scoring.MEDIUM_MIN_SESSIONS
+            for t in finding.targets
+        )
+        if not recurring:
+            finding.intervals = ()
+
+
 def _is_git(finding: Finding) -> bool:
     return finding.signal == signals.HUMAN_REWORK
 
@@ -463,6 +485,7 @@ class _Analysis:
         if missing is not None and not self.git_used:
             raise missing  # neither transcripts nor git history: nothing to analyse
 
+        _unclaim_single_session_stretches(findings)
         findings.sort(key=_finding_order)
         for index, finding in enumerate(findings):
             finding.fid = index
@@ -667,6 +690,9 @@ class _Analysis:
         sessions = len(result.sessions)
         commits = sum(s.session_id.startswith(scoring.GIT_SESSION_PREFIX) for s in result.sessions)
         level = scoring.confidence((s.session_id for s in result.sessions), signal_counts)
+        capped = scoring.weak_only(found)
+        if capped:
+            level = "low"  # evidence that is routine on its own is a lead, never a pattern
         return {
             "path": key,
             "kind": kind,
@@ -685,12 +711,12 @@ class _Analysis:
                 result.exposure_sessions - commits,
                 level,
                 commits,
-                capped=scoring.weak_only(found),
+                capped=capped,
             ),
             "recommendations": [],
             "evidence": [],
             "score_detail": {
-                "capped": scoring.weak_only(found),
+                "capped": capped,
                 "severity": result.severity,
                 "recurrence": result.recurrence,
                 "consistency": result.consistency,
@@ -734,8 +760,8 @@ class _Analysis:
             "source": self.cited_source(finding),
             "line": finding.line,
             # what this event alone claims; a hotspot's minutes are the union, not the sum
-            "est_seconds_lost": (
-                round(finding.interval[1] - finding.interval[0], 1) if finding.interval else 0.0
+            "est_seconds_lost": round(
+                sum(end - start for start, end in scoring.claimed(finding)), 1
             ),
         }
 

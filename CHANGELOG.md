@@ -17,3 +17,5 @@ All notable changes to this project are documented here. The format follows
 - `agent-friction sources`: list the transcripts that would be analysed.
 - Generic JSONL transcript format for other agents.
 - Redaction of secrets in evidence excerpts, and `--no-excerpts`.
+
+[0.1.0]: https://github.com/nurettincoban/agent-friction/commits/main

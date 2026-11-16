@@ -136,3 +136,12 @@ def test_skipped_lines_are_mentioned() -> None:
     r = sample_result()
     r["sources"][0]["skipped_lines"] = 3
     assert "3 transcript lines could not be parsed" in render_terminal(r)
+
+
+def test_markdown_code_spans_survive_backticks() -> None:
+    from agent_friction.report.markdown import _code, _html_escape
+
+    assert _code("a`b") == "``a`b``"
+    assert _code("``x") == "``` ``x ```"
+    assert _html_escape("a <b> `<c>` ``d`<e>`` <f>") == "a &lt;b&gt; `<c>` ``d`<e>`` &lt;f&gt;"
+    assert _html_escape("odd ` <x>") == "odd ` &lt;x&gt;"

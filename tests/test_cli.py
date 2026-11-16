@@ -157,7 +157,7 @@ def test_parse_when() -> None:
 
 def test_scan_nonexistent_repo_is_an_error(tmp_path: Path) -> None:
     code, _, err = run("scan", str(tmp_path / "nope"), "-t", str(FIXTURES / "transcripts"))
-    assert code == EXIT_ERROR and "not a directory" in err
+    assert code == EXIT_ERROR and "does not exist" in err
 
 
 def test_scan_with_no_sessions_in_window_is_an_error() -> None:
@@ -339,3 +339,8 @@ def test_show_finds_a_pseudonymized_command_by_its_real_name(tmp_path: Path) -> 
 def test_agent_commit_flag_validates_regex() -> None:
     assert run("scan", *INPUT, "--agent-commit", "[")[0] == EXIT_USAGE
     assert run("scan", *INPUT, "--agent-commit", "Generated-by: mybot")[0] == EXIT_OK
+
+
+def test_scan_of_a_missing_repo_says_so() -> None:
+    code, _, err = run("scan", "/no/such/repo/anywhere")
+    assert code == EXIT_ERROR and "does not exist" in err

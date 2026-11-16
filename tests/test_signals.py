@@ -1922,11 +1922,12 @@ def test_edit_and_run_rounds_that_never_go_green_do_not_converge(tmp_path: Path)
     (found,) = by_signal(detect(stuck(8), tmp_path), signals.NO_CONVERGENCE)
     assert keys(found) == [("command", "pytest"), ("file", "src/a.py")]
     assert found.detail["count"] == "8" and "8 rounds" in found.summary
-    assert found.interval is not None
-    assert 7 * 60 < found.interval[1] - found.interval[0] <= signals.NO_CONVERGENCE_CAP_SECONDS
+    # only the red runs (60 s each) and the edits between them are claimed
+    claimed = sum(end - start for start, end in found.intervals)
+    assert found.interval is None and 8 * 60 <= claimed < 8 * 60 + 8 * 10
     long = by_signal(detect(stuck(40), tmp_path), signals.NO_CONVERGENCE)[0]
-    assert long.interval is not None
-    assert long.interval[1] - long.interval[0] == signals.NO_CONVERGENCE_CAP_SECONDS
+    capped = sum(end - start for start, end in long.intervals)
+    assert capped == pytest.approx(signals.NO_CONVERGENCE_CAP_SECONDS)
 
 
 def test_rounds_that_converge_or_are_few_are_not_recorded(tmp_path: Path) -> None:
@@ -2216,3 +2217,183 @@ def test_the_same_command_in_two_packages_is_two_commands(tmp_path: Path) -> Non
 )
 def test_a_problem_that_predates_the_agent_is_not_a_correction(text: str) -> None:
     assert signals.correction_confidence(text)[0] == 0.0
+
+
+# ---- round 10 -------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("output", "verdict"),
+    [
+        ("Found 2 errors (2 fixed, 0 remaining).", "green"),
+        ("Found 2 errors (1 fixed, 1 remaining).", "red"),
+        ("Found 3 errors.", "red"),
+        ("All checks passed!", "green"),
+        ("Found 3 errors in 2 files (checked 9 source files)", "red"),
+        ("Success: no issues found in 9 source files", "green"),
+        ("........  [100%]", "green"),
+        ("..F.....  [100%]", None),
+        ("compiling...", None),
+    ],
+)
+def test_output_verdicts(output: str, verdict: str | None) -> None:
+    assert signals.output_verdict(output) == verdict
+
+
+def test_each_tool_is_judged_by_its_own_summary_line() -> None:
+    mypy_red = "All checks passed!\nFound 3 errors in 2 files (checked 9 source files)"
+    assert signals.key_verdict("ruff check", mypy_red) == "green"
+    assert signals.key_verdict("mypy", mypy_red) == "red"
+    assert signals.key_verdict("uv run pytest", mypy_red) is None
+    assert signals.key_verdict("ruff check", "Found 2 errors (2 fixed, 0 remaining).") == "green"
+    assert signals.key_verdict("git push", "1 failed in 2s") is None
+
+
+def test_a_successful_fix_run_in_a_chain_is_not_a_failure(tmp_path: Path) -> None:
+    s = Session().user("add the feature")
+    for i in range(5):
+        s.edit(A, f"a{i}", f"b{i}")
+        s.bash(
+            "ruff check --fix src | tail -1; pytest -q 2>&1 | tail -1",
+            "Found 2 errors (2 fixed, 0 remaining).\n21 passed in 1s",
+        )
+    assert detect(s, tmp_path) == []
+    red = (
+        Session()
+        .user("go")
+        .bash(
+            "ruff check src | tail -1; pytest -q 2>&1 | tail -1", "Found 2 errors.\n21 passed in 1s"
+        )
+    )
+    (found,) = detect(red, tmp_path)
+    assert keys(found)[0] == ("command", "ruff check") and found.detail["variant"] == "ordinary"
+
+
+def test_a_green_step_closes_its_own_loop_even_if_another_step_is_red(tmp_path: Path) -> None:
+    line = "ruff check . | tail -1; mypy | tail -1; pytest -q | tail -1"
+    s = Session().user("go")
+    s.bash("ruff check .", "Found 1 error.", exit_code=1).edit(A)
+    s.bash(line, "All checks passed!\nSuccess: no issues found\n1 failed, 20 passed in 2s")
+    (found,) = detect(s, tmp_path)  # ruff went red -> fix -> green; pytest is the red one
+    assert keys(found)[0] == ("command", "pytest") and found.detail["status"] == "hidden"
+
+    stuck_lint = Session().user("go")
+    for i in range(5):
+        stuck_lint.edit(A, f"a{i}", f"b{i}").bash("ruff check .", "Found 1 error.", exit_code=1)
+    stuck_lint.edit(A, "x", "y")
+    stuck_lint.bash(line, "All checks passed!\nSuccess: no issues found\n1 failed, 2 passed in 2s")
+    assert by_signal(detect(stuck_lint, tmp_path), signals.NO_CONVERGENCE) == []
+    # an error that cannot be pinned on a step of such a line is not a failure of its last one
+    quoted = (
+        Session()
+        .user("go")
+        .bash(
+            "python3 scripts/gen.py | tail -3; mypy | tail -1",
+            "bash: frobnicate: command not found\nSuccess: no issues found",
+        )
+    )
+    assert detect(quoted, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("red", "green", "output"),
+    [
+        ("pytest tests/test_app.py", "make check", "42 passed in 3s"),
+        ("npm test", "npm run ci", "done"),
+        ("ruff check .", "pre-commit run --all-files", "ruff....Passed"),
+        ("pytest -x", "nox -s tests", "ok"),
+        ("pytest -x", "pytest -q 2>&1 | tail -3 | head -1", "........  [100%]"),
+        ("ruff check .", "./scripts/everything.sh", "All checks passed!"),
+    ],
+)
+def test_a_green_aggregate_or_namesake_ends_the_stretch(
+    tmp_path: Path, red: str, green: str, output: str
+) -> None:
+    s = Session().user("fix the bug")
+    for i in range(5):
+        s.edit(A, f"a{i}", f"b{i}").bash(red, "1 failed, 41 passed in 3s", exit_code=1)
+    s.edit(A, "z", "y").bash(green, output)
+    assert by_signal(detect(s, tmp_path), signals.NO_CONVERGENCE) == []
+
+
+def test_what_does_not_end_a_stretch(tmp_path: Path) -> None:
+    for green, output in (("git status", "clean"), ("cargo check", "ok"), ("ls", "x")):
+        s = Session().user("fix the bug")
+        for i in range(5):
+            s.edit(A, f"a{i}", f"b{i}").bash("pytest", "1 failed in 3s", exit_code=1)
+        s.edit(A, "z", "y").bash(green, output)
+        assert len(by_signal(detect(s, tmp_path), signals.NO_CONVERGENCE)) == 1, green
+    # the last run showed neither red nor green: a weak lead that claims no time
+    s = Session().user("fix the bug")
+    for i in range(5):
+        s.edit(A, f"a{i}", f"b{i}").bash("pytest", "1 failed in 3s", exit_code=1)
+    s.edit(A, "z", "y").bash("pytest -q 2>&1 | tail -1", "")
+    (found,) = by_signal(detect(s, tmp_path), signals.NO_CONVERGENCE)
+    assert found.detail["uncertain"] == "1" and found.intervals == () and scoring.is_weak(found)
+    assert "neither red nor green" in found.summary
+
+
+def test_a_pause_does_not_undo_a_corroborated_correction(tmp_path: Path) -> None:
+    for message in ("No, that's wrong, revert src/a.py", "No, that's wrong. Use a dict."):
+        s = Session().user("go").edit(A, "a", "b").say("done")
+        s.tick(3600).user(message).edit(A, "b", "a")
+        (found,) = by_signal(detect(s, tmp_path), signals.USER_CORRECTION)
+        assert "the agent then changed src/a.py again" in found.summary
+        idle = Session().user("go").edit(A, "a", "b").say("done")
+        idle.tick(3600).user(message).read(B)  # after the pause, nothing happens to the file
+        (weak,) = detect(idle, tmp_path)
+        assert weak.signal == signals.PROBABLE_CORRECTION and "not corroborated" in weak.summary
+    cues = Session().user("go").edit(A).say("done")
+    cues.user("Actually we should use a dict instead")
+    assert "weaker cues only" in detect(cues, tmp_path)[0].summary
+
+
+@pytest.mark.parametrize(
+    ("typo", "right", "is_typo"),
+    [
+        ("npm run biuld", "npm run build", True),
+        ("make tset", "make test", True),
+        ("make lint", "make test", False),
+        ("npm run build", "npm run build", False),
+        ("make a", "make b", False),
+        ("pytest", "make test", False),
+    ],
+)
+def test_typos(typo: str, right: str, is_typo: bool) -> None:
+    assert signals.is_typo_of(typo, right) is is_typo
+
+
+def test_a_mistyped_command_the_agent_corrected_is_weak(tmp_path: Path) -> None:
+    s = (
+        Session()
+        .user("build")
+        .bash("npm run biuld", 'npm error Missing script: "biuld"', exit_code=1)
+    )
+    s.bash("npm run build", "done")
+    (found,) = detect(s, tmp_path)
+    assert found.detail["typo_of"] == "npm run build" and scoring.is_weak(found)
+    assert "mistyped `npm run build`" in found.summary
+    never = (
+        Session()
+        .user("build")
+        .bash("npm run biuld", 'npm error Missing script: "biuld"', exit_code=1)
+    )
+    (kept,) = detect(never, tmp_path)
+    assert "typo_of" not in kept.detail and not scoring.is_weak(kept)
+
+
+def test_weak_signals_claim_no_time(tmp_path: Path) -> None:
+    s = Session().user("go").grep("NoSuchName", "/repo/src").read("/repo/.env", missing=True)
+    s.read("/repo/src/models.py", missing=True)
+    search, probe, miss = detect(s, tmp_path)
+    assert search.interval is None and probe.interval is None and miss.interval is not None
+
+
+def test_instructions_to_a_subagent_are_turn_boundaries(tmp_path: Path) -> None:
+    s = Session(sidechain=True).user("task one: make the test pass")
+    for i in range(3):
+        s.edit(A, f"a{i}", f"b{i}").bash("pytest", "1 failed in 1s", exit_code=1)
+    s.user("task two: now the other test")  # injected by the coordinating agent
+    for i in range(3, 6):
+        s.edit(A, f"a{i}", f"b{i}").bash("pytest", "1 failed in 1s", exit_code=1)
+    assert by_signal(detect(s, tmp_path), signals.NO_CONVERGENCE) == []

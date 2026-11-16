@@ -8,6 +8,7 @@ import pytest
 from agent_friction.attribution import (
     PathResolver,
     command_role,
+    is_aggregate_check,
     is_replacement,
     is_setup_command,
     normalize_command,
@@ -514,3 +515,41 @@ def test_targets_keep_their_name_in_any_case(command: str, key: str, public: str
     assert normalize_command(command) == key
     hidden = public_key(key)
     assert hidden.startswith(public) and "Zebra" not in hidden
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ag TODO src",
+        "fd -e py",
+        "rg -q pattern",
+        "pg_isready -h localhost",
+        "nc -z localhost 5432",
+        "npm outdated",
+        "terraform plan -detailed-exitcode",
+        "test -f x",
+        "[ -d node_modules ]",
+    ],
+)
+def test_tools_whose_exit_status_is_an_answer(command: str) -> None:
+    assert parse_command(command).inspection
+    assert not parse_command("terraform plan").inspection
+
+
+@pytest.mark.parametrize(
+    ("key", "aggregate"),
+    [
+        ("make check", True),
+        ("npm run ci", True),
+        ("pre-commit run", True),
+        ("just verify", True),
+        ("make all", True),
+        ("ruff check", False),
+        ("cargo check", False),
+        ("terraform validate", False),
+        ("make test", False),
+        ("git checkout", False),
+    ],
+)
+def test_aggregate_checks(key: str, aggregate: bool) -> None:
+    assert is_aggregate_check(key) is aggregate

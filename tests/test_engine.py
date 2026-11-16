@@ -1163,3 +1163,45 @@ def test_packages_of_a_monorepo_get_their_own_command_rows(tmp_path: Path) -> No
     assert out["exposure"]["command"]["npm test (api/)"] == 3
     hidden = _scan(tmp_path, sessions, include_excerpts=False)
     assert [c["path"] for c in hidden["commands"]] == ["npm test (web/)"]
+
+
+# ---- round 10 -------------------------------------------------------------------------------
+
+
+def test_capped_rows_are_low_confidence_and_claim_no_time(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sessions = []
+    for i in range(4):
+        s = Session(f"w{i}", cwd=str(repo)).user(f"task {i}")
+        s.grep(f"Feature{i}", f"{repo}/src").read(f"{repo}/.env", missing=True)
+        s.bash("mypy", "Found 2 errors in 1 file (checked 3 source files)", exit_code=1)
+        sessions.append(s)
+    out = _scan(tmp_path, sessions)
+    rows = [*out["hotspots"], *out["commands"], *out["directories"]]
+    assert len(rows) == 3 and out["totals"]["est_minutes_lost"] == 0
+    for row in rows:
+        assert row["score_detail"]["capped"] is True and row["confidence"] == "low"
+        assert row["est_minutes_lost"] == 0 and "low confidence" in row["why"]
+
+    stuck = _scan(tmp_path / "one", _stuck_sessions(tmp_path / "one" / "repo", 1))
+    assert stuck["totals"]["est_minutes_lost"] == 0  # one stuck session: a lead, no minutes
+    assert entry(stuck["commands"], "pytest")["confidence"] == "low"
+
+
+def test_no_convergence_time_is_the_red_runs_not_the_span(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sessions = []
+    for n in range(3):
+        s = Session(f"t{n}", cwd=str(repo)).user("fix the bug")
+        for i in range(5):
+            s.edit(f"{repo}/src/app.py", f"a{i}", f"b{i}").tick(120)  # two minutes of thinking
+            s.bash("pytest -x", "1 failed in 3s", exit_code=1, took=30)
+        sessions.append(s)
+    out = _scan(tmp_path, sessions)
+    row = entry(out["commands"], "pytest")
+    assert row["score_detail"]["capped"] is False
+    assert 7.5 <= row["est_minutes_lost"] <= 9  # 3 x 5 red runs of 30 s, plus the edits between
+    (stretch,) = [e for e in row["evidence"] if e["signal"] == "no-convergence"][:1]
+    assert 150 <= stretch["est_seconds_lost"] <= 180

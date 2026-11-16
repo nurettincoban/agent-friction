@@ -213,3 +213,30 @@ def test_more_shapes_of_a_password(text: str) -> None:
 )
 def test_password_rules_leave_ordinary_text_alone(text: str) -> None:
     assert redact.redact(text) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "machine api.example.com login bob password hunter2pass",
+        "machine h\n  login bob\n  password hunter2pass\n",
+        "curl -X POST https://hooks.slack.com/services/T000/B000/hunter2pass -d '{}'",
+        "https://discord.com/api/webhooks/1234567890/hunter2pass",
+        "openssl enc -aes-256-cbc -k hunter2pass -in data",
+        "openssl rsa -passin pass:hunter2pass -in key.pem",
+    ],
+)
+def test_netrc_webhooks_and_openssl_passwords(text: str) -> None:
+    assert "hunter2pass" not in redact.redact(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "the login page password field is required",
+        "openssl x509 -in cert.pem -noout",
+        "see https://api.slack.com/messaging/webhooks",
+    ],
+)
+def test_those_rules_leave_ordinary_text_alone(text: str) -> None:
+    assert redact.redact(text) == text

@@ -283,11 +283,12 @@ Each event may claim a wall-clock interval from transcript timestamps:
 | `edit-miss`, `stale-edit` | one round trip; extended to the edit of the same file that lands only if every tool call in between failed too |
 | `command-failure` (setup/invocation) | one round trip; extended to the end of the command that recovered it (the same command succeeding, or a replacement doing the same job, within the next 5 shell calls of the turn) only if every tool call in between failed too |
 | `command-failure` (ordinary) | none |
-| `path-miss`, `search-miss`, `file-too-large`, `tool-rejected`, `permission-denied` | one round trip |
+| `path-miss`, `file-too-large`, `tool-rejected`, `permission-denied` | one round trip (a `path-miss` that is a routine probe for an optional file: none) |
+| `search-miss`, `probable-correction` | none: weak signals never claim time |
 | `edit-revert` | from the original edit to the revert if both are in the same turn; otherwise one round trip |
 | `user-correction` | the rework only: from the agent's first tool call after the correction to its last change to the files the correction was about, in that turn; one round trip (that first call) if it does not return to those files; nothing if the session ends there. A `probable-correction` claims nothing |
 | `user-interrupt` | the call that was cut short: from its start to the interrupt |
-| `no-convergence` | from the first red run of the stretch to the end of the last, at most 15 minutes |
+| `no-convergence` | the red runs of the stretch (call to result) and the edits between them, at most 15 minutes, and only when the command or file has such events in 2+ sessions; otherwise none |
 | `retry-loop`, `edit-thrash`, `read-loop`, `human-rework` | none (no defensible estimate) |
 
 **One round trip** runs from the call to the agent's *next activity* (its next
@@ -306,6 +307,12 @@ Every interval is capped at **5 minutes** (`no-convergence`: 15). `est_minutes_l
 a tree node or the whole report is the length of the **union** of its
 intervals (merged per transcript stream), so overlapping events are never
 counted twice.
+
+**Weak evidence claims no time.** Search misses, probable corrections,
+ordinary command failures, probes for optional files, and a `no-convergence`
+stretch seen in a single session are leads. They can be listed and scored
+(under the cap), but they add nothing to `est_minutes_lost`, in a row or in
+the totals: a capped row always shows 0.
 
 This is an estimate of agent wall-clock time that demonstrably went into
 failed calls or into redoing work. It is not a measure of human time, and it
@@ -331,7 +338,7 @@ when `max_evidence` hides some events).
 | --- | --- |
 | `high` | 3 or more distinct sessions **and** 2 or more distinct signal types, not counting hotspots whose only signals are the weak ones (`read-loop`, `edit-thrash`, `search-miss`, `probable-correction`, ordinary command failures) |
 | `medium` | 2 or more distinct sessions |
-| `low` | a single session |
+| `low` | a single session, **or** a target whose score is capped because all its evidence is weak (see Score), in however many sessions |
 
 A signal that is computed from other events is not a second kind of evidence
 next to them: `retry-loop` and `no-convergence` are derived from
@@ -420,6 +427,9 @@ Transcripts contain secrets. The engine therefore:
   network addresses (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) and host
   names ending in `.internal`, `.local`, `.corp` or `.lan` (`db.internal`,
   `build01.corp`; not `settings.local.json` or `threading.local()`);
+  `.netrc` entries (`machine h login u password X`, or a line that is only
+  `password X`); Slack and Discord webhook URLs; `openssl ... -k X` and
+  `-pass pass:X` / `-passin` / `-passout`;
   hex strings of 32+ characters, **except** strings of exactly 40 lower-case
   hex digits, which are git commit ids and are kept; bare 40-character
   base64 strings containing `/` or `+` (the shape of an AWS secret access

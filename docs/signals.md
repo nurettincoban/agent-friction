@@ -164,9 +164,11 @@ corroborated: ...").
     then a leading "No, ...", "Not quite", "Wrong." or "Stop." is read as an
     answer, not an objection. Phrases addressed to the agent still count.
   - *A long pause:* a verdict typed more than 5 minutes after the agent's last
-    activity, with nothing addressed to the agent, is only a *probable*
-    correction (confidence 0.4, never quoted): by then the human has often
-    moved on to something else.
+    activity, with nothing addressed to the agent, may be about something
+    else by then. Naming a changed file is then not enough: it counts as a
+    correction only if the agent goes back to the files in the turn that
+    follows (the named ones, if any were named). Without that follow-up it
+    is a *probable* correction (confidence 0.4, never quoted).
 - **Weaker cues:** a leading "actually"; "don't <verb>" (not "don't forget /
   worry / bother / need", not "don't ... yet"); "stop <doing>"; "instead";
   "wrong / incorrect / mistake"; "shouldn't / you should have / supposed to"
@@ -297,7 +299,29 @@ edit-and-run round), every run failed as an *ordinary* failure, and the turn
 (or the session) ended with the command still red. One event per command and
 turn. A green run of the command, or of another command doing the same job
 (`make test` after `pytest ...`), at any point in the turn clears the count:
-red, fix, green is never recorded, however many rounds it took. Re-running
+red, fix, green is never recorded, however many rounds it took. So do
+
+- an **aggregate target** that runs every check: a make/just/npm/... target or
+  script named `check`, `ci`, `verify`, `validate`, `all`, `precommit`,
+  `qa`, ... (`AGGREGATE_WORDS`), or `pre-commit run`. A green `make check`
+  ends a red `pytest` and a red `ruff check` alike (not `cargo check` or
+  `ruff check`, which are single jobs);
+- **any exit-0 command whose output carries the passing summary of the red
+  command's own tool** (`./scripts/everything.sh` printing "All checks
+  passed!" for a red `ruff check`);
+- **the turn's last check being green:** if the last test, lint, type-check,
+  format, build or aggregate command of the turn passed and nothing went red
+  after it, the turn converged and no event is emitted, whatever the passing
+  command was called.
+
+If the command's **latest run showed neither red nor green** (`pytest -q | tail
+-1` cut the verdict off; see `command-failure`), nobody saw how it ended: the
+event is kept as a weak lead ("its later runs showed neither red nor green"),
+capped, without recommendation and without any time claimed.
+
+Instructions that a coordinating agent sends to a **subagent** are turn
+boundaries like human prompts, so a subagent's rounds are counted per
+instruction, not across its whole transcript. Re-running
 without changing anything is a [retry loop](#retry-loop--retry-loop) instead,
 and rounds in different turns are not added up, because a human steered in
 between. Inline code (`python -c`) and setup/invocation errors do not count
@@ -310,12 +334,15 @@ or handed back.
 **Attribution:** the normalized command, in full, and the files edited between
 the red runs (the 3 most edited, the event split evenly between them).
 
-**Time:** from the first red run to the end of the last one, at most 15
-minutes. Waiting for a human is never inside a turn, so it is not included.
+**Time:** only the red runs themselves (each from call to result) and the
+edits between them, at most 15 minutes per event, newest first. The agent's
+reading and thinking between the rounds is not claimed: it may have been
+useful. An event from a single session (see below) claims no time at all.
 
 **One session is not a pattern.** A hard task can take many rounds. A target
 whose `no-convergence` events all come from one session is treated like weak
-evidence (capped, no recommendation); from two sessions on it counts in full.
+evidence (capped, low confidence, no recommendation, no minutes in the row
+or in the totals); from two sessions on it counts in full.
 It is derived from `command-failure`, so next to it it is not a second kind
 of evidence for confidence.
 
@@ -407,6 +434,13 @@ lines, so this signal weighs less than an edit miss (1.5), and it never raises
 confidence: agent commits are not counted as sessions, and `human-rework` is
 not counted as a kind of evidence, when confidence is assigned. A file whose
 only evidence is rework is always "low" confidence.
+
+**A repo-wide sweep is not rework.** A human commit that touches more than
+20 files, does not call itself a fix, and either names a mechanical change
+in its subject (reformat, prettier, black, lint, style, whitespace, license
+headers, rename, codemod, ...) or replaces about as many lines as it adds
+(within 20 %) is skipped like a bot commit (`is_sweep`): it rewrites the
+agent's lines together with everybody else's.
 
 **False positives:** a human changing the agent's lines for a new requirement
 rather than because they were wrong; a file the agent created, where any
@@ -512,8 +546,21 @@ successfully once before being removed (read as debugging).
     command failure, with "judged from its output" in the summary;
   - **green** if it shows a passing summary (`N passed`, `Tests: N passed`,
     `ok pkg 0.1s`, `test result: ok`, `All checks passed`, `Success: no
-    issues`, `Found 0 errors`, `N passing`, `N examples, 0 failures`;
-    `GREEN_OUTPUT_RE`);
+    issues`, `Found 0 errors`, `Found N errors (N fixed, 0 remaining)`, `N
+    passing`, `N examples, 0 failures`, pytest's last progress line `....
+    [100%]` without `F` or `E`; `GREEN_OUTPUT_RE`);
+  - In a line with **several commands** (`ruff check . | tail -1; mypy | tail
+    -1; pytest -q | tail -1`) each step is judged only by the summary of its
+    own kind of tool (`VERDICT_SIGNATURES`: test, lint, type-check, format,
+    build): ruff's `Found N errors` is not mypy's `Found N errors in M
+    files`, and `Found 2 errors (2 fixed, 0 remaining)` is a successful
+    `--fix`, i.e. green. The first step with a red verdict is the one that
+    failed; a step whose own passing summary appears ran green and closes
+    its own red, fix, green loop even when another step of the line is red;
+    and a setup error counts only if the output pins it on a step (the shell
+    names the program, or the step's own signature is present). Text that
+    merely looks like an error somewhere in the output of such a line is
+    not a failure of its last command.
   - **unknown** otherwise. An unknown run is not a failure, and it is never
     used as proof of success either: it does not close a red, fix, green
     loop, is never the `recovered_by` of an earlier failure, does not end a
@@ -548,6 +595,12 @@ successfully once before being removed (read as debugging).
   green. A missing third-party module (`No module named 'yaml'`) is never
   created in the repo and stays a setup error. Other setup/invocation errors
   are never dropped.
+- *A typo the agent corrected is weak:* a setup/invocation failure followed,
+  within the next 5 shell calls of the turn, by a successful command that
+  differs from it in one word by an edit distance of at most 2 (`npm run
+  biuld` then `npm run build`, `make tset` then `make test`) is marked as a
+  mistyped form of that command. It is weak evidence, and never something to
+  document.
 - *Waiting:* the same command line failing repeatedly and then passing with
   nothing changed is dropped (see [retry loop](#retry-loop--retry-loop)).
 - *`git commit` routines:* "nothing to commit" is a no-op and not recorded. A
@@ -567,7 +620,8 @@ successfully once before being removed (read as debugging).
 - *Ignored:* read-only inspection commands and probes whose exit status is
   the answer (`ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `find`, `sed`
   without `-i`, `awk`, `jq`, `diff`, `test`, `[`, `which`, `command -v`,
-  `type`, `hash`, `pgrep`, `lsof`, `git diff | status | log | show | blame |
+  `type`, `hash`, `pgrep`, `lsof`, `ag`, `fd`, `pg_isready`, `nc -z`, `ping`,
+  `terraform plan -detailed-exitcode`, `git diff | status | log | show | blame |
   rev-parse | merge-base | check-ignore`, `gh pr view | status | checks`, `pip
   show | list`, `npm ls`, `docker ps`, ...; the lists are
   `INSPECTION_PROGRAMS` and `INSPECTION_KEYS`); pipelines ending in

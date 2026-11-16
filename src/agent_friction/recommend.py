@@ -126,9 +126,22 @@ def _top(values: Sequence[str], limit: int = MAX_QUOTES) -> list[tuple[str, int]
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
 
 
+def code(value: str) -> str:
+    """``value`` as a Markdown inline code span, whatever it contains.
+
+    The fence is one backtick longer than the longest run of backticks in the
+    value, and the value is padded with a space where it starts or ends with
+    one (CommonMark strips that padding again).
+    """
+    runs = re.findall(r"`+", value)
+    fence = "`" * (max(map(len, runs), default=0) + 1)
+    pad = " " if value.startswith("`") or value.endswith("`") else ""
+    return f"{fence}{pad}{value}{pad}{fence}"
+
+
 def _code_list(pairs: Sequence[tuple[str, int]], quote: Quoter) -> str:
     return ", ".join(
-        f"`{quote(value, QUOTE_CHARS)}`" + (f" ({count}x)" if count > 1 else "")
+        code(quote(value, QUOTE_CHARS)) + (f" ({count}x)" if count > 1 else "")
         for value, count in pairs
     )
 
@@ -239,11 +252,11 @@ class _Rules:
             return
         rounds = max(int(f.detail.get("count", "0")) for f in found)
         if key is not None:
-            title = f"Agents cannot get `{key}` to pass"
-            opening = f"Agents edited and re-ran `{key}`"
+            title = f"Agents cannot get {code(key)} to pass"
+            opening = f"Agents edited and re-ran {code(key)}"
         else:
             commands = _top([_command_key(f) for f in found], 2)
-            names = " / ".join(f"`{name}`" for name, _ in commands) or "the check"
+            names = " / ".join(f"{code(name)}" for name, _ in commands) or "the check"
             title = "Edits here do not get the check to pass"
             opening = f"Agents edited this file and re-ran {names}"
         self.add(
@@ -451,6 +464,7 @@ class _Rules:
     def command(self, key: str) -> None:
         failures = self.get(signals.COMMAND_FAILURE)
         invocation = self.get(signals.COMMAND_FAILURE, "invocation")
+        invocation = [f for f in invocation if "typo_of" not in f.detail]
         retries = self.get(signals.RETRY_LOOP)
         servers = [f for f in invocation if f.detail.get("server")]
         invocation = [f for f in invocation if not f.detail.get("server")]
@@ -461,8 +475,8 @@ class _Rules:
         if len(slow) >= MIN_EVENTS:
             self.add(
                 "give-it-more-time",
-                f"`{key}` outlasts the harness timeout",
-                f"`{key}` was cut off by the harness timeout {_in_sessions(slow)}. Say in "
+                f"{code(key)} outlasts the harness timeout",
+                f"{code(key)} was cut off by the harness timeout {_in_sessions(slow)}. Say in "
                 "AGENTS.md how long it normally takes and to run it with a longer timeout or "
                 "in the background, or point agents at a faster, narrower command for the "
                 "inner loop.",
@@ -471,8 +485,8 @@ class _Rules:
         if len(servers) >= MIN_EVENTS:
             self.add(
                 "run-it-in-the-background",
-                f"Tell agents to run `{key}` in the background",
-                f"`{key}` is a server or watcher that never exits; run in the foreground it "
+                f"Tell agents to run {code(key)} in the background",
+                f"{code(key)} is a server or watcher that never exits; run in the foreground it "
                 f"sat until the harness timed it out {_in_sessions(servers)}. Say in "
                 "AGENTS.md to start it in the background (and how to check that it is up "
                 "and how to stop it), or provide a script that does so.",
@@ -486,25 +500,27 @@ class _Rules:
             fix, count = fixes[0]
             self.add(
                 "use-the-working-command",
-                f"Tell agents to use `{fix}`",
-                f"`{key}` failed {_in_sessions(failures)}; {_times(count)} the agent then "
-                f"got the same job done with `{fix}`, and `{key}` did not work later in "
+                f"Tell agents to use {code(fix)}",
+                f"{code(key)} failed {_in_sessions(failures)}; {_times(count)} the agent then "
+                f"got the same job done with {code(fix)}, and {code(key)} did not work later in "
                 f"those sessions. Add a line to AGENTS.md such as: "
-                f'"use `{fix}`, not `{key}`".',
+                f'"use {code(fix)}, not {code(key)}".',
                 [signals.COMMAND_FAILURE],
             )
         elif setups and setups[0][1] >= MIN_EVENTS:
             setup, count = setups[0]
             self.add(
                 "document-the-setup-step",
-                f"Document the setup `{key}` needs",
-                f"`{key}` failed {_in_sessions(failures)}; {_times(count)} it worked after "
-                f'the agent ran `{setup}`. Say so in AGENTS.md ("run `{setup}` before '
-                f'`{key}`"), or make the environment ready before the agent starts.',
+                f"Document the setup {code(key)} needs",
+                f"{code(key)} failed {_in_sessions(failures)}; {_times(count)} it worked after "
+                f'the agent ran {code(setup)}. Say so in AGENTS.md ("run {code(setup)} before '
+                f'{code(key)}"), or make the environment ready before the agent starts.',
                 [signals.COMMAND_FAILURE],
             )
         elif len(invocation) >= MIN_EVENTS:
-            detail = f"`{key}` failed {_in_sessions(invocation)} with setup or invocation errors."
+            detail = (
+                f"{code(key)} failed {_in_sessions(invocation)} with setup or invocation errors."
+            )
             if self.quote is not None:
                 lines = _top([_error_line(f) for f in invocation], 2)
                 if lines:
@@ -518,7 +534,7 @@ class _Rules:
             )
             self.add(
                 "document-the-command",
-                f"Document how to run `{key}`",
+                f"Document how to run {code(key)}",
                 detail,
                 [signals.COMMAND_FAILURE],
             )
@@ -527,7 +543,7 @@ class _Rules:
             self.add(
                 "make-the-failure-actionable",
                 "Make this failure explain itself",
-                f"Agents re-ran `{key}` up to {longest} times in a row without success "
+                f"Agents re-ran {code(key)} up to {longest} times in a row without success "
                 f"({_n(len(retries), 'retry loop')} in {_n(_sessions(retries), 'session')}). The "
                 "output did not lead them to a fix: note the known cause in AGENTS.md, or "
                 "make the command fail fast with a message that says what to do.",
@@ -535,7 +551,7 @@ class _Rules:
             )
         self.no_convergence(key)
         self.rejections()
-        self.denials(f"`{key}`")
+        self.denials(f"{code(key)}")
         self.interrupts()
 
 

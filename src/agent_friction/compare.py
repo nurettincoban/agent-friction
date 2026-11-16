@@ -184,7 +184,7 @@ def render_compare(
         ("improved", "Improved"),
         ("resolved", "Resolved (touched afterwards, no friction)"),
         ("inactive", "No activity afterwards (no evidence either way)"),
-        ("too-little-data", "Too few sessions touched it to tell"),
+        ("too-little-data", "Too few sessions touched these to tell"),
     ]
     out: list[str] = ["# Friction comparison" if markdown else "agent-friction compare", ""]
     out += [summary_line(before, after), ""]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from agent_friction.report._common import (
@@ -19,10 +20,11 @@ def _cell(text: object) -> str:
 
 
 def _code(text: object) -> str:
-    """Inline code that survives backticks in the content."""
+    """Inline code that survives backticks in the content (CommonMark code spans)."""
     s = str(text).replace("\n", " ")
-    fence = "``" if "`" in s else "`"
-    pad = " " if fence == "``" else ""
+    longest = max((len(run) for run in re.findall(r"`+", s)), default=0)
+    fence = "`" * (longest + 1)
+    pad = " " if s.startswith("`") or s.endswith("`") else ""
     return f"{fence}{pad}{s}{pad}{fence}"
 
 
@@ -85,12 +87,21 @@ def _details(h: dict[str, Any], titles: dict[str, str]) -> list[str]:
 
 def _html_escape(s: str) -> str:
     """Escape HTML in prose, leaving `code spans` alone (GitHub shows them literally)."""
-    parts = s.split("`")
-    if len(parts) % 2 == 0:  # unbalanced backticks: escape everything
-        parts = [s]
-    for i in range(0, len(parts), 2):  # even indexes are outside code spans
-        parts[i] = parts[i].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return "`".join(parts)
+    out: list[str] = []
+    last = 0
+    for m in _CODE_SPAN.finditer(s):
+        out.append(_escape_prose(s[last : m.start()]))
+        out.append(m.group(0))
+        last = m.end()
+    out.append(_escape_prose(s[last:]))
+    return "".join(out)
+
+
+_CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.S)
+
+
+def _escape_prose(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:

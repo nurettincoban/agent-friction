@@ -152,12 +152,18 @@ def confidence(session_ids: Iterable[str], signal_ids: Iterable[str]) -> str:
     return "low"
 
 
+def claimed(finding: Finding) -> list[tuple[float, float]]:
+    """Every stretch of time a finding claims."""
+    first = [finding.interval] if finding.interval is not None else []
+    return [*first, *finding.intervals]
+
+
 def lost_seconds(findings: Iterable[Finding]) -> float:
     """Length of the union of the findings' intervals, merged per stream."""
     by_stream: dict[str, list[tuple[float, float]]] = {}
     for finding in findings:
-        if finding.interval is not None:
-            by_stream.setdefault(finding.stream, []).append(finding.interval)
+        for interval in claimed(finding):
+            by_stream.setdefault(finding.stream, []).append(interval)
     total = 0.0
     for intervals in by_stream.values():
         intervals.sort()
@@ -262,7 +268,10 @@ def is_weak(finding: Finding) -> bool:
     invocation errors, retry loops and human reactions make a command a hotspot.
     """
     if finding.signal == COMMAND_FAILURE:
-        return finding.detail.get("variant") == "ordinary"
+        # an ordinary failure, or a mistyped name that the agent then spelled correctly
+        return finding.detail.get("variant") == "ordinary" or "typo_of" in finding.detail
+    if finding.signal == NO_CONVERGENCE:
+        return finding.detail.get("uncertain") == "1"  # its end was not seen
     if finding.signal == PATH_MISS:
         return finding.detail.get("probe") == "1"  # looking for an optional README, .env, ...
     return finding.signal in WEAK_ALONE_SIGNALS
@@ -276,7 +285,7 @@ def weak_only(findings: Iterable[Finding]) -> bool:
     one-off probe before creating something new.
     """
     found = list(findings)
-    stuck = {f.session_id for f in found if f.signal == NO_CONVERGENCE}
+    stuck = {f.session_id for f in found if f.signal == NO_CONVERGENCE and not is_weak(f)}
     if not found or not all(is_weak(f) or f.signal == NO_CONVERGENCE for f in found):
         return False
     if len(stuck) >= MEDIUM_MIN_SESSIONS:

@@ -1,12 +1,12 @@
 agent-friction · shopfront
-6 sessions · 74 tool calls · 34 friction events · ~11m lost · 4 human corrections · 2026-10-26 → 2026-11-12
+6 sessions · 74 tool calls · 34 friction events · ~9m lost · 4 human corrections · 2026-10-26 → 2026-11-12
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals
   █████▋      56.8 src/shopfront/api/schema_gen.py           4     12      4m  ● edit-miss×6, user-correction×2
   ████▍       43.4 src/shopfront/checkout/service.py         3      6      2m  ● edit-revert×2, user-correction×2
   █▏          11.4 src/shopfront/payments/refunds.py         1      1     18s  ○ path-miss×1
-  █            9.7 api/openapi.yaml                          1      1     24s  ○ search-miss×1
+  █            9.7 api/openapi.yaml                          1      1      0s  ○ search-miss×1
   ▉            8.5 tests/test_refunds.py                     1      1      0s  ○ command-failure×1
 
 Commands that keep failing
@@ -18,7 +18,7 @@ Commands that keep failing
 
 Directories where agents search in vain
   score            directory                              sess events    lost  top signals
-  ███         29.5 src/shopfront                             2      5      1m  ◐ search-miss×5
+  ███         29.5 src/shopfront                             2      5      0s  ◐ search-miss×5
 
 What to fix first
   1. src/shopfront/api/schema_gen.py: Generated file: point agents at its source
