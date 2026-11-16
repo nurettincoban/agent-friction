@@ -139,3 +139,126 @@ def test_entropy_helper() -> None:
     assert redact.shannon_entropy("") == 0.0
     assert redact.shannon_entropy("aaaa") == 0.0
     assert redact.shannon_entropy("abcd") == pytest.approx(2.0)
+
+
+def test_more_secret_shapes() -> None:
+    aws_secret = "wJalrXUtnFEMI/K7MDENG/" + "bPxRfiCYEXAMPLEKEY"
+    assert aws_secret not in redact.redact(f"aws_secret is {aws_secret} ok")
+    assert redact.redact("docker login -u bob -p S3cr3tPass registry.example") == (
+        "docker login -u bob -p [REDACTED] registry.example"
+    )
+    django = "SECRET_KEY = 'django-insecure-" + "x9!k2@pq7$' # settings"
+    assert "django-insecure" not in redact.redact(django)
+    assert redact.redact("The author: Jane") == "The author: Jane"
+
+
+def test_commit_ids_and_ip_hosts_are_kept() -> None:
+    sha = "3f2a9c1b7d4e5f60718293a4b5c6d7e8f9012345"
+    assert len(sha) == redact.GIT_SHA_LENGTH
+    assert redact.redact(f"git revert {sha}") == f"git revert {sha}"
+    assert sha + "ab" not in redact.redact(f"token {sha}ab")  # longer hex is still masked
+    assert redact.redact("ssh root@8.8.4.4 uptime") == "ssh root@8.8.4.4 uptime"
+    assert "jane@example.com" not in redact.redact("mail jane@example.com")
+
+
+def test_control_and_bidi_characters_never_survive() -> None:
+    raw = "a\x1b[2Jb\x1b]0;title\x07c‮d\te\nf\x00\x9b⁦g"
+    assert redact.strip_controls(raw) == "abcd\te\nfg"
+    assert redact.excerpt(raw, 240) == "abcd\te\nfg"
+    assert redact.one_line(raw, 240) == "abcd e fg"
+    assert redact.strip_controls("plain text") == "plain text"
+
+
+def test_private_addresses_and_internal_hosts_are_masked() -> None:
+    text = redact.redact(
+        'connection to "db.internal" (10.2.3.4) failed; tried 192.168.1.20, 172.16.0.9, '
+        "http://nas.local:8080/x and build01.corp"
+    )
+    for secret in ("db.internal", "10.2.3.4", "192.168.1.20", "172.16.0.9", "nas.local", "build01"):
+        assert secret not in text
+    assert text.count("[REDACTED:private-ip]") == 3
+    assert text.count("[REDACTED:internal-host]") == 3
+    kept = (
+        "8.8.8.8 172.32.0.1 110.2.3.4 version 10.2.3 .claude/settings.local.json "
+        "threading.local() self.internal example.com"
+    )
+    assert redact.redact(kept) == kept
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "redis://:hunter2pass@cache:6379/0",
+        "echo hunter2pass | docker login --password-stdin -u bob registry.example.com",
+        "log in with password hunter2pass and retry",
+        "using password hunter2pass",
+        "pw hunter2pass",
+        "the pw is hunter2pass",
+        "password: hunter2pass",
+    ],
+)
+def test_more_shapes_of_a_password(text: str) -> None:
+    assert "hunter2pass" not in redact.redact(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "with password authentication enabled",
+        "use the password field of the form",
+        "http://example.com:8080/path",
+        "postgres://db.example.com:5432/shop",
+        "echo done | tail -1",
+    ],
+)
+def test_password_rules_leave_ordinary_text_alone(text: str) -> None:
+    assert redact.redact(text) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "machine api.example.com login bob password hunter2pass",
+        "machine h\n  login bob\n  password hunter2pass\n",
+        "curl -X POST https://hooks.slack.com/services/T000/B000/hunter2pass -d '{}'",
+        "https://discord.com/api/webhooks/1234567890/hunter2pass",
+        "openssl enc -aes-256-cbc -k hunter2pass -in data",
+        "openssl rsa -passin pass:hunter2pass -in key.pem",
+    ],
+)
+def test_netrc_webhooks_and_openssl_passwords(text: str) -> None:
+    assert "hunter2pass" not in redact.redact(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "the login page password field is required",
+        "openssl x509 -in cert.pem -noout",
+        "see https://api.slack.com/messaging/webhooks",
+    ],
+)
+def test_those_rules_leave_ordinary_text_alone(text: str) -> None:
+    assert redact.redact(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "secret", "expected"),
+    [
+        ("X-Api-Key: Tr0ub4dor&3", "&3", "X-Api-Key: [REDACTED]"),
+        ("curl -H 'X-Api-Key: Tr0ub4dor&3' u", "&3", "curl -H 'X-Api-Key: [REDACTED]' u"),
+        ('curl -H "X-Auth-Token: a b&c" u', "b&c", 'curl -H "X-Auth-Token: [REDACTED]" u'),
+        ("Api-Key: zz&y\nnext line", "zz&y", "Api-Key: [REDACTED]\nnext line"),
+        ("PASSWORD='ab&cd ef' ./run", "cd ef", "PASSWORD='[REDACTED]' ./run"),
+        ('{"password": "ab cd&e", "user": "bob"}', "cd&e", '"[REDACTED]", "user": "bob"}'),
+        ("token: ab&cd rest", "&cd", "token: [REDACTED] rest"),
+    ],
+)
+def test_a_secret_value_is_redacted_whole(text: str, secret: str, expected: str) -> None:
+    out = redact.redact(text)
+    assert secret not in out and expected in out
+
+
+def test_an_ampersand_still_ends_a_query_parameter() -> None:
+    assert redact.redact("https://x.test/?token=abcd1234&user=bob").endswith("[REDACTED]&user=bob")
+    assert redact.redact("auth-flow: we need to rework it") == "auth-flow: we need to rework it"

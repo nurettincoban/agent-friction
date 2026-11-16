@@ -79,7 +79,8 @@ _RULES: tuple[_Rule, ...] = (
     ),
     (
         "url-credentials",
-        re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/:@]+:[^\s/@]+@"),
+        # also password-only: ``redis://:hunter2@host``
+        re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/:@]*:[^\s/@]+@"),
         r"\1[REDACTED:credentials]@",
     ),
     (
@@ -93,9 +94,40 @@ _RULES: tuple[_Rule, ...] = (
         r"\1[REDACTED]",
     ),
     (
+        # `X-Api-Key: Tr0ub4dor&3`: a header value runs to the end of the line or the quote
+        "header",
+        re.compile(
+            rf"(?i)\b((?:(?:\w+-)+(?:{_SECRET_KEY_WORDS})(?:-\w+)*"  # a hyphenated name
+            rf"|(?:{_SECRET_KEY_WORDS})(?:-(?:key|token|secret|id|signature|value))+"
+            r"|api-key|access-key|private-key)"
+            r":[ \t]+)(?!\[REDACTED)([^\n\"']+)"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
+        # `PASSWORD='ab&cd ef'`, `"password": "ab cd"`: a quoted value ends at its quote
+        "quoted-assignment",
+        re.compile(
+            rf"(?i)\b([\w-]*(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"
+            r"[\"']?\s*[:=]\s*)([\"'])(?!\[REDACTED)[^\"'\n]{4,}\2"
+        ),
+        r"\1\2[REDACTED]\2",
+    ),
+    (
+        # `token: ab&cd`: only in `key=value&other=...` does `&` end the value
+        "colon-assignment",
+        re.compile(
+            rf"(?i)\b([\w-]*(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"
+            r"[\"']?\s*:\s*[\"']?)"
+            r"(?!\[REDACTED)([^\s\"',;]{4,})"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
         "assignment",
         re.compile(
-            rf"(?i)\b([\w-]*(?:{_SECRET_KEY_WORDS})[\"']?\s*[:=]\s*[\"']?)"
+            rf"(?i)\b([\w-]*(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"
+            r"[\"']?\s*[:=]\s*[\"']?)"
             r"(?!\[REDACTED)([^\s\"',;&]{4,})"
         ),
         r"\1[REDACTED]",
@@ -123,21 +155,135 @@ _RULES: tuple[_Rule, ...] = (
         r"\1[REDACTED]",
     ),
     (
+        "login-password-flag",
+        re.compile(r"(\blogin\b[^\n|;&]*?\s(?:-p|--password)(?:\s+|=))(?!\[REDACTED)(\S+)"),
+        r"\1[REDACTED]",
+    ),
+    (
         "prose-secret",
         re.compile(
-            r"(?i)\b((?:password|passwd|passphrase|pwd|secret|token|api[ _-]?key|access[ _-]?key)"
+            r"(?i)\b((?:password|passwd|passphrase|pwd|pw|secret|token|api[ _-]?key"
+            r"|access[ _-]?key)"
             r"\s+(?:is|was)\s+[\"'`]?)(?!\[REDACTED)([^\s\"'`,;]{4,})"
         ),
         r"\1[REDACTED]",
     ),
     (
+        # "log in with password hunter2", "using pw hunter2", "pw: hunter2"
+        "prose-password",
+        re.compile(
+            r"(?i)\b((?:(?:with|using|use|via|and|the)\s+(?:(?:the|a|my|our)\s+)?"
+            r"(?:password|passwd|passphrase|pwd|pw)|pw)(?:\s*[:=]\s*|\s+)[\"'`]?)"
+            r"(?!\[REDACTED)(?!(?:is|was|for|from|in|to|of|on|the|and|or|that|if|when|auth\w*"
+            r"|protect\w*|reset\w*|field|prompt|manager|file|hash\w*|based|change\w*|polic\w+"
+            r"|check\w*|valid\w*|input|form|flow|login|stdin|env\w*|variable|store\w*)\b)"
+            r"([^\s\"'`,;]{4,})"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
+        # ``echo hunter2 | docker login --password-stdin``
+        "password-stdin",
+        re.compile(
+            r"(?i)\b((?:echo|printf)\s+(?:-\w+\s+)*[\"']?)(?!\[REDACTED)([^\s|\"']+)"
+            r"([\"']?\s*\|[^\n;&]*--password-stdin)"
+        ),
+        r"\1[REDACTED]\3",
+    ),
+    (
+        # ~/.netrc: ``machine host login user password s3cret``
+        "netrc",
+        re.compile(
+            r"(?im)(\bmachine\s+\S+\s+(?:login\s+\S+\s+)?password\s+"
+            r"|^\s*(?:login\s+\S+\s+)?password\s+(?=\S+\s*$))(?!\[REDACTED)(\S+)"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
+        "webhook",
+        re.compile(
+            r"(?i)https://(?:hooks\.slack\.com/(?:services|workflows|triggers)"
+            r"|(?:\w+\.)?discord(?:app)?\.com/api/webhooks)/[^\s\"'<>]+"
+        ),
+        "[REDACTED:webhook]",
+    ),
+    (
+        # ``openssl enc -k s3cret``, ``-pass pass:s3cret``, ``-passin pass:...``
+        "openssl-pass",
+        re.compile(
+            r"(\bopenssl\b[^\n|;&]*?\s-k\s+|(?<![\w-])-pass(?:in|out)?\s+pass:)"
+            r"(?!\[REDACTED)(\S+)"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
         "email",
-        re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\b"),
+        # the host must end in a name, so ``root@10.0.0.1`` (an ssh target) is not an email
+        re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"),
         "[REDACTED:email]",
+    ),
+    (
+        "private-ip",
+        # RFC 1918 addresses: they describe somebody's network, not the problem at hand
+        re.compile(
+            r"(?<![\w.])(?:10(?:\.\d{1,3}){3}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}"
+            r"|192\.168(?:\.\d{1,3}){2})(?!\.?\d)"
+        ),
+        "[REDACTED:private-ip]",
+    ),
+    (
+        "internal-host",
+        # ``db.internal``, ``build01.corp``, ``nas.local``: names that only resolve inside
+        # an organisation. Not ``settings.local.json`` or ``threading.local()``.
+        re.compile(
+            r"(?i)(?<![\w.-])(?!(?:self|cls|this)\.)(?:[a-z0-9-]+\.)+"
+            r"(?:internal|local|corp|lan)\b(?![\w(]|\.[a-z])"
+        ),
+        "[REDACTED:internal-host]",
     ),
 )
 
 _HEX_RE = re.compile(rf"\b[0-9a-fA-F]{{{HEX_MIN_LENGTH},}}\b")
+#: Length of a full git commit id. Lower-case hex of exactly this length is left alone:
+#: evidence is full of commit ids, and they identify nothing outside the repository.
+GIT_SHA_LENGTH = 40
+#: A bare AWS-style secret key: 40 characters of base64 with at least one ``/`` or ``+``.
+_BASE64_40_RE = re.compile(r"(?<![A-Za-z0-9/+=])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+=])")
+#: Terminal control characters and invisible direction marks. Text from a transcript may
+#: contain escape sequences that clear a screen or reorder what a reader sees.
+_ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])")
+_CONTROL_RE = re.compile(
+    "[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]"
+)
+
+
+def strip_controls(text: str) -> str:
+    """Remove ANSI escape sequences, C0/C1 controls (except newline and tab) and bidi marks."""
+    if text.isascii() and text.isprintable():
+        return text
+    return _CONTROL_RE.sub("", _ANSI_RE.sub("", text))
+
+
+def _hex_sub(match: re.Match[str]) -> str:
+    token = match.group(0)
+    if len(token) == GIT_SHA_LENGTH and token == token.lower():
+        return token
+    return "[REDACTED:hex]"
+
+
+def _base64_sub(match: re.Match[str]) -> str:
+    token = match.group(0)
+    if (
+        ("/" in token or "+" in token)
+        and any(c.isdigit() for c in token)
+        and any(c.islower() for c in token)
+        and any(c.isupper() for c in token)
+        and shannon_entropy(token) >= ENTROPY_MIN_BITS
+    ):
+        return "[REDACTED:high-entropy]"
+    return token
+
+
 _ENTROPY_RE = re.compile(rf"[A-Za-z0-9+_=-]{{{ENTROPY_MIN_LENGTH},}}")
 _HOME_RES = (
     re.compile(r"(?<![\w.~-])/(?:home|Users)/[^/\s:\"'`<>|]+"),
@@ -186,9 +332,11 @@ def redact_home(text: str, home: Path | str | None = None) -> str:
 
 def redact(text: str, home: Path | str | None = None) -> str:
     """Return ``text`` with secrets, emails and home directories masked."""
+    text = strip_controls(text)
     for _name, pattern, replacement in _RULES:
         text = pattern.sub(replacement, text)
-    text = _HEX_RE.sub("[REDACTED:hex]", text)
+    text = _HEX_RE.sub(_hex_sub, text)
+    text = _BASE64_40_RE.sub(_base64_sub, text)
     text = _ENTROPY_RE.sub(_entropy_sub, text)
     return redact_home(text, home)
 

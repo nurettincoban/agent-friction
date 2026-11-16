@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from agent_friction import model, recommend, redact, signals
 from agent_friction.model import Finding, Target
 from agent_friction.recommend import FileFacts, file_facts
@@ -101,7 +103,8 @@ def test_other_file_rules() -> None:
     rework = finding(signals.HUMAN_REWORK, human_commit="abc12345")
     assert recs_for(rework, rework) == ["learn-from-rework"]
     loop = finding(signals.READ_LOOP)
-    assert recs_for(loop, loop) == ["summarize-this-file"]
+    assert recs_for(loop, loop) == []  # weak signals alone justify no advice
+    assert recs_for(loop, loop, finding(signals.PATH_MISS)) == ["summarize-this-file"]
     interrupt = finding(signals.USER_INTERRUPT)
     assert recs_for(interrupt) == [] and recs_for(interrupt, interrupt) == ["clarify-before-acting"]
     reject = finding(signals.TOOL_REJECTED, reason="")
@@ -109,8 +112,12 @@ def test_other_file_rules() -> None:
     assert recs_for(finding(signals.TOOL_REJECTED, reason="never touch this")) == [
         "state-the-boundary"
     ]
+    # ordinary failures of commands naming a file (red tests) call for no advice
     failure = finding(signals.COMMAND_FAILURE, variant="ordinary")
-    assert recs_for(failure, failure) == ["document-how-to-run"]
+    assert recs_for(failure, failure) == []
+    denied = finding(signals.PERMISSION_DENIED, variant="permission")
+    assert recs_for(denied) == []
+    assert recs_for(denied, denied) == ["allow-or-document-the-boundary"]
 
 
 def test_command_rules() -> None:
@@ -159,3 +166,138 @@ def test_directory_search_rule_lists_patterns() -> None:
     (plain,) = recommend.recommend(model.DIR, ".", found, None, None)
     assert "RefundPolicy" not in str(plain["detail"]) and "the whole repo" in str(plain["detail"])
     assert recommend.recommend(model.DIR, "src", found[:1], None, quote) == []
+
+
+# ---- round 6 ------------------------------------------------------------------------------
+
+
+def test_one_correction_is_not_a_rule_the_human_keeps_repeating() -> None:
+    once = [finding(signals.USER_CORRECTION, quote="No, use the client")]
+    (rec,) = recommend.recommend(model.FILE, "a.py", once, None, quote)
+    assert rec["title"] == "Check whether this correction is a standing rule"
+    assert "corrected the agent here once." in str(rec["detail"])
+    assert "keeps repeating" not in str(rec) and '"No, use the client"' in str(rec["detail"])
+    said = ("No, use PaymentClient, not the legacy module", "I told you: PaymentClient only!")
+    twice = [finding(signals.USER_CORRECTION, f"s{i}", fid=i, quote=q) for i, q in enumerate(said)]
+    (rec,) = recommend.recommend(model.FILE, "a.py", twice, None, quote)
+    assert rec["title"] == "Write down the rule the human keeps repeating"
+    assert "2 times in 2 sessions" in str(rec["detail"])
+    # the same verdict holds when the words themselves may not be shown
+    (bare,) = recommend.recommend(model.FILE, "a.py", twice, None, None)
+    assert bare["title"] == rec["title"] and "PaymentClient" not in str(bare)
+    # two corrections about different things are two one-offs, not a rule being repeated
+    said = ("No, use PaymentClient, not the legacy module", "That broke the migration, revert it")
+    other = [finding(signals.USER_CORRECTION, f"s{i}", fid=i, quote=q) for i, q in enumerate(said)]
+    (rec,) = recommend.recommend(model.FILE, "a.py", other, None, quote)
+    assert rec["title"] == "Check whether these corrections are standing rules"
+    assert "each time about something else" in str(rec["detail"])
+
+
+def test_probable_corrections_and_other_weak_signals_get_no_advice() -> None:
+    probable = [finding(signals.PROBABLE_CORRECTION, f"s{i}", quote="Actually") for i in range(4)]
+    assert recommend.recommend(model.FILE, "a.py", probable, None, quote) == []
+    weak = [
+        *probable,
+        *(finding(signals.EDIT_THRASH, f"s{i}") for i in range(3)),
+        *(finding(signals.READ_LOOP, f"s{i}") for i in range(3)),
+        *(finding(signals.SEARCH_MISS, f"s{i}", pattern=f"name{i}") for i in range(3)),
+    ]
+    assert recommend.recommend(model.FILE, "a.py", weak, None, quote) == []
+    # next to a real correction they still say nothing about corrections themselves
+    mixed = [*probable, finding(signals.USER_CORRECTION, quote="No, use the client")]
+    (rec,) = recommend.recommend(model.FILE, "a.py", mixed, None, quote)
+    assert "once" in str(rec["detail"]) and "Actually" not in str(rec["detail"])
+
+
+def test_a_search_for_the_same_name_in_two_sessions_still_gets_a_pointer() -> None:
+    found = [finding(signals.SEARCH_MISS, f"s{i}", pattern="RefundPolicy") for i in range(2)]
+    assert ids(recommend.recommend(model.DIR, "src", found, None, quote)) == ["add-a-pointer"]
+    same_session = [finding(signals.SEARCH_MISS, "s1", pattern="RefundPolicy") for _ in range(2)]
+    assert recommend.recommend(model.DIR, "src", same_session, None, quote) == []
+
+
+def test_thrash_that_ended_green_did_converge() -> None:
+    green = [finding(signals.EDIT_THRASH, f"s{i}", ended_green="1") for i in range(3)]
+    miss = finding(signals.EDIT_MISS, variant="not-found")
+    assert "add-a-fast-check" not in ids(recommend.recommend(model.FILE, "a.py", [*green, miss]))
+    red = [finding(signals.EDIT_THRASH, f"s{i}") for i in range(2)]
+    assert "add-a-fast-check" in ids(recommend.recommend(model.FILE, "a.py", [*red, miss]))
+
+
+def test_line_counts_are_pluralized() -> None:
+    loops = [finding(signals.READ_LOOP), finding(signals.READ_LOOP), finding(signals.PATH_MISS)]
+    recs = recommend.recommend(model.FILE, "a.py", loops, FileFacts(True, 1))
+    assert "(1 line)" in str(recs) and "1 lines" not in str(recs)
+
+
+def test_too_large_reads_recommend_splitting() -> None:
+    found = [finding(signals.FILE_TOO_LARGE, f"s{i}") for i in range(2)]
+    (rec,) = recommend.recommend(model.FILE, "big.py", found, FileFacts(True, 9000))
+    assert rec["id"] == "split-or-anchor-large-file" and "(9000 lines)" in str(rec["detail"])
+    assert recommend.recommend(model.FILE, "big.py", found[:1], FileFacts(True, 9000)) == []
+
+
+def test_a_foreground_server_is_to_be_run_in_the_background() -> None:
+    found = [
+        finding(signals.COMMAND_FAILURE, f"s{i}", variant="invocation", timeout="1", server="1")
+        for i in range(2)
+    ]
+    (rec,) = recommend.recommend(model.COMMAND, "npm run dev", found)
+    assert rec["id"] == "run-it-in-the-background" and "never exits" in str(rec["detail"])
+    plain = [
+        finding(signals.COMMAND_FAILURE, f"s{i}", variant="invocation", timeout="1")
+        for i in range(2)
+    ]
+    (rec,) = recommend.recommend(model.COMMAND, "npm run build", plain)
+    assert rec["id"] == "give-it-more-time" and "longer timeout" in str(rec["detail"])
+
+
+def test_harness_blocks_get_their_own_wording() -> None:
+    found = [finding(signals.PERMISSION_DENIED, f"s{i}", variant="blocked") for i in range(2)]
+    (rec,) = recommend.recommend(model.COMMAND, "gh run view", found)
+    assert rec["id"] == "allow-or-document-the-boundary"
+    assert "the harness itself refuses" in str(rec["detail"]) and "allow rule" not in str(rec)
+
+
+def test_inline_code_is_never_a_command_to_document() -> None:
+    found = [
+        finding(signals.COMMAND_FAILURE, f"s{i}", variant="invocation", key="python <inline>")
+        for i in range(3)
+    ]
+    recs = recommend.recommend(model.COMMAND, "python <inline>", found)
+    assert "document-the-command" not in ids(recs)
+    ordinary = [finding(signals.COMMAND_FAILURE, f"s{i}", variant="ordinary") for i in range(5)]
+    assert recommend.recommend(model.COMMAND, "pytest", ordinary) == []
+
+
+@pytest.mark.parametrize(
+    ("value", "span"),
+    [
+        ("plain", "`plain`"),
+        ("a`b", "``a`b``"),
+        ("``x", "``` ``x ```"),
+        ("x`", "`` x` ``"),
+        ("a``b`c", "```a``b`c```"),
+    ],
+)
+def test_code_spans_survive_backticks(value: str, span: str) -> None:
+    assert recommend.code(value) == span
+
+
+def test_a_search_pattern_with_backticks_stays_valid_markdown() -> None:
+    def miss(session: str, pattern: str) -> Finding:
+        found = finding(signals.SEARCH_MISS, session, pattern=pattern)
+        found.targets = [Target(model.DIR, "src")]
+        return found
+
+    found = [miss("s1", "a`b"), miss("s2", "a`b"), miss("s1", "``x"), miss("s2", "``x")]
+    (rec,) = recommend.recommend(model.DIR, "src", found, None, quote)
+    assert "``a`b`` (2x)" in str(rec["detail"]) and "``` ``x ``` (2x)" in str(rec["detail"])
+
+
+def test_a_typo_is_not_a_command_to_document() -> None:
+    typos = [
+        finding(signals.COMMAND_FAILURE, f"s{i}", variant="invocation", typo_of="npm run build")
+        for i in range(3)
+    ]
+    assert recommend.recommend(model.COMMAND, "npm run biuld", typos) == []

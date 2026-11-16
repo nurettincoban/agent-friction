@@ -20,27 +20,28 @@ with the evidence quoted so you can check it yourself.
 ```console
 $ agent-friction scan
 agent-friction · shopfront
-6 sessions · 74 tool calls · 35 friction events · ~28m lost · 5 human corrections
+6 sessions · 74 tool calls · 34 friction events · ~9m lost · 4 human corrections
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals
-  █████▋      56.8 src/shopfront/api/schema_gen.py           4     12     11m  ● edit-miss×6, user-correction×3
-  ████        39.8 src/shopfront/checkout/service.py         3      6     19m  ● user-correction×3, edit-revert×2
+  █████▋      56.8 src/shopfront/api/schema_gen.py           4     12      4m  ● edit-miss×6, user-correction×2
+  ████▍       43.4 src/shopfront/checkout/service.py         3      6      2m  ● edit-revert×2, user-correction×2
 
 Commands that keep failing
-  █████       50.5 pytest                                    4      8      6m  ● command-failure×7, retry-loop×1
+  ████▉       48.6 pytest                                    4      7      3m  ◐ command-failure×7
 
 What to fix first
   1. src/shopfront/api/schema_gen.py: Generated file: point agents at its source
      ...agents ran into trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md
      which source to change and which command regenerates it...
   2. pytest: Tell agents to use `make test`
-     `pytest` failed 7 times in 4 sessions; 5 times the next successful command was `make test`.
+     `pytest` failed 7 times in 4 sessions; 5 times the agent then got the same job done with
+     `make test`, and `pytest` did not work later in those sessions.
   3. src/shopfront/checkout/service.py: Write down the rule the human keeps repeating
      ...In their words: "No, I said use PaymentClient, not the legacy module. [...]"
 ```
 
-That output is real: it comes from the synthetic sessions in [`tests/fixtures`](https://github.com/nurettincoban/agent-friction/tree/main/tests/fixtures).
+That output is real, abridged to its top rows: it comes from the synthetic sessions in [`tests/fixtures`](https://github.com/nurettincoban/agent-friction/tree/main/tests/fixtures).
 See the full example as [Markdown](https://github.com/nurettincoban/agent-friction/blob/main/examples/shopfront.md), [JSON](https://github.com/nurettincoban/agent-friction/blob/main/examples/shopfront.json),
 or [interactive HTML](https://github.com/nurettincoban/agent-friction/blob/main/examples/shopfront.html) (download it and open it in a browser).
 
@@ -100,7 +101,8 @@ agent-friction compare before.json after.json
 `compare` measures each file and command against the sessions that actually touched it (events per
 10 exposed sessions), so a file nobody worked on afterwards shows up as "no activity", not as
 "resolved". It ignores changes too small to mean anything, warns when either side has too few
-sessions, and refuses to compare scans of different repositories.
+sessions, and refuses to compare scans of different repositories. Both scans must use the
+same privacy mode: compare two `--no-excerpts` scans, or two scans without it.
 
 ### In CI
 
@@ -121,18 +123,22 @@ attribution rule, and known false positives in [docs/signals.md](https://github.
 
 | Signal | What happened |
 |---|---|
-| `user-correction` | The human corrected the agent ("no, use X", "I said…", "you broke…") |
-| `retry-loop` | The same failing command was re-run without a change in between |
+| `user-correction` | The human corrected the agent ("no, use X", "I said…", "you broke…") and the agent went back to the work it had just done |
+| `probable-correction` | Words that sound like a correction, without behaviour to back them up (weighted low, never quoted) |
+| `retry-loop` | The same command line, with identical arguments, failed 3+ times with no change in between |
 | `tool-rejected` | The human declined a tool call (and often said why) |
+| `permission-denied` | A permission rule, hook, or safety check refused a tool call before it ran |
 | `user-interrupt` | The human stopped the agent mid-action |
 | `human-rework` | A human rewrote lines an agent commit had just written, or committed a fix/revert of it (git) |
 | `edit-miss` | An edit could not find its target text, or found it more than once |
 | `edit-revert` | An edit undid an earlier edit in the same session |
-| `command-failure` | A command failed because of setup or invocation, not just a red test |
+| `command-failure` | A command failed because of setup or invocation; a red test that the agent then fixes is not counted |
+| `no-convergence` | The agent kept editing and re-running the same check, and it never went green |
 | `edit-thrash` | One file edited many times in one session |
 | `stale-edit` | An edit refused because the file changed or was never read |
 | `path-miss` | The agent read or edited a path that does not exist |
 | `search-miss` | A search in a file or directory came back empty |
+| `file-too-large` | The agent could not read a file because it is too large for its context |
 | `read-loop` | The same file re-read many times without being edited |
 
 Scores are 0-100, explainable, and reproducible by hand from three factors: how severe the
@@ -140,8 +146,11 @@ friction is, how often it **recurs** across sessions (one bad afternoon is not a
 **consistently** it happens in the sessions that touch that file or command at all (so a busy
 file is not penalized just for being busy). Roughly: under 20 is an incident, 20-45 a pattern,
 above 45 a reliable struggle. Red-then-green test runs with a fix in between are normal work and
-are not counted. Time lost is a conservative estimate from timestamps. Confidence (low / medium /
-high) depends on how many sessions and how many kinds of evidence back a hotspot. All of it is in
+are not counted, and weak signals on their own (re-reads, many edits, an empty search) never
+rise above the incident band. Time lost is a floor estimate of agent time from timestamps (a correction claims only the rework it caused); waiting for
+a human is never counted. Confidence (low / medium /
+high) depends on how many sessions back a hotspot and whether an independent second kind of
+evidence agrees. All of it is in
 [docs/methodology.md](https://github.com/nurettincoban/agent-friction/blob/main/docs/methodology.md).
 
 ## Privacy
@@ -155,8 +164,12 @@ Transcripts contain your code and sometimes your secrets, so:
   directory) and truncated. Thinking blocks and assistant prose are never included.
 - `--no-excerpts` removes all transcript text: prompts, quoted corrections, search patterns,
   command lines, and output. What remains is paths, counts, timestamps, and normalized command
-  names: the executable, plus a subcommand only for a fixed list of well-known tools (`git commit`,
-  `npm run build`, `make test`, `python -m pytest`). Free-form arguments never survive.
+  names built only from publicly known words (`git commit`, `npm test`, `python -m pytest`).
+  Project-specific names (your own scripts, make targets, tools) become short hashes such as
+  `make <target:37bd73>`: stable, so grouping still works, but a pseudonym rather than
+  anonymous, since someone who guesses the name can confirm it.
+- Even with `--no-excerpts`, reports always show your repository's file paths, its directory
+  name, and when sessions happened. Those are the map itself.
 
 Redaction is pattern-based: it catches secrets that look like secrets, not an opaque password
 typed as a bare argument. Skim a report before you share it outside your team, or use
@@ -169,7 +182,7 @@ See [SECURITY.md](https://github.com/nurettincoban/agent-friction/blob/main/SECU
 |---|---|
 | Claude Code | Native, auto-discovered, including subagents and resumed sessions |
 | Anything else | Convert to the [generic JSONL format](https://github.com/nurettincoban/agent-friction/blob/main/docs/schema.md#generic-transcript-format): one event per line, a few fields |
-| Git history | Any agent that marks its commits (`Co-Authored-By: Claude`, Codex, Copilot, Cursor, Aider, …) |
+| Git history | Any agent that marks its commits (`Co-Authored-By: Claude`, Codex, Copilot, Cursor, Aider, …). Without any transcripts, run `scan --allow-empty` for a git-only map |
 
 Native adapters for other agents are welcome; see [CONTRIBUTING.md](https://github.com/nurettincoban/agent-friction/blob/main/CONTRIBUTING.md).
 
@@ -184,9 +197,20 @@ within a schema version.
 - Heuristics, not ground truth. A red test that the agent then fixes is normal work, not
   friction, and the rules try hard not to count it; they will sometimes be wrong both ways.
   `show` exists so you can check.
-- Correction detection is English-only and deliberately conservative: it misses indirect or
-  softened corrections rather than mislabel ordinary follow-ups, so treat the count as a floor.
+- A correction is counted only when the human's words address the agent's work and behaviour
+  backs it up: they name a file the agent just changed, or the agent goes back to one. Anything
+  else that merely sounds like a correction is "probable": shown as evidence, weighted lower,
+  never quoted, and excluded from the headline count. It is English-only and still a heuristic,
+  so treat the count as a floor.
 - Time lost is a floor, not a measurement of human time.
+- When a command's exit status is hidden (`pytest | tail`, `cmd; echo done`), the verdict comes
+  from its output. If the filter cut the summary line away, the run counts as neither red nor green.
+- Changes made by commands are inferred, not seen. `sed -i`, formatters, `--fix`, codemods,
+  `mv`/`cp`/`rm` and inline scripts that write files count as edits; any other command that is
+  neither a look nor a check counts as "may have changed something", enough to end a retry loop
+  or make the next green run a fix. Changes made outside the transcript (your editor, another
+  agent) are missed, so a check someone else fixed can still show as failing. Agents that edit
+  mostly through shell commands also leave fewer traces of edit friction.
 
 Reports of wrong or missed hotspots are the most valuable contribution you can make:
 [open one here](https://github.com/nurettincoban/agent-friction/issues/new?template=false_positive.yml).

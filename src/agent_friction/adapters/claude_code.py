@@ -33,7 +33,14 @@ WRAPPER_PREFIXES = (
 #: Slash commands start a new human turn but are never read as corrections.
 COMMAND_PREFIXES = ("<command-name>", "<command-message>", "<command-args>")
 
-_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+#: Blocks the harness or an IDE extension puts into user turns. They are removed before a
+#: prompt is read, quoted or attributed: none of it was typed by the human.
+_HARNESS_TAGS = (
+    r"system-reminder|ide_opened_file|ide_selection|ide_diagnostics|ide_[a-z_]+"
+    r"|local-command-[a-z]+|user-prompt-submit-hook|command-stdout|command-stderr"
+    r"|bash-input|bash-stdout|bash-stderr|task-notification|user-memory-input|post-tool-use-hook"
+)
+_REMINDER_RE = re.compile(rf"<({_HARNESS_TAGS})\b[^>]*>.*?</\1>", re.S)
 
 _TOOL_OPS = {
     "Read": model.OP_READ,
@@ -101,21 +108,32 @@ def _tool_call(block: dict[str, Any], line: int, base: dict[str, Any]) -> Event 
     elif name == "Edit":
         old, new = inp.get("old_string"), inp.get("new_string")
         if isinstance(old, str) and isinstance(new, str):
-            event.edits = ((common.digest(old), common.digest(new)),)
+            event.edits, event.insertions = common.edit_pairs([(old, new)])
+            event.new_text = common.new_text(new)
+            event.old_text = common.new_text(old)
     elif name == "MultiEdit":
         edits = inp.get("edits")
         if isinstance(edits, list):
-            event.edits = tuple(
-                (common.digest(e["old_string"]), common.digest(e["new_string"]))
-                for e in edits
-                if isinstance(e, dict)
-                and isinstance(e.get("old_string"), str)
-                and isinstance(e.get("new_string"), str)
+            event.edits, event.insertions = common.edit_pairs(
+                [
+                    (e["old_string"], e["new_string"])
+                    for e in edits
+                    if isinstance(e, dict)
+                    and isinstance(e.get("old_string"), str)
+                    and isinstance(e.get("new_string"), str)
+                ]
+            )
+            event.new_text = common.new_text(
+                *(e.get("new_string") for e in edits if isinstance(e, dict))
+            )
+            event.old_text = common.new_text(
+                *(e.get("old_string") for e in edits if isinstance(e, dict))
             )
     elif name == "Write":
         content = inp.get("content")
         if isinstance(content, str):
             event.content_digest = common.digest(content)
+            event.new_text = common.new_text(content)
     elif name == "Bash":
         event.command = _str(inp.get("command"))
     elif event.op == model.OP_SEARCH:
@@ -134,12 +152,17 @@ def _tool_result(
     event = Event(kind=model.TOOL_RESULT, line=line, call_id=call_id, **base)
     # Trust the flag. The error tag only counts when the result starts with it:
     # a successful command may well print "<tool_use_error>" (e.g. from a test file).
-    is_error = block.get("is_error") is True or text.lstrip().startswith("<tool_use_error>")
+    tagged = text.lstrip().startswith("<tool_use_error>")
+    is_error = block.get("is_error") is True or tagged
+    event.harness_error = tagged
     clean = common.strip_error_tags(text) if is_error else text.strip()
     info: dict[str, Any] = structured if isinstance(structured, dict) else {}
     reason = common.rejection_reason(text)
+    denied = common.denial(text) if is_error else None
     if reason is not None:
         event.ok, event.error, event.reason = False, model.ERR_REJECTED, reason
+    elif denied is not None:
+        event.ok, event.error, event.reason = False, model.ERR_DENIED, denied
     elif clean.startswith(INTERRUPT_PREFIX) or info.get("interrupted") is True:
         event.ok, event.error = False, model.ERR_INTERRUPTED
     else:
@@ -169,7 +192,7 @@ def _user_text(text: str, line: int, base: dict[str, Any]) -> Event | None:
         return Event(kind=model.INTERRUPT, line=line, text=stripped, **base)
     if stripped.startswith(COMMAND_PREFIXES):
         return Event(kind=model.USER_MESSAGE, line=line, synthetic=True, **base)
-    if stripped.startswith(WRAPPER_PREFIXES):
+    if stripped.startswith(WRAPPER_PREFIXES) or common.HOOK_FEEDBACK_RE.match(stripped):
         return None
     return Event(kind=model.USER_MESSAGE, line=line, text=stripped, **base)
 
@@ -192,6 +215,9 @@ def _line_events(obj: dict[str, Any], line: int) -> list[Event] | None:
                     call = _tool_call(block, line, base)
                     if call is not None:
                         events.append(call)
+        if not events and isinstance(content, (str, list)):
+            # Prose or thinking: only the fact that the agent was active at this time.
+            events.append(Event(kind=model.AGENT_MESSAGE, line=line, **base))
         return events
     human = not (obj.get("isMeta") is True or obj.get("isCompactSummary") is True)
     if isinstance(content, str):
@@ -220,12 +246,12 @@ def _line_events(obj: dict[str, Any], line: int) -> list[Event] | None:
 
 
 def _asks_question(content: object) -> bool | None:
-    """Whether an assistant message ends on a question (``None``: it says nothing either way).
+    """Whether an assistant message asks the human something (``None``: no say either way).
 
     Only this one bit is kept from assistant prose; the text itself is discarded.
     """
     if isinstance(content, str):
-        return content.rstrip().endswith("?")
+        return common.asks_question(content)
     if not isinstance(content, list):
         return None
     verdict: bool | None = None
@@ -233,19 +259,25 @@ def _asks_question(content: object) -> bool | None:
         if not isinstance(block, dict):
             continue
         if block.get("type") == "text" and isinstance(block.get("text"), str):
-            verdict = block["text"].rstrip().endswith("?")
+            verdict = common.asks_question(block["text"])
         elif block.get("type") == "tool_use":
-            verdict = False  # it went on working: whatever it asked was rhetorical
+            # A question/choice tool is a question. Any other tool: it went on working, so
+            # whatever it asked was rhetorical.
+            verdict = bool(common.QUESTION_TOOL_RE.search(str(block.get("name") or "")))
     return verdict
 
 
-def parse_file(path: Path, seen_uuids: set[str] | None = None) -> ParsedFile:
+def parse_file(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFile:
     """Parse one Claude Code ``.jsonl`` transcript.
 
-    ``seen_uuids`` de-duplicates lines across files: resumed sessions can replay
-    earlier lines (same ``uuid``) into a new file.
+    ``seen_uuids`` (line uuid -> session id) de-duplicates lines across files.
+    A resumed session replays earlier lines (same ``uuid``) into a new file
+    under a new session id: such a file continues the session those lines
+    came from and is given its id, so one piece of work is one session.
     """
-    seen = seen_uuids if seen_uuids is not None else set()
+    seen = seen_uuids if seen_uuids is not None else {}
+    resumed_from: str | None = None
+    added: list[str] = []
     in_subagent_dir = path.parent.name == "subagents"
     session = session_id_for(path)
     main = Stream(session_id=session, source=path, kind=KIND, sidechain=False)
@@ -259,7 +291,7 @@ def parse_file(path: Path, seen_uuids: set[str] | None = None) -> ParsedFile:
                 continue
             try:
                 obj = json.loads(raw)
-            except ValueError:
+            except (ValueError, RecursionError):
                 parsed.skipped_lines += 1
                 continue
             if not isinstance(obj, dict):
@@ -271,8 +303,11 @@ def parse_file(path: Path, seen_uuids: set[str] | None = None) -> ParsedFile:
             uuid = obj.get("uuid")
             if isinstance(uuid, str) and uuid:
                 if uuid in seen:
+                    if resumed_from is None and seen[uuid] != session:
+                        resumed_from = seen[uuid]
                     continue
-                seen.add(uuid)
+                seen[uuid] = session
+                added.append(uuid)
             events = _line_events(obj, number)
             if events is None:
                 parsed.skipped_lines += 1
@@ -288,5 +323,9 @@ def parse_file(path: Path, seen_uuids: set[str] | None = None) -> ParsedFile:
                         event.after_question = asking[target.sidechain]
                         asking[target.sidechain] = False
             target.events.extend(events)
+    if resumed_from is not None and not in_subagent_dir:
+        main.session_id = side.session_id = resumed_from
+        for uuid in added:
+            seen[uuid] = resumed_from
     parsed.streams = [s for s in (main, side) if s.events]
     return parsed

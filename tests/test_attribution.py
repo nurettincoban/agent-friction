@@ -7,10 +7,15 @@ import pytest
 
 from agent_friction.attribution import (
     PathResolver,
+    command_role,
+    is_aggregate_check,
+    is_replacement,
+    is_setup_command,
     normalize_command,
     objectionable_step,
     parse_command,
     path_candidates,
+    public_key,
 )
 
 needs_symlinks = pytest.mark.skipif(sys.platform == "win32", reason="needs symlink privileges")
@@ -80,8 +85,30 @@ def test_real_directories_resolve_on_this_platform(tmp_path: Path) -> None:
 def test_parse_command_flags_inspection() -> None:
     for command in ("sed -n 1,5p a.py", "git log -3", "cat a | wc -l", "git diff | grep x"):
         assert parse_command(command).inspection, command
-    for command in ("sed -i s/a/b/ a.py", "git diff --exit-code", "git commit -m x", "pytest"):
+    for command in ("sed -i s/a/b/ a.py", "git commit -m x", "pytest", "git stash pop"):
         assert not parse_command(command).inspection, command
+    # exit-status probes ask a question; "no" is an answer, not a failure
+    for command in (
+        "command -v docker",
+        "type docker",
+        "hash docker 2>/dev/null",
+        "pgrep -f vite",
+        "lsof -i :3000",
+        "gh pr view",
+        "gh pr checks 12",
+        "pip show requests",
+        "npm ls left-pad",
+        "git diff --quiet",
+        "git diff --exit-code",
+        "git merge-base --is-ancestor a b",
+        "git check-ignore -q build",
+        "git rev-parse --verify feature",
+        "test -f x",
+        "[ -d node_modules ]",
+    ):
+        assert parse_command(command).inspection, command
+    assert parse_command("command -v docker").key == "command"
+    assert parse_command("command docker ps -q").key == "docker ps"
 
 
 def test_extra_roots_and_nested_worktree_win() -> None:
@@ -122,8 +149,8 @@ def test_symlinked_repo_root_matches_both_spellings(tmp_path: Path) -> None:
         ("/home/u/.venv/bin/pytest -q", "pytest"),
         (".venv/bin/python scripts/gen.py --all", "python scripts/gen.py"),
         ("python3 -m pytest -k x", "python -m pytest"),
-        ("python3.12 manage.py migrate", "python manage.py"),
-        ("python -c 'print(1)'", "python -c"),
+        ("python3.12 manage.py migrate", "python manage.py migrate"),
+        ("python -c 'print(1)'", "python <inline>"),
         ("uv run pytest tests/", "uv run pytest"),
         ("./scripts/build.sh --fast", "scripts/build.sh"),
         ('git commit -m "fix; a && b | c"', "git commit"),
@@ -161,7 +188,10 @@ def test_symlinked_repo_root_matches_both_spellings(tmp_path: Path) -> None:
         # heredoc bodies are data, not commands
         ("cat <<EOF > x.py\nimport y\nEOF\npython x.py", "python x.py"),
         ("cat > t.sh <<-'END'\n\tnpm run nope\n\tEND\nnpm run build", "npm run build"),
-        ("python - <<'PY'\nimport os\nos.system('rm -rf x')\nPY", "python"),
+        ("python - <<'PY'\nimport os\nos.system('rm -rf x')\nPY", "python <stdin>"),
+        ("python3 <<EOF\nprint(1)\nEOF", "python"),
+        ("ruff check --fix .", "ruff check"),
+        ("ruff format --check .", "ruff format"),
         # control flow, subshells and nested shells are looked through
         ("if ! make lint; then exit 1; fi", "make lint"),
         ("if pytest; then echo ok; fi", "pytest"),
@@ -185,10 +215,16 @@ def test_symlinked_repo_root_matches_both_spellings(tmp_path: Path) -> None:
         ("bundle exec rspec spec/a_spec.rb", "bundle exec rspec"),
         ("gh pr create --title x", "gh pr create"),
         ("git stash pop", "git stash pop"),
-        ("docker compose run web pytest", "docker compose run"),
+        ("docker compose run web pytest", "pytest"),
+        ("docker compose exec -T web npm test", "npm test"),
+        ("docker exec -it shop_web_1 python manage.py migrate", "python manage.py migrate"),
+        ("docker compose exec web", "docker compose exec"),
+        ("docker run --rm img pytest", "docker run"),
+        ("kubectl exec -n prod deploy/web -c app -- pytest -q", "pytest"),
         ("docker run --rm -it registry.corp/img pytest", "docker run"),
-        ("kubectl exec pod-1 -- ls", "kubectl exec"),
-        ("yarn workspace web test", "yarn workspace"),
+        ("kubectl exec pod-1 -- ls", "ls"),
+        ("kubectl exec pod-1", "kubectl exec"),
+        ("yarn workspace web test", "yarn workspace web test"),
         ("aws s3 cp secret-bucket/x .", "aws s3"),
         ("tox -e py312", "tox"),
         # anything else is the executable alone: arguments are never part of a key
@@ -200,6 +236,23 @@ def test_symlinked_repo_root_matches_both_spellings(tmp_path: Path) -> None:
         ("mysql -uroot -phunter2 shop", "mysql"),
         ("curl -H 'Cookie: sid=abc' https://x.test", "curl"),
         ("scripts/release.sh v1.2.3-internal", "scripts/release.sh"),
+        # a wrapper's own options and their values are not the command
+        ("sudo -u alice pytest", "pytest"),
+        ("xargs -n 1 pytest", "pytest"),
+        ("find . -name '*.py' | xargs -n 1 -P 4 pytest", "pytest"),
+        ("timeout -s KILL 30 make test", "make test"),
+        ("env -u FOO BAR=1 npm test", "npm test"),
+        ("nice -n 10 cargo build", "cargo build"),
+        ("watch -n 5 make test", "make test"),
+        ("uv run --group dev pytest", "uv run pytest"),
+        ("uv run --with rich --python 3.12 python -m pytest", "uv run python -m pytest"),
+        ("npx -p typescript tsc", "npx tsc"),
+        ("docker compose -f ci.yml up", "docker compose up"),
+        # a key never holds a number or anything the redactor would mask
+        ("make 2", "make"),
+        ("python 0123456789abcdef0123456789abcdef0123.py", "python"),
+        ("npm run sk-ant-" + "api03-" + "a" * 36, "npm run"),
+        ("bob@corp.test --help", ""),
     ],
 )
 def test_normalize_command(command: str, key: str) -> None:
@@ -251,3 +304,252 @@ def test_objectionable_step() -> None:
     assert pick("ls && cat x") == "cat"  # nothing but inspection: the line's own key
     assert pick("cd api && make test", "wrong directory, cd elsewhere") == "make test"
     assert pick("") == ""
+
+
+@pytest.mark.parametrize(
+    ("key", "public"),
+    [
+        ("pytest", "pytest"),
+        ("python -m pytest", "python -m pytest"),
+        ("npm run test:unit", "npm run test:unit"),
+        ("make test", "make test"),
+        ("uv run pytest", "uv run pytest"),
+        ("git commit", "git commit"),
+        ("docker compose up", "docker compose up"),
+        ("python deploy_acme_customer.py", "python <script:93d162>"),
+        ("make deploy-customer-acme", "make <target:37bd73>"),
+        ("npm run deploy:acme-prod", "npm run <target:f16a85>"),
+        ("uvx internal-tool-acme", "uvx <target:b0d558>"),
+        ("python -m acme.jobs", "python -m <module:3a8a44>"),
+        ("mytool", "<tool:373279>"),
+        ("run", "<tool:acba25>"),  # a subcommand word is not a public program name
+        ("", ""),
+    ],
+)
+def test_public_key_hashes_project_specific_names(key: str, public: str) -> None:
+    assert public_key(key) == public
+    assert public_key(public_key(key)) == public or "<" in public
+
+
+@pytest.mark.parametrize(
+    ("failed", "other", "expected"),
+    [
+        ("pytest", "make test", True),
+        ("pytest", "uv run pytest", True),
+        ("pytest", "python -m pytest", True),
+        ("npm run build", "pnpm build", True),
+        ("mypy", "pyright", True),
+        ("pytest", "pip install", False),
+        ("pytest", "uv sync", False),
+        ("npm test", "git commit", False),
+        ("pytest", "rm", False),
+        ("pytest", "make codegen", False),
+        ("ruff check", "ruff format", False),
+        ("pytest", "pytest", False),
+    ],
+)
+def test_is_replacement(failed: str, other: str, expected: bool) -> None:
+    assert is_replacement(failed, other) is expected
+
+
+def test_roles_and_setup_commands() -> None:
+    assert [command_role(k) for k in ("pytest", "npm run test:unit", "cargo clippy", "tsc")] == [
+        "test",
+        "test",
+        "lint",
+        "typecheck",
+    ]
+    assert command_role("git commit") is None and command_role("mytool") is None
+    for key in ("pip install", "uv sync", "npm ci", "docker compose up", "python -m venv"):
+        assert is_setup_command(key), key
+    for key in ("pytest", "git add", "make test", "mytool", ""):
+        assert not is_setup_command(key), key
+
+
+# ---- robustness ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [
+        ("sed -i '' 's/a/b/' f", "sed"),
+        ("git commit -m ''", "git commit"),
+        ('echo ""', "echo"),
+        ("grep '' file", "grep"),
+        ("pytest -k '' tests", "pytest"),
+        ("printf '' > file", "printf"),
+        ("'' ''", ""),
+        ("", ""),
+        ("python3 - <<EOF\nprint(1)\nEOF", "python <stdin>"),
+        ("python3 - <<'PY'\nimport app\nPY", "python <stdin>"),
+    ],
+)
+def test_empty_words_and_stdin_scripts(command: str, key: str) -> None:
+    assert parse_command(command).key == key
+
+
+_FUZZ_ATOMS = (
+    "pytest", "git", "commit", "-m", "''", '""', "'", '"', "`", "$(", ")", "(", "{", "}", ";",
+    "&&", "||", "|", "&", ">", ">>", "<", "<<EOF", "<<'EOF'", "<<-", "EOF", "\n", "\t", " ", "\\",
+    "$", "${X:-", "2>&1", "-", "--", "=", "FOO=", "sed", "-i", "bash", "-c", "sh", "env", "sudo",
+    "cd", "src/a.py", "é", "日本語", "‮", "\x1b[2J", "\x00", "#", "!", "*", "?", "[", "]",
+    "for", "do", "done", "if", "then", "fi", "while", "case", "esac", "python3", "npm", "run",
+    "docker", "compose", "exec", "uv", "make", "time", "xargs", "<(", "<<<", "~", "..", "/",
+)  # fmt: skip
+
+
+def test_parse_command_never_raises_on_shell_ish_noise() -> None:
+    import random
+
+    rng = random.Random(20261115)
+    for _ in range(4000):
+        size = rng.randint(0, 14)
+        glue = rng.choice(("", " ", " ", " "))
+        command = glue.join(rng.choice(_FUZZ_ATOMS) for _ in range(size))
+        parsed = parse_command(command)  # must not raise, whatever the input
+        assert isinstance(parsed.key, str) and len(parsed.key) < 200, command
+        assert "\n" not in parsed.key, command
+        assert public_key(parsed.key) is not None
+        path_candidates(parsed.tokens)
+        objectionable_step(parsed, command)
+
+
+def test_chdir_follows_cd_lexically(resolver: PathResolver) -> None:
+    cwd = "/work/repo"
+    assert resolver.chdir(cwd, ("src",)) == "/work/repo/src"
+    assert resolver.chdir(cwd, ("src", "..", "..")) == "/work"
+    assert resolver.chdir(cwd, ("~/other",)) == "/home/dev/other"
+    assert resolver.chdir(cwd, ()) == cwd
+    for unknown in ("-", "$WORK", "build-*", ""):
+        assert resolver.chdir(cwd, (unknown,)) is None
+    assert resolver.outside("/tmp/scratch") and resolver.outside("../sibling", cwd)
+    assert not resolver.outside("src/a.py", cwd) and not resolver.outside("/work/repo/x")
+
+
+@pytest.mark.parametrize(
+    ("command", "moves"),
+    [
+        ("cd /tmp/x && python repro.py", ("/tmp/x",)),
+        ("cd web; cd src && npm test", ("web", "src")),
+        ("git -C ../other status", ("../other",)),
+        ("make -C docs html", ("docs",)),
+        ("npm --prefix web test", ("web",)),
+        ("uv --directory tools run pytest", ("tools",)),
+        ("pytest -q", ()),
+    ],
+)
+def test_steps_remember_where_they_run(command: str, moves: tuple[str, ...]) -> None:
+    assert parse_command(command).steps[-1].moves == moves
+
+
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [
+        ("node -e 'process.exit(1)'", "node <inline>"),
+        ("ruby -e 'puts 1'", "ruby <inline>"),
+        ("perl -e 'print 1'", "perl <inline>"),
+        ("bun -e 'console.log(1)'", "bun <inline>"),
+        ("python3 - <<'PY'\nprint(1)\nPY", "python <stdin>"),
+        ("php artisan migrate --force", "php artisan migrate"),
+        ("poetry run pytest -q", "poetry run pytest"),
+        ("command -v docker", "command"),
+    ],
+)
+def test_round_seven_keys(command: str, key: str) -> None:
+    assert normalize_command(command) == key
+
+
+def test_a_workspace_name_is_not_public() -> None:
+    hidden = public_key("yarn workspace acme-billing test")
+    assert (
+        "acme" not in hidden and hidden.startswith("yarn workspace <") and hidden.endswith("test")
+    )
+    assert public_key("python <inline>") == "python <inline>"
+    assert public_key("python manage.py migrate") == "python manage.py migrate"
+
+
+def test_drive_letter_roots_ignore_case() -> None:
+    resolver = PathResolver(Path("/work/repo"), ["C:\\Users\\Dev\\Shop"])
+    for raw in (
+        "c:\\users\\dev\\shop\\src\\a.py",
+        "C:/Users/Dev/Shop/src/a.py",
+        "C:\\USERS\\DEV\\SHOP\\src\\a.py",
+    ):
+        assert resolver.resolve(raw) == "src/a.py"
+    assert resolver.resolve("C:\\Users\\Dev\\Shopping\\a.py") is None
+
+
+@pytest.mark.parametrize(
+    ("command", "masked"),
+    [
+        ("pytest -q 2>&1 | tail -5", True),
+        ("make test 2>&1 | grep -E 'passed|failed'", True),
+        ("pytest; echo $?", True),
+        ("pytest || true", True),
+        ("cd web && npm test 2>&1 | tee out.log", True),
+        ("bash -c 'pytest | tail'", True),
+        ("timeout 60 pytest | head", True),
+        ("pytest", False),
+        ("pytest;", False),
+        ("pytest && echo ok", False),
+        ("mkdir -p out && pytest", False),
+        ("set -o pipefail; pytest | tee log", False),
+        ("if [ -f x ]; then pytest; fi", False),
+    ],
+)
+def test_whose_exit_status_a_command_line_reports(command: str, masked: bool) -> None:
+    assert parse_command(command).masked is masked
+
+
+@pytest.mark.parametrize(
+    ("command", "key", "public"),
+    [
+        ("make deploy-ZebraCustomer", "make deploy-ZebraCustomer", "make <target:"),
+        ("npm run ZebraCustomer:build", "npm run ZebraCustomer:build", "npm run <"),
+        ("make -j4 Test", "make Test", "make <target:"),
+        ("npm run build", "npm run build", "npm run build"),
+        ("git commit Message", "git commit", "git commit"),
+    ],
+)
+def test_targets_keep_their_name_in_any_case(command: str, key: str, public: str) -> None:
+    assert normalize_command(command) == key
+    hidden = public_key(key)
+    assert hidden.startswith(public) and "Zebra" not in hidden
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ag TODO src",
+        "fd -e py",
+        "rg -q pattern",
+        "pg_isready -h localhost",
+        "nc -z localhost 5432",
+        "npm outdated",
+        "terraform plan -detailed-exitcode",
+        "test -f x",
+        "[ -d node_modules ]",
+    ],
+)
+def test_tools_whose_exit_status_is_an_answer(command: str) -> None:
+    assert parse_command(command).inspection
+    assert not parse_command("terraform plan").inspection
+
+
+@pytest.mark.parametrize(
+    ("key", "aggregate"),
+    [
+        ("make check", True),
+        ("npm run ci", True),
+        ("pre-commit run", True),
+        ("just verify", True),
+        ("make all", True),
+        ("ruff check", False),
+        ("cargo check", False),
+        ("terraform validate", False),
+        ("make test", False),
+        ("git checkout", False),
+    ],
+)
+def test_aggregate_checks(key: str, aggregate: bool) -> None:
+    assert is_aggregate_check(key) is aggregate

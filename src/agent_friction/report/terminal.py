@@ -6,6 +6,7 @@ import textwrap
 from typing import Any
 
 from agent_friction.report._common import (
+    all_items,
     collect_recommendations,
     fmt_minutes,
     plural,
@@ -42,9 +43,10 @@ class Style:
         return self._wrap("36", text)
 
     def heat(self, score: float, text: str) -> str:
-        if score >= 60:
+        # Bands follow the reading guide: <20 incident, 20-45 pattern, >45 reliable struggle.
+        if score >= 45:
             return self.red(text)
-        if score >= 30:
+        if score >= 20:
             return self.yellow(text)
         return self.green(text)
 
@@ -63,13 +65,15 @@ def _truncate(text: str, width: int) -> str:
 
 
 def _hotspot_rows(
-    items: list[dict[str, Any]], st: Style, titles: dict[str, str], width: int
+    items: list[dict[str, Any]],
+    st: Style,
+    titles: dict[str, str],
+    width: int,
+    label: str = "path",
 ) -> list[str]:
     lines: list[str] = []
     path_w = max(24, min(48, width - 62))
-    header = (
-        f"  {'score':<16} {'path':<{path_w}} {'sess':>4} {'events':>6} {'lost':>7}  top signals"
-    )
+    header = f"  {'score':<16} {label:<{path_w}} {'sess':>4} {'events':>6} {'lost':>7}  top signals"
     lines.append(st.dim(header))
     for h in items:
         score = float(h.get("score", 0))
@@ -103,9 +107,11 @@ def render_terminal(
     span = ""
     if window.get("start") or window.get("end"):
         span = f" · {str(window.get('start') or '…')[:10]} → {str(window.get('end') or '…')[:10]}"
+    sessions = int(totals.get("sessions", 0))
+    who = plural(sessions, "session") if sessions else "git history only, no agent sessions"
     out.append(
         st.dim(
-            f"{plural(int(totals.get('sessions', 0)), 'session')}"
+            f"{who}"
             f" · {plural(int(totals.get('tool_calls', 0)), 'tool call')}"
             f" · {plural(int(totals.get('friction_events', 0)), 'friction event')}"
             f" · ~{fmt_minutes(float(totals.get('est_minutes_lost', 0)))} lost"
@@ -116,8 +122,12 @@ def render_terminal(
 
     hotspots = list(result.get("hotspots", []))[:top]
     commands = list(result.get("commands", []))[:top]
-    if not hotspots and not commands:
-        out.append(st.green("No recurring friction found. Agents seem to have a smooth ride here."))
+    if not hotspots and not commands and not result.get("directories"):
+        calls = int(totals.get("tool_calls", 0))
+        out.append(
+            st.green(f"No recurring friction found in {plural(calls, 'tool call')}.")
+            + (st.dim(" That is a small sample; check again later.") if calls < 50 else "")
+        )
         return "\n".join(out) + "\n"
 
     if hotspots:
@@ -126,12 +136,12 @@ def render_terminal(
         out.append("")
     if commands:
         out.append(st.bold("Commands that keep failing"))
-        out.extend(_hotspot_rows(commands, st, titles, width))
+        out.extend(_hotspot_rows(commands, st, titles, width, "command"))
         out.append("")
     directories = list(result.get("directories", []))[:top]
     if directories:
         out.append(st.bold("Directories where agents search in vain"))
-        out.extend(_hotspot_rows(directories, st, titles, width))
+        out.extend(_hotspot_rows(directories, st, titles, width, "directory"))
         out.append("")
 
     recs = collect_recommendations(result, limit=5)
@@ -151,6 +161,22 @@ def render_terminal(
             "drill in: agent-friction show <path> · full map: --format html -o map.html"
         )
     )
+    out.append(
+        st.dim(
+            "Per-row time can overlap (one stall can involve a file and a command); "
+            "the total counts each minute once."
+        )
+    )
+    if any(int(h.get("agent_commits", 0)) for h in all_items(result)):
+        out.append(st.dim("For git evidence, sess counts the agent commits involved."))
+    skipped = sum(int(s.get("skipped_lines", 0)) for s in result.get("sources", []))
+    if skipped:
+        out.append(
+            st.yellow(
+                f"{plural(skipped, 'transcript line')} could not be parsed and "
+                "were skipped (see sources in --format json)."
+            )
+        )
     return "\n".join(out) + "\n"
 
 
@@ -220,7 +246,7 @@ def render_dir_detail(
     st = Style(color)
     score = float(node.get("score", 0))
     out = [
-        st.bold(f"directory: {node.get('path') or '.'}/"),
+        st.bold(f"directory: {node.get('path') or '.'}/ (everything inside, rolled up)"),
         st.heat(score, f"{bar(score)} {score:.1f}/100")
         + st.dim(
             f"  · {plural(int(node.get('events', 0)), 'event')}"

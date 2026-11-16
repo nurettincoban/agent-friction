@@ -1,38 +1,43 @@
 {
   "commands": [
     {
-      "confidence": "high",
-      "est_minutes_lost": 5.9,
-      "events": 8,
+      "agent_commits": 0,
+      "confidence": "medium",
+      "est_minutes_lost": 2.5,
+      "events": 7,
       "evidence": [
         {
+          "est_seconds_lost": 24.0,
           "excerpt": "$ pytest tests/test_checkout.py -q\nExit code 4\nImportError while loading conftes … /shopfront/tests/conftest.py'.\ntests/conftest.py:3: in <module>\n    from shopfront.db import make_engine\nE   ModuleNotFoundError: No module named 'shopfront'",
           "line": 20,
           "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
           "signal": "command-failure",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/e65615b3-b6e0-5853-afdf-c13d1b54f9b5.jsonl",
+          "source": "claude-code:shopfront/e65615b3-b6e0-5853-afdf-c13d1b54f9b5.jsonl",
           "summary": "`pytest` failed (exit 4; setup/invocation error)",
           "timestamp": "2026-10-26T10:03:31Z"
         },
         {
+          "est_seconds_lost": 29.0,
+          "excerpt": "$ pytest tests/test_refunds.py\nExit code 4\nImportError while loading conftest '~/shopfront/tests/conftest.py'.\ntests/conftest.py:3: in <module>\n    from shopfront.db import make_engine\nE   ModuleNotFoundError: No module named 'shopfront'",
+          "line": 17,
+          "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
+          "signal": "command-failure",
+          "source": "claude-code:shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
+          "summary": "`pytest` failed (exit 4; setup/invocation error)",
+          "timestamp": "2026-10-29T14:03:15Z"
+        },
+        {
+          "est_seconds_lost": 39.0,
           "excerpt": "$ pytest tests/test_refunds.py -x\nExit code 4\nImportError while loading conftest '~/shopfront/tests/conftest.py'.\ntests/conftest.py:3: in <module>\n    from shopfront.db import make_engine\nE   ModuleNotFoundError: No module named 'shopfront'",
           "line": 19,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
           "signal": "command-failure",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
+          "source": "claude-code:shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
           "summary": "`pytest` failed (exit 4; setup/invocation error)",
           "timestamp": "2026-10-29T14:03:44Z"
         },
         {
-          "excerpt": null,
-          "line": 23,
-          "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
-          "signal": "retry-loop",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
-          "summary": "`pytest` failed 3 times in a row",
-          "timestamp": "2026-10-29T14:04:51Z"
-        },
-        {
+          "est_seconds_lost": 39.0,
           "excerpt": "$ pytest -q\nImportError while loading conftest '~/shopfront/tests/conftest.py'.\ntests/conftest.py:3: in <module>\n    from shopfront.db import make_engine\nE   ModuleNotFoundError: No module named 'shopfront'",
           "line": 7,
           "session_id": "aider-2026-11-05",
@@ -42,12 +47,13 @@
           "timestamp": "2026-11-05T16:01:04Z"
         },
         {
-          "excerpt": "$ pytest tests/test_checkout.py\nExit code 4\nImportError while loading conftest '~/shopfront/tests/conftest.py'.\ntests/conftest.py:3: in <module>\n    from shopfront.db import make_engine\nE   ModuleNotFoundError: No module named 'shopfront'",
+          "est_seconds_lost": 19.0,
+          "excerpt": "$ pytest tests/test_checkout.py 2>&1 | tail -20\nImportError while loading confte … /shopfront/tests/conftest.py'.\ntests/conftest.py:3: in <module>\n    from shopfront.db import make_engine\nE   ModuleNotFoundError: No module named 'shopfront'",
           "line": 13,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
           "signal": "command-failure",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
-          "summary": "`pytest` failed (exit 4; setup/invocation error)",
+          "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
+          "summary": "`pytest` failed (judged from its output: the exit status was that of a pipe or a later step; setup/invocation error)",
           "timestamp": "2026-11-09T15:01:53Z"
         }
       ],
@@ -57,27 +63,20 @@
       "path": "pytest",
       "recommendations": [
         {
-          "detail": "`pytest` failed 7 times in 4 sessions; 5 times the next successful command was `make test`. Add a line to AGENTS.md such as: \"use `make test`, not `pytest`\".",
+          "detail": "`pytest` failed 7 times in 4 sessions; 5 times the agent then got the same job done with `make test`, and `pytest` did not work later in those sessions. Add a line to AGENTS.md such as: \"use `make test`, not `pytest`\".",
           "id": "use-the-working-command",
           "signals": [
             "command-failure"
           ],
           "title": "Tell agents to use `make test`"
-        },
-        {
-          "detail": "Agents re-ran `pytest` up to 3 times in a row without success (1 retry loop(s) in 1 session(s)). The output did not lead them to a fix: note the known cause in AGENTS.md, or make the command fail fast with a message that says what to do.",
-          "id": "make-the-failure-actionable",
-          "signals": [
-            "retry-loop"
-          ],
-          "title": "Make this failure explain itself"
         }
       ],
-      "score": 50.5,
+      "score": 48.6,
       "score_detail": {
+        "capped": false,
         "consistency": 0.88,
-        "intensity": 8.122,
-        "mean_session_points": 2.031,
+        "intensity": 7.503,
+        "mean_session_points": 1.876,
         "recurrence": 0.774,
         "sessions": [
           {
@@ -86,9 +85,9 @@
             "weighted_events": 2.0
           },
           {
-            "points": 3.104,
+            "points": 2.485,
             "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
-            "weighted_events": 7.6
+            "weighted_events": 4.6
           },
           {
             "points": 1.585,
@@ -101,26 +100,27 @@
             "weighted_events": 2.6
           }
         ],
-        "severity": 0.742
+        "severity": 0.714
       },
       "sessions": 4,
       "signals": {
-        "command-failure": 7,
-        "retry-loop": 1
+        "command-failure": 7
       },
-      "why": "8 friction events in all 4 sessions that touched it (7 command failure, 1 retry loop); high confidence because it recurs across sessions with several kinds of evidence."
+      "why": "7 friction events in all 4 sessions that touched it (7 command failures); medium confidence because it recurs across sessions."
     },
     {
+      "agent_commits": 0,
       "confidence": "low",
       "est_minutes_lost": 0.7,
       "events": 1,
       "evidence": [
         {
+          "est_seconds_lost": 39.0,
           "excerpt": "$ rm -rf migrations/versions && alembic revision --autogenerate -m currency\nuser said: never delete existing migrations, add a new revision on top",
           "line": 19,
           "session_id": "4132e18c-d843-510d-aee7-82374ae93389",
           "signal": "tool-rejected",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/4132e18c-d843-510d-aee7-82374ae93389.jsonl",
+          "source": "claude-code:shopfront/4132e18c-d843-510d-aee7-82374ae93389.jsonl",
           "summary": "The user declined Bash on `rm` and said why",
           "timestamp": "2026-11-03T09:03:15Z"
         }
@@ -141,6 +141,7 @@
       ],
       "score": 16.3,
       "score_detail": {
+        "capped": false,
         "consistency": 0.7,
         "intensity": 1.807,
         "mean_session_points": 1.807,
@@ -158,19 +159,21 @@
       "signals": {
         "tool-rejected": 1
       },
-      "why": "1 friction event in the only session that touched it (1 tool call declined); low confidence because there is too little independent evidence so far."
+      "why": "1 friction event in the only session that touched it (1 declined tool call); low confidence because there is too little independent evidence so far."
     },
     {
+      "agent_commits": 0,
       "confidence": "low",
-      "est_minutes_lost": 0.4,
+      "est_minutes_lost": 0.2,
       "events": 1,
       "evidence": [
         {
+          "est_seconds_lost": 14.0,
           "excerpt": "$ curl -s -H 'Authorization: Bearer [REDACTED:token]' https://staging.shopfront.example/api/health\nExit code 7\ncurl: (7) Failed to connect to staging.shopfront.example port 443: Connection refused",
           "line": 33,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
           "signal": "command-failure",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
+          "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
           "summary": "`curl` failed (exit 7; setup/invocation error)",
           "timestamp": "2026-11-09T15:15:24Z"
         }
@@ -182,6 +185,7 @@
       "recommendations": [],
       "score": 15.2,
       "score_detail": {
+        "capped": false,
         "consistency": 0.7,
         "intensity": 1.585,
         "mean_session_points": 1.585,
@@ -202,16 +206,18 @@
       "why": "1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far."
     },
     {
+      "agent_commits": 0,
       "confidence": "low",
       "est_minutes_lost": 0.5,
       "events": 1,
       "evidence": [
         {
+          "est_seconds_lost": 28.0,
           "excerpt": "$ python -m pytest -q\nExit code 4\nImportError while loading conftest '~/shopfront/tests/conftest.py'.\ntests/conftest.py:3: in <module>\n    from shopfront.db import make_engine\nE   ModuleNotFoundError: No module named 'shopfront'",
           "line": 19,
           "session_id": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
           "signal": "command-failure",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/fb4e20bf-8179-51b6-93e1-be4a26ada996.jsonl",
+          "source": "claude-code:shopfront/fb4e20bf-8179-51b6-93e1-be4a26ada996.jsonl",
           "summary": "`python -m pytest` failed (exit 4; setup/invocation error)",
           "timestamp": "2026-11-12T11:02:35Z"
         }
@@ -223,6 +229,7 @@
       "recommendations": [],
       "score": 15.2,
       "score_detail": {
+        "capped": false,
         "consistency": 0.7,
         "intensity": 1.585,
         "mean_session_points": 1.585,
@@ -245,52 +252,58 @@
   ],
   "directories": [
     {
+      "agent_commits": 0,
       "confidence": "medium",
-      "est_minutes_lost": 1.2,
+      "est_minutes_lost": 0.0,
       "events": 5,
       "evidence": [
         {
+          "est_seconds_lost": 0,
           "excerpt": "pattern: RefundPolicy",
           "line": 5,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
           "signal": "search-miss",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
+          "source": "claude-code:shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
           "summary": "Grep search in src/shopfront returned nothing",
           "timestamp": "2026-10-29T14:00:06Z"
         },
         {
+          "est_seconds_lost": 0,
           "excerpt": "pattern: src/shopfront/**/refund*.py",
           "line": 7,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
           "signal": "search-miss",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
+          "source": "claude-code:shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
           "summary": "Glob search in src/shopfront returned nothing",
           "timestamp": "2026-10-29T14:00:22Z"
         },
         {
+          "est_seconds_lost": 0,
           "excerpt": "pattern: DiscountPolicy",
           "line": 3,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
           "signal": "search-miss",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58/subagents/agent-a1f3c9.jsonl",
+          "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58/subagents/agent-a1f3c9.jsonl",
           "summary": "Grep search in src/shopfront returned nothing",
           "timestamp": "2026-11-09T15:00:06Z"
         },
         {
+          "est_seconds_lost": 0,
           "excerpt": "pattern: RefundPolicy",
           "line": 5,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
           "signal": "search-miss",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58/subagents/agent-a1f3c9.jsonl",
+          "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58/subagents/agent-a1f3c9.jsonl",
           "summary": "Grep search in src/shopfront returned nothing",
           "timestamp": "2026-11-09T15:00:20Z"
         },
         {
+          "est_seconds_lost": 0,
           "excerpt": "pattern: **/*policy*.py",
           "line": 7,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
           "signal": "search-miss",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58/subagents/agent-a1f3c9.jsonl",
+          "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58/subagents/agent-a1f3c9.jsonl",
           "summary": "Glob search in src/shopfront returned nothing",
           "timestamp": "2026-11-09T15:00:34Z"
         }
@@ -311,6 +324,7 @@
       ],
       "score": 29.5,
       "score_detail": {
+        "capped": false,
         "consistency": 0.8,
         "intensity": 3.585,
         "mean_session_points": 1.792,
@@ -333,7 +347,7 @@
       "signals": {
         "search-miss": 5
       },
-      "why": "5 friction events in all 2 sessions that touched it (5 search miss); medium confidence because it recurs across sessions."
+      "why": "5 friction events in all 2 sessions that touched it (5 search misses); medium confidence because it recurs across sessions."
     }
   ],
   "exposure": {
@@ -363,54 +377,60 @@
   "generated_at": "2026-11-13T09:00:00Z",
   "hotspots": [
     {
+      "agent_commits": 0,
       "confidence": "high",
-      "est_minutes_lost": 10.7,
+      "est_minutes_lost": 3.6,
       "events": 12,
       "evidence": [
         {
+          "est_seconds_lost": 0,
+          "excerpt": null,
+          "line": 28,
+          "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
+          "signal": "probable-correction",
+          "source": "claude-code:shopfront/e65615b3-b6e0-5853-afdf-c13d1b54f9b5.jsonl",
+          "summary": "Probable correction (confidence 0.4; matched \"don't\", \"instead\", \"not allowed\"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py",
+          "timestamp": "2026-10-26T10:08:42Z"
+        },
+        {
+          "est_seconds_lost": 16.0,
           "excerpt": "File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.",
           "line": 13,
           "session_id": "4132e18c-d843-510d-aee7-82374ae93389",
           "signal": "stale-edit",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/4132e18c-d843-510d-aee7-82374ae93389.jsonl",
+          "source": "claude-code:shopfront/4132e18c-d843-510d-aee7-82374ae93389.jsonl",
           "summary": "Edit on src/shopfront/api/schema_gen.py refused: the file changed on disk after it was read",
           "timestamp": "2026-11-03T09:01:39Z"
         },
         {
+          "est_seconds_lost": 3.0,
           "excerpt": null,
           "line": 24,
           "session_id": "4132e18c-d843-510d-aee7-82374ae93389",
           "signal": "user-interrupt",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/4132e18c-d843-510d-aee7-82374ae93389.jsonl",
+          "source": "claude-code:shopfront/4132e18c-d843-510d-aee7-82374ae93389.jsonl",
           "summary": "The user interrupted the agent while it was working on src/shopfront/api/schema_gen.py",
           "timestamp": "2026-11-03T09:04:16Z"
         },
         {
+          "est_seconds_lost": 0,
           "excerpt": "That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml.",
           "line": 10,
           "session_id": "aider-2026-11-05",
           "signal": "user-correction",
           "source": "tests/fixtures/transcripts/other-agents/aider-2026-11-05.jsonl",
-          "summary": "User correction (confidence 1; matched \"that's wrong\", \"revert/undo\"); names src/shopfront/api/schema_gen.py",
+          "summary": "User correction (confidence 1; matched \"that's wrong\", \"revert/undo\"; the user names src/shopfront/api/schema_gen.py, which it had changed); names src/shopfront/api/schema_gen.py",
           "timestamp": "2026-11-05T16:06:40Z"
         },
         {
+          "est_seconds_lost": 21.0,
           "excerpt": "String to replace not found in file.\nString: API_VERSION = \"2.3\"",
           "line": 9,
           "session_id": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
           "signal": "edit-miss",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/fb4e20bf-8179-51b6-93e1-be4a26ada996.jsonl",
+          "source": "claude-code:shopfront/fb4e20bf-8179-51b6-93e1-be4a26ada996.jsonl",
           "summary": "Edit on src/shopfront/api/schema_gen.py failed: the text to replace was not found",
           "timestamp": "2026-11-12T11:00:48Z"
-        },
-        {
-          "excerpt": null,
-          "line": 10,
-          "session_id": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
-          "signal": "read-loop",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/fb4e20bf-8179-51b6-93e1-be4a26ada996.jsonl",
-          "summary": "src/shopfront/api/schema_gen.py was read 3 times with no edit in between",
-          "timestamp": "2026-11-12T11:01:07Z"
         }
       ],
       "exposure_sessions": 4,
@@ -433,7 +453,7 @@
           "title": "Generated file: point agents at its source"
         },
         {
-          "detail": "6 edits failed to locate their target in this 1031-line file (2 matched several places, 4 matched nothing) across 4 session(s). Split it into smaller modules, or give repeated blocks unique nearby text (section comments, distinct names) so an edit can be targeted.",
+          "detail": "6 edits failed to locate the target in this 1031-line file (2 matched several places, 4 matched nothing) across 4 sessions. Split it into smaller modules, or give repeated blocks unique nearby text (section comments, distinct names) so an edit can be targeted.",
           "id": "split-or-anchor-large-file",
           "signals": [
             "edit-miss"
@@ -441,7 +461,7 @@
           "title": "Large file: split it or add unique anchors"
         },
         {
-          "detail": "A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: \"No, stop hand-editing src/shopfront/api/schema_gen.py. It is generated: change api/openapi.yaml and run make codegen.\" / \"That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml.\"",
+          "detail": "A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: \"No, stop hand-editing src/shopfront/api/schema_gen.py. It is generated: change api/openapi.yaml and run make codegen.\" / \"That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml.\"",
           "id": "write-down-the-rule",
           "signals": [
             "user-correction"
@@ -451,9 +471,10 @@
       ],
       "score": 56.8,
       "score_detail": {
+        "capped": false,
         "consistency": 0.88,
-        "intensity": 10.795,
-        "mean_session_points": 2.699,
+        "intensity": 10.782,
+        "mean_session_points": 2.696,
         "recurrence": 0.774,
         "sessions": [
           {
@@ -467,9 +488,9 @@
             "weighted_events": 6.0
           },
           {
-            "points": 2.536,
+            "points": 2.524,
             "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
-            "weighted_events": 4.8
+            "weighted_events": 4.75
           },
           {
             "points": 1.807,
@@ -477,65 +498,72 @@
             "weighted_events": 2.5
           }
         ],
-        "severity": 0.835
+        "severity": 0.834
       },
       "sessions": 4,
       "signals": {
         "edit-miss": 6,
+        "probable-correction": 1,
         "read-loop": 1,
         "stale-edit": 1,
-        "user-correction": 3,
+        "user-correction": 2,
         "user-interrupt": 1
       },
-      "why": "12 friction events in all 4 sessions that touched it (6 edit miss, 3 user correction, 1 read loop, 2 more signal types); high confidence because it recurs across sessions with several kinds of evidence."
+      "why": "12 friction events in all 4 sessions that touched it (6 edit misses, 2 user corrections, 1 probable correction, 3 more signal types); high confidence because it recurs across sessions with several kinds of evidence."
     },
     {
+      "agent_commits": 0,
       "confidence": "high",
-      "est_minutes_lost": 18.9,
+      "est_minutes_lost": 1.9,
       "events": 6,
       "evidence": [
         {
+          "est_seconds_lost": 0,
+          "excerpt": null,
+          "line": 28,
+          "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
+          "signal": "probable-correction",
+          "source": "claude-code:shopfront/e65615b3-b6e0-5853-afdf-c13d1b54f9b5.jsonl",
+          "summary": "Probable correction (confidence 0.4; matched \"don't\", \"instead\", \"not allowed\"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py",
+          "timestamp": "2026-10-26T10:08:42Z"
+        },
+        {
+          "est_seconds_lost": 2.0,
           "excerpt": "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.",
           "line": 29,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
           "signal": "user-correction",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
-          "summary": "User correction (confidence 1; matched \"no, …\", \"I told you\"); after edits to src/shopfront/checkout/service.py, tests/test_refunds.py, src/shopfront/payments/client.py",
+          "source": "claude-code:shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
+          "summary": "User correction (confidence 1; matched \"no, …\", \"I told you\"; the agent then changed src/shopfront/checkout/service.py again); attributed to src/shopfront/checkout/service.py",
           "timestamp": "2026-10-29T14:11:05Z"
         },
         {
-          "excerpt": null,
-          "line": 17,
-          "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
-          "signal": "edit-revert",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
-          "summary": "Edit on src/shopfront/checkout/service.py undid an earlier edit from the same session",
-          "timestamp": "2026-11-09T15:02:42Z"
-        },
-        {
+          "est_seconds_lost": 0,
           "excerpt": null,
           "line": 21,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
           "signal": "edit-thrash",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
+          "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
           "summary": "7 successful edits to src/shopfront/checkout/service.py within one user turn",
           "timestamp": "2026-11-09T15:03:39Z"
         },
         {
+          "est_seconds_lost": 28.0,
           "excerpt": "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only.",
           "line": 27,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
           "signal": "user-correction",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
-          "summary": "User correction (confidence 1; matched \"still failing\", \"I told you\"); names src/shopfront/checkout/service.py",
+          "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
+          "summary": "User correction (confidence 1; matched \"still failing\", \"I told you\"; the user names src/shopfront/checkout/service.py, which it had changed); names src/shopfront/checkout/service.py",
           "timestamp": "2026-11-09T15:14:23Z"
         },
         {
+          "est_seconds_lost": 16.0,
           "excerpt": null,
           "line": 31,
           "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
           "signal": "edit-revert",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
+          "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
           "summary": "Edit on src/shopfront/checkout/service.py undid an earlier edit from the same session",
           "timestamp": "2026-11-09T15:15:05Z"
         }
@@ -551,7 +579,7 @@
       "path": "src/shopfront/checkout/service.py",
       "recommendations": [
         {
-          "detail": "A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: \"It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only.\" / \"No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.\"",
+          "detail": "A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: \"It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only.\" / \"No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.\"",
           "id": "write-down-the-rule",
           "signals": [
             "user-correction"
@@ -559,20 +587,20 @@
           "title": "Write down the rule the human keeps repeating"
         },
         {
-          "detail": "Edits here did not converge: 1 thrash episode(s) and 2 reverted edit(s) in 1 session(s). Document the quickest command that validates this file (a single test, a type check) so agents can verify instead of iterating blind.",
+          "detail": "Edits here did not converge: 0 thrash episodes and 2 reverted edits in 1 session. Document the quickest command that validates this file (a single test, a type check) so agents can verify instead of iterating blind.",
           "id": "add-a-fast-check",
           "signals": [
-            "edit-revert",
-            "edit-thrash"
+            "edit-revert"
           ],
           "title": "Give agents a fast way to check changes to this file"
         }
       ],
-      "score": 39.8,
+      "score": 43.4,
       "score_detail": {
+        "capped": false,
         "consistency": 0.85,
-        "intensity": 5.463,
-        "mean_session_points": 1.821,
+        "intensity": 6.522,
+        "mean_session_points": 2.174,
         "recurrence": 0.667,
         "sessions": [
           {
@@ -581,93 +609,40 @@
             "weighted_events": 9.5
           },
           {
-            "points": 1.222,
+            "points": 2.322,
             "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
-            "weighted_events": 1.333
+            "weighted_events": 4.0
           },
           {
-            "points": 0.848,
+            "points": 0.807,
             "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
-            "weighted_events": 0.8
+            "weighted_events": 0.75
           }
         ],
-        "severity": 0.703
+        "severity": 0.765
       },
       "sessions": 3,
       "signals": {
         "edit-revert": 2,
         "edit-thrash": 1,
-        "user-correction": 3
+        "probable-correction": 1,
+        "user-correction": 2
       },
-      "why": "6 friction events in all 3 sessions that touched it (3 user correction, 2 edit reverted, 1 edit thrash); high confidence because it recurs across sessions with several kinds of evidence."
+      "why": "6 friction events in all 3 sessions that touched it (2 reverted edits, 2 user corrections, 1 edit thrash episode, 1 more signal type); high confidence because it recurs across sessions with several kinds of evidence."
     },
     {
-      "confidence": "low",
-      "est_minutes_lost": 5.0,
-      "events": 2,
-      "evidence": [
-        {
-          "excerpt": "$ pytest tests/test_refunds.py -x\nExit code 1\ntests/conftest.py:11: in engine\n    return make_engine(os.environ['DATABASE_URL'])\nE   KeyError: 'DATABASE_URL'\nERROR tests/test_checkout.py - KeyError: 'DATABASE_URL'",
-          "line": 23,
-          "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
-          "signal": "command-failure",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
-          "summary": "`pytest` failed (exit 1; ordinary failure)",
-          "timestamp": "2026-10-29T14:04:51Z"
-        },
-        {
-          "excerpt": "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.",
-          "line": 29,
-          "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
-          "signal": "user-correction",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
-          "summary": "User correction (confidence 1; matched \"no, …\", \"I told you\"); after edits to src/shopfront/checkout/service.py, tests/test_refunds.py, src/shopfront/payments/client.py",
-          "timestamp": "2026-10-29T14:11:05Z"
-        }
-      ],
-      "exposure_sessions": 1,
-      "file": {
-        "exists": false,
-        "generated": false,
-        "lines": null
-      },
-      "friction_rate": 1.0,
-      "kind": "file",
-      "path": "tests/test_refunds.py",
-      "recommendations": [],
-      "score": 15.0,
-      "score_detail": {
-        "consistency": 0.7,
-        "intensity": 1.553,
-        "mean_session_points": 1.553,
-        "recurrence": 0.333,
-        "sessions": [
-          {
-            "points": 1.553,
-            "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
-            "weighted_events": 1.933
-          }
-        ],
-        "severity": 0.645
-      },
-      "sessions": 1,
-      "signals": {
-        "command-failure": 1,
-        "user-correction": 1
-      },
-      "why": "2 friction events in the only session that touched it (1 command failure, 1 user correction); low confidence because there is too little independent evidence so far."
-    },
-    {
+      "agent_commits": 0,
       "confidence": "low",
       "est_minutes_lost": 0.3,
       "events": 1,
       "evidence": [
         {
+          "est_seconds_lost": 21.0,
           "excerpt": "File does not exist.",
           "line": 9,
           "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
           "signal": "path-miss",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
+          "source": "claude-code:shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
           "summary": "Read targeted src/shopfront/payments/refunds.py, which does not exist",
           "timestamp": "2026-10-29T14:00:38Z"
         }
@@ -684,6 +659,7 @@
       "recommendations": [],
       "score": 11.4,
       "score_detail": {
+        "capped": false,
         "consistency": 0.7,
         "intensity": 1.0,
         "mean_session_points": 1.0,
@@ -704,62 +680,18 @@
       "why": "1 friction event in the only session that touched it (1 path miss); low confidence because there is too little independent evidence so far."
     },
     {
+      "agent_commits": 0,
       "confidence": "low",
-      "est_minutes_lost": 5.0,
+      "est_minutes_lost": 0.0,
       "events": 1,
       "evidence": [
         {
-          "excerpt": "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.",
-          "line": 29,
-          "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
-          "signal": "user-correction",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
-          "summary": "User correction (confidence 1; matched \"no, …\", \"I told you\"); after edits to src/shopfront/checkout/service.py, tests/test_refunds.py, src/shopfront/payments/client.py",
-          "timestamp": "2026-10-29T14:11:05Z"
-        }
-      ],
-      "exposure_sessions": 2,
-      "file": {
-        "exists": true,
-        "generated": false,
-        "lines": 13
-      },
-      "friction_rate": 0.5,
-      "kind": "file",
-      "path": "src/shopfront/payments/client.py",
-      "recommendations": [],
-      "score": 11.1,
-      "score_detail": {
-        "consistency": 0.6,
-        "intensity": 1.222,
-        "mean_session_points": 1.222,
-        "recurrence": 0.333,
-        "sessions": [
-          {
-            "points": 1.222,
-            "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
-            "weighted_events": 1.333
-          }
-        ],
-        "severity": 0.557
-      },
-      "sessions": 1,
-      "signals": {
-        "user-correction": 1
-      },
-      "why": "1 friction event in 1 of the 2 sessions that touched it (1 user correction); low confidence because there is too little independent evidence so far."
-    },
-    {
-      "confidence": "low",
-      "est_minutes_lost": 0.4,
-      "events": 1,
-      "evidence": [
-        {
+          "est_seconds_lost": 0,
           "excerpt": "pattern: API_VERSION",
           "line": 13,
           "session_id": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
           "signal": "search-miss",
-          "source": "tests/fixtures/transcripts/-home-dev-shopfront/fb4e20bf-8179-51b6-93e1-be4a26ada996.jsonl",
+          "source": "claude-code:shopfront/fb4e20bf-8179-51b6-93e1-be4a26ada996.jsonl",
           "summary": "Grep search in api/openapi.yaml returned nothing",
           "timestamp": "2026-11-12T11:01:35Z"
         }
@@ -776,6 +708,7 @@
       "recommendations": [],
       "score": 9.7,
       "score_detail": {
+        "capped": true,
         "consistency": 0.6,
         "intensity": 1.0,
         "mean_session_points": 1.0,
@@ -793,7 +726,56 @@
       "signals": {
         "search-miss": 1
       },
-      "why": "1 friction event in 1 of the 2 sessions that touched it (1 search miss); low confidence because there is too little independent evidence so far."
+      "why": "1 friction event in 1 of the 2 sessions that touched it (1 search miss); low confidence because there is too little independent evidence so far. Only weak signals, which also accompany productive work: the score is capped at 19 and nothing is recommended."
+    },
+    {
+      "agent_commits": 0,
+      "confidence": "low",
+      "est_minutes_lost": 0.0,
+      "events": 1,
+      "evidence": [
+        {
+          "est_seconds_lost": 0,
+          "excerpt": "$ pytest tests/test_refunds.py -x\nExit code 1\ntests/conftest.py:11: in engine\n    return make_engine(os.environ['DATABASE_URL'])\nE   KeyError: 'DATABASE_URL'\nERROR tests/test_checkout.py - KeyError: 'DATABASE_URL'",
+          "line": 23,
+          "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
+          "signal": "command-failure",
+          "source": "claude-code:shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
+          "summary": "`pytest` failed (exit 1; ordinary failure)",
+          "timestamp": "2026-10-29T14:04:51Z"
+        }
+      ],
+      "exposure_sessions": 1,
+      "file": {
+        "exists": false,
+        "generated": false,
+        "lines": null
+      },
+      "friction_rate": 1.0,
+      "kind": "file",
+      "path": "tests/test_refunds.py",
+      "recommendations": [],
+      "score": 8.5,
+      "score_detail": {
+        "capped": true,
+        "consistency": 0.7,
+        "intensity": 0.678,
+        "mean_session_points": 0.678,
+        "recurrence": 0.333,
+        "sessions": [
+          {
+            "points": 0.678,
+            "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
+            "weighted_events": 0.6
+          }
+        ],
+        "severity": 0.364
+      },
+      "sessions": 1,
+      "signals": {
+        "command-failure": 1
+      },
+      "why": "1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far. Only weak signals, which also accompany productive work: the score is capped at 19 and nothing is recommended."
     }
   ],
   "repo": {
@@ -801,11 +783,16 @@
     "root": "tests/fixtures/shopfront"
   },
   "schema_version": 1,
+  "settings": {
+    "excerpts": true,
+    "git": false,
+    "key_mode": "plain"
+  },
   "signals": [
     {
       "attribution": "Files the agent touched in the preceding turn that the message names; otherwise split evenly over the files it edited in that turn (the 5 most recent).",
-      "count": 5,
-      "description": "A human prompt that follows agent work and opens with an unambiguous correction (\"No, …\", \"I told you …\", \"revert that\", \"still failing\", \"you broke …\"), or with two weaker cues together. Single weak cues and friendly follow-ups do not count.",
+      "count": 4,
+      "description": "A human prompt that follows agent work and is worded as a correction of it (\"No, …\", \"I told you …\", \"revert that\", \"still failing\", \"you broke …\"), corroborated by behaviour: the agent had changed files, and the human names one of them or the agent then changes one of them again. Wording alone, or two weaker cues together, is only a probable correction.",
       "id": "user-correction",
       "severity": 4.0,
       "title": "User correction",
@@ -813,17 +800,26 @@
     },
     {
       "attribution": "The normalized command.",
-      "count": 1,
-      "description": "The same normalized shell command failed 3 or more times in a row in one session without succeeding in between.",
+      "count": 0,
+      "description": "The same command line failed 3 or more times in a row in one session with identical arguments, with no success of that command and nothing changed in between: no edit, and no other command that could have changed files (a script, an install, a move). Dropped as waiting if the same line then passes with nothing changed.",
       "id": "retry-loop",
       "severity": 3.0,
       "title": "Retry loop",
       "why": "The failure output did not tell the agent what to do, so it kept guessing."
     },
     {
+      "attribution": "The normalized command, and the files edited between the runs (the 3 most edited, split evenly).",
+      "count": 0,
+      "description": "Within one turn the agent ran the same command 4 or more times, each run after a file change since the previous one, every run failed as an ordinary failure, and the turn ended with the command still failing.",
+      "id": "no-convergence",
+      "severity": 3.0,
+      "title": "No convergence",
+      "why": "Edit, run, red, again and again without ever going green: the agent could not work out what the check wants."
+    },
+    {
       "attribution": "The file the tool targeted, or the normalized command for shell calls.",
       "count": 1,
-      "description": "The human declined a tool call the agent proposed.",
+      "description": "The human declined a tool call the agent proposed. Declining a plan or a question is not counted.",
       "id": "tool-rejected",
       "severity": 2.5,
       "title": "Tool call declined",
@@ -832,7 +828,7 @@
     {
       "attribution": "The target of the agent's most recent tool call in that turn.",
       "count": 1,
-      "description": "The human interrupted the agent mid-turn (not counted when it merely accompanies a declined tool call).",
+      "description": "The human interrupted the agent after it had made at least one tool call in the turn. The interrupt that accompanies a declined tool call is not counted again.",
       "id": "user-interrupt",
       "severity": 2.5,
       "title": "User interrupt",
@@ -850,7 +846,7 @@
     {
       "attribution": "The file being edited.",
       "count": 2,
-      "description": "An edit exactly undid an earlier successful edit to the same file in the same session (or a write restored an earlier version of the file).",
+      "description": "An edit exactly undid an earlier successful edit to the same file in the same session, or a write restored an earlier version of the file. Taking out lines that were only added and then run successfully (a debug print) is not counted.",
       "id": "edit-revert",
       "severity": 2.0,
       "title": "Edit reverted",
@@ -859,7 +855,7 @@
     {
       "attribution": "The normalized command. Ordinary failures are also attributed to repo files named on the command line; setup/invocation errors are not (the files are not the cause).",
       "count": 9,
-      "description": "A shell command exited non-zero. Failures that look like setup or invocation problems (command not found, missing module, bad arguments, …) count fully; other failures, such as a test that legitimately fails, count at 0.3. Read-only inspection commands (ls, grep, …) are ignored.",
+      "description": "A shell command failed: it exited non-zero or, where the exit status belongs to a pipe or a later step, its own output says so. Setup and invocation errors (command not found, missing module, bad arguments, …) count fully; ordinary failures, such as a test that fails, count at 0.3. A red run followed by a change and a green run of the same job is dropped. Read-only inspection commands (ls, grep, …) are ignored.",
       "id": "command-failure",
       "severity": 2.0,
       "title": "Command failure",
@@ -877,11 +873,20 @@
     {
       "attribution": "The file being edited.",
       "count": 1,
-      "description": "One file received 6 or more successful edits within a single user turn.",
+      "description": "One file received 6 or more successful edits within a single turn in which something also went wrong: an edit miss, a stale edit or a reverted edit on that file, or a failed command or retry loop in the turn.",
       "id": "edit-thrash",
       "severity": 1.5,
       "title": "Edit thrash",
       "why": "Many small edits to one file in one go usually means trial and error rather than a plan. Weak signal on its own."
+    },
+    {
+      "attribution": "The file the tool targeted, or the normalized shell command (the step most likely to have been refused).",
+      "count": 0,
+      "description": "A tool call was refused by permission settings, a hook or a safety check before it ran. No human was asked, and the command or edit never happened.",
+      "id": "permission-denied",
+      "severity": 1.5,
+      "title": "Permission denied",
+      "why": "The agent wanted to do something the setup does not allow. Either the allow-list is missing a routine command, or the agent does not know the boundary."
     },
     {
       "attribution": "The file being edited.",
@@ -893,9 +898,27 @@
       "why": "Something else (formatter, code generator, watcher, another agent) rewrites this file, or the agent edits it blind."
     },
     {
+      "attribution": "Split evenly over the files edited in the preceding turn (the 5 most recent).",
+      "count": 1,
+      "description": "A human prompt that is worded like a correction but is not corroborated by behaviour (the agent had changed nothing, or the human names no changed file and the agent did not go back to what it had changed), or that only contains two or more weaker cues. It may be an ordinary follow-up request.",
+      "id": "probable-correction",
+      "severity": 1.5,
+      "title": "Probable correction",
+      "why": "Possibly a redirect by a human. Kept apart from corrections so that a guess never inflates their count; never quoted, never the basis of a recommendation."
+    },
+    {
+      "attribution": "The file.",
+      "count": 0,
+      "description": "A read was refused because the file exceeds what the harness returns in one piece.",
+      "id": "file-too-large",
+      "severity": 1.0,
+      "title": "File too large to read",
+      "why": "The agent has to page through the file or search it blind, in every session."
+    },
+    {
       "attribution": "The non-existent path (so repeated wrong guesses add up).",
       "count": 1,
-      "description": "The agent tried to read or edit a path that does not exist.",
+      "description": "The agent tried to read or edit a path that does not exist. A read of a missing file that the agent then creates in the same session is not recorded.",
       "id": "path-miss",
       "severity": 1.0,
       "title": "Path miss",
@@ -904,7 +927,7 @@
     {
       "attribution": "The file or directory that was searched.",
       "count": 6,
-      "description": "A Grep or Glob search returned nothing.",
+      "description": "A Grep or Glob search returned nothing. A search that only confirms a name is free before the agent creates it is not recorded.",
       "id": "search-miss",
       "severity": 1.0,
       "title": "Search miss",
@@ -913,7 +936,7 @@
     {
       "attribution": "The file being read.",
       "count": 1,
-      "description": "The same range of a file was read 3 or more times in one session with no edit to it in between.",
+      "description": "The same range of a file was read 3 or more times in one session with no successful edit to it in between.",
       "id": "read-loop",
       "severity": 0.5,
       "title": "Read loop",
@@ -925,9 +948,10 @@
       "files": 6,
       "ignored_lines": 10,
       "kind": "claude-code",
-      "path": "tests/fixtures/transcripts/-home-dev-shopfront",
+      "path": "claude-code:shopfront",
       "sessions": 5,
       "sessions_outside_repo": 0,
+      "skipped_events": 0,
       "skipped_lines": 0
     },
     {
@@ -937,6 +961,7 @@
       "path": "tests/fixtures/transcripts/other-agents/aider-2026-11-05.jsonl",
       "sessions": 1,
       "sessions_outside_repo": 0,
+      "skipped_events": 0,
       "skipped_lines": 0
     }
   ],
@@ -946,11 +971,12 @@
   },
   "totals": {
     "commands_affected": 4,
-    "corrections": 5,
+    "corrections": 4,
     "directories_affected": 1,
-    "est_minutes_lost": 27.9,
-    "files_affected": 6,
-    "friction_events": 35,
+    "est_minutes_lost": 9.4,
+    "files_affected": 5,
+    "friction_events": 34,
+    "probable_corrections": 1,
     "sessions": 6,
     "tool_calls": 74,
     "unattributed_events": 0
@@ -965,7 +991,7 @@
                 "children": [
                   {
                     "children": [],
-                    "est_minutes_lost": 10.7,
+                    "est_minutes_lost": 3.6,
                     "events": 12,
                     "exposure_sessions": 4,
                     "friction_rate": 1.0,
@@ -976,7 +1002,7 @@
                     "sessions": 4
                   }
                 ],
-                "est_minutes_lost": 10.7,
+                "est_minutes_lost": 3.6,
                 "events": 12,
                 "exposure_sessions": 4,
                 "friction_rate": 1.0,
@@ -990,25 +1016,25 @@
                 "children": [
                   {
                     "children": [],
-                    "est_minutes_lost": 18.9,
+                    "est_minutes_lost": 1.9,
                     "events": 6,
                     "exposure_sessions": 3,
                     "friction_rate": 1.0,
                     "kind": "file",
                     "name": "service.py",
                     "path": "src/shopfront/checkout/service.py",
-                    "score": 39.8,
+                    "score": 43.4,
                     "sessions": 3
                   }
                 ],
-                "est_minutes_lost": 18.9,
+                "est_minutes_lost": 1.9,
                 "events": 6,
                 "exposure_sessions": 3,
                 "friction_rate": 1.0,
                 "kind": "dir",
                 "name": "checkout",
                 "path": "src/shopfront/checkout",
-                "score": 39.8,
+                "score": 43.4,
                 "sessions": 3
               },
               {
@@ -1024,82 +1050,45 @@
                     "path": "src/shopfront/payments/refunds.py",
                     "score": 11.4,
                     "sessions": 1
-                  },
-                  {
-                    "children": [],
-                    "est_minutes_lost": 5.0,
-                    "events": 1,
-                    "exposure_sessions": 2,
-                    "friction_rate": 0.5,
-                    "kind": "file",
-                    "name": "client.py",
-                    "path": "src/shopfront/payments/client.py",
-                    "score": 11.1,
-                    "sessions": 1
                   }
                 ],
-                "est_minutes_lost": 5.3,
-                "events": 2,
+                "est_minutes_lost": 0.3,
+                "events": 1,
                 "exposure_sessions": 2,
                 "friction_rate": 0.5,
                 "kind": "dir",
                 "name": "payments",
                 "path": "src/shopfront/payments",
-                "score": 13.7,
+                "score": 9.7,
                 "sessions": 1
               }
             ],
-            "est_minutes_lost": 26.6,
+            "est_minutes_lost": 5.8,
             "events": 23,
             "exposure_sessions": 6,
             "friction_rate": 1.0,
             "kind": "dir",
             "name": "shopfront",
             "path": "src/shopfront",
-            "score": 73.3,
+            "score": 73.6,
             "sessions": 6
           }
         ],
-        "est_minutes_lost": 26.6,
+        "est_minutes_lost": 5.8,
         "events": 23,
         "exposure_sessions": 6,
         "friction_rate": 1.0,
         "kind": "dir",
         "name": "src",
         "path": "src",
-        "score": 73.3,
+        "score": 73.6,
         "sessions": 6
       },
       {
         "children": [
           {
             "children": [],
-            "est_minutes_lost": 5.0,
-            "events": 2,
-            "exposure_sessions": 1,
-            "friction_rate": 1.0,
-            "kind": "file",
-            "name": "test_refunds.py",
-            "path": "tests/test_refunds.py",
-            "score": 15.0,
-            "sessions": 1
-          }
-        ],
-        "est_minutes_lost": 5.0,
-        "events": 2,
-        "exposure_sessions": 1,
-        "friction_rate": 1.0,
-        "kind": "dir",
-        "name": "tests",
-        "path": "tests",
-        "score": 15.0,
-        "sessions": 1
-      },
-      {
-        "children": [
-          {
-            "children": [],
-            "est_minutes_lost": 0.4,
+            "est_minutes_lost": 0.0,
             "events": 1,
             "exposure_sessions": 2,
             "friction_rate": 0.5,
@@ -1110,7 +1099,7 @@
             "sessions": 1
           }
         ],
-        "est_minutes_lost": 0.4,
+        "est_minutes_lost": 0.0,
         "events": 1,
         "exposure_sessions": 2,
         "friction_rate": 0.5,
@@ -1119,9 +1108,34 @@
         "path": "api",
         "score": 9.7,
         "sessions": 1
+      },
+      {
+        "children": [
+          {
+            "children": [],
+            "est_minutes_lost": 0.0,
+            "events": 1,
+            "exposure_sessions": 1,
+            "friction_rate": 1.0,
+            "kind": "file",
+            "name": "test_refunds.py",
+            "path": "tests/test_refunds.py",
+            "score": 8.5,
+            "sessions": 1
+          }
+        ],
+        "est_minutes_lost": 0.0,
+        "events": 1,
+        "exposure_sessions": 1,
+        "friction_rate": 1.0,
+        "kind": "dir",
+        "name": "tests",
+        "path": "tests",
+        "score": 8.5,
+        "sessions": 1
       }
     ],
-    "est_minutes_lost": 27.0,
+    "est_minutes_lost": 5.8,
     "events": 25,
     "exposure_sessions": 6,
     "friction_rate": 1.0,

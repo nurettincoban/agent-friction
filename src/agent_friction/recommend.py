@@ -14,7 +14,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_friction import model, signals
+from agent_friction import attribution, model, scoring, signals
 from agent_friction.model import Finding
 
 #: A file with at least this many lines is called "large" in recommendations.
@@ -55,15 +55,19 @@ RULE_IDS: tuple[str, ...] = (
     "path-agents-expect",
     "write-down-the-rule",
     "state-the-boundary",
+    "allow-or-document-the-boundary",
     "clarify-before-acting",
     "add-a-fast-check",
     "learn-from-rework",
-    "document-how-to-run",
     "add-a-pointer",
     "summarize-this-file",
     "use-the-working-command",
+    "document-the-setup-step",
     "document-the-command",
     "make-the-failure-actionable",
+    "run-it-in-the-background",
+    "give-it-more-time",
+    "explain-the-failing-check",
 )
 
 
@@ -104,13 +108,17 @@ def _sessions(findings: Sequence[Finding]) -> int:
     return len({f.session_id for f in findings})
 
 
+def _n(count: int, noun: str, plural: str | None = None) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {plural or noun + 's'}"
+
+
 def _times(count: int) -> str:
     return "once" if count == 1 else f"{count} times"
 
 
 def _in_sessions(findings: Sequence[Finding]) -> str:
     n = _sessions(findings)
-    return f"{_times(len(findings))} in {n} session{'' if n == 1 else 's'}"
+    return f"{_times(len(findings))} in {_n(n, 'session')}"
 
 
 def _top(values: Sequence[str], limit: int = MAX_QUOTES) -> list[tuple[str, int]]:
@@ -118,9 +126,22 @@ def _top(values: Sequence[str], limit: int = MAX_QUOTES) -> list[tuple[str, int]
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
 
 
+def code(value: str) -> str:
+    """``value`` as a Markdown inline code span, whatever it contains.
+
+    The fence is one backtick longer than the longest run of backticks in the
+    value, and the value is padded with a space where it starts or ends with
+    one (CommonMark strips that padding again).
+    """
+    runs = re.findall(r"`+", value)
+    fence = "`" * (max(map(len, runs), default=0) + 1)
+    pad = " " if value.startswith("`") or value.endswith("`") else ""
+    return f"{fence}{pad}{value}{pad}{fence}"
+
+
 def _code_list(pairs: Sequence[tuple[str, int]], quote: Quoter) -> str:
     return ", ".join(
-        f"`{quote(value, QUOTE_CHARS)}`" + (f" ({count}x)" if count > 1 else "")
+        code(quote(value, QUOTE_CHARS)) + (f" ({count}x)" if count > 1 else "")
         for value, count in pairs
     )
 
@@ -151,20 +172,30 @@ class _Rules:
     # ---- shared rules ----------------------------------------------------------------
 
     def corrections(self) -> None:
+        # Corroborated corrections only: a "probable" one is a separate, weak signal and
+        # never the basis of a claim that a human corrected anything.
         found = self.get(signals.USER_CORRECTION)
         if sum(self.shares.get(f.fid, 1.0) for f in found) < CORRECTION_MIN_SHARE:
             return  # nothing, or only thin slices of corrections spread over many files
+        # "Keeps repeating" is a claim about the same thing being said twice: it needs two
+        # corrections that share wording. Two unrelated corrections are two one-offs.
+        repeated = _share_wording([f.detail.get("quote", "") for f in found])
         detail = (
             f"A human corrected the agent here {_in_sessions(found)}. Put the rule in "
             "AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read "
             "before the next attempt."
         )
+        if not repeated:
+            detail = (
+                "A human corrected the agent here "
+                + ("once" if len(found) == 1 else _in_sessions(found))
+                + ("" if len(found) == 1 else ", each time about something else")
+                + ". If what they said is a standing rule rather than a one-off, put it in "
+                "AGENTS.md / CLAUDE.md (or a comment at the top of the file)."
+            )
         if self.quote is not None:
             # Only unambiguous corrections are quoted: a "probable" one may be small talk.
-            ranked = sorted(
-                (f for f in found if f.weight >= signals.CORRECTION_STRONG),
-                key=lambda f: (f.source, f.line),
-            )
+            ranked = sorted(found, key=lambda f: (f.source, f.line))
             quotes: list[str] = []
             for finding in ranked:
                 text = self.quote(finding.detail.get("quote", ""), QUOTE_CHARS)
@@ -174,7 +205,13 @@ class _Rules:
                 detail += " In their words: " + " / ".join(f'"{q}"' for q in quotes[:MAX_QUOTES])
         self.add(
             "write-down-the-rule",
-            "Write down the rule the human keeps repeating",
+            "Write down the rule the human keeps repeating"
+            if repeated
+            else (
+                "Check whether this correction is a standing rule"
+                if len(found) == 1
+                else "Check whether these corrections are standing rules"
+            ),
             detail,
             [signals.USER_CORRECTION],
         )
@@ -208,6 +245,31 @@ class _Rules:
             [signals.USER_INTERRUPT],
         )
 
+    def no_convergence(self, key: str | None) -> None:
+        """``key`` is the command for a command hotspot, ``None`` for a file."""
+        found = self.get(signals.NO_CONVERGENCE)
+        if len(found) < MIN_EVENTS:
+            return
+        rounds = max(int(f.detail.get("count", "0")) for f in found)
+        if key is not None:
+            title = f"Agents cannot get {code(key)} to pass"
+            opening = f"Agents edited and re-ran {code(key)}"
+        else:
+            commands = _top([_command_key(f) for f in found], 2)
+            names = " / ".join(f"{code(name)}" for name, _ in commands) or "the check"
+            title = "Edits here do not get the check to pass"
+            opening = f"Agents edited this file and re-ran {names}"
+        self.add(
+            "explain-the-failing-check",
+            title,
+            f"{opening} up to {rounds} times in a row without it ever going green "
+            f"({_in_sessions(found)}). The failure output did not lead them to a fix. "
+            "Document in AGENTS.md how to run and debug this check (one test at a time, "
+            "where its fixtures and expected values come from) and what behaviour it "
+            "expects, or make its failure message say so.",
+            [signals.NO_CONVERGENCE],
+        )
+
     def search_misses(self, where: str) -> None:
         found = self.get(signals.SEARCH_MISS)
         if len(found) < MIN_EVENTS:
@@ -234,8 +296,10 @@ class _Rules:
         misses = self.get(signals.EDIT_MISS)
         ambiguous = self.get(signals.EDIT_MISS, "ambiguous")
         stale = self.get(signals.STALE_EDIT)
-        thrash = self.get(signals.EDIT_THRASH)
+        # A sitting of many edits that ended on a green command did converge.
+        thrash = [f for f in self.get(signals.EDIT_THRASH) if not f.detail.get("ended_green")]
         reverts = self.get(signals.EDIT_REVERT)
+        too_large = self.get(signals.FILE_TOO_LARGE)
         rework = self.get(signals.HUMAN_REWORK)
         edit_trouble = [*misses, *stale, *thrash, *reverts]
         generated = facts is not None and facts.generated
@@ -256,15 +320,26 @@ class _Rules:
             self.add(
                 "split-or-anchor-large-file",
                 "Large file: split it or add unique anchors",
-                f"{len(misses)} edits failed to locate their target in this {facts.lines}-line "
+                f"{_n(len(misses), 'edit')} failed to locate the target in this {facts.lines}-line "
                 f"file ({len(ambiguous)} matched several places, "
                 f"{len(misses) - len(ambiguous)} matched nothing) across "
-                f"{_sessions(misses)} session(s). Split it into smaller modules, or give "
+                f"{_n(_sessions(misses), 'session')}. Split it into smaller modules, or give "
                 "repeated blocks unique nearby text (section comments, distinct names) so "
                 "an edit can be targeted.",
                 [signals.EDIT_MISS],
             )
-        elif len(misses) >= MIN_EVENTS and not generated:
+        elif len(too_large) >= MIN_EVENTS and not generated:
+            size = f" ({_n(facts.lines, 'line')})" if facts is not None and facts.lines else ""
+            self.add(
+                "split-or-anchor-large-file",
+                "Large file: agents cannot read it in one piece",
+                f"Reads of this file{size} were refused as too large {_in_sessions(too_large)}"
+                ", so agents page through it or search it blind. Split it, or say in "
+                "AGENTS.md which parts matter and how to find them (section names to search "
+                "for).",
+                [signals.FILE_TOO_LARGE],
+            )
+        if len(misses) >= MIN_EVENTS and not generated and not large:
             if len(ambiguous) * 2 >= len(misses):
                 detail = (
                     f"{len(ambiguous)} of {len(misses)} failed edits matched several places: "
@@ -274,7 +349,8 @@ class _Rules:
                 title = "Repeated blocks: make edit targets unique"
             else:
                 detail = (
-                    f"{len(misses)} edits in {_sessions(misses)} session(s) did not find the "
+                    f"{_n(len(misses), 'edit')} in {_n(_sessions(misses), 'session')} did not "
+                    "find the "
                     "text the agent expected. Usual causes: a formatter or hook rewrites the "
                     "file after edits, unusual whitespace (tabs, CRLF), or the file changes "
                     "under the agent. Document the formatting step, or run it in a hook so "
@@ -308,16 +384,18 @@ class _Rules:
 
         self.corrections()
         self.rejections()
+        self.denials("to change this file")
         self.interrupts()
 
         if len(thrash) + len(reverts) >= MIN_EVENTS:
             self.add(
                 "add-a-fast-check",
                 "Give agents a fast way to check changes to this file",
-                f"Edits here did not converge: {len(thrash)} thrash episode(s) and "
-                f"{len(reverts)} reverted edit(s) in {_sessions([*thrash, *reverts])} "
-                "session(s). Document the quickest command that validates this file (a "
-                "single test, a type check) so agents can verify instead of iterating blind.",
+                f"Edits here did not converge: {_n(len(thrash), 'thrash episode')} and "
+                f"{_n(len(reverts), 'reverted edit')} in "
+                f"{_n(_sessions([*thrash, *reverts]), 'session')}. Document the quickest "
+                "command that validates this file (a single test, a type check) so agents "
+                "can verify instead of iterating blind.",
                 [f.signal for f in (*thrash, *reverts)],
             )
 
@@ -339,29 +417,12 @@ class _Rules:
                 [signals.HUMAN_REWORK],
             )
 
-        failures = self.get(signals.COMMAND_FAILURE)
-        if len(failures) >= MIN_EVENTS:
-            detail = f"Commands naming this file failed {_in_sessions(failures)}"
-            commands = _top([_command_key(f) for f in failures])
-            if commands:
-                detail += ": " + ", ".join(
-                    f"`{cmd}`" + (f" ({n}x)" if n > 1 else "") for cmd, n in commands
-                )
-            detail += (
-                ". Document how to run or test this file (see the matching entry under commands)."
-            )
-            self.add(
-                "document-how-to-run",
-                "Document how to run or test this file",
-                detail,
-                [signals.COMMAND_FAILURE],
-            )
-
         self.search_misses("this file")
+        self.no_convergence(None)
 
         loops = self.get(signals.READ_LOOP)
         if len(loops) >= MIN_EVENTS:
-            size = f" ({facts.lines} lines)" if facts is not None and facts.lines else ""
+            size = f" ({_n(facts.lines, 'line')})" if facts is not None and facts.lines else ""
             self.add(
                 "summarize-this-file",
                 "Agents keep re-reading this file",
@@ -371,25 +432,95 @@ class _Rules:
                 [signals.READ_LOOP],
             )
 
+    def denials(self, what: str) -> None:
+        denied = self.get(signals.PERMISSION_DENIED)
+        if len(denied) < MIN_EVENTS:
+            return
+        hooks = sum(f.detail.get("variant") == "hook" for f in denied)
+        blocked = sum(f.detail.get("variant") == "blocked" for f in denied)
+        if blocked * 2 > len(denied):
+            self.add(
+                "allow-or-document-the-boundary",
+                "Tell agents what the harness wants instead",
+                f"Agents tried {what} {_in_sessions(denied)} in a form the harness itself "
+                "refuses to run (see the cited lines for what it suggests instead). Put that "
+                "alternative in AGENTS.md so the first attempt is the right one.",
+                [signals.PERMISSION_DENIED],
+            )
+            return
+        by = "a hook" if hooks * 2 > len(denied) else "permission settings"
+        self.add(
+            "allow-or-document-the-boundary",
+            "Allow it, or tell agents it is off limits",
+            f"Agents tried {what} {_in_sessions(denied)} and were refused by {by} before "
+            "anything ran. If this is routine and safe, add an allow rule so they stop "
+            "stalling on it; if it is meant to be off limits, say so in AGENTS.md together "
+            "with what to do instead.",
+            [signals.PERMISSION_DENIED],
+        )
+
     # ---- command rules ---------------------------------------------------------------
 
     def command(self, key: str) -> None:
         failures = self.get(signals.COMMAND_FAILURE)
         invocation = self.get(signals.COMMAND_FAILURE, "invocation")
+        invocation = [f for f in invocation if "typo_of" not in f.detail]
         retries = self.get(signals.RETRY_LOOP)
+        servers = [f for f in invocation if f.detail.get("server")]
+        invocation = [f for f in invocation if not f.detail.get("server")]
+        slow = [f for f in invocation if f.detail.get("timeout")]
+        invocation = [f for f in invocation if not f.detail.get("timeout")]
+        if attribution.is_inline_code(key):
+            invocation = []  # ad-hoc code is not a command anyone could document
+        if len(slow) >= MIN_EVENTS:
+            self.add(
+                "give-it-more-time",
+                f"{code(key)} outlasts the harness timeout",
+                f"{code(key)} was cut off by the harness timeout {_in_sessions(slow)}. Say in "
+                "AGENTS.md how long it normally takes and to run it with a longer timeout or "
+                "in the background, or point agents at a faster, narrower command for the "
+                "inner loop.",
+                [signals.COMMAND_FAILURE],
+            )
+        if len(servers) >= MIN_EVENTS:
+            self.add(
+                "run-it-in-the-background",
+                f"Tell agents to run {code(key)} in the background",
+                f"{code(key)} is a server or watcher that never exits; run in the foreground it "
+                f"sat until the harness timed it out {_in_sessions(servers)}. Say in "
+                "AGENTS.md to start it in the background (and how to check that it is up "
+                "and how to stop it), or provide a script that does so.",
+                [signals.COMMAND_FAILURE],
+            )
         fixes = _top([f.detail.get("recovered_by", "") for f in failures], 1)
+        setups = _top([f.detail.get("fixed_by_setup", "") for f in failures], 1)
         if fixes and fixes[0][1] >= MIN_EVENTS:
+            # Only a command doing the same job counts (see signals: is_replacement), and
+            # only in sessions where the failing command never worked afterwards.
             fix, count = fixes[0]
             self.add(
                 "use-the-working-command",
-                f"Tell agents to use `{fix}`",
-                f"`{key}` failed {_in_sessions(failures)}; {_times(count)} the next "
-                f"successful command was `{fix}`. Add a line to AGENTS.md such as: "
-                f'"use `{fix}`, not `{key}`".',
+                f"Tell agents to use {code(fix)}",
+                f"{code(key)} failed {_in_sessions(failures)}; {_times(count)} the agent then "
+                f"got the same job done with {code(fix)}, and {code(key)} did not work later in "
+                f"those sessions. Add a line to AGENTS.md such as: "
+                f'"use {code(fix)}, not {code(key)}".',
+                [signals.COMMAND_FAILURE],
+            )
+        elif setups and setups[0][1] >= MIN_EVENTS:
+            setup, count = setups[0]
+            self.add(
+                "document-the-setup-step",
+                f"Document the setup {code(key)} needs",
+                f"{code(key)} failed {_in_sessions(failures)}; {_times(count)} it worked after "
+                f'the agent ran {code(setup)}. Say so in AGENTS.md ("run {code(setup)} before '
+                f'{code(key)}"), or make the environment ready before the agent starts.',
                 [signals.COMMAND_FAILURE],
             )
         elif len(invocation) >= MIN_EVENTS:
-            detail = f"`{key}` failed {_in_sessions(invocation)} with setup or invocation errors."
+            detail = (
+                f"{code(key)} failed {_in_sessions(invocation)} with setup or invocation errors."
+            )
             if self.quote is not None:
                 lines = _top([_error_line(f) for f in invocation], 2)
                 if lines:
@@ -403,7 +534,7 @@ class _Rules:
             )
             self.add(
                 "document-the-command",
-                f"Document how to run `{key}`",
+                f"Document how to run {code(key)}",
                 detail,
                 [signals.COMMAND_FAILURE],
             )
@@ -412,14 +543,82 @@ class _Rules:
             self.add(
                 "make-the-failure-actionable",
                 "Make this failure explain itself",
-                f"Agents re-ran `{key}` up to {longest} times in a row without success "
-                f"({len(retries)} retry loop(s) in {_sessions(retries)} session(s)). The "
+                f"Agents re-ran {code(key)} up to {longest} times in a row without success "
+                f"({_n(len(retries), 'retry loop')} in {_n(_sessions(retries), 'session')}). The "
                 "output did not lead them to a fix: note the known cause in AGENTS.md, or "
                 "make the command fail fast with a message that says what to do.",
                 [signals.RETRY_LOOP],
             )
+        self.no_convergence(key)
         self.rejections()
+        self.denials(f"{code(key)}")
         self.interrupts()
+
+
+_WORD_RE = re.compile(r"[a-z_][a-z0-9_]{3,}")
+_COMMON_WORDS = frozenset(
+    {
+        "that",
+        "this",
+        "with",
+        "from",
+        "have",
+        "here",
+        "there",
+        "what",
+        "when",
+        "then",
+        "they",
+        "them",
+        "your",
+        "just",
+        "again",
+        "still",
+        "told",
+        "said",
+        "asked",
+        "please",
+        "should",
+        "would",
+        "could",
+        "wrong",
+        "revert",
+        "undo",
+        "broke",
+        "not",
+        "don",
+        "the",
+        "and",
+        "for",
+        "you",
+        "use",
+        "was",
+        "were",
+        "are",
+        "but",
+    }
+)
+#: Two corrections are "the same thing again" if they share this many content words, or
+#: one long word: a name such as ``PaymentClient`` or ``schema_gen`` rarely recurs by chance.
+SHARED_WORDS_MIN = 2
+SHARED_NAME_CHARS = 7
+
+
+def _content_words(text: str) -> set[str]:
+    return set(_WORD_RE.findall(text.lower())) - _COMMON_WORDS
+
+
+def _share_wording(quotes: Sequence[str]) -> bool:
+    """Do at least two of these messages talk about the same thing?"""
+    words = [_content_words(q) for q in quotes if q]
+    for index, first in enumerate(words):
+        for second in words[index + 1 :]:
+            shared = first & second
+            if len(shared) >= SHARED_WORDS_MIN or any(
+                len(word) >= SHARED_NAME_CHARS for word in shared
+            ):
+                return True
+    return False
 
 
 def _command_key(finding: Finding) -> str:
@@ -456,6 +655,8 @@ def recommend(
     finding's ``fid`` to the fraction of it attributed to this hotspot
     (default 1).
     """
+    if scoring.weak_only(findings):
+        return []  # nothing here that productive work does not also produce
     rules = _Rules(findings, quote, shares or {})
     if kind == model.FILE:
         rules.file(facts)

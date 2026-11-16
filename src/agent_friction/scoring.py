@@ -10,7 +10,19 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from agent_friction.model import Finding
-from agent_friction.signals import BY_ID, EDIT_THRASH, HUMAN_REWORK, READ_LOOP, SEVERITY
+from agent_friction.signals import (
+    BY_ID,
+    COMMAND_FAILURE,
+    EDIT_THRASH,
+    HUMAN_REWORK,
+    NO_CONVERGENCE,
+    PATH_MISS,
+    PROBABLE_CORRECTION,
+    READ_LOOP,
+    RETRY_LOOP,
+    SEARCH_MISS,
+    SEVERITY,
+)
 
 #: Mean session points at which the severity factor reaches 1 - 1/e (about 0.63).
 SEVERITY_SCALE = 1.5
@@ -25,8 +37,17 @@ MEDIUM_MIN_SESSIONS = 2
 HIGH_MIN_SESSIONS = 3
 #: Distinct signal types needed for "high" confidence.
 HIGH_MIN_SIGNALS = 2
-#: Signals too weak to justify "high" confidence on their own.
-WEAK_SIGNALS = frozenset({READ_LOOP, EDIT_THRASH})
+#: Signals that routinely accompany productive work (many edits in one sitting, re-reading
+#: a file, a search that finds nothing, a follow-up that merely sounds like a correction).
+#: A target with nothing but these is a lead at most: its score is capped, it gets no
+#: recommendation, and it cannot fail a build on its own.
+WEAK_ALONE_SIGNALS = frozenset({READ_LOOP, EDIT_THRASH, SEARCH_MISS, PROBABLE_CORRECTION})
+WEAK_ONLY_SCORE_CAP = 19.0
+#: The same signals are too weak to justify "high" confidence on their own.
+WEAK_SIGNALS = WEAK_ALONE_SIGNALS
+#: Signals computed from other findings. Next to their source they are the same evidence
+#: counted again, so they do not add a distinct signal type for confidence.
+DERIVED_SIGNALS = {RETRY_LOOP: COMMAND_FAILURE, NO_CONVERGENCE: COMMAND_FAILURE}
 #: Session ids with this prefix are agent commits (git), not transcript sessions.
 GIT_SESSION_PREFIX = "git:"
 
@@ -117,6 +138,9 @@ def confidence(session_ids: Iterable[str], signal_ids: Iterable[str]) -> str:
     """
     sessions = len({s for s in session_ids if not s.startswith(GIT_SESSION_PREFIX)})
     kinds = set(signal_ids) - {HUMAN_REWORK}
+    for derived, source in DERIVED_SIGNALS.items():
+        if source in kinds:
+            kinds.discard(derived)  # one phenomenon, not two kinds of evidence
     if (
         sessions >= HIGH_MIN_SESSIONS
         and len(kinds) >= HIGH_MIN_SIGNALS
@@ -128,12 +152,18 @@ def confidence(session_ids: Iterable[str], signal_ids: Iterable[str]) -> str:
     return "low"
 
 
+def claimed(finding: Finding) -> list[tuple[float, float]]:
+    """Every stretch of time a finding claims."""
+    first = [finding.interval] if finding.interval is not None else []
+    return [*first, *finding.intervals]
+
+
 def lost_seconds(findings: Iterable[Finding]) -> float:
     """Length of the union of the findings' intervals, merged per stream."""
     by_stream: dict[str, list[tuple[float, float]]] = {}
     for finding in findings:
-        if finding.interval is not None:
-            by_stream.setdefault(finding.stream, []).append(finding.interval)
+        for interval in claimed(finding):
+            by_stream.setdefault(finding.stream, []).append(interval)
     total = 0.0
     for intervals in by_stream.values():
         intervals.sort()
@@ -153,15 +183,51 @@ def lost_minutes(findings: Iterable[Finding]) -> float:
 
 
 def _plural(count: int, noun: str) -> str:
-    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+    if count == 1:
+        return f"{count} {noun}"
+    return f"{count} {noun}es" if noun.endswith(("s", "sh", "ch", "x")) else f"{count} {noun}s"
+
+
+#: How each signal is counted in a sentence ("6 edit misses", "1 retry loop").
+SIGNAL_NOUNS: dict[str, str] = {
+    "user-correction": "user correction",
+    "retry-loop": "retry loop",
+    "tool-rejected": "declined tool call",
+    "user-interrupt": "user interrupt",
+    "edit-miss": "edit miss",
+    "edit-revert": "reverted edit",
+    "command-failure": "command failure",
+    "human-rework": "human rework commit",
+    "edit-thrash": "edit thrash episode",
+    "permission-denied": "permission denial",
+    "stale-edit": "stale edit",
+    "path-miss": "path miss",
+    "search-miss": "search miss",
+    "read-loop": "read loop",
+    "probable-correction": "probable correction",
+    "file-too-large": "refused read of a too-large file",
+    "no-convergence": "edit-and-run stretch that never went green",
+}
 
 
 def explain(
-    signal_counts: Sequence[tuple[str, int]], sessions: int, exposure: int, level: str
+    signal_counts: Sequence[tuple[str, int]],
+    sessions: int,
+    exposure: int,
+    level: str,
+    agent_commits: int = 0,
+    capped: bool = False,
 ) -> str:
-    """One-sentence reason for a hotspot's score and confidence."""
+    """One-sentence reason for a hotspot's score and confidence.
+
+    ``sessions`` and ``exposure`` count transcript sessions; ``agent_commits``
+    are git commits with rework that no transcript session accounts for.
+    """
     events = sum(count for _, count in signal_counts)
-    top = ", ".join(f"{count} {BY_ID[sid].title.lower()}" for sid, count in signal_counts[:3])
+    top = ", ".join(
+        _plural(count, SIGNAL_NOUNS.get(sid, BY_ID[sid].title.lower()))
+        for sid, count in signal_counts[:3]
+    )
     more = len(signal_counts) - 3
     if more > 0:
         top += f", {more} more signal type{'s' if more > 1 else ''}"
@@ -171,13 +237,62 @@ def explain(
         reason = "it recurs across sessions"
     else:
         reason = "there is too little independent evidence so far"
-    if exposure <= 1:
+    if exposure <= 0:
+        where = ""
+    elif exposure == 1:
         where = "the only session that touched it"
     elif sessions >= exposure:
         where = f"all {exposure} sessions that touched it"
     else:
         where = f"{sessions} of the {exposure} sessions that touched it"
-    return (
+    if agent_commits:
+        commits = _plural(agent_commits, "agent commit")
+        where = f"{where} and {commits}" if where else commits
+    text = (
         f"{_plural(events, 'friction event')} in {where} ({top}); "
         f"{level} confidence because {reason}."
     )
+    if capped:
+        text += (
+            f" Only weak signals, which also accompany productive work: the score is capped "
+            f"at {WEAK_ONLY_SCORE_CAP:g} and nothing is recommended."
+        )
+    return text
+
+
+def is_weak(finding: Finding) -> bool:
+    """Evidence that is routine on its own: a weak signal, or an *ordinary* command failure.
+
+    A command that merely exits non-zero (a red test, a probe that answers
+    "no", an ad-hoc snippet that raises) is what commands do. Only setup and
+    invocation errors, retry loops and human reactions make a command a hotspot.
+    """
+    if finding.signal == COMMAND_FAILURE:
+        # an ordinary failure, or a mistyped name that the agent then spelled correctly
+        return finding.detail.get("variant") == "ordinary" or "typo_of" in finding.detail
+    if finding.signal == NO_CONVERGENCE:
+        return finding.detail.get("uncertain") == "1"  # its end was not seen
+    if finding.signal == PATH_MISS:
+        return finding.detail.get("probe") == "1"  # looking for an optional README, .env, ...
+    return finding.signal in WEAK_ALONE_SIGNALS
+
+
+def weak_only(findings: Iterable[Finding]) -> bool:
+    """True if there is evidence and all of it is of the weak-alone kind.
+
+    One thing lifts a search miss out of that class: the *same* pattern missed
+    in two or more sessions. A name that agents keep looking for is not a
+    one-off probe before creating something new.
+    """
+    found = list(findings)
+    stuck = {f.session_id for f in found if f.signal == NO_CONVERGENCE and not is_weak(f)}
+    if not found or not all(is_weak(f) or f.signal == NO_CONVERGENCE for f in found):
+        return False
+    if len(stuck) >= MEDIUM_MIN_SESSIONS:
+        return False  # one stuck session can be a hard task; the same check twice is a pattern
+    sessions_by_pattern: dict[str, set[str]] = {}
+    for finding in found:
+        pattern = finding.detail.get("pattern", "").casefold()
+        if finding.signal == SEARCH_MISS and pattern:
+            sessions_by_pattern.setdefault(pattern, set()).add(finding.session_id)
+    return not any(len(s) >= MEDIUM_MIN_SESSIONS for s in sessions_by_pattern.values())

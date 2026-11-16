@@ -7,7 +7,7 @@ import math
 import re
 from pathlib import Path
 
-from agent_friction import gitsignals, recommend, redact, scoring, signals
+from agent_friction import attribution, engine, gitsignals, recommend, redact, scoring, signals
 from agent_friction.adapters import generic
 from tests.builders import detect
 
@@ -36,9 +36,11 @@ def test_documented_thresholds_match_the_code() -> None:
     assert f"first {signals.CORRECTION_HEAD_CHARS} characters" in catalog
     assert f"weight {signals.ORDINARY_FAILURE_WEIGHT}" in catalog
     assert f"correction (confidence {signals.CORRECTION_PROBABLE})" in catalog
-    worth = signals.CORRECTION_PROBABLE * signals.SEVERITY[signals.USER_CORRECTION]
-    assert f"a probable correction is worth {worth:g}" in catalog
-    assert f"or {signals.CORRECTION_PROBABLE}\n  for a" in method
+    worth = signals.SEVERITY[signals.PROBABLE_CORRECTION]
+    assert f"a probable correction weighs {worth:g}" in catalog
+    assert f"the score is capped at **{scoring.WEAK_ONLY_SCORE_CAP:g}**" in method
+    for weak in scoring.WEAK_ALONE_SIGNALS:
+        assert f"`{weak}`" in method.split("**Weak evidence is capped.**")[1][:200]
     assert f"({gitsignals.DEFAULT_REWORK_WINDOW_DAYS}\ndays by default)" in catalog
     assert f"exp(-mean points / {scoring.SEVERITY_SCALE:g})" in method
     bits = math.log2(1 + scoring.RECURRENCE_FULL_SESSIONS)
@@ -52,12 +54,20 @@ def test_documented_thresholds_match_the_code() -> None:
     assert f"only the newest {gitsignals.MAX_PATCH_COMMITS} candidate commits" in catalog
     rework, miss = signals.SEVERITY[signals.HUMAN_REWORK], signals.SEVERITY[signals.EDIT_MISS]
     assert rework < miss and f"weighs less than an edit miss ({rework:g})" in catalog
+    stale = signals.CORRECTION_STALE_SECONDS / 60
+    assert f"typed more than {stale:g} minutes after the agent's last" in catalog
+    assert f"first {attribution.PUBLIC_HASH_DIGITS} hex digits of its SHA-256" in method
+    minutes = engine.COMMIT_SESSION_SLACK.total_seconds() / 60
+    assert f"{minutes:g} minutes after its last" in catalog
+    assert f"first {engine.JSONL_PROBE_LINES} lines is a JSON object" in read("schema.md")
     assert f"capped at **{signals.TIME_CAP_SECONDS / 60:g} minutes**" in method
     assert f"next {signals.RECOVERY_LOOKAHEAD} shell calls" in method
     assert f"has {recommend.LARGE_FILE_LINES}+ lines" in method
     assert f"default {redact.DEFAULT_EXCERPT_CHARS} characters" in method
     assert f"strings of {redact.ENTROPY_MIN_LENGTH}+ characters" in method
     assert f"hex strings of {redact.HEX_MIN_LENGTH}+ characters" in method
+    assert f"strings of exactly {redact.GIT_SHA_LENGTH} lower-case" in method
+    assert f"command line fails {signals.POLL_MIN_FAILURES} or more" in catalog
     assert f"{scoring.HIGH_MIN_SESSIONS} or more distinct sessions **and**" in method
 
 
@@ -76,7 +86,8 @@ def test_generic_format_example_in_the_docs_parses(tmp_path: Path) -> None:
     parsed = generic.parse_file(path)
     assert parsed.skipped_lines == 0 and len(parsed.streams[0].events) == 6
     found = detect(path, tmp_path, repo="/work/shop")
-    assert [f.signal for f in found] == ["edit-miss", "command-failure", "user-correction"]
+    # the only edit failed, so nothing corroborates the complaint: a probable correction
+    assert [f.signal for f in found] == ["edit-miss", "command-failure", "probable-correction"]
 
 
 def test_score_table_in_the_methodology_is_computed_by_the_code() -> None:
@@ -109,3 +120,43 @@ def test_documented_command_examples_match_the_code() -> None:
     for command, key in examples:
         if "..." not in command:
             assert normalize_command(command) == key, command
+
+
+def test_documented_placeholders_are_computed_by_the_code() -> None:
+    method = re.sub(r"\s+", " ", read("methodology.md"))
+    for name, shown in (
+        ("python deploy_acme_customer.py", "python <script:93d162>"),
+        ("make deploy-customer-acme", "make <target:37bd73>"),
+        ("mytool", "<tool:373279>"),
+    ):
+        assert attribution.public_key(name) == shown and shown in method
+
+
+def _section(text: str, signal_id: str) -> str:
+    """One signal's section of signals.md as running text (quote marks and wrapping removed)."""
+    body = text.split(f"\n## `{signal_id}` — ", 1)[1].split("\n## ", 1)[0]
+    return " ".join(re.sub(r"^> ?", "", body, flags=re.M).split())
+
+
+def test_every_catalog_description_is_the_summary_of_its_documented_rule() -> None:
+    # The catalog text travels with every report (`signals[].description`); the doc holds
+    # the full rule. The description is quoted in the doc, so neither can drift alone.
+    text = read("signals.md")
+    for definition in signals.CATALOG:
+        assert f"**In short:** {definition.description}" in _section(text, definition.id)
+
+
+def test_catalog_descriptions_state_the_rules_that_decide() -> None:
+    described = {s.id: s.description for s in signals.CATALOG}
+    correction = described[signals.USER_CORRECTION]
+    assert "corroborated by behaviour" in correction
+    assert "two weaker cues together, is only a probable correction" in correction
+    assert "or with two weaker cues" not in correction
+    assert "not corroborated" in described[signals.PROBABLE_CORRECTION]
+    assert "could have changed files" in described[signals.RETRY_LOOP]
+    assert "something also went wrong" in described[signals.EDIT_THRASH]
+    assert "change and a green run" in described[signals.COMMAND_FAILURE]
+    text = read("signals.md")
+    # ... and the doc says the same in its own words
+    assert "only if behaviour corroborates it" in _section(text, signals.USER_CORRECTION)
+    assert "may have changed something" in _section(text, signals.RETRY_LOOP)

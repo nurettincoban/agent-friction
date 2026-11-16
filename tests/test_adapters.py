@@ -54,7 +54,10 @@ def test_claude_basic_events(tmp_path: Path) -> None:
     assert parsed.kind == "claude-code" and parsed.skipped_lines == 0
     (stream,) = parsed.streams
     assert stream.session_id == "s1" and not stream.sidechain
-    events = stream.events
+    # agent prose and thinking leave a time marker and nothing else
+    markers = [e for e in stream.events if e.kind == "agent_message"]
+    assert markers and all(not (m.text or m.output or m.new_text) for m in markers)
+    events = [e for e in stream.events if e.kind != "agent_message"]
     assert [e.kind for e in events] == ["user_message"] + ["tool_call", "tool_result"] * 4
     read, read_result, edit, edit_result, bash, bash_result, grep, grep_result = events[1:]
     assert (read.op, read.path, read.read_range, read.cwd) == (
@@ -148,7 +151,7 @@ def test_claude_malformed_and_unknown_lines_never_crash(tmp_path: Path) -> None:
     parsed = parse_transcript(s.save(tmp_path))
     assert parsed.skipped_lines == 5  # 3 non-object lines + 2 user lines with unusable message
     assert parsed.ignored_lines == 5
-    events = parsed.streams[0].events
+    events = [e for e in parsed.streams[0].events if e.kind != "agent_message"]
     assert [(e.kind, e.tool, e.text) for e in events] == [
         ("tool_call", "X", ""),
         ("user_message", "", "still parsed"),
@@ -191,11 +194,14 @@ def test_claude_duplicate_uuids_are_dropped_across_files(tmp_path: Path) -> None
     resumed = Session("two")
     resumed.lines = list(first.lines)  # a resumed session replays the old lines
     resumed.user("and more")
-    seen: set[str] = set()
+    seen: dict[str, str] = {}
     a = parse_transcript(first.save(tmp_path), seen)
     b = parse_transcript(resumed.save(tmp_path), seen)
     assert len(kinds(a)) == 3
     assert [e.text for s in b.streams for e in s.events] == ["and more"]
+    # the resumed file continues the first session: one piece of work, one session
+    assert [s.session_id for s in b.streams] == ["one"]
+    assert set(seen.values()) == {"one"}
 
 
 def test_format_detection(tmp_path: Path) -> None:
@@ -290,3 +296,69 @@ def test_error_tag_inside_successful_output_is_not_an_error(tmp_path: Path) -> N
     ]
     assert [(r.ok, r.error) for r in results] == [(True, ""), (True, ""), (False, "not_read")]
     assert "<tool_use_error>" in results[0].output  # successful output is kept verbatim
+
+
+def test_question_detection_keeps_one_bit_of_agent_prose() -> None:
+    from agent_friction.adapters.common import QUESTION_TOOL_RE, asks_question
+
+    assert asks_question("Done.\n\nWant me to refactor util.py? It would take a few minutes.")
+    assert asks_question("Which one?")
+    assert not asks_question("Why did it fail? A typo.\n\nFixed in a.py.")
+    assert not asks_question("") and not asks_question("Done.")
+    for tool in ("AskUserQuestion", "ask_user", "ExitPlanMode", "ask_followup_question"):
+        assert QUESTION_TOOL_RE.search(tool), tool
+    for tool in ("Bash", "Edit", "Task", "TodoWrite", "WebSearch"):
+        assert not QUESTION_TOOL_RE.search(tool), tool
+
+
+def test_pure_insertions_are_flagged_without_keeping_text(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.edit("/repo/a.py", "x = 1", "x = 1\nprint(x)").edit("/repo/a.py", "x = 1", "x = 2")
+    (stream,) = parse_transcript(s.save(tmp_path)).streams
+    first, second = (e for e in stream.events if e.kind == model.TOOL_CALL)
+    assert first.insertions == frozenset(first.edits) and second.insertions == frozenset()
+    assert "print" not in repr(first.edits)
+
+
+def test_generic_events_repeated_across_files_are_read_once(tmp_path: Path) -> None:
+    lines = [
+        {"session": "s1", "ts": "2026-11-05T16:00:00Z", "kind": "user_message", "text": "go"},
+        {"session": "s1", "ts": "2026-11-05T16:00:01Z", "kind": "tool_call", "id": 1, "op": "shell",
+         "command": "make"},
+        {"session": "s1", "ts": "2026-11-05T16:00:02Z", "kind": "tool_result", "id": 1,
+         "exit_code": 2, "output": "nope"},
+    ]  # fmt: skip
+    text = "\n".join(json.dumps(line) for line in lines) + "\n"
+    first, copy = tmp_path / "a.jsonl", tmp_path / "copy.jsonl"
+    first.write_text(text)
+    copy.write_text(text)
+    seen: dict[str, str] = {}
+    one = parse_transcript(first, seen)
+    two = parse_transcript(copy, seen)
+    assert sum(len(s.events) for s in one.streams) == 3
+    assert sum(len(s.events) for s in two.streams) == 0
+    assert sum(len(s.events) for s in parse_transcript(copy).streams) == 3
+
+
+def test_implausible_timestamps_are_missing() -> None:
+    assert parse_ts("1970-01-01T00:00:05Z") is None and parse_ts(12) is None
+    assert parse_ts("1999-12-31T23:59:59Z") is None and parse_ts("not a time") is None
+    assert parse_ts("2000-01-01T00:00:00Z") == datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+
+def test_absurdly_nested_json_is_a_skipped_line(tmp_path: Path) -> None:
+    deep = '{"a":' * 100_000 + "1" + "}" * 100_000
+    s = Session().user("go").bash("make", "nope", exit_code=2)
+    path = tmp_path / "deep.jsonl"
+    path.write_text(s.text() + deep + "\n")
+    parsed = parse_transcript(path)
+    # Python 3.14 can parse it (then it is a line of no known type, ignored); older
+    # versions raise RecursionError, which must count as a skipped line, not a crash.
+    assert parsed.skipped_lines + parsed.ignored_lines == 1
+    assert sum(len(st.events) for st in parsed.streams) == 3
+    generic_file = tmp_path / "g.jsonl"
+    generic_file.write_text(
+        json.dumps({"session": "s", "kind": "user_message", "text": "go"}) + "\n" + deep + "\n"
+    )
+    g = generic.parse_file(generic_file)
+    assert g.skipped_lines + g.ignored_lines == 1

@@ -26,7 +26,7 @@ def detect_format(path: Path) -> str:
             for raw in islice(handle, SNIFF_LINES):
                 try:
                     obj = json.loads(raw)
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
                 if not isinstance(obj, dict):
                     continue
@@ -39,8 +39,8 @@ def detect_format(path: Path) -> str:
     return claude_code.KIND
 
 
-def parse_transcript(path: Path, seen_uuids: set[str] | None = None) -> ParsedFile:
+def parse_transcript(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFile:
     """Parse a transcript file in whichever supported format it is in."""
     if detect_format(path) == generic.KIND:
-        return generic.parse_file(path)
+        return generic.parse_file(path, seen_uuids)
     return claude_code.parse_file(path, seen_uuids)

@@ -16,8 +16,20 @@ _TS_RE = re.compile(
 )
 
 
+#: Timestamps before this are placeholders (0, 1970-01-01), not when something happened.
+EARLIEST_YEAR = 2000
+
+
 def parse_ts(value: object) -> datetime | None:
-    """Parse an ISO-8601 timestamp (or epoch seconds). Naive values are taken as UTC."""
+    """Parse an ISO-8601 timestamp (or epoch seconds). Naive values are taken as UTC.
+
+    Anything unparsable, or earlier than ``EARLIEST_YEAR``, counts as missing.
+    """
+    parsed = _parse_ts(value)
+    return parsed if parsed is not None and parsed.year >= EARLIEST_YEAR else None
+
+
+def _parse_ts(value: object) -> datetime | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -42,6 +54,45 @@ def parse_ts(value: object) -> datetime | None:
         return datetime.fromisoformat(f"{date}T{clock}.{micro}{zone}")
     except ValueError:
         return None
+
+
+#: Characters of written text kept in memory per call (see ``Event.new_text``).
+NEW_TEXT_LIMIT = 200_000
+
+
+def new_text(*parts: object) -> str:
+    return "\n".join(p for p in parts if isinstance(p, str))[:NEW_TEXT_LIMIT]
+
+
+#: Tools with which an agent asks the human to choose or confirm, in any harness.
+QUESTION_TOOL_RE = re.compile(
+    r"ask.?(?:user|human|followup|question)|user.?(?:question|input)|request.?(?:input|decision)"
+    r"|exit.?plan|confirm",
+    re.I,
+)
+
+
+def asks_question(text: str) -> bool:
+    """Does agent prose put a question to the human in its final paragraph?
+
+    "Want me to refactor util.py? It would take a few minutes." asks, although
+    it does not end in a question mark. Only this one bit is kept of the text.
+    """
+    paragraphs = [p for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+    return bool(paragraphs) and "?" in paragraphs[-1]
+
+
+def edit_pairs(
+    pairs: list[tuple[str, str]],
+) -> tuple[tuple[tuple[str, str], ...], frozenset[tuple[str, str]]]:
+    """``Event.edits`` and ``Event.insertions`` for (old, new) replacement texts."""
+    hashed = tuple((digest(old), digest(new)) for old, new in pairs)
+    added = frozenset(
+        (digest(old), digest(new))
+        for old, new in pairs
+        if old.strip() and old != new and old in new
+    )
+    return hashed, added
 
 
 def digest(text: str) -> str:
@@ -70,6 +121,27 @@ def strip_error_tags(text: str) -> str:
     return _TAG_RE.sub("", text).strip()
 
 
+#: The harness refused to start the call: a sibling in a parallel batch failed, or the
+#: arguments did not validate. Nothing ran, so nothing failed.
+_NOT_RUN_RE = re.compile(
+    r"\s*(?:Error: )?(?:Cancelled: |InputValidationError\b|No such tool available\b"
+    r"|Tool \S+ not found\b)",
+    re.I,
+)
+_TOO_LARGE_RE = re.compile(
+    r"exceeds (?:the )?maximum allowed (?:tokens|size)|File content \([^)]*\) exceeds", re.I
+)
+#: The harness's own refusal of a command pattern ("Blocked: sleep 30 followed by ...").
+_BLOCKED_RE = re.compile(r"\s*(?:Error: )?Blocked: ")
+#: User-role lines that carry hook output, not something the human typed.
+HOOK_FEEDBACK_RE = re.compile(
+    r"(?:[\w:.-]+ )?hook (?:feedback|blocking error|error|additional context|output)\b"
+    r"|(?:Pre|Post)ToolUse:|(?:Stop|SubagentStop|SessionStart|UserPromptSubmit|PreCompact"
+    r"|Notification) hook\b",
+    re.I,
+)
+
+
 def classify_error(text: str) -> tuple[str, int | None]:
     """Map a failed tool result's text to an error class and the "N matches" count.
 
@@ -77,6 +149,10 @@ def classify_error(text: str) -> tuple[str, int | None]:
     either reuse them or set ``error`` explicitly in the generic format.
     """
     lowered = text.lower()
+    if _NOT_RUN_RE.match(text):
+        return model.ERR_NOT_RUN, None
+    if _TOO_LARGE_RE.search(text):
+        return model.ERR_TOO_LARGE, None
     if "string to replace not found" in lowered or "string not found in file" in lowered:
         return model.ERR_EDIT_NOT_FOUND, None
     ambiguous = _AMBIGUOUS_RE.search(text)
@@ -102,6 +178,34 @@ def rejection_reason(text: str) -> str | None:
         return None
     match = _REASON_RE.search(stripped)
     return match.group(1).strip() if match else ""
+
+
+#: Results the harness writes when a tool call was refused before it ran, without a
+#: human declining it: missing permission, a deny rule, a hook, a safety check.
+_DENIED_RE = re.compile(
+    r"\s*(?:Error: )?(?:"
+    r"Claude requested permissions? to [^\n]{1,300}, but you haven't granted it yet"
+    r"|Permission to use \S+(?: with command [^\n]*)? has been (?:auto-)?denied"
+    r"|Permission for this (?:command|tool|action|tool use) (?:was|has been) denied"
+    r"|\S* ?(?:PreToolUse|PermissionRequest):\S* hook (?:error|blocking error|denied)"
+    r"|[^\n]{0,80}\bhook (?:blocking error|returned blocking error|blocked this)"
+    r"|This command requires approval"
+    r"|(?:The )?(?:command|tool use|action) was blocked (?:by|for)\b"
+    r")",
+    re.I,
+)
+_HOOK_RE = re.compile(r"\bhook\b", re.I)
+
+
+def denial(text: str) -> str | None:
+    """``"hook"`` or ``"permission"`` if ``text`` is a policy denial, else ``None``."""
+    stripped = strip_error_tags(text)
+    if _BLOCKED_RE.match(stripped):
+        return "blocked"
+    match = _DENIED_RE.match(stripped)
+    if match is None:
+        return None
+    return "hook" if _HOOK_RE.search(match.group(0)) else "permission"
 
 
 def exit_code(text: str) -> int | None:

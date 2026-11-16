@@ -182,7 +182,7 @@ def test_explain_sentence() -> None:
     counts = [(signals.EDIT_MISS, 5), (signals.USER_CORRECTION, 1)]
     assert scoring.explain(counts, 3, 4, "high") == (
         "6 friction events in 3 of the 4 sessions that touched it "
-        "(5 edit miss, 1 user correction); "
+        "(5 edit misses, 1 user correction); "
         "high confidence because it recurs across sessions with several kinds of evidence."
     )
     assert scoring.explain(counts, 3, 3, "medium").startswith(
@@ -191,3 +191,51 @@ def test_explain_sentence() -> None:
     assert scoring.explain([(signals.EDIT_MISS, 1)], 1, 1, "low").startswith(
         "1 friction event in the only session that touched it (1 edit miss); low confidence"
     )
+    with_git = scoring.explain([(signals.EDIT_MISS, 1), (signals.HUMAN_REWORK, 3)], 1, 1, "low", 3)
+    assert with_git.startswith(
+        "4 friction events in the only session that touched it and 3 agent commits "
+        "(1 edit miss, 3 human rework commits);"
+    )
+    only_git = scoring.explain([(signals.HUMAN_REWORK, 1)], 0, 0, "low", 1)
+    assert only_git.startswith("1 friction event in 1 agent commit (1 human rework commit);")
+    assert set(scoring.SIGNAL_NOUNS) == set(signals.BY_ID)
+
+
+def test_a_derived_signal_is_not_a_second_kind_of_evidence() -> None:
+    sessions = ["a", "b", "c", "d"]
+    loop_and_failures = [signals.COMMAND_FAILURE, signals.RETRY_LOOP]
+    assert scoring.confidence(sessions, loop_and_failures) == "medium"
+    assert scoring.confidence(sessions, [*loop_and_failures, signals.TOOL_REJECTED]) == "high"
+    # a retry loop next to unrelated evidence is still its own signal
+    assert scoring.confidence(sessions, [signals.RETRY_LOOP, signals.USER_CORRECTION]) == "high"
+
+
+def test_weak_only_evidence() -> None:
+    def miss(session: str, pattern: str) -> Finding:
+        found = finding(signals.SEARCH_MISS, session)
+        found.detail["pattern"] = pattern
+        return found
+
+    assert not scoring.weak_only([])
+    assert scoring.weak_only([finding(signals.EDIT_THRASH), finding(signals.READ_LOOP)])
+    assert scoring.weak_only([finding(signals.PROBABLE_CORRECTION)])
+    assert not scoring.weak_only([finding(signals.READ_LOOP), finding(signals.EDIT_MISS)])
+    assert scoring.weak_only([miss("s1", "feature_1"), miss("s2", "feature_2")])
+    assert scoring.weak_only([miss("s1", "Policy"), miss("s1", "Policy")])
+    # the same name missed in two sessions is no longer a one-off probe
+    assert not scoring.weak_only([miss("s1", "Policy"), miss("s2", "policy")])
+    counts = [(signals.READ_LOOP, 5)]
+    assert "capped at 19" in scoring.explain(counts, 5, 5, "medium", capped=True)
+    assert "capped" not in scoring.explain(counts, 5, 5, "medium")
+
+
+def test_ordinary_command_failures_are_weak_on_their_own() -> None:
+    def failure(variant: str, session: str = "s1") -> Finding:
+        found = finding(signals.COMMAND_FAILURE, session)
+        found.detail["variant"] = variant
+        return found
+
+    assert scoring.is_weak(failure("ordinary")) and not scoring.is_weak(failure("invocation"))
+    assert scoring.weak_only([failure("ordinary", f"s{i}") for i in range(10)])
+    assert not scoring.weak_only([failure("ordinary"), failure("invocation")])
+    assert not scoring.weak_only([failure("ordinary"), finding(signals.RETRY_LOOP)])

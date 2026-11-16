@@ -35,6 +35,16 @@ DEFAULT_AGENT_PATTERNS: tuple[str, ...] = (
     rf"^author: .*\b(?:{_AGENTS})\b.*(?:\[bot\]|noreply@anthropic\.com|agent@)",
 )
 
+#: Automation that commits on its own (formatters, dependency updates). Matched like the
+#: agent patterns. Such a commit is neither the agent's work nor a human's reaction to it.
+DEFAULT_BOT_PATTERNS: tuple[str, ...] = (
+    r"^author: .*\[bot\]",
+    r"^author: (?:dependabot|renovate|pre-commit-ci|github-actions|mergify|semantic-release"
+    r"|allcontributors|snyk|greenkeeper|imgbot|restyled|deepsource|sourcery|codecov)\b",
+    r"^author: .*<(?:bot@renovateapp\.com|action@github\.com|actions@github\.com"
+    r"|[^>]*\bbot@[^>]*|[^>]*@bots?\.[^>]*)>",
+)
+
 _RS = "\x1e"
 _FS = "\x1f"
 _FORMAT = f"{_RS}%H{_FS}%aI{_FS}%an{_FS}%ae{_FS}%B{_FS}"
@@ -47,6 +57,8 @@ class Commit:
     author: str
     message: str
     is_agent: bool
+    #: Committed by automation that is not a coding agent (CI formatter, dependency bot).
+    is_bot: bool = False
     files: dict[str, tuple[int, int]] = field(default_factory=dict)  # path -> (added, deleted)
 
     @property
@@ -80,8 +92,17 @@ def is_agent_commit(author: str, message: str, patterns: Sequence[re.Pattern[str
     return any(p.search(text) for p in patterns)
 
 
-def parse_log(output: str, patterns: Sequence[re.Pattern[str]]) -> list[Commit]:
+def compile_bot_patterns(extra: Sequence[str] = ()) -> list[re.Pattern[str]]:
+    return [re.compile(p, re.I | re.M) for p in (*DEFAULT_BOT_PATTERNS, *extra)]
+
+
+def parse_log(
+    output: str,
+    patterns: Sequence[re.Pattern[str]],
+    bot_patterns: Sequence[re.Pattern[str]] | None = None,
+) -> list[Commit]:
     """Parse ``git log --numstat`` output produced with our record/field separators."""
+    bots = compile_bot_patterns() if bot_patterns is None else bot_patterns
     commits: list[Commit] = []
     for record in output.split(_RS)[1:]:
         fields = record.split(_FS)
@@ -99,6 +120,7 @@ def parse_log(output: str, patterns: Sequence[re.Pattern[str]]) -> list[Commit]:
             message=message,
             is_agent=is_agent_commit(author, message, patterns),
         )
+        commit.is_bot = not commit.is_agent and any(p.search(f"author: {author}") for p in bots)
         for line in _FS.join(fields[5:]).splitlines():
             parts = line.split("\t", 2)
             if len(parts) != 3 or not parts[2]:
@@ -116,6 +138,7 @@ def read_history(
     repo: Path,
     max_commits: int = DEFAULT_MAX_COMMITS,
     agent_patterns: Sequence[str] | None = None,
+    bot_patterns: Sequence[str] = (),
 ) -> GitHistory:
     """Read commit history for ``repo``. Never raises: failures set ``available=False``."""
     command = [
@@ -151,7 +174,10 @@ def read_history(
     if proc.returncode != 0:
         lines = proc.stderr.strip().splitlines()
         return GitHistory(False, lines[-1] if lines else "git log failed")
-    return GitHistory(True, "", parse_log(proc.stdout, compile_agent_patterns(agent_patterns)))
+    commits = parse_log(
+        proc.stdout, compile_agent_patterns(agent_patterns), compile_bot_patterns(bot_patterns)
+    )
+    return GitHistory(True, "", commits)
 
 
 Range = tuple[int, int]  # half-open line range [start, end)
@@ -257,6 +283,34 @@ def reworked_lines(agent_new: Sequence[Range], human_old: Sequence[Range]) -> in
     return hits
 
 
+#: A human commit touching more files than this may be a repo-wide sweep.
+SWEEP_MIN_FILES = 20
+SWEEP_SUBJECT_RE = re.compile(
+    r"\b(?:re-?format\w*|format(?:ting|ted)?|prettier|black|ruff format|gofmt|rustfmt|isort"
+    r"|lint(?:ing)?|style|whitespace|line endings|eol|license headers?|copyright|codemod"
+    r"|rename|bump|mass|bulk|sweep)\b",
+    re.I,
+)
+
+
+def is_sweep(commit: Commit) -> bool:
+    """A human commit that reformats or mechanically rewrites the whole repo.
+
+    More than ``SWEEP_MIN_FILES`` files, not announced as a fix, and either
+    named as a mechanical change or replacing about as many lines as it adds
+    in total (within 20 %). Such a commit touches the agent's lines like
+    everybody else's and says nothing about them.
+    """
+    if commit.is_agent or len(commit.files) <= SWEEP_MIN_FILES:
+        return False
+    if FIX_SUBJECT_RE.search(commit.subject):
+        return False
+    added = sum(a for a, _ in commit.files.values())
+    deleted = sum(d for _, d in commit.files.values())
+    balanced = min(added, deleted) > 0 and min(added, deleted) / max(added, deleted) >= 0.8
+    return balanced or SWEEP_SUBJECT_RE.search(commit.subject) is not None
+
+
 def find_rework(
     commits: Sequence[Commit],
     window_days: int = DEFAULT_REWORK_WINDOW_DAYS,
@@ -274,6 +328,8 @@ def find_rework(
     last_touch: dict[str, Commit] = {}
     candidates: list[tuple[Commit, Commit, str]] = []
     for commit in commits:
+        if commit.is_bot or is_sweep(commit):
+            continue  # an auto-formatter, dependency bot or repo-wide reformat is no rework
         for path in sorted(commit.files):
             previous = last_touch.get(path)
             last_touch[path] = commit

@@ -13,7 +13,7 @@ import re
 import sys
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, TextIO
 
 from agent_friction import __version__
@@ -26,13 +26,67 @@ from agent_friction.report import (
     render_markdown,
     render_terminal,
 )
-from agent_friction.report._common import all_items, find_dir, find_target
+from agent_friction.report._common import all_items, find_dir, find_target, plural
 from agent_friction.report.terminal import render_detail, render_dir_detail
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_GATE = 0, 1, 2, 3
 
+
+class UsageError(AgentFrictionError):
+    """A problem with the arguments rather than the data (exit code 2)."""
+
+
 _REL = re.compile(r"^(\d+)\s*([hdwm])$")
-_EXT_FORMAT = {".html": "html", ".htm": "html", ".md": "markdown", ".json": "json"}
+_EXT_FORMAT = {
+    ".html": "html",
+    ".htm": "html",
+    ".md": "markdown",
+    ".json": "json",
+    ".txt": "terminal",
+}
+
+
+_REPO_HELP = "repo root (default: the git repository containing the current directory)"
+
+
+def _absolute_path(value: str) -> str:
+    # Aliases are usually recorded on another machine, so accept either OS's form.
+    if not (PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()):
+        raise argparse.ArgumentTypeError(f"{value!r} is not an absolute path")
+    return value
+
+
+def _find_repo_root(start: Path) -> Path | None:
+    for d in (start, *start.parents):
+        if (d / ".git").exists():
+            return d
+    return None
+
+
+def _resolve_repo(args: argparse.Namespace, err: TextIO) -> None:
+    """Fill in ``args.repo``: explicit path, else the enclosing git repository, else ``.``."""
+    pos = getattr(args, "repo_pos", None)
+    if pos is not None:
+        if args.repo is not None:
+            raise UsageError("give the repo either as an argument or with --repo, not both")
+        args.repo = pos
+    if args.repo is not None:
+        if not args.repo.exists():
+            raise AgentFrictionError(f"{args.repo}: directory does not exist")
+        return
+    cwd = Path.cwd()
+    root = _find_repo_root(cwd)
+    if root is not None and root != cwd:
+        err.write(f"agent-friction: using the repository root {root}\n")
+    args.repo = Path() if root is None or root == cwd else root
+
+
+def _regex(value: str) -> str:
+    try:
+        re.compile(value)
+    except re.error as exc:
+        raise argparse.ArgumentTypeError(f"invalid regex {value!r}: {exc}") from None
+    return value
 
 
 def parse_when(value: str, *, now: datetime | None = None) -> datetime:
@@ -42,7 +96,10 @@ def parse_when(value: str, *, now: datetime | None = None) -> datetime:
     if m:
         n, unit = int(m.group(1)), m.group(2)
         days = {"h": n / 24, "d": n, "w": 7 * n, "m": 30 * n}[unit]
-        return now - timedelta(days=days)
+        try:
+            return now - timedelta(days=days)
+        except OverflowError:
+            raise argparse.ArgumentTypeError(f"{value!r} reaches too far back") from None
     try:
         parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
@@ -95,14 +152,15 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
         "--since",
         type=parse_when,
         metavar="WHEN",
-        help="only sessions after WHEN (30d, 2026-01-31)",
+        help="only events after WHEN (30d, 2026-01-31); a session that straddles it is cut",
     )
-    g.add_argument("--until", type=parse_when, metavar="WHEN", help="only sessions before WHEN")
+    g.add_argument("--until", type=parse_when, metavar="WHEN", help="only events before WHEN")
     g.add_argument("--no-git", action="store_true", help="skip git history (human-rework signal)")
     g.add_argument(
         "--repo-alias",
         action="append",
         default=[],
+        type=_absolute_path,
         metavar="PATH",
         help="another absolute path where this repo lived when sessions were recorded "
         "(another machine, an old checkout); repeatable",
@@ -115,6 +173,24 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
         help="human edits within N days of an agent commit count as rework (default 14)",
     )
     g.add_argument(
+        "--agent-commit",
+        action="append",
+        default=[],
+        type=_regex,
+        metavar="REGEX",
+        help="also treat commits whose author line or message matches REGEX as written by "
+        "an agent (added to the built-in trailers); repeatable",
+    )
+    g.add_argument(
+        "--bot-author",
+        action="append",
+        default=[],
+        type=_regex,
+        metavar="REGEX",
+        help='treat commits whose author ("Name <email>") matches REGEX as automation, '
+        "not human rework; repeatable",
+    )
+    g.add_argument(
         "--no-excerpts",
         action="store_true",
         help="omit transcript excerpts from evidence (safer for sharing)",
@@ -122,14 +198,15 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
     g.add_argument(
         "--allow-empty",
         action="store_true",
-        help="produce a report even when no session touched the repo (default: exit 1)",
+        help="produce a report even when no session touched the repo, or from git history "
+        "alone when there are no transcripts (default: exit 1)",
     )
     g.add_argument(
         "--max-evidence",
         type=_positive_int,
         default=5,
         metavar="N",
-        help="evidence items kept per hotspot (default 5)",
+        help="evidence items kept per hotspot (default 5; 20 for show)",
     )
 
 
@@ -150,7 +227,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     scan = sub.add_parser("scan", help="analyse agent sessions and print the friction map")
-    scan.add_argument("repo", nargs="?", type=Path, default=Path(), help="repo root (default .)")
+    scan.add_argument("repo", nargs="?", type=Path, help=_REPO_HELP)
     _add_input_options(scan)
     out = scan.add_argument_group("output")
     out.add_argument(
@@ -161,7 +238,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     out.add_argument("-o", "--output", type=Path, metavar="FILE", help="write to FILE")
     out.add_argument(
-        "--top", type=_positive_int, default=10, metavar="N", help="rows per table (default 10)"
+        "--top",
+        type=_positive_int,
+        default=10,
+        metavar="N",
+        help="rows per table in terminal and Markdown output (default 10); JSON and "
+        "HTML always include every hotspot",
     )
     out.add_argument(
         "--color", choices=("auto", "always", "never"), default="auto", help="terminal colors"
@@ -175,7 +257,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     show = sub.add_parser("show", help="show the evidence behind one file, directory, or command")
     show.add_argument("target", help="repo-relative file or directory, or a normalized command")
-    show.add_argument("--repo", type=Path, default=Path(), help="repo root (default .)")
+    show.add_argument("repo_pos", nargs="?", type=Path, metavar="repo", help=_REPO_HELP)
+    show.add_argument("--repo", type=Path, help=argparse.SUPPRESS)
     show.add_argument(
         "--from",
         dest="from_json",
@@ -211,7 +294,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=3,
         metavar="N",
-        help="below N sessions on either side, report but never trip the gate (default 3)",
+        help="below N sessions overall on either side, report but never trip the gate; "
+        "a target touched in fewer than N sessions on either side is 'too little data' "
+        "(default 3)",
     )
     cmp_.add_argument(
         "--allow-repo-mismatch",
@@ -223,12 +308,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     src = sub.add_parser("sources", help="list the transcripts that would be analysed")
-    src.add_argument("repo", nargs="?", type=Path, default=Path(), help="repo root (default .)")
+    src.add_argument("repo", nargs="?", type=Path, help=_REPO_HELP)
+    src.add_argument(
+        "-t",
+        "--transcripts",
+        action="append",
+        type=Path,
+        metavar="PATH",
+        help="transcript file or directory (repeatable), as for `scan`",
+    )
+    src.add_argument(
+        "--repo-alias",
+        action="append",
+        default=[],
+        type=_absolute_path,
+        metavar="PATH",
+        help="another absolute path where this repo lived, as for `scan`",
+    )
+    src.add_argument("--no-git", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
 def _analyze(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
     from agent_friction.engine import AnalyzeOptions, analyze
+    from agent_friction.gitsignals import DEFAULT_AGENT_PATTERNS
 
     if not repo.is_dir():
         raise AgentFrictionError(f"{repo}: not a directory (pass the repository root)")
@@ -243,6 +346,11 @@ def _analyze(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
             max_evidence=args.max_evidence,
             repo_aliases=tuple(args.repo_alias),
             rework_window_days=args.rework_days,
+            agent_commit_patterns=(
+                [*DEFAULT_AGENT_PATTERNS, *args.agent_commit] if args.agent_commit else None
+            ),
+            bot_commit_patterns=[f"^author: .*(?:{p})" for p in args.bot_author],
+            allow_no_transcripts=args.allow_empty,
         )
     )
     if int(result.get("totals", {}).get("sessions", 0)) == 0 and not args.allow_empty:
@@ -257,10 +365,26 @@ def _analyze(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
 
 
 def _load_json(path: Path) -> dict[str, Any]:
+    if path.is_dir():  # Windows reports reading a directory as "Permission denied"
+        raise AgentFrictionError(f"{path}: is a directory, expected a `scan -f json` file")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        raw = path.read_bytes()
     except FileNotFoundError:
         raise AgentFrictionError(f"{path}: no such file") from None
+    except IsADirectoryError:
+        raise AgentFrictionError(
+            f"{path}: is a directory, expected a `scan -f json` file"
+        ) from None
+    except OSError as exc:
+        raise AgentFrictionError(f"{path}: cannot read ({exc.strerror or exc})") from None
+    # PowerShell 5's `>` writes UTF-16; accept it rather than failing on the BOM.
+    encoding = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
+    try:
+        data = json.loads(raw.decode(encoding))
+    except UnicodeDecodeError:
+        raise AgentFrictionError(
+            f"{path}: not UTF-8 or UTF-16 text; write it with `scan -f json -o FILE`"
+        ) from None
     except json.JSONDecodeError as exc:
         raise AgentFrictionError(f"{path}: not valid JSON ({exc})") from None
     if not isinstance(data, dict) or "schema_version" not in data:
@@ -287,18 +411,45 @@ def _write(text: str, output: Path | None, stdout: TextIO) -> None:
     if output is None:
         stdout.write(text)
         return
-    output.parent.mkdir(parents=True, exist_ok=True)
+    if not output.parent.is_dir():
+        raise UsageError(f"{output.parent}: directory does not exist")
     output.write_text(text, encoding="utf-8")
 
 
+def _utf8_safe(stream: TextIO) -> TextIO:
+    """Make a text stream able to print the report's box-drawing glyphs.
+
+    Redirected output on Windows defaults to cp1252, which cannot encode them. A
+    file or pipe is switched to UTF-8; an interactive console that cannot show a
+    glyph gets a replacement character instead of a crash.
+    """
+    encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+    reconfigure = getattr(stream, "reconfigure", None)
+    if encoding in ("utf8", "utf8sig") or reconfigure is None:
+        return stream
+    try:
+        if getattr(stream, "isatty", lambda: False)():
+            reconfigure(errors="replace")
+        else:
+            reconfigure(encoding="utf-8")
+    except (ValueError, OSError):  # pragma: no cover - stream already written to
+        reconfigure(errors="replace")
+    return stream
+
+
 def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    if args.output is not None and str(args.output) == "-":
+        args.output = None  # `-o -` means standard output, as usual
     fmt = args.format
+    if args.output is not None and args.output.is_dir():
+        stderr.write(f"agent-friction: {args.output} is a directory; pass a file name\n")
+        return EXIT_USAGE
     if fmt is None and args.output is not None:
         fmt = _EXT_FORMAT.get(args.output.suffix.lower())
         if fmt is None:
             stderr.write(
                 f"agent-friction: can't tell the format from {args.output.name!r}; "
-                "use a .html, .md or .json extension, or pass --format\n"
+                "use a .html, .md, .json or .txt extension, or pass --format\n"
             )
             return EXIT_USAGE
     fmt = fmt or "terminal"
@@ -345,7 +496,11 @@ def _cmd_show(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         if node is not None:
             stdout.write(render_dir_detail(result, node, color=color))
         if item is not None:
-            stdout.write("\n" + render_detail(result, item, color=color))
+            stdout.write(
+                "\nFriction attributed to the directory itself "
+                "(for example searches in it that found nothing):\n\n"
+            )
+            stdout.write(render_detail(result, item, color=color))
         return EXIT_OK
     stderr.write(
         f"agent-friction: no friction recorded for {args.target!r}. "
@@ -359,13 +514,26 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
     if not 0 < args.threshold < 10:
         stderr.write("agent-friction: --threshold must be between 0 and 10\n")
         return EXIT_USAGE
+    modes = (before.get("settings", {}).get("key_mode"), after.get("settings", {}).get("key_mode"))
+    if modes[0] != modes[1] and None not in modes:
+        raise AgentFrictionError(
+            f"one scan names commands in {modes[0]!r} mode and the other in {modes[1]!r} mode "
+            "(was only one made with --no-excerpts?), so their command hotspots can't be "
+            "matched. Re-run both scans with the same options."
+        )
     names = (before.get("repo", {}).get("name"), after.get("repo", {}).get("name"))
     if names[0] != names[1] and not args.allow_repo_mismatch:
         raise AgentFrictionError(
             f"these scans are of different repositories ({names[0]!r} vs {names[1]!r}). "
             "Pass --allow-repo-mismatch if the repository was renamed."
         )
-    changes = compare(before, after, threshold=args.threshold, min_events=args.min_events)
+    changes = compare(
+        before,
+        after,
+        threshold=args.threshold,
+        min_events=args.min_events,
+        min_exposure=args.min_sessions,
+    )
     sessions = (int(before["totals"]["sessions"]), int(after["totals"]["sessions"]))
     low_sample = min(sessions) < args.min_sessions
     if low_sample:
@@ -390,26 +558,38 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
 
 
 def _cmd_sources(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
-    from agent_friction.discovery import discover_transcripts
+    from agent_friction.engine import AnalyzeOptions, inspect_transcripts
 
-    found = discover_transcripts(args.repo)
-    if not found:
-        stderr.write(
-            f"agent-friction: no Claude Code transcripts found for {args.repo.resolve()}. "
-            "Run this from the repository you use the agent in, set CLAUDE_CONFIG_DIR if your "
-            "config lives elsewhere, or pass transcript paths to `scan --transcripts`.\n"
+    if not args.repo.is_dir():
+        raise AgentFrictionError(f"{args.repo}: not a directory (pass the repository root)")
+    report = inspect_transcripts(
+        AnalyzeOptions(
+            repo=args.repo,
+            transcripts=args.transcripts,
+            repo_aliases=tuple(args.repo_alias),
+            include_git=False,
         )
-        return EXIT_ERROR
-    for path in found:
-        stdout.write(f"{path}\n")
+    )
+    unreadable = 0
+    for path, events, skipped in report:
+        if events == 0:
+            unreadable += 1
+            note = "  (no events: empty, binary, or not a transcript)"
+        elif skipped:
+            note = f"  ({events} events, {plural(skipped, 'line')} skipped)"
+        else:
+            note = f"  ({events} events)"
+        stdout.write(f"{path}{note}\n")
+    if unreadable:
+        stderr.write(f"agent-friction: {plural(unreadable, 'file')} contained nothing to analyse\n")
     return EXIT_OK
 
 
 def main(
     argv: Sequence[str] | None = None, *, stdout: TextIO | None = None, stderr: TextIO | None = None
 ) -> int:
-    out = stdout or sys.stdout
-    err = stderr or sys.stderr
+    out = _utf8_safe(stdout or sys.stdout)
+    err = _utf8_safe(stderr or sys.stderr)
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
@@ -418,6 +598,13 @@ def main(
     if args.command is None:
         parser.print_help(out)
         return EXIT_USAGE
+    since, until = getattr(args, "since", None), getattr(args, "until", None)
+    if since is not None and until is not None and since >= until:
+        err.write(
+            f"agent-friction: --since ({since:%Y-%m-%d %H:%M}) must be before "
+            f"--until ({until:%Y-%m-%d %H:%M})\n"
+        )
+        return EXIT_USAGE
     handlers = {
         "scan": _cmd_scan,
         "show": _cmd_show,
@@ -425,7 +612,12 @@ def main(
         "sources": _cmd_sources,
     }
     try:
+        if hasattr(args, "repo"):
+            _resolve_repo(args, err)
         return handlers[args.command](args, out, err)
+    except UsageError as exc:
+        err.write(f"agent-friction: {exc}\n")
+        return EXIT_USAGE
     except AgentFrictionError as exc:
         err.write(f"agent-friction: {exc}\n")
         return EXIT_ERROR

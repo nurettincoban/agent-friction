@@ -9,7 +9,9 @@ A hotspot counts as improved or regressed only when that rate moves by at least
 ``threshold`` (relative) and the after event count differs by at least
 ``min_events`` from what the before rate predicts for the after exposure.
 Hotspots with fewer than ``min_events`` events on both sides are always
-"unchanged", which keeps small-sample noise out of the verdict.
+"unchanged", and a verdict about a target touched in fewer than ``min_exposure``
+sessions on either side becomes "too-little-data", which keeps small-sample
+noise out of the verdict.
 """
 
 from __future__ import annotations
@@ -17,9 +19,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from agent_friction.report._common import all_items, fmt_minutes
+from agent_friction.report._common import all_items, fmt_minutes, plural
 
-STATUSES = ("regressed", "new", "improved", "resolved", "inactive", "unchanged")
+STATUSES = ("regressed", "new", "improved", "resolved", "inactive", "too-little-data", "unchanged")
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,7 @@ def compare(
     *,
     threshold: float = 0.25,
     min_events: int = 2,
+    min_exposure: int = 1,
 ) -> list[Change]:
     """Classify every hotspot, command, and directory that appears in either analysis."""
 
@@ -134,6 +137,10 @@ def compare(
             status = "improved" if ar < br else "regressed"
         else:
             status = "unchanged"
+        if status in ("regressed", "new", "improved", "resolved"):
+            needed = (a_exp,) if status == "new" else (b_exp, a_exp)
+            if min(needed) < min_exposure:
+                status = "too-little-data"
         changes.append(
             Change(
                 kind=kind,
@@ -158,8 +165,8 @@ def summary_line(before: dict[str, Any], after: dict[str, Any]) -> str:
     b_per = float(bt.get("est_minutes_lost", 0)) / max(bs, 1)
     a_per = float(at.get("est_minutes_lost", 0)) / max(as_, 1)
     return (
-        f"before: {bs} sessions, ~{fmt_minutes(b_per)} lost per session · "
-        f"after: {as_} sessions, ~{fmt_minutes(a_per)} lost per session"
+        f"before: {plural(bs, 'session')}, ~{fmt_minutes(b_per)} lost per session · "
+        f"after: {plural(as_, 'session')}, ~{fmt_minutes(a_per)} lost per session"
     )
 
 
@@ -177,6 +184,7 @@ def render_compare(
         ("improved", "Improved"),
         ("resolved", "Resolved (touched afterwards, no friction)"),
         ("inactive", "No activity afterwards (no evidence either way)"),
+        ("too-little-data", "Too few sessions touched these to tell"),
     ]
     out: list[str] = ["# Friction comparison" if markdown else "agent-friction compare", ""]
     out += [summary_line(before, after), ""]
@@ -202,4 +210,14 @@ def render_compare(
         out.append("")
     if not any_change:
         out += ["No meaningful change.", ""]
+    if any(
+        (c.status == "regressed" and c.after_score < c.before_score)
+        or (c.status == "improved" and c.after_score > c.before_score)
+        for c in changes
+    ):
+        out += [
+            "Verdicts follow the event rate in the sessions that touched each target, not the "
+            "score, which also weighs severity and recurrence, so the two can move apart.",
+            "",
+        ]
     return "\n".join(out)

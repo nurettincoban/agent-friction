@@ -26,7 +26,8 @@ header { padding: 24px 16px 8px; max-width: 1200px; margin: 0 auto; }
 h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
 h2 { font-size: 15px; margin: 28px 0 10px; }
 .sub { color: var(--muted); }
-main { max-width: 1200px; margin: 0 auto; padding: 0 16px 48px; }
+main { max-width: 1200px; margin: 0 auto; padding: 0 16px 48px; min-width: 0; }
+.layout > * { min-width: 0; }
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin: 16px 0; }
 .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
 .stat b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
@@ -45,7 +46,7 @@ main { max-width: 1200px; margin: 0 auto; padding: 0 16px 48px; }
 #crumbs { margin: 0 0 8px; color: var(--muted); }
 #crumbs a { color: var(--accent); cursor: pointer; text-decoration: none; }
 aside { overflow-wrap: anywhere; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px;
-  max-height: 640px; overflow: auto; }
+  align-self: start; }
 aside h3 { margin: 0 0 4px; font-size: 14px; word-break: break-all; }
 .chip { display: inline-block; background: var(--chip); border-radius: 999px; padding: 1px 8px;
   margin: 2px 4px 2px 0; font-size: 12px; }
@@ -60,16 +61,31 @@ th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--lin
 th { font-size: 12px; color: var(--muted); font-weight: 600; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 th[scope=row] { font-weight: 400; }
-button.linkish { all: unset; cursor: pointer; word-break: break-all; }
+button.linkish { all: unset; cursor: pointer; word-break: break-all; display: inline-block; min-height: 24px; line-height: 24px; }
 button.linkish:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 .cell:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-@media (max-width: 640px) { .hide-sm { display: none; } th, td { padding: 6px 6px; } }
+.show-sm { display: none; }
+@media (max-width: 640px) { .hide-sm { display: none; } .show-sm { display: block; } th, td { padding: 6px 6px; } }
+@media (pointer: coarse) { .seg button { min-height: 32px; } button.linkish { display: inline-block; min-height: 24px; padding: 2px 0; } }
 tr.row { cursor: pointer; } tr.row:hover { background: var(--chip); }
 .tablewrap { overflow-x: auto; }
-.legend { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; margin-top: 6px; }
+.legend { flex-wrap: wrap; display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; margin-top: 6px; }
 .legend i { width: 18px; height: 10px; display: inline-block; border-radius: 2px; }
 input[type=search] { width: 100%; max-width: 320px; padding: 6px 10px; border: 1px solid var(--line);
   border-radius: 8px; background: var(--panel); color: var(--ink); }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 8px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { background: var(--panel); color: var(--ink); border: 0; padding: 5px 10px; min-height: 26px; font: inherit; font-size: 12.5px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--chip); font-weight: 600; }
+.seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
+@media print {
+  .controls, input[type=search], .legend { display: none; }
+  body { background: #fff; color: #000; }
+  aside { max-height: none; overflow: visible; }
+  .layout { grid-template-columns: 1fr; }
+}
 footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
 .empty { padding: 40px; text-align: center; color: var(--muted); }
 </style>
@@ -82,15 +98,26 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
 <main>
   <div class="stats" id="stats"></div>
   <h2>Where agents struggle</h2>
+  <div class="controls">
+    <div class="seg" role="group" aria-label="Map shows">
+      <button type="button" data-view="files" aria-pressed="true">Files</button>
+      <button type="button" data-view="commands" aria-pressed="false">Commands</button>
+    </div>
+    <div class="seg" role="group" aria-label="Cell size by">
+      <button type="button" data-size="time" aria-pressed="true">Size: time lost</button>
+      <button type="button" data-size="score" aria-pressed="false">Size: score</button>
+    </div>
+  </div>
   <div id="crumbs"></div>
   <div class="layout">
     <div>
       <div id="map" role="group" aria-label="Treemap of friction by directory and file. Each cell is a button; the table below lists the same data."></div>
-      <div class="legend">less <i style="background:var(--h0)"></i><i style="background:var(--h1)"></i><i style="background:var(--h2)"></i><i style="background:var(--h3)"></i><i style="background:var(--h4)"></i> more friction · area = estimated time lost · click a directory to zoom</div>
+      <div class="legend">less <i style="background:var(--h0)"></i><i style="background:var(--h1)"></i><i style="background:var(--h2)"></i><i style="background:var(--h3)"></i><i style="background:var(--h4)"></i> more friction · <span id="sizelabel">area = estimated time lost</span> · click a directory to zoom</div>
     </div>
     <aside id="detail" aria-live="polite" tabindex="-1"><div class="sub">Select a file or command to see why it scores high, what to change, and the evidence.</div></aside>
   </div>
   <h2>Hotspots</h2>
+  <p class="show-sm sub">Some columns are hidden on narrow screens. Tap a row for its sessions, events and signals.</p>
   <input type="search" id="filter" placeholder="Filter files and commands…" aria-label="Filter hotspots">
   <div class="tablewrap" style="margin-top:8px"><table id="table"><thead><tr>
     <th scope="col">Path or command</th><th scope="col" class="num">Score</th><th scope="col" class="num hide-sm">Sessions</th><th scope="col" class="num hide-sm">Events</th><th scope="col" class="num">Time lost</th><th scope="col" class="hide-sm">Top signals</th><th scope="col">Confidence</th>
@@ -114,17 +141,22 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     if (text !== undefined && text !== null) e.textContent = String(text);
     return e;
   }
+  function plural(n, word) { n = Number(n) || 0; return n + " " + word + (n === 1 ? "" : "s"); }
   function mins(m) {
     m = Number(m) || 0;
-    if (m <= 0) return "0m";
-    if (m < 1) return Math.round(m * 60) + "s";
-    if (m < 60) return Math.round(m) + "m";
-    var h = Math.floor(Math.round(m) / 60), r = Math.round(m) % 60;
+    // Same rules as fmt_minutes in report/_common.py: round half up.
+    if (m <= 0) return "0s";
+    var secs = Math.floor(m * 60 + 0.5);
+    if (secs < 60) return secs + "s";
+    var whole = Math.floor(m + 0.5);
+    if (whole < 60) return whole + "m";
+    var h = Math.floor(whole / 60), r = whole % 60;
     return h + "h " + (r < 10 ? "0" : "") + r + "m";
   }
   function heat(score) {
     var s = Number(score) || 0;
-    var i = s >= 80 ? 4 : s >= 60 ? 3 : s >= 40 ? 2 : s >= 20 ? 1 : 0;
+    // Bands follow the reading guide: <20 incident, 20-45 pattern, >45 reliable struggle.
+    var i = s >= 60 ? 4 : s >= 45 ? 3 : s >= 30 ? 2 : s >= 20 ? 1 : 0;
     return "var(--h" + i + ")";
   }
   function topSignals(h, n) {
@@ -140,12 +172,13 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
   document.getElementById("subtitle").textContent =
     (w.start || w.end ? String(w.start || "…").slice(0, 10) + " → " + String(w.end || "…").slice(0, 10) + " · " : "") +
     "generated " + String(R.generated_at || "").slice(0, 16).replace("T", " ");
-  [["sessions", "agent sessions"], ["tool_calls", "tool calls"], ["friction_events", "friction events"],
-   ["est_minutes_lost", "est. time lost"], ["corrections", "human corrections"], ["files_affected", "files affected"]]
+  [["sessions", "agent session", "agent sessions"], ["tool_calls", "tool call", "tool calls"],
+   ["friction_events", "friction event", "friction events"], ["est_minutes_lost", "est. time lost", "est. time lost"],
+   ["corrections", "human correction", "human corrections"], ["files_affected", "file affected", "files affected"]]
     .forEach(function (p) {
       var box = el("div", { class: "stat" });
       box.appendChild(el("b", null, p[0] === "est_minutes_lost" ? mins(t[p[0]]) : (t[p[0]] || 0)));
-      box.appendChild(el("span", null, p[1]));
+      box.appendChild(el("span", null, Number(t[p[0]]) === 1 ? p[1] : p[2]));
       document.getElementById("stats").appendChild(box);
     });
 
@@ -155,8 +188,8 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     detail.textContent = "";
     detail.appendChild(el("div", { class: "sub" }, h.kind === "command" ? "command" : h.kind === "dir" ? "directory" : "file"));
     detail.appendChild(el("h3", { class: "mono" }, h.path));
-    detail.appendChild(el("div", { class: "sub" }, "score " + Number(h.score).toFixed(1) + " · " + h.sessions +
-      " sessions · " + h.events + " events · ~" + mins(h.est_minutes_lost) + " lost · " + h.confidence + " confidence"));
+    detail.appendChild(el("div", { class: "sub" }, "score " + Number(h.score).toFixed(1) + " · " + plural(h.sessions, "session") +
+      " · " + plural(h.events, "event") + " · ~" + mins(h.est_minutes_lost) + " lost · " + h.confidence + " confidence"));
     if (h.why) detail.appendChild(el("p", null, h.why));
     var chips = el("div");
     topSignals(h, 99).forEach(function (s) { chips.appendChild(el("span", { class: "chip", title: s[0] }, (titles[s[0]] || s[0]) + " × " + s[1])); });
@@ -183,11 +216,16 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     detail.textContent = "";
     detail.appendChild(el("div", { class: "sub" }, "directory"));
     detail.appendChild(el("h3", { class: "mono" }, (n.path || ".") + "/"));
-    detail.appendChild(el("div", { class: "sub" }, "score " + Number(n.score).toFixed(1) + " · " + n.events + " events · ~" + mins(n.est_minutes_lost) + " lost"));
+    detail.appendChild(el("div", { class: "sub" }, "score " + Number(n.score).toFixed(1) + " · " + plural(n.events, "event") + " · ~" + mins(n.est_minutes_lost) + " lost"));
   }
 
   // Squarified treemap
-  function weight(n) { return Math.max(Number(n.est_minutes_lost) || 0, 0) + 0.5 * (Number(n.events) || 0) + 0.01; }
+  var sizeBy = "time", view = "files";
+  var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function weight(n) {
+    if (sizeBy === "score") return Math.max(Number(n.score) || 0, 0) + 0.01;
+    return Math.max(Number(n.est_minutes_lost) || 0, 0) + 0.5 * (Number(n.events) || 0) + 0.01;
+  }
   function squarify(nodes, x, y, w, h) {
     var out = [], total = 0;
     nodes.forEach(function (n) { total += weight(n); });
@@ -253,6 +291,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
           Array.prototype.forEach.call(map.querySelectorAll(".sel"), function (s) { s.classList.remove("sel"); });
           c.classList.add("sel");
           if (isDir) { stack.push(r.n); draw(r.n); showDir(r.n); }
+          else if (r.n.kind === "command") { var hc = byPath["command:" + r.n.path]; if (hc) showItem(hc); }
           else { var hs = byPath["file:" + r.n.path]; if (hs) showItem(hs); else showDir(r.n); }
         }
         c.addEventListener("click", activate);
@@ -263,7 +302,35 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     }
     layout(node, 0, 0, W, H, 0);
   }
-  if (R.tree) { stack = [R.tree]; draw(R.tree); }
+  // Commands have no directory structure: show them as a flat map of their own.
+  var commandRoot = { name: "commands", path: "", children: (R.commands || []).map(function (c) {
+    return { name: "$ " + c.path, path: c.path, kind: "command", score: c.score, events: c.events,
+      est_minutes_lost: c.est_minutes_lost, children: [] };
+  }) };
+  function reset() {
+    if (view === "commands") { stack = [commandRoot]; draw(commandRoot); }
+    else if (R.tree) { stack = [R.tree]; draw(R.tree); }
+  }
+  Array.prototype.forEach.call(document.querySelectorAll(".seg button"), function (b) {
+    b.addEventListener("click", function () {
+      var group = b.parentNode;
+      Array.prototype.forEach.call(group.querySelectorAll("button"), function (o) { o.setAttribute("aria-pressed", String(o === b)); });
+      if (b.dataset.view) view = b.dataset.view;
+      if (b.dataset.size) {
+        sizeBy = b.dataset.size;
+        document.getElementById("sizelabel").textContent = sizeBy === "score" ? "area = score" : "area = estimated time lost";
+      }
+      reset();
+    });
+  });
+  // With no time lost anywhere, areas by time would only reflect event counts: size by score.
+  var anyTime = (R.hotspots || []).concat(R.commands || []).some(function (h) { return Number(h.est_minutes_lost) > 0; });
+  if (!anyTime) {
+    sizeBy = "score";
+    Array.prototype.forEach.call(document.querySelectorAll("[data-size]"), function (o) { o.setAttribute("aria-pressed", String(o.dataset.size === "score")); });
+    document.getElementById("sizelabel").textContent = "area = score (no time lost was recorded)";
+  }
+  reset();
   var resizeTimer;
   window.addEventListener("resize", function () { clearTimeout(resizeTimer); resizeTimer = setTimeout(function () { draw(stack[stack.length - 1]); }, 120); });
 
@@ -285,7 +352,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
         tr.appendChild(el("td", { class: "num" }, mins(h.est_minutes_lost)));
         tr.appendChild(el("td", { class: "hide-sm" }, topSignals(h, 3).map(function (s) { return s[0] + "×" + s[1]; }).join(", ")));
         tr.appendChild(el("td", null, h.confidence));
-        function pick() { showItem(h); detail.scrollIntoView({ block: "nearest", behavior: "smooth" }); }
+        function pick() { showItem(h); detail.scrollIntoView({ block: "nearest", behavior: reduceMotion ? "auto" : "smooth" }); }
         tr.addEventListener("click", function (e) { if (e.target !== btn) pick(); });
         btn.addEventListener("click", function () { pick(); detail.focus({ preventScroll: true }); });
         tbody.appendChild(tr);

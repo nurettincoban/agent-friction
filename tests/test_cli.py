@@ -123,7 +123,7 @@ def test_no_transcripts_is_a_clean_error(tmp_path: Path, monkeypatch: pytest.Mon
     assert code == EXIT_ERROR
     assert err.startswith("agent-friction: ") and "Traceback" not in err
     code, _, err = run("sources", str(tmp_path))
-    assert code == EXIT_ERROR and "--transcripts" in err
+    assert code == EXIT_ERROR and "No Claude Code transcripts found" in err
 
 
 def test_sources_lists_discovered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -157,7 +157,7 @@ def test_parse_when() -> None:
 
 def test_scan_nonexistent_repo_is_an_error(tmp_path: Path) -> None:
     code, _, err = run("scan", str(tmp_path / "nope"), "-t", str(FIXTURES / "transcripts"))
-    assert code == EXIT_ERROR and "not a directory" in err
+    assert code == EXIT_ERROR and "does not exist" in err
 
 
 def test_scan_with_no_sessions_in_window_is_an_error() -> None:
@@ -168,10 +168,13 @@ def test_scan_with_no_sessions_in_window_is_an_error() -> None:
 
 
 def test_unknown_output_extension_is_a_usage_error(tmp_path: Path) -> None:
-    code, _, err = run("scan", *INPUT, "-o", str(tmp_path / "report.txt"))
+    code, _, err = run("scan", *INPUT, "-o", str(tmp_path / "report.xyz"))
     assert code == EXIT_USAGE and "--format" in err
-    code, _, _ = run("scan", *INPUT, "-o", str(tmp_path / "report.txt"), "-f", "markdown")
+    code, _, _ = run("scan", *INPUT, "-o", str(tmp_path / "report.xyz"), "-f", "markdown")
     assert code == EXIT_OK
+    code, _, _ = run("scan", *INPUT, "-o", str(tmp_path / "report.txt"))
+    assert code == EXIT_OK
+    assert "\033[" not in (tmp_path / "report.txt").read_text(encoding="utf-8")
 
 
 def test_compare_low_sample_does_not_trip_gate(tmp_path: Path) -> None:
@@ -214,3 +217,135 @@ def test_show_accepts_a_raw_command_line(tmp_path: Path) -> None:
     run("scan", *INPUT, "-o", str(saved))
     code, out, _ = run("show", "PYTEST -x tests/test_refunds.py", "--from", str(saved))
     assert code == EXIT_OK and "command: pytest" in out
+
+
+def test_non_utf8_stdout_does_not_crash() -> None:
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252")
+    code = main(["scan", *INPUT, "--color", "never"], stdout=stream, stderr=io.StringIO())
+    stream.flush()
+    assert code == EXIT_OK
+    assert "█" in raw.getvalue().decode("utf-8")
+
+
+def test_inverted_window_is_a_usage_error() -> None:
+    code, _, err = run("scan", *INPUT, "--since", "2026-11-01", "--until", "2026-10-01")
+    assert code == EXIT_USAGE and "must be before" in err
+
+
+def test_output_into_missing_directory_is_an_error(tmp_path: Path) -> None:
+    code, _, err = run("scan", *INPUT, "-o", str(tmp_path / "missing" / "x.html"))
+    assert code == EXIT_USAGE and "does not exist" in err
+
+
+def test_sources_with_explicit_transcripts() -> None:
+    code, out, _ = run("sources", *INPUT[:-1])  # drop --no-git, not a `sources` flag
+    assert code == EXIT_OK and ".jsonl" in out
+
+
+def test_sources_rejects_non_transcript_file(tmp_path: Path) -> None:
+    bogus = tmp_path / "notes.md"
+    bogus.write_text("# just markdown\n", encoding="utf-8")
+    code, _, err = run("sources", str(tmp_path), "-t", str(bogus))
+    assert code == EXIT_ERROR and "not a JSONL transcript" in err
+
+
+def test_git_only_scan_with_allow_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+    import subprocess
+
+    if shutil.which("git") is None:
+        pytest.skip("git not installed")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "no-config"))
+
+    def git(*a: str) -> None:
+        subprocess.run(["git", *a], cwd=repo, check=True, capture_output=True)
+
+    git("init", "-q")
+    git("config", "user.name", "Dev")
+    git("config", "user.email", "dev@example.com")
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-q", "-m", "add a\n\nCo-Authored-By: Claude <noreply@anthropic.com>")
+    code, _, err = run("scan", str(repo))
+    assert code == EXIT_ERROR and "No Claude Code transcripts" in err
+    code, out, err = run("scan", str(repo), "--allow-empty", "-f", "json")
+    assert code == EXIT_OK, err
+    assert json.loads(out)["settings"]["git"] is True
+
+
+def test_bad_json_inputs_are_clean_errors(tmp_path: Path) -> None:
+    code, _, err = run("compare", str(tmp_path), str(tmp_path))
+    assert code == EXIT_ERROR and "is a directory" in err
+    good = tmp_path / "r.json"
+    run("scan", *INPUT, "-o", str(good))
+    utf16 = tmp_path / "ps.json"
+    utf16.write_text(good.read_text(encoding="utf-8"), encoding="utf-16")
+    assert run("compare", str(good), str(utf16))[0] == EXIT_OK
+    garbage = tmp_path / "bin.json"
+    garbage.write_bytes(b"\x80\x81\x82{")
+    code, _, err = run("compare", str(good), str(garbage))
+    assert code == EXIT_ERROR and "Traceback" not in err
+
+
+def test_absurd_since_and_directory_output_are_usage_errors(tmp_path: Path) -> None:
+    assert run("scan", *INPUT, "--since", "99999999999d")[0] == EXIT_USAGE
+    code, _, err = run("scan", *INPUT, "-o", str(tmp_path))
+    assert code == EXIT_USAGE and "is a directory" in err
+
+
+def test_bot_author_flag_validates_regex() -> None:
+    assert run("scan", *INPUT, "--bot-author", "(")[0] == EXIT_USAGE
+    assert run("scan", *INPUT, "--bot-author", "ci-robot")[0] == EXIT_OK
+
+
+def test_repo_alias_must_be_absolute() -> None:
+    assert run("scan", *INPUT, "--repo-alias", "relative/path")[0] == EXIT_USAGE
+    assert run("scan", *INPUT, "--repo-alias", "C:\\Users\\dev\\shop")[0] == EXIT_OK
+
+
+def test_scan_from_a_subdirectory_uses_the_repo_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "src").mkdir()
+    monkeypatch.chdir(tmp_path / "src")
+    _, _, err = run("sources", "-t", str(tmp_path / "none.jsonl"))
+    assert f"using the repository root {tmp_path}" in err
+
+
+def test_show_accepts_repo_positionally() -> None:
+    code, out, _ = run("show", "pytest", *INPUT)
+    assert code == EXIT_OK and "pytest" in out
+    assert run("show", "pytest", *INPUT, "--repo", INPUT[0])[0] == EXIT_USAGE
+
+
+def test_show_finds_a_pseudonymized_command_by_its_real_name(tmp_path: Path) -> None:
+    from agent_friction.attribution import public_key
+
+    saved = tmp_path / "private.json"
+    assert run("scan", *INPUT, "--no-excerpts", "-o", str(saved))[0] == EXIT_OK
+    data = json.loads(saved.read_text(encoding="utf-8"))
+    hashed = public_key("make deploy-acme")
+    assert hashed != "make deploy-acme"
+    data["commands"].append({**data["commands"][0], "path": hashed})
+    saved.write_text(json.dumps(data), encoding="utf-8")
+    code, out, _ = run("show", "make deploy-acme", "--from", str(saved))
+    assert code == EXIT_OK and hashed in out
+
+
+def test_agent_commit_flag_validates_regex() -> None:
+    assert run("scan", *INPUT, "--agent-commit", "[")[0] == EXIT_USAGE
+    assert run("scan", *INPUT, "--agent-commit", "Generated-by: mybot")[0] == EXIT_OK
+
+
+def test_scan_of_a_missing_repo_says_so() -> None:
+    code, _, err = run("scan", "/no/such/repo/anywhere")
+    assert code == EXIT_ERROR and "does not exist" in err
+
+
+def test_output_dash_is_stdout() -> None:
+    code, out, _ = run("scan", *INPUT, "-f", "json", "-o", "-")
+    assert code == EXIT_OK and json.loads(out)["schema_version"] == 1

@@ -206,12 +206,13 @@ def discount_codes() -> tuple[Session, Session]:
         SERVICE, "    total = cart.total()", "    total = apply_discount(cart.total(), code)"
     )
     s.tick(20).edit(SERVICE, "    return Decimal(total)", "    return round(total, 2)")
-    s.tick(10).bash("pytest tests/test_checkout.py", NO_MODULE, exit_code=4)
+    # This agent pipes everything through `tail`, so every exit status below is 0 and
+    # says nothing: red and green have to be read from the output.
+    s.tick(10).bash("pytest tests/test_checkout.py 2>&1 | tail -20", NO_MODULE)
     s.tick(10).bash(
-        "make test",
+        "make test 2>&1 | tail -5",
         "FAILED tests/test_checkout.py::test_rounding - assert Decimal('9.99') == 9.99\n"
         "1 failed, 42 passed",
-        exit_code=2,
         took=9,
     )
     s.tick(20).edit(SERVICE, "    return round(total, 2)", "    return Decimal(total)")
@@ -220,7 +221,7 @@ def discount_codes() -> tuple[Session, Session]:
     )
     s.tick(20).edit(SERVICE, "    return total * rate", "    return (total * rate).quantize(CENT)")
     s.tick(20).edit(SERVICE, "    charge = payments.charge", "    charge = legacy_charge")
-    s.tick(5).bash("make test", PASSED.replace("42", "44"), took=9)
+    s.tick(5).bash("make test 2>&1 | tail -5", PASSED.replace("42", "44"), took=9)
     s.say("Discount codes work and all tests pass.")
     s.tick(600).user(
         "It's still failing for me on staging, and you used legacy_charge again in "

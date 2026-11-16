@@ -287,6 +287,7 @@ def detect(
         resolver,
         is_file=lambda rel: rel in touched or "." in rel.rsplit("/", 1)[-1],
         is_known_file=lambda rel: rel in touched,
+        first_party=lambda top: any(rel.split("/")[0] in (top, f"{top}.py") for rel in touched),
     )
     found: list[Finding] = []
     for stream in parsed.streams:
