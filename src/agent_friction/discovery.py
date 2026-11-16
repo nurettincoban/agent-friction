@@ -153,6 +153,12 @@ def discover_project_dirs(
                 continue
             exact = entry.name in encoded
             if not exact and not any(entry.name.startswith(e + "-") for e in encoded):
+                # ... or the repository under another name: sessions started through a
+                # symbolic link are filed under the link's spelling. One transcript
+                # says which directory that was; the file system says where it leads.
+                first = next(iter(_session_files(entry)), None)
+                if first is not None and resolver.adopt(_file_cwd(first)):
+                    found.append(entry)
                 continue
             cwds = [c for c in map(_file_cwd, _session_files(entry)) if c is not None]
             if any(resolver.contains(c) for c in cwds) if cwds else exact:
@@ -213,7 +219,7 @@ def discover_repo_transcripts(repo: Path, roots: Sequence[Path] | None = None) -
         for session in _session_files(directory):
             group = [session, *expand_transcript_paths([directory / session.stem])]
             cwd = _file_cwd(session)
-            inside = cwd is None or resolver.contains(cwd)
+            inside = cwd is None or resolver.adopt(cwd)
             if inside or (
                 PathResolver.normalize(cwd or "") in above
                 and any(_mentions(f, needles) for f in group)

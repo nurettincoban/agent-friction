@@ -1001,7 +1001,7 @@ def test_only_a_command_doing_the_same_job_is_a_replacement(tmp_path: Path) -> N
             "npm error code E401\nnpm error Incorrect or missing password.",
             1,
             "npm install",
-            "invocation",
+            "environment",  # the registry wants a login
         ),
         (
             "pip install -r requirements.txt && pytest tests/test_a.py",
@@ -2896,7 +2896,9 @@ def test_more_failures_of_the_surroundings_are_told_apart(
 def test_a_command_after_a_cd_that_failed_never_ran(tmp_path: Path) -> None:
     gone = "/bin/bash: line 1: cd: missing-dir: No such file or directory"
     s = Session().user("go").bash("cd missing-dir && npm test", gone, exit_code=1)
-    assert detect(s, tmp_path) == []
+    # no failure of `npm test (missing-dir/)`: what is on record is the guessed directory
+    (miss,) = detect(s, tmp_path)
+    assert miss.signal == signals.PATH_MISS and keys(miss) == [("file", "missing-dir")]
     # the directory was there: the failure is that of the command in it
     s = Session().user("go").bash("cd web && npm test", "1 failing", exit_code=1)
     (found,) = detect(s, tmp_path)
@@ -3559,3 +3561,301 @@ def test_a_denied_chain_is_keyed_to_its_first_step(tmp_path: Path) -> None:
         s = Session().user("go").tool("Bash", {"command": line}, refused, is_error=True)
         (denied,) = detect(s, tmp_path)
         assert keys(denied) == [("command", key)], line
+
+
+# ---- round 22 ------------------------------------------------------------------------------
+
+NPM_RED = "Tests:       1 failed, 40 passed, 41 total\nnpm ERR! Test failed.  See above."
+MAKE_RED = "1 failed, 1317 passed in 6.2s\nmake: *** [Makefile:20: test] Error 1"
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "code", "key"),
+    [
+        # the runner's line (`npm ERR!`, `make: ***`) fits both steps: the summary decides
+        ("npm run lint && npm test 2>&1 | tail -5", NPM_RED, 0, "npm test"),
+        ("make lint && make test 2>&1 | tail -5", MAKE_RED, 0, "make test"),
+        ("make lint && make test", MAKE_RED, 2, "make test"),
+        # ... and so does the target or script the runner names
+        (
+            "make lint && make test 2>&1 | tail -3",
+            "make: *** [Makefile:12: lint] Error 1",
+            0,
+            "make lint",
+        ),
+        ("make lint && make test", "make: *** [Makefile:12: lint] Error 1", 2, "make lint"),
+        (
+            "npm run lint && npm test 2>&1 | tail -3",
+            "npm ERR! code ELIFECYCLE\nnpm ERR! shop@1.0.0 lint: `eslint .`\nnpm ERR! Exit 1",
+            0,
+            "npm run lint",
+        ),
+        (
+            "npm run lint && npm test 2>&1 | tail -3",
+            "npm error Lifecycle script `test` failed with error:\nnpm error code 1",
+            0,
+            "npm test",
+        ),
+        # a step sent to /dev/null printed none of it
+        ("npm run build >/dev/null 2>&1; npm test | tail -3", NPM_RED, 0, "npm test"),
+        ("npm run build &>/dev/null; npm test | tail -3", NPM_RED, 0, "npm test"),
+        ("make examples >/dev/null 2>&1; make check 2>&1 | tail -2", MAKE_RED, 0, "make check"),
+        ("make examples > /dev/null 2> /dev/null; make check | tail -2", MAKE_RED, 0, "make check"),
+        # only stdout is hidden: the error line may still be the first step's
+        (
+            "make examples >/dev/null; make check 2>&1 | tail -2",
+            "make: *** [Makefile:9: examples] Error 1",
+            0,
+            "make examples",
+        ),
+    ],
+)
+def test_a_red_run_is_pinned_on_the_step_that_printed_it(
+    tmp_path: Path, command: str, output: str, code: int, key: str
+) -> None:
+    s = Session().user("go").bash(command, output, exit_code=code)
+    (failure,) = detect(s, tmp_path)
+    assert keys(failure)[0] == ("command", key) and "ambiguous_step" not in failure.detail
+    if key.split()[-1] not in ("test", "check"):
+        return
+    # red, an edit, green: the development loop, for the step that was red
+    green = "Tests:       41 passed, 41 total" if "npm" in command else "1318 passed in 6.1s"
+    loop = Session().user("go").bash(command, output, exit_code=code).edit(A)
+    loop.bash(command, green)
+    assert detect(loop, tmp_path) == []
+
+
+def test_a_runner_line_alone_still_blames_the_first_step_it_fits(tmp_path: Path) -> None:
+    # nothing names a target and no summary is shown: as before
+    s = Session().user("go").bash("make lint && make test", "make: *** Error 1", exit_code=2)
+    (failure,) = detect(s, tmp_path)
+    assert keys(failure)[0] == ("command", "make lint")
+    # two different tools each keep their own verdict
+    both = "error: could not compile `shop`\n===== 1 failed, 2 passed in 0.31s ====="
+    s = Session().user("go").bash("cargo build; pytest | tail -5", both)
+    (failure,) = detect(s, tmp_path)
+    assert keys(failure)[0] == ("command", "cargo build")
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "/bin/bash: line 1: cd: frontend: No such file or directory",
+        "bash: cd: frontend: No such file or directory",
+        "(eval):cd:1: no such file or directory: frontend",
+        "cd:1: no such file or directory: frontend",
+        "cd: no such file or directory: frontend",
+        "sh: 1: cd: can't cd to frontend",
+    ],
+)
+def test_a_cd_into_a_directory_that_is_not_there_is_a_path_miss(
+    tmp_path: Path, output: str
+) -> None:
+    s = Session().user("go").bash("cd frontend && npm test", output, exit_code=1)
+    (miss,) = detect(s, tmp_path)
+    assert miss.signal == signals.PATH_MISS and keys(miss) == [("file", "frontend")]
+    assert miss.summary == "`cd` was pointed at frontend, which does not exist"
+    assert miss.detail == {"variant": "directory"} and miss.interval is not None
+    # resolved against where the shell stood
+    s = Session().user("go").bash("cd web && cd frontend && npm test", output, exit_code=1)
+    (miss,) = detect(s, tmp_path)
+    assert keys(miss) == [("file", "web/frontend")]
+
+
+def test_a_failed_cd_out_of_the_repo_or_into_a_real_directory_is_nothing(
+    tmp_path: Path,
+) -> None:
+    gone = "bash: cd: /srv/elsewhere: No such file or directory"
+    s = Session().user("go").bash("cd /srv/elsewhere && npm test", gone, exit_code=1)
+    assert detect(s, tmp_path) == []
+    # the directory is on disk: the shell stood somewhere else, nobody guessed a path
+    s = Session().user("go")
+    s.bash("cd frontend && npm test", "bash: cd: frontend: No such file or directory", exit_code=1)
+    assert detect(s, tmp_path, dirs=("frontend",)) == []
+
+
+ENVIRONMENT_VOCABULARY = [
+    (
+        "mysql -e 'select 1'",
+        "ERROR 1045 (28000): Access denied for user 'root'@'localhost'",
+        "auth",
+    ),
+    (
+        "docker pull registry.example/x",
+        'Error response from daemon: Get "https://registry.example/v2/": unauthorized: '
+        "incorrect username or password",
+        "auth",
+    ),
+    ("terraform apply", "Error: No valid credential sources found", "auth"),
+    (
+        "aws s3 cp a s3://b",
+        "An error occurred (InvalidAccessKeyId) when calling the PutObject operation: The AWS "
+        "Access Key Id you provided does not exist in our records.",
+        "auth",
+    ),
+    (
+        "aws s3 cp a s3://b",
+        "An error occurred (ExpiredToken) when calling the PutObject operation: The provided "
+        "token has expired.",
+        "auth",
+    ),
+    (
+        "aws dynamodb create-table",
+        "An error occurred (UnrecognizedClientException): The security token included in the "
+        "request is invalid.",
+        "auth",
+    ),
+    ("gh api -X POST repos/a/b/issues", '{"message":"Bad credentials","status":"401"}', "auth"),
+    (
+        "npm install",
+        "npm ERR! code E403\nnpm ERR! 403 403 Forbidden - GET https://npm.pkg.example/@acme%2fui",
+        "auth",
+    ),
+    ("pip install -r requirements.txt", "ERROR: HTTP error 403 while getting https://x", "auth"),
+    (
+        "kubectl apply -f k8s/",
+        "Unable to connect to the server: dial tcp 10.0.0.1:6443: i/o timeout",
+        "service",
+    ),
+]
+
+
+@pytest.mark.parametrize(("command", "output", "kind"), ENVIRONMENT_VOCABULARY)
+def test_credentials_and_clusters_in_the_words_of_more_tools(
+    tmp_path: Path, command: str, output: str, kind: str
+) -> None:
+    s = Session().user("go").bash(command, output, exit_code=1)
+    (found,) = detect(s, tmp_path)
+    assert (found.detail["variant"], found.detail.get("environment")) == ("environment", kind)
+    assert signals.environment_error(output) is not None
+
+
+def test_a_cluster_that_does_not_answer_a_question_is_still_down(tmp_path: Path) -> None:
+    timeout = "Unable to connect to the server: dial tcp 10.0.0.1:6443: i/o timeout"
+    s = Session().user("go").bash("kubectl get pods", timeout, exit_code=1)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["service"] == "the Kubernetes cluster"
+    assert "the Kubernetes cluster was not reachable" in found.summary
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "E   AssertionError: expected 403 Forbidden but got 200\n1 failed in 0.2s",
+        "FAILED tests/test_auth.py::test_denied - assert 403 == 200\n1 failed in 0.2s",
+        "E   AssertionError: 'Access granted for user' != 'ok'\n1 failed in 0.2s",
+        "error: test expected status 200\n  got 403\n1 failed in 0.2s",
+    ],
+)
+def test_a_test_about_permissions_is_not_a_credential_problem(tmp_path: Path, output: str) -> None:
+    s = Session().user("go").bash("pytest", output, exit_code=1)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["variant"] == "ordinary" and signals.environment_error(output) is None
+
+
+def test_a_push_the_remote_turned_down_is_an_ordinary_failure_with_a_name(
+    tmp_path: Path,
+) -> None:
+    rejected = (
+        "To github.com:acme/shop.git\n ! [rejected]        main -> main (non-fast-forward)\n"
+        "error: failed to push some refs to 'github.com:acme/shop.git'\n"
+        "hint: Updates were rejected because the tip of your current branch is behind"
+    )
+    s = Session().user("go").bash("git push", rejected, exit_code=1)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["variant"] == "ordinary" and found.detail["push_rejected"] == "1"
+    assert found.summary == (
+        "`git push` failed (exit 1; the remote branch had commits the local one lacked)"
+    )
+    assert scoring.is_weak(found)
+    # any other failed push is just that
+    denied = "remote: Permission to acme/shop.git denied to dev.\nfatal: unable to access"
+    s = Session().user("go").bash("git push", denied, exit_code=128)
+    (found,) = detect(s, tmp_path)
+    assert "push_rejected" not in found.detail and found.detail["variant"] == "environment"
+
+
+INSTRUCTIONS = [
+    ("Don't use time.sleep here, it makes the suite slow", "don't …"),
+    ("I don't want a new dependency for this, write it by hand", "I don't want …"),
+    ("you're overcomplicating this, a dict is enough", "you're over… this"),
+    ("We already have a retry helper in utils, use that instead", "use that instead"),
+    ("again, no mocks in these tests", "no … here"),
+    ("can you not change the public API? restore the old name", "can you not …"),
+]
+
+
+@pytest.mark.parametrize(("text", "label"), INSTRUCTIONS)
+def test_an_instruction_the_agent_acts_on_is_a_correction(
+    tmp_path: Path, text: str, label: str
+) -> None:
+    assert label in signals.instruction_cues(text)
+    assert correction_confidence(text)[0] == 0  # the wording alone says nothing
+    s = Session().user("go").edit(A, "a", "b").say("done").user(text).edit(A, "b", "c")
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", "src/a.py")]
+    assert f'matched "{label}"' in found.summary and found.detail["corroborated"] == "followed"
+    assert "the agent then changed src/a.py again" in found.summary
+    # the agent moves on to another file: an instruction for what comes next, not recorded
+    s = Session().user("go").edit(A, "a", "b").say("done").user(text).edit(B, "b", "c")
+    assert detect(s, tmp_path) == []
+    # nothing had been changed: there is no work it could redirect
+    s = Session().user("go").read(A).say("done").user(text).edit(A, "b", "c")
+    assert detect(s, tmp_path) == []
+    # in reply to a question from the agent it is the answer
+    assert signals.instruction_cues(text, after_question=True) == []
+
+
+def test_dont_use_x_use_y_reads_a_dotted_name(tmp_path: Path) -> None:
+    confidence, labels = correction_confidence("Don't use time.sleep. Use the scheduler.")
+    assert (confidence, labels) == (1.0, ["don't use X, use Y"])
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Don't forget to update the changelog",
+        "Don't commit yet",
+        "Don't worry about the docs",
+        "No tests are needed here, thanks",
+        "Now add logging to it",
+        "I don't want to bother you but can you also add a flag",
+        "use tabs instead of spaces in the new file",
+        "use the factory instead",
+        "next task: don't use the cache in the importer",
+        "Looks great. Don't change anything else",
+        "My bad, I don't want the flag after all",
+        "restore the database from the backup and run the migration",
+        "can you note the public API in the README?",
+    ],
+)
+def test_ordinary_instructions_are_not_cues(tmp_path: Path, text: str) -> None:
+    assert signals.instruction_cues(text) == []
+    s = Session().user("go").edit(A, "a", "b").say("done").user(text).edit(A, "b", "c")
+    assert by_signal(detect(s, tmp_path), signals.USER_CORRECTION) == []
+
+
+def test_an_instruction_with_weaker_cues_stays_probable_if_nothing_follows(
+    tmp_path: Path,
+) -> None:
+    text = "Don't call legacy_charge() here, it's deprecated. Use the client instead."
+    s = Session().user("go").edit(A, "a", "b").say("done").user(text).read(B)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.PROBABLE_CORRECTION and "weaker cues only" in found.summary
+    assert found.excerpt == "" and "quote" not in found.detail
+    s = Session().user("go").edit(A, "a", "b").say("done").user(text).edit(A, "b", "c")
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.USER_CORRECTION and 'matched "don\'t …"' in found.summary
+
+
+def test_red_after_the_agents_own_change_is_marked(tmp_path: Path) -> None:
+    red = "FAILED tests/test_a.py::test_old - AssertionError\n1 failed, 40 passed in 2.0s"
+    s = (
+        Session()
+        .user("go")
+        .bash("pytest", red, exit_code=1)
+        .edit(A)
+        .bash("pytest", red, exit_code=1)
+    )
+    first, second = by_signal(detect(s, tmp_path), signals.COMMAND_FAILURE)
+    assert "after_edit" not in first.detail and second.detail["after_edit"] == "1"

@@ -388,6 +388,7 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
     # The same test red in ``STANDING_TEST_MIN_SESSIONS`` episodes or more, none of which
     # made it pass: a standing failure. It is no longer "a red test during development".
     red_tests: dict[tuple[str, str], set[str]] = {}
+    on_arrival: set[tuple[str, str]] = set()  # red before the session changed anything
     naming = [
         f
         for f in findings
@@ -399,12 +400,18 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
         for key in _command_keys(finding):
             for test in finding.detail["failed_tests"].split("\n"):
                 red_tests.setdefault((key, test), set()).add(finding.unit)
+                if "after_edit" not in finding.detail:
+                    on_arrival.add((key, test))
     for finding in naming:
         tests = finding.detail["failed_tests"].split("\n")
         files = finding.detail.get("failed_test_files", "").split("\n")
         for test, rel in zip(tests, files, strict=False):
+            # ... unless every red run came after the agent's own change in its session:
+            # then the agent may have broken it each time, and "mark it as known to
+            # fail" would be the wrong advice.
             if not any(
                 len(red_tests.get((key, test), ())) >= STANDING_TEST_MIN_SESSIONS
+                and (key, test) in on_arrival
                 for key in _command_keys(finding)
             ):
                 continue
@@ -417,6 +424,18 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
             finding.summary = finding.summary.replace(
                 "ordinary failure", "a test that is red session after session"
             )
+    # A push turned down because the remote had moved on: routine once, and a habit worth
+    # a line of guidance from ``RECURRING_RED_MIN_SESSIONS`` sessions on.
+    pushes: dict[str, set[str]] = {}
+    turned_down = [f for f in findings if "push_rejected" in f.detail]
+    for finding in turned_down:
+        for key in _command_keys(finding):
+            pushes.setdefault(key, set()).add(finding.unit)
+    for finding in turned_down:
+        if any(
+            len(pushes.get(key, ())) >= RECURRING_RED_MIN_SESSIONS for key in _command_keys(finding)
+        ):
+            finding.detail["push_rejected"] = "recurring"
     dropped: list[Finding] = []
     for finding in pending:
         fix = finding.detail.pop("fixed_by_command")
@@ -967,6 +986,7 @@ class _Analysis:
             tool_name=str if options.include_excerpts else public_tool,
             first_party=self.first_party,
             unit=self.unit,
+            exists=lambda rel: self._disk_is_file(rel) is not None,
         )
         findings: list[Finding] = []
         dropped: list[tuple[int, float, str]] = []
@@ -1082,6 +1102,10 @@ class _Analysis:
 
     def _in_repo(self, stream: Stream) -> bool:
         resolver = self.resolver
+        # A session started through a symbolic link to the repository recorded the
+        # link's spelling: on this machine that directory is the repo.
+        for cwd in {event.cwd for event in stream.events if event.cwd}:
+            resolver.adopt(cwd)
         # Where nothing says where the session ran (no cwd recorded), only a tool call
         # places it here; a session of prose alone touched no repository.
         return any(

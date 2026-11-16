@@ -24,19 +24,35 @@ EARLIEST_YEAR = 2000
 def parse_ts(value: object) -> datetime | None:
     """Parse an ISO-8601 timestamp (or epoch seconds). Naive values are taken as UTC.
 
-    Anything unparsable, or earlier than ``EARLIEST_YEAR``, counts as missing.
+    Epoch numbers may be seconds, milliseconds, microseconds or nanoseconds (told
+    apart by their size), given as a number or as a string of digits. Anything
+    unparsable, earlier than ``EARLIEST_YEAR`` or more than a year ahead of today
+    counts as missing: such a value is a placeholder or a unit mix-up, and one of
+    them would stretch a session over decades.
     """
     parsed = _parse_ts(value)
-    return parsed if parsed is not None and parsed.year >= EARLIEST_YEAR else None
+    if parsed is None or parsed.year < EARLIEST_YEAR:
+        return None
+    return parsed if parsed.year <= datetime.now(timezone.utc).year + 1 else None
+
+
+_EPOCH_RE = re.compile(r"^\d{9,19}(?:\.\d+)?$")
 
 
 def _parse_ts(value: object) -> datetime | None:
     if isinstance(value, bool):
         return None
+    if isinstance(value, str) and _EPOCH_RE.match(value.strip()):
+        value = float(value)
     if isinstance(value, (int, float)):
         try:
-            # Heuristic: values this large are epoch milliseconds.
-            seconds = value / 1000 if value > 1e11 else value
+            # Heuristic: 1e11 seconds is the year 5138. Larger values count in
+            # milliseconds, microseconds or nanoseconds.
+            seconds = float(value)
+            for limit, unit in ((1e17, 1e9), (1e14, 1e6), (1e11, 1e3)):
+                if seconds > limit:
+                    seconds /= unit
+                    break
             return datetime.fromtimestamp(seconds, tz=timezone.utc)
         except (OverflowError, OSError, ValueError):
             return None

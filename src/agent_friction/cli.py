@@ -37,6 +37,14 @@ class UsageError(AgentFrictionError):
 
 
 _REL = re.compile(r"^(\d+)\s*([hdwm])$")
+_FORMAT_ALIASES = {"md": "markdown", "txt": "terminal", "text": "terminal", "htm": "html"}
+
+
+def _format_name(value: str) -> str:
+    """Accept the file-extension spellings too: `-f md` is `-f markdown`."""
+    return _FORMAT_ALIASES.get(value.lower(), value.lower())
+
+
 _EXT_FORMAT = {
     ".html": "html",
     ".htm": "html",
@@ -239,6 +247,7 @@ def build_parser() -> argparse.ArgumentParser:
     out.add_argument(
         "-f",
         "--format",
+        type=_format_name,
         choices=FORMATS,
         help="output format (default: terminal, or inferred from --output extension)",
     )
@@ -293,6 +302,7 @@ def build_parser() -> argparse.ArgumentParser:
     cmp_.add_argument(
         "-f",
         "--format",
+        type=_format_name,
         choices=("terminal", "markdown", "json"),
         help="output format (default: terminal, or inferred from --output extension)",
     )
@@ -753,7 +763,7 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         }
         text = json.dumps(doc, indent=2, sort_keys=True) + "\n"
     else:
-        color = output is None and fmt in (None, "text") and _use_color(args.color, stdout)
+        color = output is None and fmt in (None, "terminal") and _use_color(args.color, stdout)
         text = render_compare(before, after, changes, markdown=fmt == "markdown", color=color)
     _write(text, output, stdout)
     if (

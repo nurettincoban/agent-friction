@@ -268,11 +268,13 @@ def detect(
     repo: str = "/repo",
     known: tuple[str, ...] = (),
     files: tuple[str, ...] = (),
+    dirs: tuple[str, ...] = (),
 ) -> list[Finding]:
     """Parse a built session and run the detectors against a purely lexical repo.
 
     ``known`` are repo-relative paths treated as existing files; every path the
     session touches with a file tool is known as well, as in the real engine.
+    ``dirs`` are repo-relative directories that exist.
     """
     path = session if isinstance(session, Path) else session.save(tmp_path)
     resolver = PathResolver(Path(repo))
@@ -288,6 +290,7 @@ def detect(
         is_file=lambda rel: rel in touched or "." in rel.rsplit("/", 1)[-1],
         is_known_file=lambda rel: rel in touched,
         first_party=lambda top: any(rel.split("/")[0] in (top, f"{top}.py") for rel in touched),
+        exists=lambda rel: rel in touched or rel in dirs,
     )
     found: list[Finding] = []
     for stream in parsed.streams:

@@ -72,6 +72,7 @@ RULE_IDS: tuple[str, ...] = (
     "explain-the-failing-check",
     "say-if-it-is-known-broken",
     "fix-the-flaky-test",
+    "pull-before-pushing",
 )
 
 
@@ -194,6 +195,7 @@ DOCUMENTABLE: frozenset[str] = frozenset(
         "document-the-environment",
         "document-the-command",
         "make-the-failure-actionable",
+        "pull-before-pushing",
         "run-it-in-the-background",
         "give-it-more-time",
         "explain-the-failing-check",
@@ -534,8 +536,13 @@ class _Rules:
             self.add(
                 "path-agents-expect",
                 "Agents expect this path to exist",
-                f"Agents tried to open this non-existent path {_in_sessions(path_misses)}. "
-                "Add a line to AGENTS.md saying where this actually lives, or create the "
+                (
+                    "Agents tried to `cd` into this non-existent directory "
+                    if all(f.detail.get("variant") == "directory" for f in path_misses)
+                    else "Agents tried to open this non-existent path "
+                )
+                + f"{_in_sessions(path_misses)}. "
+                + "Add a line to AGENTS.md saying where this actually lives, or create the "
                 "file/alias if the guess is the more natural layout.",
                 [signals.PATH_MISS],
             )
@@ -874,6 +881,17 @@ class _Rules:
                 "those sessions ended. If it is known to be broken, or needs something agents "
                 "do not have, say so in AGENTS.md together with what to run instead; "
                 "otherwise fix it, so that a red run means something again.",
+                [signals.COMMAND_FAILURE],
+            )
+        rejected = [f for f in failures if f.detail.get("push_rejected") == "recurring"]
+        if rejected:
+            self.add(
+                "pull-before-pushing",
+                f"Tell agents to bring the branch up to date before {code(key)}",
+                f"{code(key)} was rejected {_in_sessions(rejected)} because the remote branch "
+                "had commits the local one lacked (non-fast-forward). Say in AGENTS.md to "
+                "fetch and rebase (or merge) before pushing, and whether a force-push is ever "
+                "acceptable.",
                 [signals.COMMAND_FAILURE],
             )
         flaky = self.get(signals.COMMAND_FAILURE, "flaky")

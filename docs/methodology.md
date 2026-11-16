@@ -41,6 +41,11 @@ directory) if set, otherwise `~/.claude` and `~/.config/claude`.
   starting the agent in `~` or a monorepo root is common. A session from
   there is read only if it (or one of its subagent transcripts) contains the
   repo's path, and then only its events inside the repo count.
+- Directories filed under **another name for the repo** are used as well: a
+  session started through a symbolic link is stored under the link's
+  spelling. For each remaining project directory one transcript is opened to
+  read its working directory; if that directory exists here and its real
+  path is the repository's (or lies inside it), the directory is the repo's.
 
 ## Sessions
 
@@ -96,7 +101,13 @@ it (in 10 separate episodes of work)").
 ## Attribution
 
 **Paths.** Absolute paths are matched lexically against the repo root, its
-symlink-resolved form, its git worktrees and any `repo_aliases`. Relative
+symlink-resolved form, its git worktrees and any `repo_aliases`. A session
+started *through* a symbolic link to the repository (`~/proj` for
+`/data/proj`) recorded the link's spelling: where a session's working
+directory exists on this machine and its real path is the repository's or
+lies inside it, that spelling becomes one more root (`PathResolver.adopt`),
+and Claude Code project directories filed under it are discovered when the
+real path is scanned. Nothing else is resolved through the file system. Relative
 paths are resolved against the session's working directory. Paths outside the
 repo and inside `.git` are dropped. Symlinks in the target path are not
 followed, and files need not exist any more.
@@ -110,9 +121,13 @@ together, and so that the key can be shown even when excerpts are off:
    `done`, `fi`, ...) are looked through, and `bash -c '<script>'` is replaced
    by the commands of its script. Redirections, leading `VAR=value`
    assignments and wrappers (`sudo`, `env`, `time`, `timeout N`, `nohup`,
-   `xargs`, `nice`, `watch`, ...) are stripped from each command, together
+   `xargs`, `nice`, `watch`, ...; also by absolute path, `/usr/bin/time -v`)
+   are stripped from each command, together
    with the wrapper's own options and their values (`WRAPPER_VALUE_OPTIONS`:
    `sudo -u alice pytest` -> `pytest`, `xargs -n 1 pytest` -> `pytest`).
+   One thing is remembered about the redirections: a command whose standard
+   output and standard error both go to `/dev/null` is *silenced*, and
+   nothing in the line's output is taken for its verdict.
 2. **Pick the command that names the line:** the **last significant** one.
    Setup (`cd`, `export`, `source`, `echo`, ...), housekeeping (`mkdir`,
    `touch`, `rm`, `cp`, `mv`, ...) and read-only inspection (`cat`, `tail`,
@@ -352,7 +367,11 @@ struggle. Read the score together with `friction_rate` and the confidence.
 
 ## Estimated time lost
 
-Each event may claim a wall-clock interval from transcript timestamps:
+Each event may claim a wall-clock interval from transcript timestamps.
+Timestamps that cannot be right are treated as missing: anything before the
+year 2000 (a zeroed clock) or more than a year ahead of today (a unit
+mix-up). Epoch numbers are read as seconds, milliseconds, microseconds or
+nanoseconds according to their size.
 
 | Event | Interval |
 | --- | --- |
@@ -454,7 +473,7 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `split-or-anchor-large-file` | 2+ `edit-miss` and the file has 800+ lines, or 2+ `file-too-large` reads |
 | `make-edits-land` | 2+ `edit-miss` on a file that is neither large nor generated (wording depends on whether misses were mostly ambiguous or not-found) |
 | `document-what-rewrites-this-file` | 2+ `stale-edit` of the "modified since read" kind |
-| `path-agents-expect` | 2+ `path-miss` |
+| `path-agents-expect` | 2+ `path-miss` (a read, an edit, a test command pointed at a missing test file, or a `cd` into a missing directory) |
 | `write-down-the-rule` | corroborated `user-correction` events whose attributed shares sum to 0.5 or more; quotes up to 3. "The rule the human keeps repeating" is claimed only when 2+ of the corrections share wording (two content words, or one distinctive word of 7+ letters, e.g. the same class name); otherwise the recommendation only asks whether the correction(s) reflect a standing rule. A `probable-correction` never counts |
 | `state-the-boundary` | 2+ `tool-rejected`, or 1 with a stated reason |
 | `allow-or-document-the-boundary` | 2+ `permission-denied` |
@@ -465,14 +484,15 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `summarize-this-file` | 2+ `read-loop`, next to other evidence |
 | `use-the-working-command` | 2+ *setup/invocation* failures of a command were followed by the same successful command *doing the same job* (same role, or a wrapper of the same tool), in sessions where the failing command never worked afterwards. Never an install, version-control or housekeeping command. Also: 2+ `command not found` failures after which the same command ran under a versioned name of the program ("use `python3`, not `python`"), and 2+ setup/invocation failures after which the same command ran with a variable set in front of it and no file edited in between ("use `PYTHONPATH=src pytest`"; the value is shown only for a fixed set of variables such as `PYTHONPATH`, `NODE_ENV`, `DJANGO_SETTINGS_MODULE`, and only with excerpts, otherwise `NAME=...`) or with an option added ("use `npm install --legacy-peer-deps`"; only with excerpts). Also: ordinary failures after which another command for the same job passed with nothing changed, in 3+ sessions (`pnpm test` after a red `yarn test`: the wrong runner). On Windows the launcher counts as a name of the program ("use `py`, not `python`") |
 | `document-the-setup-step` | 2+ failures of a command that then passed after the same setup step with no file edited in between (`pip install`, `npm ci`, `docker compose up`, `cp .env.example .env`, or any other command that did so in 2+ sessions), or that then passed on a line that first activated an environment (`source .venv/bin/activate && pytest`, `poetry shell`, `conda activate <env>`): "run X before Y". Each failure is bound to the steps run between it and the next run of the same command; every step that helped 2+ times is listed, in order, with its own count ("run `pip install`, then `docker compose up -d` before `pytest`"), and named so that it can be run as written (`npx playwright install`, `go mod download`) |
-| `document-the-environment` | 2+ *environment* failures of a command (and none of the above): a service that was not reachable ("say how to start PostgreSQL before `pytest`"; the service is named when the output identifies it), missing or expired credentials, an unset environment variable (named only with excerpts), a port that was already in use, a full disk, or a host name that could not be resolved (no network, or a host that is not allowed: "say what `curl` can reach from where agents work") |
+| `document-the-environment` | 2+ *environment* failures of a command (and none of the above): a service that was not reachable ("say how to start PostgreSQL before `pytest`"; the service is named when the output identifies it), missing, expired or refused credentials (also a database, registry or cloud API that turns them down), an unset environment variable (named only with excerpts), a port that was already in use, a full disk, or a host name that could not be resolved (no network, or a host that is not allowed: "say what `curl` can reach from where agents work") |
 | `document-the-command` | 2+ setup/invocation failures of a command (and none of the above). If the same command then worked in a subdirectory, the advice names it ("run `npm test` from `web/`"). A command that is keyed by where it ran (`pytest (src/)`) is titled "Document how to run `pytest` in `src/`" |
 | `make-the-failure-actionable` | 1+ `retry-loop` on a command |
 | `run-it-in-the-background` | 2+ harness timeouts of a command that is a server or watcher (`npm run dev`, `uvicorn`, ...); replaces `document-the-command` for those |
 | `give-it-more-time` | 2+ harness timeouts of any other command (`npm run build` cut off after 2 minutes): say how long it takes, raise the timeout or run it in the background, or name a narrower command; replaces `document-the-command` for those |
 | `explain-the-failing-check` | 2+ `no-convergence` events from 2+ sessions, on the command ("Agents cannot get `pytest` to pass") or on a file edited during the rounds: document how to run and debug the check and what it expects |
-| `say-if-it-is-known-broken` | A command lifted out of the weak class because it stays red: it failed 2+ times and was still red at the end, in 3+ sessions (and there is no `no-convergence` event on it): "`npm run e2e` keeps ending red": say that it is known to be broken and what to run instead, or fix it. Also: the same test named as failed in 3+ sessions, none of which made it pass ("`tests/test_legacy.py::test_old` is red session after session": fix it, or mark it as a known failure and say so); this form also appears on the test file's row |
+| `say-if-it-is-known-broken` | A command lifted out of the weak class because it stays red: it failed 2+ times and was still red at the end, in 3+ sessions (and there is no `no-convergence` event on it): "`npm run e2e` keeps ending red": say that it is known to be broken and what to run instead, or fix it. Also: the same test named as failed in 3+ sessions, none of which made it pass, and at least once before the session had changed any file ("`tests/test_legacy.py::test_old` is red session after session": fix it, or mark it as a known failure and say so); this form also appears on the test file's row |
 | `fix-the-flaky-test` | A test command failed and then passed on a plain re-run, with nothing changed in between, in 3+ sessions (variant `flaky`): "`npm test` looks flaky": fix or quarantine the flaky test, and say in AGENTS.md that a red run should be re-run once before anything is changed |
+| `pull-before-pushing` | `git push` was rejected as non-fast-forward (the remote branch had commits the local one lacked) in 3+ sessions: "tell agents to bring the branch up to date before `git push`": say in AGENTS.md to fetch and rebase (or merge) before pushing, and whether a force-push is ever acceptable. No time is claimed |
 
 ### What the repository already says
 
@@ -713,7 +733,9 @@ follow one rule: anything that looks like a home directory becomes `~`.
   are one hotspot; `pytest` and `python -m pytest` are two; every use of a
   tool that is not on the subcommand allowlist is one hotspot (`mytool build`
   and `mytool deploy` are both `mytool`). When `a && b` fails we cannot tell
-  which step failed unless the output shows it. The shell is tokenized,
+  which step failed unless the output shows it (a target or script the
+  runner names, a check's own summary, or the runner's generic line, in that
+  order; see `command-failure`). The shell is tokenized,
   not interpreted: aliases, functions, `eval` and command substitution are not
   followed.
 - **Corrections are under-counted on purpose.** `totals.corrections` counts

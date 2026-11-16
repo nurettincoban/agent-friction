@@ -604,3 +604,10 @@ def test_no_session_in_repo_names_where_sessions_ran() -> None:
         "--no-git",
     )
     assert code == EXIT_ERROR and "--repo-alias /home/dev/shopfront" in err
+
+
+def test_format_accepts_extension_spellings() -> None:
+    code, out, _ = run("scan", *INPUT, "-f", "md")
+    assert code == EXIT_OK and out.startswith("# Agent friction map")
+    code, out, _ = run("scan", *INPUT, "-f", "txt")
+    assert code == EXIT_OK and out.startswith("agent-friction · ")

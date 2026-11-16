@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
 import posixpath
 import re
 import shlex
@@ -73,6 +74,7 @@ class PathResolver:
         if not roots:  # pragma: no cover - absolute() always yields an absolute path
             roots.append("/")
         self.primary = roots[0]
+        self._not_ours: set[str] = set()  # directories `adopt` has looked at and turned down
         self.drives = any(_DRIVE_RE.match(root) for root in roots)
         # Longest first so a worktree nested inside the repo wins over the repo.
         self.roots: tuple[str, ...] = tuple(sorted(roots, key=lambda r: (-len(r), r)))
@@ -154,6 +156,42 @@ class PathResolver:
         if rel is None or rel == ".git" or rel.startswith(".git/"):
             return None
         return rel
+
+    def adopt(self, cwd: str | None) -> bool:
+        """Take a directory that *is* the repo under another name as one more root.
+
+        A session started through a symbolic link (``~/proj`` for ``/data/proj``)
+        records the link's spelling. If ``cwd`` exists here and its real path is
+        the repository's, or lies inside it, the spelling that stands for the
+        repo root becomes a root. Returns True if ``cwd`` is inside the repo then.
+        """
+        absolute = self._absolute(cwd, None) if cwd else None
+        if absolute is None or self._relative(absolute) is not None:
+            return absolute is not None
+        if absolute in self._not_ours:
+            return False
+        self._not_ours.add(absolute)
+        try:
+            if not Path(absolute).is_dir():
+                return False
+            real = os.path.realpath(absolute)
+            root = os.path.realpath(self.primary)
+        except (OSError, ValueError):
+            return False
+        alias = absolute
+        if real != root:
+            below = real[len(root) :] if real.startswith(root.rstrip("/") + "/") else ""
+            below = "/" + below.lstrip("/") if below else ""
+            if not below or not absolute.endswith(below):
+                return False
+            alias = absolute[: -len(below)]
+            try:
+                if os.path.realpath(alias) != root:
+                    return False
+            except (OSError, ValueError):
+                return False
+        self.roots = tuple(sorted({*self.roots, alias}, key=lambda r: (-len(r), r)))
+        return True
 
     def contains(self, cwd: str | None) -> bool:
         """True when ``cwd`` is inside the repo (unknown cwd counts as inside)."""
@@ -360,6 +398,9 @@ class Step:
     #: Directory changes in effect when the step runs, in order: earlier ``cd`` commands
     #: of the line, then its own ``-C`` / ``--prefix`` / ``--directory`` option.
     moves: tuple[str, ...] = ()
+    #: Its output never reaches the transcript: ``>/dev/null 2>&1``, ``&>/dev/null``.
+    #: Nothing in the line's output can then be this step's verdict.
+    silenced: bool = False
 
 
 @dataclass(frozen=True)
@@ -407,29 +448,55 @@ def _tokenize(command: str) -> list[str]:
         return text.split()
 
 
-def _segments(tokens: Sequence[str]) -> list[list[str]]:
+class _Segment(list[str]):
+    """The words of one simple command, and where its output went."""
+
+    out_null = False
+    err_null = False
+
+    def redirect(self, fd: str, operator: str, target: str) -> None:
+        null = target == "/dev/null"
+        if "<" in operator:
+            return
+        if operator.startswith("&>") or (operator == ">&" and not target.isdigit()):
+            self.out_null = self.err_null = null
+        elif operator == ">&":  # `2>&1`: one stream follows the other
+            if fd == "2" and target == "1":
+                self.err_null = self.out_null
+            elif fd in ("", "1") and target == "2":
+                self.out_null = self.err_null
+        elif fd == "2":
+            self.err_null = null
+        elif fd in ("", "1"):
+            self.out_null = null
+
+
+def _segments(tokens: Sequence[str]) -> list[_Segment]:
     """Split tokens into simple commands, dropping redirections and comments."""
-    segments: list[list[str]] = []
-    current: list[str] = []
-    skip_next = False
+    segments: list[_Segment] = []
+    current = _Segment()
+    pending: tuple[str, str] | None = None  # a redirection waiting for its target
     comment = False
     for token in tokens:
         if token in _SEPARATORS:
             if current:
                 segments.append(current)
-            current = []
+            current = _Segment()
             comment = comment and token not in (";", ";;")
-            skip_next = False
+            pending = None
             continue
         if comment:
             continue
-        if skip_next:
-            skip_next = False
+        if pending is not None:
+            current.redirect(*pending, token)
+            pending = None
             continue
-        if token[:1] in ("<", ">"):  # redirection: drop it, its target and a leading fd number
-            skip_next = token.strip("<>&") == ""
-            if current and current[-1].isdigit():
-                current.pop()
+        if token[:1] in ("<", ">") or token[:2] == "&>":
+            # redirection: drop it, its target and a leading fd number
+            fd = current.pop() if current and current[-1].isdigit() else ""
+            operator = token.rstrip("&") if token[:2] == "&>" else token
+            if token.strip("<>&|") == "":
+                pending = (fd, operator)
             continue
         if token.startswith("#") and not current:
             comment = True
@@ -451,8 +518,10 @@ def _strip_prefixes(words: Sequence[str]) -> list[str]:
             out.pop(0)
         elif head == "command" and len(out) > 1 and out[1] in ("-v", "-V"):
             return ["command"]  # `command -v docker` asks whether docker exists
-        elif head in WRAPPER_PROGRAMS:
-            out = _strip_wrapper(head, out[1:])
+        elif head in WRAPPER_PROGRAMS or (
+            _is_abs(head) and head.rsplit("/", 1)[-1] in WRAPPER_PROGRAMS
+        ):
+            out = _strip_wrapper(head.rsplit("/", 1)[-1], out[1:])  # `/usr/bin/time -v`
         else:
             inner = _container_command(out)
             if not inner:
@@ -725,7 +794,8 @@ def _steps(command: str, depth: int = 0, moves: tuple[str, ...] = ()) -> list[St
             inspection or program in SETUP_PROGRAMS or program in HOUSEKEEPING_PROGRAMS
         )
         where = (*moves, *_own_directory(program, words[1:]))
-        steps.append(Step(key, program, tuple(words[1:]), inspection, significant, where))
+        silenced = segment.out_null and segment.err_null
+        steps.append(Step(key, program, tuple(words[1:]), inspection, significant, where, silenced))
     return steps
 
 

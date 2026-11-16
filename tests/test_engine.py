@@ -114,7 +114,7 @@ def test_sources_and_totals(result: dict[str, Any]) -> None:
     assert (generic["kind"], generic["sessions"]) == ("generic", 1)
     totals = result["totals"]
     assert totals["sessions"] == 6  # the subagent transcript belongs to its parent session
-    # four corroborated corrections; "Don't call legacy_charge() ..." is only probable
+    # four corroborated corrections; "Actually legacy_charge() is deprecated ..." is only probable
     assert (totals["corrections"], totals["probable_corrections"]) == (4, 1)
     assert all(source["skipped_events"] == 0 for source in result["sources"])
     assert totals["files_affected"] == len(result["hotspots"]) == 5
@@ -365,7 +365,7 @@ def test_only_unambiguous_corrections_are_quoted(result: dict[str, Any]) -> None
     text = json.dumps([h["recommendations"] for h in result["hotspots"]])
     assert "I told you: PaymentClient only" in text
     # the "probable" correction (two weaker cues) counts, but is not put in anyone's mouth
-    assert "Don't call legacy_charge() here" not in text
+    assert "Actually legacy_charge() is deprecated" not in text
     probable = [
         e
         for h in story(max_evidence=50)["hotspots"]
@@ -373,7 +373,7 @@ def test_only_unambiguous_corrections_are_quoted(result: dict[str, Any]) -> None
         if e["signal"] == "probable-correction" and "confidence 0.4" in e["summary"]
     ]
     assert probable and all(e["excerpt"] is None for e in probable)
-    assert "Don't call legacy_charge" not in json.dumps(story(max_evidence=50))
+    assert "Actually legacy_charge" not in json.dumps(story(max_evidence=50))
 
 
 def test_windows_transcripts_resolve_on_any_platform(tmp_path: Path) -> None:
@@ -2397,3 +2397,113 @@ def test_where_the_sessions_that_missed_the_repo_ran(tmp_path: Path) -> None:
     assert session_directories(options, limit=1) == [("~/work/old-name", 3)]
     aliased = dataclasses.replace(options, repo_aliases=[f"{home}/work/old-name"])
     assert session_directories(aliased) == [("/srv/other", 1)]
+
+
+# ---- round 22 ------------------------------------------------------------------------------
+
+
+def test_a_piped_red_run_is_reported_for_the_step_that_was_red(tmp_path: Path) -> None:
+    red = "1 failed, 1317 passed in 6.2s\nmake: *** [Makefile:20: test] Error 1"
+    line = "make examples >/dev/null 2>&1; make check 2>&1 | tail -2"
+    (row,) = _commands(tmp_path, lambda s: s.bash(line, red).read("/repo/a.py"))
+    assert row["path"] == "make check"
+    # red, an edit, green: nothing to report, and the red runs are counted as dropped
+    result = scan(
+        tmp_path / "loop",
+        [
+            Session(f"s{i}", cwd="/repo")
+            .user("go")
+            .bash(line, red)
+            .edit("/repo/src/a.py")
+            .bash(line, "1318 passed in 6.1s")
+            for i in range(4)
+        ],
+    )
+    assert result["commands"] == [] and result["totals"]["dropped_red_runs"] == 4
+
+
+def test_a_directory_agents_keep_guessing_is_a_path_agents_expect(tmp_path: Path) -> None:
+    gone = "/bin/bash: line 1: cd: frontend: No such file or directory"
+
+    def sessions() -> list[Session]:
+        return [
+            Session(f"s{i}", cwd="/repo")
+            .user("go")
+            .bash("cd frontend && npm test", gone, exit_code=1)
+            for i in range(4)
+        ]
+
+    result = scan(tmp_path, sessions())
+    assert result["commands"] == []  # `npm test (frontend/)` never ran
+    (row,) = result["hotspots"]
+    assert row["path"] == "frontend" and row["signals"] == {"path-miss": 4}
+    (advice,) = row["recommendations"]
+    assert advice["id"] == "path-agents-expect"
+    assert (
+        "tried to `cd` into this non-existent directory 4 times in 4 sessions" in advice["detail"]
+    )
+    assert row["evidence"][0]["summary"] == "`cd` was pointed at frontend, which does not exist"
+    # without excerpts the guessed name is not shown
+    bare = scan(tmp_path / "bare", sessions(), include_excerpts=False)
+    assert "frontend" not in json.dumps(bare)
+    assert bare["hotspots"][0]["signals"] == {"path-miss": 4}
+
+
+def test_credentials_the_tool_names_get_environment_advice(tmp_path: Path) -> None:
+    denied = "ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: NO)"
+    (row,) = _commands(tmp_path, lambda s: s.bash("mysql -e 'select 1'", denied, exit_code=1))
+    (advice,) = row["recommendations"]
+    assert advice["id"] == "document-the-environment"
+    assert advice["title"] == "Say how `mysql` gets its credentials"
+    timeout = "Unable to connect to the server: dial tcp 10.0.0.1:6443: i/o timeout"
+    (row,) = _commands(tmp_path / "k", lambda s: s.bash("kubectl get pods", timeout, exit_code=1))
+    assert row["recommendations"][0]["title"] == (
+        "Say how to start the Kubernetes cluster before `kubectl get`"
+    )
+
+
+def test_a_push_rejected_session_after_session_gets_advice(tmp_path: Path) -> None:
+    rejected = (
+        " ! [rejected]        main -> main (non-fast-forward)\n"
+        "error: failed to push some refs to 'github.com:acme/shop.git'"
+    )
+
+    def build(s: Session) -> None:
+        s.bash("git push", rejected, exit_code=1).read("/repo/a.py")
+
+    (row,) = _commands(tmp_path, build, count=3)
+    (advice,) = row["recommendations"]
+    assert advice["id"] == "pull-before-pushing"
+    assert "rejected 3 times in 3 sessions" in advice["detail"]
+    assert row["est_minutes_lost"] == 0  # a habit to name, not time to claim
+    # twice is how parallel work goes: a capped lead, no advice
+    (row,) = _commands(tmp_path / "twice", build, count=2)
+    assert row["recommendations"] == [] and row["score"] <= 19
+
+
+def test_a_test_red_only_after_the_agents_own_change_is_not_a_standing_failure(
+    tmp_path: Path,
+) -> None:
+    red = "FAILED tests/test_legacy.py::test_old - AssertionError\n1 failed, 40 passed in 2.0s"
+
+    def after_edit(s: Session) -> None:
+        s.edit("/repo/src/a.py").bash("pytest", red, exit_code=1).read("/repo/a.py")
+
+    (row,) = _commands(tmp_path, after_edit)
+    assert row["recommendations"] == [] and row["score"] <= 19
+    assert all("session after session" not in e["summary"] for e in row["evidence"])
+
+    # red before anything was changed, in the same number of sessions: it was broken already
+    def on_arrival(s: Session) -> None:
+        s.bash("pytest", red, exit_code=1).edit("/repo/src/a.py").bash("pytest", red, exit_code=1)
+
+    (row,) = _commands(tmp_path / "standing", on_arrival)
+    assert [r["id"] for r in row["recommendations"]] == ["say-if-it-is-known-broken"]
+
+    # edit and re-run, round after round: that is not converging, and it is said so
+    def rounds(s: Session) -> None:
+        for _ in range(4):
+            s.edit("/repo/src/a.py").bash("pytest", red, exit_code=1)
+
+    (row,) = _commands(tmp_path / "rounds", rounds)
+    assert [r["id"] for r in row["recommendations"]] == ["explain-the-failing-check"]

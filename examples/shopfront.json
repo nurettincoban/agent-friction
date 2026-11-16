@@ -413,7 +413,7 @@
           "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
           "signal": "probable-correction",
           "source": "claude-code:shopfront/e65615b3-b6e0-5853-afdf-c13d1b54f9b5.jsonl",
-          "summary": "Wording that could be a correction (confidence 0.4; matched \"don't\", \"instead\", \"not allowed\"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py",
+          "summary": "Wording that could be a correction (confidence 0.4; matched \"actually\", \"instead\", \"not allowed\"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py",
           "timestamp": "2026-10-26T10:08:42Z"
         },
         {
@@ -557,7 +557,7 @@
           "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
           "signal": "probable-correction",
           "source": "claude-code:shopfront/e65615b3-b6e0-5853-afdf-c13d1b54f9b5.jsonl",
-          "summary": "Wording that could be a correction (confidence 0.4; matched \"don't\", \"instead\", \"not allowed\"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py",
+          "summary": "Wording that could be a correction (confidence 0.4; matched \"actually\", \"instead\", \"not allowed\"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py",
           "timestamp": "2026-10-26T10:08:42Z"
         },
         {

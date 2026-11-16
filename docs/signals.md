@@ -191,6 +191,24 @@ corroborated: ...").
     is recorded as a *probable* correction (confidence 0.4, never quoted,
     `corroborated: softened`), attributed to those files. If the agent only
     reruns a command, or edits something else, nothing is recorded.
+  - *An instruction that redirects the work just done* is neither a verdict
+    nor addressed at a mistake, and on its own it is how anyone briefs an
+    agent: "Don't use time.sleep here", "I don't want a new dependency for
+    this", "you're overcomplicating this", "we already have a retry helper,
+    use that instead", "again, no mocks in these tests", "can you not change
+    the public API? restore the old name" (`instruction_cues`; labels
+    "don't …", "I don't want …", "you're over… this", "use that instead",
+    "no … here", "can you not …", "restore the old …"). Behaviour decides:
+    if the agent had changed files in the turn before and changes one of
+    them again in reply, the message is a correction (confidence 1,
+    `corroborated: followed`, attributed to the files it went back to). If
+    it does not, nothing is recorded (or, where the message also carries two
+    weaker cues, the probable correction those give). Naming a file is not
+    enough here. Not cues: "don't forget ...", "don't worry", "don't commit
+    yet", "use the factory instead" (may be the next step), "use tabs instead
+    of spaces", "No tests are needed here", anything after praise, a
+    dismissal, self-blame or "next task:", and an answer to a question the
+    agent asked.
   - *Somebody else's words:* a quotation introduced by a reporting phrase
     ("Here's the reviewer's comment: 'No, I said to keep the old name'. Do
     you agree?", "Bob wrote: \"that is wrong, revert it\"", "the ticket says
@@ -594,6 +612,11 @@ follows the agent commit within 2 days (`FEATURE_REWORK_WINDOW`), whatever
 the window: "feat: add pagination" a week later that touches lines the agent
 wrote is the project moving on, not a repair.
 
+A human commit that changes nothing in a file but a version string (every
+removed and added line is `"version": "1.4.1",`, `version = "1.4.1"`,
+`__version__ = "1.4.1"` or the like; `VERSION_LINE_RE`) is a release, not a
+repair, even when the agent's commit had set the version before it.
+
 A human who continues work elsewhere in the file, or appends after the agent's
 lines, with an ordinary subject is **not** rework. One event per (human
 commit, file). A human commit that follows another human commit is not rework.
@@ -835,7 +858,11 @@ successfully once before being removed (read as debugging).
   - `service`: something the command talks to is not running. `Cannot connect
     to the Docker daemon`, `Connection refused`, `ECONNREFUSED`, `could not
     connect to server`, `connection to server ... failed`, `Is the server
-    running`. The service is named only from a fixed vocabulary (by its
+    running`, and what kubectl and other Go clients print when a cluster or
+    host does not answer (`Unable to connect to the server`, `dial tcp ...:
+    i/o timeout`; named "the Kubernetes cluster"). Unlike other failed
+    look-ups, an inspection command that cannot reach its service (`kubectl
+    get pods`, `docker ps`) is recorded. The service is named only from a fixed vocabulary (by its
     default port or a word in the output: PostgreSQL, MySQL, Redis, MongoDB,
     RabbitMQ, Elasticsearch, Kafka, Memcached, "the Docker daemon", else "the
     service on port N"), so no transcript text is passed on;
@@ -845,7 +872,17 @@ successfully once before being removed (read as debugging).
     run `gh auth login` / `aws sso login` / `docker login`, a remote that
     answers `The requested URL returned error: 403` (or 401), `Permission
     to <repo> denied to <user>`, `Invalid username or password`, `401
-    Unauthorized`;
+    Unauthorized`; a database, registry or cloud API that turns the
+    credentials down: MySQL's `ERROR 1045 (28000): Access denied for user`,
+    PostgreSQL's `password authentication failed`, docker's `unauthorized:
+    incorrect username or password`, terraform's `No valid credential sources
+    found`, AWS's `InvalidAccessKeyId`, `ExpiredToken`, `The security token
+    included in the request is invalid`, GitHub's `Bad credentials`; and a
+    403 as a tool reports it (`npm ERR! code E403`, `ERROR: HTTP error 403
+    ...`, `remote: ... 403`, `HTTP 403: ...`, `403 Client Error: Forbidden`).
+    A package registry that answers `npm ERR! code E401`/`E403` is this kind,
+    not a setup/invocation error. A test that *asserts* a 403 (`expected 403
+    Forbidden but got 200`) is an ordinary red test;
   - `port`: the port a server wants is taken (`EADDRINUSE`, `address already
     in use`, `port is already allocated`), usually by one left running
     earlier;
@@ -912,9 +949,40 @@ successfully once before being removed (read as debugging).
   started. Nothing is recorded. Without such a banner, with another exit
   status, or without `timeout` in front, it is judged like any other run.
 - *A `cd` that failed:* in `cd missing-dir && npm test`, when the shell
-  reports that it could not change directory (`cd: missing-dir: No such file
-  or directory`), nothing after the `cd` ran. No failure of `npm test
-  (missing-dir/)` is recorded: the line is dropped.
+  reports that it could not change directory (bash: `cd: missing-dir: No such
+  file or directory`; zsh: `cd:1: no such file or directory: missing-dir`,
+  also behind `(eval):`; dash: `cd: can't cd to missing-dir`), nothing after
+  the `cd` ran. No failure of `npm test (missing-dir/)` is recorded, and that
+  command does not count as having been run there. What is recorded is the
+  guess: a [`path-miss`](#path-miss--path-miss) on the directory, resolved
+  against where the shell stood ("`cd` was pointed at missing-dir, which does
+  not exist"), so that a directory agents keep expecting gets
+  `path-agents-expect`. Nothing is recorded when the directory lies outside
+  the repository or exists on disk today (the shell then stood somewhere
+  other than the transcript says).
+- *Which step printed it:* on a line with several commands the output is
+  matched to the step it belongs to (`failing_step`, `step_verdicts`), in
+  this order:
+  1. a runner that names its target or script: `make: *** [Makefile:20:
+     test] Error 1` is about the `make` step whose target is `test`, or about
+     the one aggregate target on the line that may include it (`make
+     check`); `npm ERR! Test failed.`, ``npm error Lifecycle script `lint`
+     failed`` and `npm ERR! shop@1.0.0 lint: ...` are about `npm test` and
+     `npm run lint` (`named_steps`);
+  2. a check's own summary (`Tests: 1 failed`, `1 failed, 40 passed in 2s`,
+     `Found 3 errors`): it outranks the runner's generic line. In `npm run
+     lint && npm test 2>&1 | tail -5` that ends in `Tests: 1 failed` and `npm
+     ERR! Test failed.`, the red step is `npm test`, although `npm ERR!` fits
+     `npm run lint` just as well;
+  3. the runner's generic line (`npm ERR!`, `make: ***`, `error: could not
+     compile`), for the first step it fits, as before.
+
+  A step whose standard output and standard error both go to `/dev/null`
+  (`>/dev/null 2>&1`, `&>/dev/null`, `>/dev/null 2>/dev/null`) printed none
+  of the output and never gets a verdict from it: in `make examples
+  >/dev/null 2>&1; make check 2>&1 | tail -2` a failure shown is `make
+  check`'s. Red, edit, green then drops the failure of the step that was
+  red, like any other.
 - *Ordinary failures* (anything else: a red test, a linter or type checker
   reporting problems, a script that raises) count at weight 0.3 and claim no
   lost time. A red test during development is the tool working as intended.
@@ -1017,6 +1085,23 @@ successfully once before being removed (read as debugging).
   test file too if it exists, and lead to `say-if-it-is-known-broken` ("fix
   it, or mark it as a known failure and say so"). The test is named only
   with excerpts: its name comes from command output.
+  One condition more: at least one of those red runs must have come
+  *before* the session changed any file (`after_edit` is not set on it).
+  When every red run of the test follows the agent's own change in its
+  session, the agent may have broken it each time, and "mark it as a known
+  failure" would be the wrong advice; if the agent kept editing and
+  re-running, [`no-convergence`](#no-convergence--no-convergence) says so
+  instead.
+- *A push the remote turned down:* `git push` that fails with `! [rejected]
+  ... (non-fast-forward)` (or `(fetch first)`) is **not** an environment
+  failure: nothing is missing, the remote branch has commits the local one
+  lacks. It is an ordinary failure with its own wording ("the remote branch
+  had commits the local one lacked", detail `push_rejected`): weak evidence,
+  no time claimed. From 3 episodes of work on (`RECURRING_RED_MIN_SESSIONS`)
+  it is a habit and gets `pull-before-pushing` ("say in AGENTS.md to fetch
+  and rebase (or merge) before pushing, and whether a force-push is ever
+  acceptable"); still no time is claimed. A push refused for want of
+  credentials is an `auth` failure as above.
 - *A program that is only there by its path:* `zebractl: command not found`
   followed by `./bin/zebractl ...` succeeding records `works_as:
   ./bin/zebractl`, and the advice is "use `./bin/zebractl`, not `zebractl`"
@@ -1260,8 +1345,9 @@ never makes a hotspot or advice.
 > read of a missing file that the agent then creates in the same session is
 > not recorded.
 
-**What:** a read or edit of a path that does not exist, or a test command
-pointed at a test file that does not exist (see `command-failure`). A read of a missing
+**What:** a read or edit of a path that does not exist, a test command
+pointed at a test file that does not exist, or a `cd` into a directory that
+does not exist (variant `directory`; see `command-failure` for both). A read of a missing
 file that the agent then creates with a write in the same session (checking
 whether `CHANGELOG.md` exists before adding it) is not recorded.
 

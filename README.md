@@ -180,7 +180,8 @@ evidence agrees. All of it is in
 Transcripts contain your code and sometimes your secrets, so:
 
 - Everything runs locally. No network calls, ever. The HTML report loads nothing external and
-  ships a strict Content-Security-Policy.
+  ships a Content-Security-Policy that blocks every network load (`default-src 'none'`; its own
+  inline script and styles are the only code it runs).
 - Excerpts are redacted (API keys and tokens, `Authorization` headers, private keys, common
   password forms, credentials in URLs and `curl -u`, emails, high-entropy strings, your home
   directory) and truncated. Thinking blocks and assistant prose are never included.

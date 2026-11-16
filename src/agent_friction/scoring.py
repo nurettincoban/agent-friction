@@ -285,6 +285,8 @@ def is_weak(finding: Finding) -> bool:
         if "fixed_by_setup" in detail or "recurring_red" in detail or "standing_test" in detail:
             # it took a setup step to pass, or it stays red session after session
             return False
+        if detail.get("push_rejected") == "recurring":
+            return False  # pushing without fetching first, session after session
         # an ordinary failure, or a mistyped name that the agent then spelled correctly
         return detail.get("variant") == "ordinary" or "typo_of" in detail
     if finding.signal == NO_CONVERGENCE:

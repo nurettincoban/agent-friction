@@ -632,3 +632,34 @@ def test_setup_labels_can_be_run_as_written(command: str, label: str) -> None:
     from agent_friction.attribution import parse_command, setup_label
 
     assert setup_label(parse_command(command).steps[0]) == label
+
+
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [
+        ("/usr/bin/time -v pytest -q", "pytest"),
+        ("time pytest -q", "pytest"),
+        ("time -p make test", "make test"),
+        ("/usr/bin/env FOO=1 npm test", "npm test"),
+        ("( pytest -q )", "pytest"),
+        ("(cd web && npm test)", "npm test"),
+        ("( make lint; make test ) 2>&1 | tail -5", "make test"),
+    ],
+)
+def test_time_and_subshells_are_wrappers(command: str, key: str) -> None:
+    assert parse_command(command).key == key
+
+
+def test_steps_know_when_their_output_went_nowhere() -> None:
+    def silenced(command: str) -> list[bool]:
+        return [s.silenced for s in parse_command(command).steps]
+
+    assert silenced("npm run build >/dev/null 2>&1; npm test | tail -3") == [True, False, False]
+    assert silenced("make a &>/dev/null; make b &> /dev/null; make c") == [True, True, False]
+    assert silenced("a > /dev/null 2> /dev/null; b 2>/dev/null >/dev/null") == [True, True]
+    # one stream still reaches the transcript
+    assert silenced("a >/dev/null; b 2>/dev/null; c 2>&1; d >out.txt 2>&1") == [False] * 4
+    # `2>&1 >/dev/null`: stderr goes where stdout *was*
+    assert silenced("a 2>&1 >/dev/null") == [False]
+    # redirections never become arguments
+    assert parse_command("make a &>/dev/null").steps[0].args == ("a",)

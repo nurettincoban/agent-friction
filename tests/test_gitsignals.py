@@ -326,3 +326,42 @@ def test_a_formatter_commit_is_not_rework_at_any_size(repo: Repo) -> None:
         assert gitsignals.MECHANICAL_SUBJECT_RE.search(subject), subject
     for subject in ("restyle the login page", "fix the linter config", "black background"):
         assert not gitsignals.MECHANICAL_SUBJECT_RE.search(subject), subject
+
+
+def test_a_version_bump_is_not_rework(repo: Repo) -> None:
+    package = '{\n  "name": "shop",\n  "version": "1.4.0",\n  "private": true\n}\n'
+    project = '[project]\nname = "shop"\nversion = "1.4.0"\n'
+    init = '"""Shop."""\n\n__version__ = "1.4.0"\n'
+    files = {"package.json": package, "pyproject.toml": project, "shop/__init__.py": init}
+    repo.commit(1, "init", {name: text.replace("1.4.0", "1.3.0") for name, text in files.items()})
+    repo.commit(2, f"release prep\n\n{CLAUDE}", files)
+    repo.commit(3, "v1.4.1", {name: text.replace("1.4.0", "1.4.1") for name, text in files.items()})
+    history = gitsignals.read_history(repo.path)
+    reader = gitsignals.HunkReader(repo.path)
+    assert gitsignals.find_rework(history.commits, hunks=reader) == []
+    assert reader.version_only(history.commits[-1].sha) == frozenset(files)
+    # the version and something else: a human changing what the agent wrote
+    repo.commit(4, f"more\n\n{CLAUDE}", {"package.json": package.replace("true", "false")})
+    human = repo.commit(
+        5, "tidy", {"package.json": package.replace("true", "null").replace("1.4.0", "2.0.0")}
+    )
+    history = gitsignals.read_history(repo.path)
+    found = gitsignals.find_rework(history.commits, hunks=gitsignals.HunkReader(repo.path))
+    assert [f.detail["human_commit"] for f in found] == [human[:8]]
+
+
+@pytest.mark.parametrize(
+    ("line", "is_version"),
+    [
+        ('  "version": "1.4.0",', True),
+        ('version = "1.4.0"', True),
+        ('__version__ = "1.4.0"', True),
+        ('export const VERSION = "2.0.0-rc.1";', True),
+        ("version: 1.2.3", True),
+        ('  "version": getVersion(),', False),
+        ("retries = 3", False),
+        ('  "conversion": "1.4.0",', False),
+    ],
+)
+def test_version_lines(line: str, is_version: bool) -> None:
+    assert bool(gitsignals.VERSION_LINE_RE.match(line)) is is_version

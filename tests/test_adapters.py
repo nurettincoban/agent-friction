@@ -567,3 +567,23 @@ def test_lines_another_file_already_gave_are_counted(tmp_path: Path) -> None:
     seen = {}
     assert parse_transcript(one, seen).duplicate_lines == 0
     assert parse_transcript(two, seen).duplicate_lines == 3
+
+
+def test_implausible_timestamps_count_as_missing() -> None:
+    from datetime import datetime, timezone
+
+    expected = datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
+    # epoch seconds, milliseconds, microseconds and nanoseconds, as numbers or digits
+    for value in (1700000000, 1700000000000, 1700000000000000, 1700000000000000000):
+        assert parse_ts(value) == expected, value
+        assert parse_ts(str(value)) == expected, value
+    assert parse_ts(1700000000.5) == expected.replace(microsecond=500000)
+    # placeholders and unit mix-ups: before 2000, or more than a year ahead
+    for value in (0, 1, "1970-01-01T00:00:00Z", "1999-12-31T23:59:59Z"):
+        assert parse_ts(value) is None, value
+    for value in (4102444800, "2099-01-01T00:00:00Z", "9999-12-31T00:00:00Z", 32503680000):
+        assert parse_ts(value) is None, value
+    ahead = datetime.now(timezone.utc).year + 1
+    assert parse_ts(f"{ahead}-06-01T00:00:00Z") is not None  # a clock that runs a little fast
+    assert parse_ts(f"{ahead + 1}-01-01T00:00:00Z") is None
+    assert parse_ts(float("nan")) is None and parse_ts(float("inf")) is None

@@ -262,6 +262,44 @@ def parse_hunks(patch: str) -> dict[str, tuple[list[Range], list[Range]]]:
     return files
 
 
+#: A line that states a version and nothing else: ``"version": "1.4.0",`` in package.json,
+#: ``version = "1.4.0"`` in pyproject.toml or Cargo.toml, ``__version__ = "1.4.0"``.
+VERSION_LINE_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:const\s+|let\s+|var\s+)?[\"']?(?:__version__|version|VERSION"
+    r"|appVersion|versionName|versionCode|[A-Z_]*VERSION)[\"']?\s*(?::\s*\w+\s*)?[:=]\s*"
+    r"[\"']?v?\d+(?:\.\d+)*[\w.+-]*[\"']?\s*[,;]?\s*$"
+)
+
+
+def version_only_files(patch: str) -> frozenset[str]:
+    """Files of a patch in which nothing changed but a version string.
+
+    Every removed and every added line of the file states a version
+    (``VERSION_LINE_RE``), and as many were added as removed.
+    """
+    lines: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    old_name = ""
+    for line in patch.splitlines():
+        if line.startswith("diff --git "):
+            current = None
+        elif line.startswith("--- "):
+            old_name = line[4:].strip()
+        elif line.startswith("+++ "):
+            name = line[4:].strip()
+            name = old_name if name == "/dev/null" else name
+            current = lines.setdefault(name[2:] if name[:2] in ("a/", "b/") else name, [])
+        elif current is not None and line[:1] in ("+", "-"):
+            current.append(line)
+    return frozenset(
+        name
+        for name, changed in lines.items()
+        if changed
+        and all(VERSION_LINE_RE.match(line[1:]) for line in changed)
+        and sum(line[0] == "+" for line in changed) * 2 == len(changed)
+    )
+
+
 class HunkReader:
     """Reads and caches the changed line ranges of single commits (``git show -U0``)."""
 
@@ -269,6 +307,12 @@ class HunkReader:
         self.repo = repo
         self.calls = 0
         self._cache: dict[str, dict[str, tuple[list[Range], list[Range]]]] = {}
+        self._bumps: dict[str, frozenset[str]] = {}
+
+    def version_only(self, sha: str) -> frozenset[str]:
+        """Files of ``sha`` in which only a version string changed (see above)."""
+        self(sha)
+        return self._bumps.get(sha, frozenset())
 
     def __call__(self, sha: str) -> dict[str, tuple[list[Range], list[Range]]]:
         if sha not in self._cache:
@@ -293,7 +337,10 @@ class HunkReader:
             )
         except (OSError, subprocess.SubprocessError):
             return {}
-        return parse_hunks(proc.stdout) if proc.returncode == 0 else {}
+        if proc.returncode != 0:
+            return {}
+        self._bumps[sha] = version_only_files(proc.stdout)
+        return parse_hunks(proc.stdout)
 
 
 Hunks = Callable[[str], dict[str, tuple[list[Range], list[Range]]]]
@@ -400,6 +447,8 @@ def find_rework(
         by_subject = bool(FIX_SUBJECT_RE.search(commit.subject))
         if not overlap and not by_subject:
             continue
+        if isinstance(hunks, HunkReader) and path in hunks.version_only(commit.sha):
+            continue  # a release bumping the version the agent's commit had set: no rework
         new_work = not by_subject and FEATURE_SUBJECT_RE.search(commit.subject) is not None
         if new_work and commit.date - previous.date > FEATURE_REWORK_WINDOW:
             # "feat: add pagination" a week later, touching lines the agent wrote, is the

@@ -10,7 +10,7 @@ from __future__ import annotations
 import fnmatch
 import posixpath
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 
@@ -497,25 +497,93 @@ GREEN_OUTPUT_RE = re.compile(
 )
 
 
+#: Signatures of a runner rather than of a check. ``npm ERR!`` and ``make: ***`` are
+#: printed for whichever script or target failed, so on a line with two steps of the
+#: same runner they do not say which one it was.
+_RUNNER_SIGNATURES = frozenset({"build", "make", "npm", "cargo"})
+
+
+def _verdict(name: str | None, output: str) -> str | None:
+    signature = VERDICT_SIGNATURES.get(name or "")
+    if signature is None:
+        return None
+    red, green = signature
+    if red.search(output):
+        return "red"
+    return "green" if green is not None and green.search(output) else None
+
+
+def _key_verdicts(key: str, output: str) -> tuple[str | None, str | None]:
+    """``(specific, generic)`` verdicts for ``key``: by its check's summary, by its runner."""
+    words = key.split()
+    specific: str | None = None
+    generic: str | None = None
+    for name in (command_role(key), words[0] if words else ""):
+        verdict = _verdict(name, output)
+        if verdict is None:
+            continue
+        if name in _RUNNER_SIGNATURES:
+            generic = "red" if "red" in (generic, verdict) else verdict
+        else:
+            specific = "red" if "red" in (specific, verdict) else verdict
+    return specific, generic
+
+
 def key_verdict(key: str, output: str) -> str | None:
     """``"red"``/``"green"`` if ``output`` carries that verdict *of the tool behind ``key``*.
 
     Only the signatures of the key's own role or program are consulted, so in
     ``ruff check .; mypy; pytest`` each step is judged by its own summary line.
     """
-    words = key.split()
-    names = (command_role(key), words[0] if words else "")
-    found: str | None = None
-    for name in names:
-        signature = VERDICT_SIGNATURES.get(name or "")
-        if signature is None:
-            continue
-        red, green = signature
-        if red.search(output):
-            return "red"
-        if green is not None and green.search(output):
-            found = "green"
-    return found
+    specific, generic = _key_verdicts(key, output)
+    if "red" in (specific, generic):
+        return "red"
+    return specific or generic
+
+
+#: The target a failed ``make`` names: ``make: *** [Makefile:20: test] Error 1``.
+_MAKE_TARGET_RE = re.compile(
+    r"^make(?:\[\d+\])?: \*\*\* \[(?:[^\]\n]*:\d+: )?([^\]\n:]+)\] Error", re.M
+)
+#: The script a failed ``npm``/``pnpm``/``yarn`` run names.
+_NPM_SCRIPT_RE = re.compile(
+    r"^npm (?:ERR!|error) (?:(Test) failed\b|Lifecycle script `([\w:.-]+)` failed"
+    r"|\S+@\S+ ([\w:.-]+): |Failed at the \S+ ([\w:.-]+) script)"
+    r"|ELIFECYCLE\u2009? +(Test) failed|ELIFECYCLE\u2009? +Command failed.*",
+    re.M,
+)
+_NODE_RUNNERS = frozenset({"npm", "pnpm", "yarn", "bun"})
+
+
+def named_steps(steps: Sequence[Step], output: str) -> list[Step] | None:
+    """The steps a runner's own failure line names, or ``None`` if it names nothing.
+
+    ``make: *** [Makefile:20: test] Error 1`` is about the step whose target is
+    ``test``, or about the one aggregate target that may include it; ``npm ERR! Test
+    failed.`` is about ``npm test``. An empty list means that a target was named and
+    no step on the line can be the one.
+    """
+    targets = {m.group(1).strip() for m in _MAKE_TARGET_RE.finditer(output)}
+    scripts = {
+        next(g for g in m.groups() if g).casefold()
+        for m in _NPM_SCRIPT_RE.finditer(output)
+        if any(m.groups())
+    }
+    if not targets and not scripts:
+        return None
+    named: list[Step] = []
+    makes = [s for s in steps if s.program in ("make", "gmake")]
+    direct = [s for s in makes if targets & set(s.args)]
+    aggregates = [s for s in makes if is_aggregate_check(s.key)]
+    if targets:
+        named += direct or (aggregates if len({s.key for s in aggregates}) == 1 else [])
+    if scripts:
+        named += [
+            s
+            for s in steps
+            if s.program in _NODE_RUNNERS and s.key.split()[-1].casefold() in scripts
+        ]
+    return named
 
 
 #: Variables whose value says how a command is run, not who runs it.
@@ -621,14 +689,28 @@ def _candidates(cmd: ParsedCommand) -> list[Step]:
 def step_verdicts(cmd: ParsedCommand, output: str) -> dict[str, str]:
     """Verdict per step key of a line with several commands, each by its own signature."""
     verdicts: dict[str, str] = {}
-    for step in _candidates(cmd):
-        verdict = key_verdict(step.key, output)
+    # A step whose output went to /dev/null printed none of this.
+    judged = [s for s in _candidates(cmd) if not s.silenced]
+    named = named_steps(judged, output)
+    both = {s.key: _key_verdicts(s.key, output) for s in judged}
+    for step in judged:
+        specific, generic = both[step.key]
+        if generic == "red" and specific != "red":
+            # `npm ERR!` after `npm run lint && npm test`: the runner's line belongs to
+            # the step it names, or to the one whose own summary is red.
+            others = [s for s in judged if s.key != step.key and s.program == step.program]
+            if named is not None:
+                if step not in named and any(s in named for s in others):
+                    generic = None
+            elif any(both[s.key][0] == "red" for s in others):
+                generic = None
+        verdict = "red" if "red" in (specific, generic) else specific or generic
         if verdict is not None and verdicts.get(step.key) != "red":
             verdicts[step.key] = verdict
     # `ruff format . && make check | tail -2 && git status`: an aggregate target has no
     # summary line of its own. It ran green when nothing in the output is red and the
     # output shows a passing summary that no other step on the line could have printed.
-    steps = _candidates(cmd)
+    steps = judged
     aggregates = {s.key for s in steps if is_aggregate_check(s.key)} - set(verdicts)
     if len(aggregates) == 1 and not RED_OUTPUT_RE.search(output):
         (aggregate,) = aggregates
@@ -688,10 +770,10 @@ def is_typo_of(failed: str, other: str) -> bool:
     return min(len(a), len(b)) >= 4 and _distance(a, b) <= TYPO_MAX_DISTANCE
 
 
-def _step_signature(step: Step) -> list[re.Pattern[str]]:
+def _step_signature(step: Step, runner: bool = True) -> list[re.Pattern[str]]:
     if is_setup_command(step.key):
         return [INSTALL_FAILURE_RE]
-    names = (command_role(step.key), step.program)
+    names = (command_role(step.key), step.program) if runner else (command_role(step.key),)
     return [STEP_SIGNATURES[name] for name in names if name in STEP_SIGNATURES]
 
 
@@ -711,7 +793,16 @@ def failing_step(cmd: ParsedCommand, output: str) -> tuple[Step | None, bool]:
     ]
     if len({s.key for s in candidates}) <= 1:
         return primary, True
-    for step in candidates:
+    # Nothing in the output was printed by a step sent to /dev/null.
+    heard = [s for s in candidates if not s.silenced]
+    # The runner names its target (`make: *** [Makefile:20: test] Error 1`) ...
+    for step in named_steps(heard, output) or ():
+        return step, True
+    # ... a check's own summary says more than its runner's `npm ERR!` or `make: ***` ...
+    for step in heard:
+        if any(pattern.search(output) for pattern in _step_signature(step, runner=False)):
+            return step, True
+    for step in heard:
         if any(pattern.search(output) for pattern in _step_signature(step)):
             return step, True
     return primary, False
@@ -843,6 +934,9 @@ _SERVICE_DOWN_RE = re.compile(
     r"|could not connect to server|connection to server\b.{0,120}\bfailed"
     r"|Is the server running|Can't connect to (?:local )?(?:MySQL )?server"
     r"|No connection could be made|server closed the connection unexpectedly"
+    # kubectl and other Go clients: the cluster or host did not answer
+    r"|Unable to connect to the server"
+    r"|dial tcp [^\n]*: (?:i/o timeout|connect: connection refused|connect: no route to host)"
     # curl could not connect (7), timed out (28), got no reply (52) or lost the connection (56)
     r"|curl: \((?:7|28|52|56)\) ",
     re.I,
@@ -858,8 +952,27 @@ _AUTH_RE = re.compile(
     r"|InvalidClientTokenId|could not read Username"
     # a remote that refuses the credentials at hand
     r"|The requested URL returned error: 40[13]|Permission to \S+ denied to "
-    r"|Invalid username or password|\b401 Unauthorized\b|\bcode E401\b",
-    re.I,
+    r"|Invalid username or password|\b401 Unauthorized\b|\bcode E40[13]\b"
+    # a database, a registry or a cloud API that turns the credentials down
+    r"|ERROR 1045 \(28000\)|Access denied for user\b"
+    r"|password authentication failed|\bunauthorized: (?:incorrect|authentication|access)\b"
+    r"|No valid credential sources|\bBad credentials\b"
+    r"|InvalidAccessKeyId|ExpiredToken|UnrecognizedClientException|SignatureDoesNotMatch"
+    r"|security token included in the request is (?:invalid|expired)"
+    # 403 as a tool reports it, not as a test asserts it
+    r"|(?-i:^(?:npm (?:ERR!|error)|error:|fatal:|ERROR:|remote:|gh:|HTTP) [^\n]*\b403\b)"
+    r"|\b403 Client Error: Forbidden",
+    re.I | re.M,
+)
+#: A package registry that refused the credentials: an install that failed for want of
+#: a login, not for how it was called.
+_REGISTRY_AUTH_RE = re.compile(r"^npm (?:ERR!|error) code E40[13]\b", re.M)
+#: `git push` turned down because the remote branch has commits the local one lacks.
+PUSH_REJECTED_RE = re.compile(
+    r"^ ! \[rejected\][^\n]*\((?:non-fast-forward|fetch first)\)"
+    r"|^hint: Updates were rejected because (?:the tip of your current branch is behind"
+    r"|the remote contains work)",
+    re.M,
 )
 #: Searches for leftovers: debug statements, work markers, conflict markers, focused or
 #: skipped tests. An empty result is the answer the agent wanted.
@@ -892,9 +1005,12 @@ READY_BANNER_RE = re.compile(
 #: How many of the latest edits are remembered for "did the agent just add this import?".
 ADDED_TEXTS_KEPT = 8
 #: The shell could not change directory, so what came after `cd x &&` never ran.
+#: bash (``bash: line 1: cd: web: No such file or directory``), zsh (``cd:1: no such
+#: file or directory: web``, ``(eval):cd:1: ...``) and dash (``cd: can't cd to web``).
 _CD_FAILED_RE = re.compile(
-    r"(?:^|: )cd: (?:[^\n]*: )?(?:No such file or directory|Not a directory)\s*$"
-    r"|^cd: no such file or directory: |: can't cd to ",
+    r"(?:^|: )cd: (?:(?P<bash>[^\n:]+): )?(?:No such file or directory|Not a directory)\s*$"
+    r"|(?:^|:)cd:(?:\d+:)? (?:no such file or directory|not a directory): (?P<zsh>[^\n]+?)\s*$"
+    r"|: can't cd to (?P<dash>[^\n]+?)\s*$",
     re.M | re.I,
 )
 #: The port a server wants is taken, usually by one left running earlier.
@@ -938,6 +1054,7 @@ _SERVICE_WORDS = (
     (re.compile(r"rabbitmq|amqp", re.I), "RabbitMQ"),
     (re.compile(r"elasticsearch|opensearch", re.I), "Elasticsearch"),
     (re.compile(r"kafka", re.I), "Kafka"),
+    (re.compile(r"Unable to connect to the server|kube|:6443\b", re.I), "the Kubernetes cluster"),
 )
 _PORT_RE = re.compile(r"(?:\bport |(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):)(\d{2,5})\b")
 ENV_SERVICE = "service"
@@ -1172,7 +1289,7 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
         ),
         (
             "don't use X, use Y",
-            _OPEN + r"(?:please )?(?:don't|do not) use [^.,;:!?\n]{1,40}[,;.:—-]+\s*"
+            _OPEN + r"(?:please )?(?:don't|do not) use (?:[^.,;:!?\n]|\.(?=\w)){1,40}[,;.:—-]+\s*"
             r"(?:use|prefer|we use|it's|it is|always)\b",
             False,
         ),
@@ -1311,6 +1428,53 @@ _WEAK_CORRECTION: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 )
 
 
+#: Instructions that redirect work just done: "Don't use time.sleep here", "I don't want
+#: a new dependency", "use that instead". On their own they are how anyone briefs an
+#: agent; they count as a correction only if the agent had just changed files and then
+#: goes back to one of them (see ``instruction_cues``).
+_INSTRUCTION_CUES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (label, re.compile(pattern, re.I))
+    for label, pattern in (
+        (
+            # not "don't forget ...", "don't worry", "don't commit yet"
+            "don't …",
+            _OPEN + r"(?:please |pls )?(?:don't|do not) (?!forget|worry|bother|need|hesitate|mind"
+            r"|have to|think|know|see|understand|care|get me wrong|be sorry|apologi[sz]e)\w+\b"
+            r"(?!(?: \S+){0,3},? yet\b)",
+        ),
+        (
+            "I don't want …",
+            _OPEN + r"i (?:don't|do not) want (?:an?|any|the|this|that|these|those|you to"
+            r"|to (?:add|use|have|see|change|introduce|pull in|depend))\b",
+        ),
+        (
+            "you're over… this",
+            r"\byou(?:'re| are) (?:over-?(?:complicat|engineer|think|do)ing\b"
+            r"|making (?:this|it) (?:too|more|overly) )",
+        ),
+        (
+            # what is already there, by pronoun: "we have a retry helper, use that
+            # instead"; "use the factory instead" may just as well be the next step
+            "use that instead",
+            r"\b(?:use|reuse|keep|call) (?:that|this|it|those|these|them|ours|the existing"
+            r"(?: \w+)?|what (?:we|you) (?:already )?(?:have|had)) instead\b(?! of\b)",
+        ),
+        (
+            # "again, no mocks in these tests"; not "No tests are needed"
+            "no … here",
+            _OPEN + r"no (?:more )?\w[\w-]*(?: \w[\w-]*)? "
+            r"(?:in (?:the|this|these|those|here|our|my)\b|here\b)",
+        ),
+        ("can you not …", _OPEN + r"(?:can|could) you (?:please )?not \w+"),
+        (
+            "restore the old …",
+            r"\brestore (?:(?:the|my|that|this) (?:old|original|previous|earlier|former)\b"
+            r"|(?:it|that)\b)",
+        ),
+    )
+)
+
+
 #: ``[Image #1]``, ``[Pasted text #2 +14 lines]``: markers the harness puts where the
 #: human attached something.
 _ATTACHMENT_RE = re.compile(r"^(?:\s*\[(?:Image|Pasted text|File)[^\]\n]{0,40}\]\s*)+", re.I)
@@ -1374,6 +1538,20 @@ def softened_correction(text: str, after_question: bool = False) -> list[str]:
     return _judge(text, after_question, None)[2]
 
 
+def instruction_cues(text: str, after_question: bool = False) -> list[str]:
+    """Instructions in ``text`` that redirect work the agent has just done.
+
+    "Don't use time.sleep. Use the scheduler.", "I don't want a new dependency",
+    "you're overcomplicating this", "we already have a helper, use that instead",
+    "again, no mocks in these tests", "can you not change the public API? restore
+    the old name". Such a sentence is not a correction by its wording: it is one if
+    the agent had changed files in the turn before and changes one of them again in
+    reply. Nothing is returned for a message that carries a clearer phrase, praise, a
+    dismissal, self-blame or a new task, or that answers a question from the agent.
+    """
+    return _judge(text, after_question, None)[3]
+
+
 def correction_confidence(
     text: str, after_question: bool = False, idle_seconds: float | None = None
 ) -> tuple[float, list[str]]:
@@ -1395,14 +1573,14 @@ def correction_confidence(
     * A single weaker cue ("don't forget ...", "actually, can you also ...")
       is ordinary conversation and gives 0.
     """
-    confidence, labels, _ = _judge(text, after_question, idle_seconds)
+    confidence, labels, _, _ = _judge(text, after_question, idle_seconds)
     return confidence, labels
 
 
 def _judge(
     text: str, after_question: bool, idle_seconds: float | None
-) -> tuple[float, list[str], list[str]]:
-    """``correction_confidence`` plus the phrases only self-blame voided."""
+) -> tuple[float, list[str], list[str], list[str]]:
+    """``correction_confidence``, the phrases only self-blame voided, and instructions."""
     # A pasted screenshot comes first in the message; the words after it are the reply.
     head = _ATTACHMENT_RE.sub("", text.strip())[:CORRECTION_HEAD_CHARS].replace("’", "'")
     # Somebody else's words, quoted for discussion, are not the human correcting the agent.
@@ -1435,14 +1613,17 @@ def _judge(
     if strong:
         stale = idle_seconds is not None and idle_seconds > CORRECTION_STALE_SECONDS
         if stale and not addressed_any:
-            return CORRECTION_PROBABLE, [*strong, "long pause"], []
-        return CORRECTION_STRONG, strong, []
+            return CORRECTION_PROBABLE, [*strong, "long pause"], [], []
+        return CORRECTION_STRONG, strong, [], []
     if softeners or blame:
-        return 0.0, [], softened
+        return 0.0, [], softened, []
+    instructed: list[str] = []
+    if not new_task and not after_question:
+        instructed = [label for label, pattern in _INSTRUCTION_CUES if pattern.search(head)]
     weak = [label for label, pattern in _WEAK_CORRECTION if pattern.search(head)]
     if len(weak) >= CORRECTION_MIN_CUES:
-        return CORRECTION_PROBABLE, weak, []
-    return 0.0, [], []
+        return CORRECTION_PROBABLE, weak, [], instructed
+    return 0.0, [], [], instructed
 
 
 @dataclass
@@ -1454,6 +1635,8 @@ class DetectContext:
     is_file: Callable[[str], bool]
     #: True if a repo-relative path is a file known from disk or from any transcript.
     is_known_file: Callable[[str], bool]
+    #: True if a repo-relative path is on disk today, as a file or as a directory.
+    exists: Callable[[str], bool] = lambda rel: False
     #: How a command key is shown (identity, or ``attribution.public_key`` without excerpts).
     command_key: Callable[[str], str] = str
     #: How a tool name is shown (identity, or ``attribution.public_tool`` without excerpts).
@@ -1537,6 +1720,10 @@ class _Unconfirmed:
     matched: str
     how: str
     note: str = ""  # what the agent then did, once it has done it
+    #: An instruction, not a verdict: unless the agent acts on it, nothing is recorded.
+    tentative: bool = False
+    #: The weaker cues the same message carries: what is left of it if nothing follows.
+    fallback: str = ""
     followed: list[str] = field(default_factory=list)  # which of ``files`` it went back to
 
 
@@ -2286,6 +2473,31 @@ class _Detector:
         if action.call.op == model.OP_READ:
             self.state.missing_reads.setdefault(action.file, []).append(finding)
 
+    def _cd_miss(self, action: _Action, result: Event, name: str) -> None:
+        """A `cd` into a directory that is not there: a miss on that path."""
+        cmd = action.cmd
+        moved = [s for s in cmd.steps if s.program in ("cd", "pushd") and s.moves] if cmd else []
+        step = next((s for s in moved if s.moves[-1] == name), None)
+        if step is None and len(moved) == 1:
+            step = moved[0]
+        if step is None:
+            return
+        resolver = self.ctx.resolver
+        base = resolver.chdir(action.call.cwd, step.moves[:-1]) if step.moves[:-1] else None
+        rel = resolver.resolve(step.moves[-1], base or action.call.cwd)
+        if not rel or self.ctx.exists(rel) or self.ctx.is_known_file(rel):
+            return  # outside the repo, or there after all: the shell stood somewhere else
+        rel = rel.rstrip("/")
+        self._emit(
+            PATH_MISS,
+            result,
+            f"`cd` was pointed at {rel}, which does not exist",
+            [Target(model.FILE, rel)],
+            excerpt=result.output,
+            interval=self._round_trip(action),
+            detail={"variant": "directory"},
+        )
+
     def _on_read(self, action: _Action, result: Event) -> None:
         self._looked_for(action.call.path or "")
         path = action.file
@@ -2640,9 +2852,17 @@ class _Detector:
                     waiting.append((finding, failed_key, left))
             state.pending = waiting
             return
-        if _CD_FAILED_RE.search(result.output) and any(s.moves for s in cmd.steps):
+        cd_failed = _CD_FAILED_RE.search(result.output)
+        if cd_failed is not None and any(s.moves for s in cmd.steps):
             # `cd missing-dir && npm test`: the shell stopped at the `cd`. Nothing ran
-            # there, so there is no failure of `npm test (missing-dir/)` to record.
+            # there, so there is no failure of `npm test (missing-dir/)` to record. The
+            # agent guessed a directory, though: that is a miss on the path.
+            if located is not None and located.moves:
+                # ... and the command was not run in a directory that does not exist
+                seen = (model.COMMAND, shown(key))
+                self.exposed.discard(seen)
+                self.exposed_in = {e for e in self.exposed_in if e[:2] != seen}
+            self._cd_miss(action, result, next((g for g in cd_failed.groups() if g), ""))
             return
         if (
             result.exit_code == TIMEOUT_EXIT_CODE
@@ -2667,6 +2887,8 @@ class _Detector:
         if result.harness_error and code is None and not timed_out:
             return  # the harness's own error message: the command was never executed
         invocation = is_invocation_error(result.output, code, self.ctx.first_party)
+        if code not in INVOCATION_EXIT_CODES and _REGISTRY_AUTH_RE.search(result.output):
+            invocation = False  # the registry wants a login: see `environment_error`
         step, certain = self._blamed_step(cmd, result.output)
         if red_step is not None:
             step, certain = red_step, True
@@ -2719,6 +2941,9 @@ class _Detector:
                 ENV_DISK: "the disk was full",
                 ENV_NETWORK: "a host name could not be resolved",
             }[environment[0]]
+        pushed = key == "git push" and PUSH_REJECTED_RE.search(result.output) is not None
+        if pushed and environment is None and not invocation:
+            kind = "the remote branch had commits the local one lacked"
         summary = f"`{shown(key)}` failed ({status}; {kind})"
         if not certain:
             summary = (
@@ -2735,6 +2960,8 @@ class _Detector:
             and own_module_missing(result.output, self.ctx.first_party)
         ):
             detail["own_module"] = "1"
+        if pushed and environment is None and not invocation:
+            detail["push_rejected"] = "1"
         if environment is not None:
             detail["variant"] = "environment"
             detail["environment"] = environment[0]
@@ -2770,6 +2997,10 @@ class _Detector:
             if failed:
                 detail["failed_tests"] = "\n".join(test for test, _ in failed)
                 detail["failed_test_files"] = "\n".join(rel for _, rel in failed)
+                if state.changes:
+                    # red after the agent's own change: perhaps its doing, not a test
+                    # that was broken before the session began
+                    detail["after_edit"] = "1"
         if timed_out:
             detail["timeout"] = "1"
             if DEV_SERVER_RE.search(call.command or ""):
@@ -3079,6 +3310,21 @@ class _Detector:
             return
         self.state.unconfirmed = None
         finding = pending.finding
+        if pending.tentative and not pending.note:
+            if not pending.fallback:
+                self.findings = [f for f in self.findings if f is not finding]
+                return
+            finding.signal = PROBABLE_CORRECTION
+            finding.excerpt = ""
+            finding.detail.pop("quote", None)
+            finding.detail["confidence"] = f"{CORRECTION_PROBABLE:g}"
+            finding.summary = self._correction_summary(
+                CORRECTION_PROBABLE,
+                pending.fallback,
+                "weaker cues only, no clear correction phrase",
+                pending.how,
+            )
+            return
         if pending.note:
             how = pending.how
             if pending.followed:
@@ -3233,13 +3479,20 @@ class _Detector:
             finished = max(finished or 0.0, self.state.agent_seen)
         asked = _epoch(event)
         idle = asked - finished if asked is not None and finished is not None else None
-        confidence, labels, softened = _judge(event.text, event.after_question, idle)
+        confidence, labels, softened, instructed = _judge(event.text, event.after_question, idle)
+        before = frozenset(
+            a.file
+            for a in self.state.turn
+            if a.file and a.call.op in (model.OP_EDIT, model.OP_WRITE)
+        )
+        # An instruction that redirects the work just done ("don't use X here") is a
+        # correction if the agent goes back to that work, and nothing if it does not.
+        tentative = bool(instructed) and bool(before)
+        fallback = ""
+        if tentative:
+            fallback = ", ".join(f'"{label}"' for label in labels)
+            confidence, labels = CORRECTION_STRONG, instructed
         if confidence <= 0:
-            before = frozenset(
-                a.file
-                for a in self.state.turn
-                if a.file and a.call.op in (model.OP_EDIT, model.OP_WRITE)
-            )
             if softened and before:
                 matched = ", ".join(f'"{label}"' for label in softened)
                 self.state.softened = (event, before, matched)
@@ -3285,7 +3538,7 @@ class _Detector:
         corroborated = ""
         if not strong:
             note = "weaker cues only, no clear correction phrase"
-        elif named_changed and not stale:
+        elif named_changed and not stale and not tentative:
             note, corroborated = f"the user names {named_changed[0]}, which it had changed", "named"
         elif changed:
             confidence = CORRECTION_STRONG
@@ -3308,7 +3561,9 @@ class _Detector:
             self.state.rework = _Rework(finding, frozenset(named_changed))
         elif strong and changed:
             about = frozenset(named_changed) or changed
-            self.state.unconfirmed = _Unconfirmed(finding, about, matched, how)
+            self.state.unconfirmed = _Unconfirmed(
+                finding, about, matched, how, tentative=tentative, fallback=fallback
+            )
             self.state.rework = _Rework(finding, about)
 
 

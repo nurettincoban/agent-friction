@@ -265,7 +265,7 @@ Common fields:
 | --- | --- | --- |
 | `session` | yes | Session id (string or number). |
 | `kind` | yes | `"tool_call"`, `"tool_result"`, `"user_message"`, `"interrupt"` or (optional) `"assistant_message"`. Other kinds are ignored. |
-| `ts` | no | ISO-8601 timestamp or epoch seconds. Without it no time is estimated. A value that cannot be parsed, or that lies before the year 2000 (a zeroed clock, a counter), is treated as missing. |
+| `ts` | no | ISO-8601 timestamp, or an epoch number (as a number or a string of digits): seconds, or milliseconds, microseconds or nanoseconds, told apart by size (above 1e11, 1e14, 1e17). Without it no time is estimated. A value that cannot be parsed, that lies before the year 2000 (a zeroed clock, a counter) or more than a year ahead of today (a unit mix-up) is treated as missing. The same holds for Claude Code's `timestamp`. |
 | `cwd` | no | Working directory; relative paths resolve against it. Unknown means the repo root. |
 | `subagent` | no | `true` for events of a sub-agent: its `user_message`s are not treated as human. |
 

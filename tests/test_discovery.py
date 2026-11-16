@@ -157,3 +157,44 @@ def test_expand_transcript_paths(tmp_path: Path) -> None:
     for path in (a, b, tmp_path / "d" / "c.txt"):
         path.write_text("{}\n")
     assert discovery.expand_transcript_paths([tmp_path / "d", a, tmp_path / "nope"]) == [a, b]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")
+def test_sessions_recorded_through_a_symbolic_link_are_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = tmp_path / "data" / "proj"
+    (real / "web").mkdir(parents=True)
+    (real / "web" / "app.js").write_text("x\n")
+    link = tmp_path / "home" / "proj"
+    link.parent.mkdir()
+    link.symlink_to(real, target_is_directory=True)
+    other = tmp_path / "home" / "other"
+    other.mkdir()
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+
+    def session(cwd: Path, name: str) -> Path:
+        s = Session(name, cwd=str(cwd)).user("go")
+        s.edit(f"{cwd}/app.js", error=builders.EDIT_NOT_FOUND)
+        return s.save(config / "projects" / encode_cwd(cwd))
+
+    through_link = session(link, "linked")
+    below_link = session(link / "web", "below")
+    session(other, "elsewhere")
+    # scanning the real path finds what was recorded under the link's spelling ...
+    assert discover_transcripts(real) == sorted([through_link, below_link])
+    result = analyze(AnalyzeOptions(repo=real, include_git=False))
+    assert result["totals"]["sessions"] == 2
+    # ... and the paths resolve into the repository, not next to it
+    assert sorted(h["path"] for h in result["hotspots"]) == ["app.js", "web/app.js"]
+    # given explicitly, the same transcripts are placed the same way
+    explicit = analyze(
+        AnalyzeOptions(repo=real, transcripts=[config / "projects"], include_git=False)
+    )
+    assert explicit["totals"]["sessions"] == 2
+    # a link to somewhere else is nobody's alias
+    stray = tmp_path / "home" / "stray"
+    stray.symlink_to(other, target_is_directory=True)
+    session(stray, "stray")
+    assert discover_transcripts(real) == sorted([through_link, below_link])

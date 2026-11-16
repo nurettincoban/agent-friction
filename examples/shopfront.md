@@ -54,7 +54,7 @@ Only friction in the directory itself (searches that found nothing there); `agen
 
 **Evidence**
 
-- `2026-10-26 10:08 UTC` session `e65615b3` · Probable correction: Wording that could be a correction (confidence 0.4; matched "don't", "instead", "not allowed"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py
+- `2026-10-26 10:08 UTC` session `e65615b3` · Probable correction: Wording that could be a correction (confidence 0.4; matched "actually", "instead", "not allowed"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py
 - `2026-11-03 09:01 UTC` session `4132e18c` · Stale edit: Edit on src/shopfront/api/schema_gen.py refused: the file changed on disk after it was read
   > File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.
 - `2026-11-03 09:04 UTC` session `4132e18c` · User interrupt: The user interrupted the agent while it was working on src/shopfront/api/schema_gen.py
@@ -77,7 +77,7 @@ Only friction in the directory itself (searches that found nothing there); `agen
 
 **Evidence**
 
-- `2026-10-26 10:08 UTC` session `e65615b3` · Probable correction: Wording that could be a correction (confidence 0.4; matched "don't", "instead", "not allowed"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py
+- `2026-10-26 10:08 UTC` session `e65615b3` · Probable correction: Wording that could be a correction (confidence 0.4; matched "actually", "instead", "not allowed"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py
 - `2026-10-29 14:11 UTC` session `9f6ff626` · User correction: The user corrected the agent (confidence 1; matched "no, …", "I told you"; the agent then changed src/shopfront/checkout/service.py again); attributed to src/shopfront/checkout/service.py
   > No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.
 - `2026-11-09 15:03 UTC` session `8d986baa` · Edit thrash: 7 successful edits to src/shopfront/checkout/service.py within one user turn
