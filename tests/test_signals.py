@@ -2643,3 +2643,122 @@ def test_the_same_command_under_another_name_or_in_another_place(tmp_path: Path)
     again.bash("npm test", "npm error enoent Could not read package.json", exit_code=254)
     again.bash("npm install", "ok").bash("npm test", "Tests: 3 passed, 3 total")
     assert "works_in" not in detect(again, tmp_path)[0].detail
+
+
+# ---- round 13 -----------------------------------------------------------------------------
+
+OWN_MODULE = (
+    "ImportError while loading conftest '/repo/tests/conftest.py'.\n"
+    "tests/conftest.py:1: in <module>\n    from app import x\n"
+    "E   ModuleNotFoundError: No module named 'app'"
+)
+APP = "/repo/app/__init__.py"
+WORKING_FORMS = [
+    ("make test", None, "recovered_by", "make test"),
+    ("python -m pytest", None, "recovered_by", "python -m pytest"),
+    ("uv run pytest", None, "recovered_by", "uv run pytest"),
+    ("PYTHONPATH=src pytest -q", None, "works_with", "PYTHONPATH=src pytest"),
+    ("pytest -q", "pip install -e .", "fixed_by_setup", "pip install"),
+]
+
+
+@pytest.mark.parametrize(("second", "between", "field", "value"), WORKING_FORMS)
+@pytest.mark.parametrize("edits_later", [False, True])
+def test_a_package_that_was_there_all_along_was_not_what_was_missing(
+    tmp_path: Path, second: str, between: str | None, field: str, value: str, edits_later: bool
+) -> None:
+    s = Session().user("run the tests").bash("pytest -q", OWN_MODULE, exit_code=4)
+    if between:
+        s.bash(between, "ok")
+    s.bash(second, "3 passed in 0.1s")
+    if edits_later:  # work on the package afterwards must not erase the failure
+        s.read(APP).edit(APP).bash(second, "3 passed in 0.1s")
+    (found,) = detect(s, tmp_path, known=("app/__init__.py",))
+    assert found.detail[field] == value and found.detail["variant"] == "invocation"
+    assert found.weight == 1.0 and not scoring.is_weak(found) and found.interval is not None
+    assert "setup/invocation error" in found.summary
+
+
+def test_an_import_typo_fixed_by_an_edit_is_still_the_development_loop(tmp_path: Path) -> None:
+    # the same command goes green after an edit: a bug was fixed, nothing to document
+    s = Session().user("go").bash("pytest -q", OWN_MODULE, exit_code=4)
+    s.edit("/repo/tests/conftest.py", "from app", "from apps").bash("pytest -q", "3 passed")
+    assert detect(s, tmp_path, known=("app/__init__.py",)) == []
+    # never resolved: ordinary, as documented
+    red = Session().user("go").bash("pytest -q", OWN_MODULE, exit_code=4)
+    (left,) = detect(red, tmp_path, known=("app/__init__.py",))
+    assert left.detail["variant"] == "ordinary" and left.detail["own_module"] == "1"
+    # a variable in front after an edit proves nothing either way: dropped with the edit
+    both = Session().user("go").bash("pytest -q", OWN_MODULE, exit_code=4)
+    both.edit("/repo/tests/conftest.py").bash("PYTHONPATH=src pytest -q", "3 passed")
+    assert detect(both, tmp_path, known=("app/__init__.py",)) == []
+
+
+def test_test_first_needs_a_file_that_is_created_before_anything_went_green(
+    tmp_path: Path,
+) -> None:
+    missing = "ERROR: file or directory not found: tests/test_new.py"
+    new = "/repo/tests/test_new.py"
+    first = Session().user("go").bash("pytest tests/test_new.py", missing, exit_code=4)
+    first.write(new).bash("pytest tests/test_new.py", "1 passed")
+    assert detect(first, tmp_path) == []  # test-first: the file is created, then green
+
+    edited = Session().user("go").read(new).bash("pytest tests/test_new.py", missing, exit_code=4)
+    edited.edit(new).bash("pytest tests/test_new.py", "1 passed")
+    assert len(detect(edited, tmp_path)) == 1  # it was there: an edit did not supply it
+
+    late = Session().user("go").bash("pytest tests/test_new.py", missing, exit_code=4)
+    late.bash("cd api && pytest tests/test_new.py", "1 passed")  # resolved another way
+    late.write(new).bash("pytest tests/test_new.py", "1 passed")
+    (kept,) = detect(late, tmp_path)
+    assert kept.detail["works_in"] == "api/"
+
+
+def test_an_inspection_command_that_cannot_reach_its_subject_counts(tmp_path: Path) -> None:
+    daemon = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock."
+    s = Session().user("go").bash("docker ps", daemon, exit_code=1)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["service"] == "the Docker daemon" and keys(found) == [
+        ("command", "docker ps")
+    ]
+    quiet = Session().user("go").bash("docker ps --filter name=x -q | grep x", "", exit_code=1)
+    quiet.bash("grep -rn 'Connection refused' logs/", "", exit_code=1)
+    quiet.bash("cat missing.log", "cat: missing.log: No such file or directory", exit_code=1)
+    assert detect(quiet, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("message", "voided"),
+    [
+        ("Not quite what I had in mind but fine. Add a docstring too", True),
+        ("no, wait, also add a --verbose flag", True),
+        ("That's wrong but good enough for now, moving on", True),
+        ("no, wait, that breaks the API. undo it", False),
+        ("That's not what I asked for, but fix the test first", False),
+    ],
+)
+def test_a_shrug_or_an_afterthought_is_not_a_correction(message: str, voided: bool) -> None:
+    confidence, _ = correction_confidence(message)
+    assert (confidence == 0.0) is voided
+
+
+def test_a_refusal_is_filed_under_the_step_that_cannot_be_undone(tmp_path: Path) -> None:
+    command = "cat >> notes.md <<'EOF'\nx\nEOF\ngit add -A && git commit -m wip && git push -f"
+    said = "Permission to use Bash with command git has been denied. "
+    s = Session().user("go").tool("Bash", {"command": command}, said + command, is_error=True)
+    s.reject("Bash", {"command": command})
+    denied, declined = detect(s, tmp_path)
+    assert keys(denied) == [("command", "git push")] == keys(declined)
+    only = "git add -A && git commit -m wip"
+    plain = Session().user("go").reject("Bash", {"command": only})
+    assert keys(detect(plain, tmp_path)[0]) == [("command", "git commit")]
+
+
+def test_the_excerpt_of_a_line_of_commands_ends_at_the_step_that_failed(tmp_path: Path) -> None:
+    output = (
+        "Found 3 errors.\n" + "\n".join(f"ok line {n}" for n in range(400)) + "\n5 passed in 1s"
+    )
+    s = Session().user("go").bash("ruff check . | tail -1; pytest -q | tail -500", output)
+    (found,) = detect(s, tmp_path)
+    assert keys(found) == [("command", "ruff check")]
+    assert found.excerpt.endswith("Found 3 errors.")

@@ -349,3 +349,12 @@ def test_scan_of_a_missing_repo_says_so() -> None:
 def test_output_dash_is_stdout() -> None:
     code, out, _ = run("scan", *INPUT, "-f", "json", "-o", "-")
     assert code == EXIT_OK and json.loads(out)["schema_version"] == 1
+
+
+def test_compare_writes_to_a_file_with_format_from_extension(tmp_path: Path) -> None:
+    saved = tmp_path / "scan.json"
+    assert run("scan", *INPUT, "-o", str(saved))[0] == EXIT_OK
+    report = tmp_path / "cmp.md"
+    code, out, _ = run("compare", str(saved), str(saved), "-o", str(report))
+    assert code == EXIT_OK and out == ""
+    assert report.read_text(encoding="utf-8").startswith("# Friction comparison")

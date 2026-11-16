@@ -145,3 +145,12 @@ def test_markdown_code_spans_survive_backticks() -> None:
     assert _code("``x") == "``` ``x ```"
     assert _html_escape("a <b> `<c>` ``d`<e>`` <f>") == "a &lt;b&gt; `<c>` ``d`<e>`` &lt;f&gt;"
     assert _html_escape("odd ` <x>") == "odd ` &lt;x&gt;"
+
+
+def test_header_without_sessions_says_whether_git_was_read() -> None:
+    from agent_friction.report.terminal import render_terminal
+
+    empty = {"totals": {"sessions": 0}, "repo": {"name": "x"}, "hotspots": [], "commands": []}
+    with_git = render_terminal({**empty, "settings": {"git": True}}, color=False)
+    without = render_terminal({**empty, "settings": {"git": False}}, color=False)
+    assert "git history only" in with_git and "git history only" not in without

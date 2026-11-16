@@ -820,6 +820,20 @@ def parse_command(command: str) -> ParsedCommand:
     )
 
 
+#: Destructive, but local and easily undone: next to a push or a delete, not the problem.
+_RECOVERABLE_KEYS = frozenset({"git commit", "git stash", "git branch", "git tag"})
+_FORCE_FLAGS = frozenset({"-f", "--force", "--force-with-lease", "--hard", "-rf", "-fr"})
+
+
+def _worst(steps: Sequence[Step]) -> Step | None:
+    """The first destructive step; one that is forced or cannot be undone locally first."""
+    risky = [s for s in steps if s.program in DESTRUCTIVE_PROGRAMS or s.key in DESTRUCTIVE_KEYS]
+    for step in risky:
+        if step.key not in _RECOVERABLE_KEYS or _FORCE_FLAGS & set(step.args):
+            return step
+    return risky[0] if risky else None
+
+
 def objectionable_step(parsed: ParsedCommand, reason: str = "") -> Step | None:
     """The step of a declined command line the human most plausibly objected to.
 
@@ -831,14 +845,20 @@ def objectionable_step(parsed: ParsedCommand, reason: str = "") -> Step | None:
     if not parsed.steps:
         return None
     words = set(re.findall(r"[\w.+-]+", reason.lower()))
-    for step in parsed.steps:
-        named = step.program.lower() in words and step.program not in SETUP_PROGRAMS
-        # Looking is never what was objected to while the line also changes something.
-        if named and not step.inspection:
-            return step
-    for step in parsed.steps:
-        if step.program in DESTRUCTIVE_PROGRAMS or step.key in DESTRUCTIVE_KEYS:
-            return step
+    # Looking is never what was objected to while the line also changes something.
+    named = [
+        step
+        for step in parsed.steps
+        if step.program.lower() in words
+        and step.program not in SETUP_PROGRAMS
+        and not step.inspection
+    ]
+    if named:
+        # "git" names `git commit` and `git push -f` alike: then the destructive one.
+        return _worst(named) or named[0]
+    worst = _worst(parsed.steps)
+    if worst is not None:
+        return worst
     for step in parsed.steps:
         if not step.inspection and step.program not in SETUP_PROGRAMS:
             return step

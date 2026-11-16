@@ -109,7 +109,11 @@ def render_terminal(
     if window.get("start") or window.get("end"):
         span = f" · {str(window.get('start') or '…')[:10]} → {str(window.get('end') or '…')[:10]}"
     sessions = int(totals.get("sessions", 0))
-    who = plural(sessions, "session") if sessions else "git history only, no agent sessions"
+    git_on = bool(result.get("settings", {}).get("git", True))
+    if sessions:
+        who = plural(sessions, "session")
+    else:
+        who = "git history only, no agent sessions" if git_on else "no agent sessions"
     out.append(
         st.dim(
             f"{who}"

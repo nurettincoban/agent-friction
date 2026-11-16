@@ -159,7 +159,10 @@ corroborated: ...").
     app/main.py?" is a new request): "you forgot
     nothing, great job", "I said use tabs in my last project but here spaces
     are fine". Praise *before* the phrase does not void it ("Great effort, but
-    you broke the login page").
+    you broke the login page"). So do a shrug ("Not quite what I had in mind
+    but fine", "... but it works", "... but good enough") and an afterthought
+    that only adds to the request ("no, wait, also add a --verbose flag",
+    "oh, one more thing").
   - *Moving on* voids a verdict: "next task", "new task", "another issue",
     "let's move on", "next: ..." ("It doesn't work on Windows yet; next task: add Windows
     support").
@@ -451,6 +454,11 @@ in this order: a step whose program the stated reason names; the first
 destructive step (`rm`, `mv`, `dd`, `git push`, `git reset`, ...); the first
 step that is neither setup nor read-only inspection; otherwise the line's own
 key. So declining `rm -rf migrations && alembic revision` is recorded on `rm`.
+Among several destructive steps (or several that the reason names: "git"
+names `git commit` and `git push` alike), one that is forced (`-f`,
+`--force`, `--hard`) or cannot be undone locally comes before `git commit |
+stash | branch | tag`: `cat >> notes && git commit -m x && git push -f` is
+recorded on `git push`.
 Declined tools with neither file nor command (e.g. MCP tools) are counted but
 unattributed.
 
@@ -621,12 +629,28 @@ successfully once before being removed (read as debugging).
   ...` lines, its `FAILED path::test - reason` summary lines and traceback
   frames are ignored when looking for those shapes. A test that fails with
   `E   ModuleNotFoundError: No module named 'plugin_x'` is a red test.
-- *A module that cannot be imported* is a setup error only if it is not the
-  repository's own. If the top-level package exists in the repo (`src/`,
-  `app/`, `shop.py`, ...), `No module named 'src.utlis'` is a typo to fix: an
-  ordinary failure, and gone entirely once an edit turns the run green. A
-  missing third-party module (`No module named 'yaml'`) at collection time is
-  a setup error.
+- *A module that cannot be imported:* a missing third-party module (`No
+  module named 'yaml'`) at collection time is a setup error. A module of the
+  repository itself (the top-level package exists: `src/`, `app/`,
+  `shop.py`, ...) can be two things, and only what happens next tells them
+  apart (`own_module_missing`; the same rule whether pytest prints the name
+  on an `E` line, under "ImportError while loading conftest", or directly):
+  - a typo in an import (`No module named 'src.utlis'`): a bug. The failure
+    starts as *ordinary*, and is gone entirely once an edit turns **the same
+    command** green;
+  - a package that is there but cannot be found the way the command was run
+    (`pytest` without `PYTHONPATH=src`, a package that is not installed): a
+    setup problem. The failure is promoted to a setup/invocation error
+    (weight 1.0, no file blamed) as soon as it passes without the code
+    having been the fix: after a setup step (`pip install -e .`, with
+    `fixed_by_setup`), with a variable in front (`PYTHONPATH=src pytest`,
+    with `works_with`), or when **another command for the same job** goes
+    green (`make test`, `python -m pytest`, `uv run pytest`, with
+    `recovered_by`), also if files were edited in between: an edit that made
+    `make test` pass says nothing about whether `pytest` can import the
+    package.
+
+  If neither happens (the session ends red), it stays ordinary.
 - *A foreground server is not a failed command:* when the harness timeout hits
   a command that never exits by design (`npm run dev`, `vite`, `uvicorn`,
   `flask run`, `rails s`, `manage.py runserver`, `docker compose up` without
@@ -665,7 +689,8 @@ successfully once before being removed (read as debugging).
     build): ruff's `Found N errors` is not mypy's `Found N errors in M
     files`, and `Found 2 errors (2 fixed, 0 remaining)` is a successful
     `--fix`, i.e. green. The first step with a red verdict is the one that
-    failed; a step whose own passing summary appears ran green and closes
+    failed (and its excerpt ends at that step's verdict line, not at the
+    output of whatever ran after it); a step whose own passing summary appears ran green and closes
     its own red, fix, green loop even when another step of the line is red;
     an aggregate target on such a line (`ruff format . && make check | tail
     -2 && git status`), which has no summary line of its own, ran green when
@@ -769,10 +794,15 @@ successfully once before being removed (read as debugging).
   that names what is missing (`No module named 'app.newfeat'`, `can't open
   file 'scripts/run.py'`, `file or directory not found: tests/test_x.py`,
   `Cannot find module './util'`) is dropped when a file that provides exactly
-  that module or path is then written in the repo **and** the command goes
-  green. A missing third-party module (`No module named 'yaml'`) is never
-  created in the repo and stays a setup error. Other setup/invocation errors
-  are never dropped.
+  that module or path is then **created** in the repo (a Write of a file the
+  session had neither read nor changed before) **and** the command goes
+  green. Editing a file that was there all along does not count: it cannot
+  be what was missing. Nor does a file created after the command, or another
+  command for the same job, had already gone green: by then the failure was
+  resolved some other way (a setup step, another runner), and it stays on
+  the record with that. A missing third-party module (`No module named
+  'yaml'`) is never created in the repo and stays a setup error. Other
+  setup/invocation errors are never dropped.
 - *A typo the agent corrected is weak:* a setup/invocation failure followed,
   within the next 5 shell calls of the turn, by a successful command that
   differs from it in one word by an edit distance of at most 2 (`npm run
@@ -795,6 +825,10 @@ successfully once before being removed (read as debugging).
   error, not a pytest failure. If no step can be confirmed, the event stays on
   the last significant command, **no file is blamed**, and the summary says
   that the step is unknown (`ambiguous_step`).
+- *An inspection command that could not reach what it inspects is not
+  ignored:* `docker ps` answering `Cannot connect to the Docker daemon`, or
+  `kubectl get pods` answering `You must be logged in`, is an environment
+  failure (kinds `service` and `auth`) like any other.
 - *Ignored:* read-only inspection commands and probes whose exit status is
   the answer (`ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `find`, `sed`
   without `-i`, `awk`, `jq`, `diff`, `test`, `[`, `which`, `command -v`,

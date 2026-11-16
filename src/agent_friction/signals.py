@@ -508,6 +508,49 @@ def key_verdict(key: str, output: str) -> str | None:
     return found
 
 
+#: Variables whose value says how a command is run, not who runs it.
+_PUBLIC_ENV = frozenset(
+    {"PYTHONPATH", "NODE_ENV", "NODE_OPTIONS", "NODE_PATH", "DJANGO_SETTINGS_MODULE"}
+    | {"RAILS_ENV", "RACK_ENV", "APP_ENV", "CI", "GOFLAGS", "RUSTFLAGS", "TZ", "LC_ALL", "LANG"}
+)
+_ENV_ASSIGNMENT_RE = re.compile(r"(?:^|&&|;|\|\||\()\s*((?:[A-Za-z_]\w*=\S*\s+)+)(?=\S)")
+_ENV_VALUE_RE = re.compile(r"[\w./:@,=+-]{1,60}")
+
+
+def _env_prefix(command: str, values: bool) -> str:
+    """Variables set in front of the last command of a line: ``PYTHONPATH=src``.
+
+    Values are kept only for a fixed set of variables that say how to run things,
+    and only when ``values`` is true; any other variable is shown as ``NAME=...``.
+    """
+    found = _ENV_ASSIGNMENT_RE.findall(command.split("<<", 1)[0])
+    if not found:
+        return ""
+    shown = []
+    for assignment in found[-1].split():
+        name, _, value = assignment.partition("=")
+        plain = values and name in _PUBLIC_ENV and _ENV_VALUE_RE.fullmatch(value) is not None
+        shown.append(f"{name}={value}" if plain else f"{name}=...")
+    return " ".join(shown)
+
+
+def _up_to_verdict(step: Step | None, output: str) -> str:
+    """``output`` cut after the line that carries ``step``'s red verdict, if it has one.
+
+    Excerpts keep the head and the tail of long output. On a line with several
+    commands the tail belongs to the last of them, which may have passed.
+    """
+    if step is None:
+        return output
+    for name in (command_role(step.key), step.program):
+        signature = VERDICT_SIGNATURES.get(name or "")
+        match = signature[0].search(output) if signature is not None else None
+        if match is not None:
+            end = output.find("\n", match.end())
+            return output if end < 0 else output[:end]
+    return output
+
+
 def _candidates(cmd: ParsedCommand) -> list[Step]:
     return [
         s
@@ -549,6 +592,8 @@ def output_verdict(output: str, first_party: Callable[[str], bool] | None = None
     lines = [line for line in output.splitlines() if line.strip()]
     if is_invocation_error(output, None, first_party) or RED_OUTPUT_RE.search(output):
         return "red"
+    if own_module_missing(output, first_party):
+        return "red"  # it did not run, whichever kind of failure that turns out to be
     traceback = bool(lines) and "Traceback (most recent call last)" in output
     if traceback and _TRACEBACK_END_RE.match(lines[-1].strip()):
         return "red"
@@ -700,14 +745,36 @@ def is_invocation_error(
         return True
     own = first_party or (lambda top: False)
     direct = _QUOTED_LINE_RE.sub("", output)
+    collected = None if _TESTS_RAN_RE.search(output) else _COLLECTION_MISSING_RE.search(output)
     if INVOCATION_ERROR_RE.search(direct):
         missing = missing_name(direct)
+        if missing is None and collected is not None:
+            # "ImportError while loading conftest" with the module named on an `E` line
+            missing = ("module", collected.group(1))
         ours = missing is not None and missing[0] == "module" and own(missing[1].split(".")[0])
         return not ours
-    match = _COLLECTION_MISSING_RE.search(output)
-    if match is not None and not _TESTS_RAN_RE.search(output):
-        return not own(match.group(1).split(".")[0])
+    if collected is not None:
+        return not own(collected.group(1).split(".")[0])
     return False
+
+
+def own_module_missing(output: str, first_party: Callable[[str], bool] | None) -> bool:
+    """Did the command stop because a module *of this repository* could not be imported?
+
+    Two things look like this: a typo in an import (a bug, fixed by an edit) and a
+    package that is there but not importable the way the command was run (no
+    ``PYTHONPATH``, not installed, wrong runner). Only what happens next tells them
+    apart, so the failure starts as ordinary and is promoted when a setup step or
+    another command for the same job makes it pass with no edit.
+    """
+    if first_party is None or _TESTS_RAN_RE.search(output):
+        return False
+    direct = _QUOTED_LINE_RE.sub("", output)
+    missing = missing_name(direct) if INVOCATION_ERROR_RE.search(direct) else None
+    collected = _COLLECTION_MISSING_RE.search(output)
+    if missing is None and collected is not None:
+        missing = ("module", collected.group(1))
+    return missing is not None and missing[0] == "module" and first_party(missing[1].split(".")[0])
 
 
 #: Failures of the surroundings rather than of the code or the command line: a service
@@ -815,6 +882,9 @@ _SOFTENER_RE = re.compile(
     r"|love it|like it|nailed it|keep going|looks good|lgtm|all good|amazing|wonderful"
     r"|no worries|never ?mind|ignore (?:it|that|this)|unrelated|not your fault|flaky"
     r"|(?:that's|it's|that is|it is|is|are) (?:fine|ok|okay)"
+    # a shrug ("not quite what I had in mind but fine") or an afterthought ("no, wait, also")
+    r"|but (?:fine|ok|okay|whatever|it works|that works|good enough|i can live with (?:it|that))"
+    r"|(?:wait|oh|hang on|hold on),? (?:also|and also|one more thing|additionally|while you)"
     # the human takes the blame, or is only asking
     r"|(?:because|after|since|when|once) (?:i|my|we|our)\b|my (?:bad|fault|mistake)"
     r"|just (?:curious|wondering|asking|checking|confirming|making sure)"
@@ -1216,6 +1286,9 @@ class _State:
     red_then_ran: dict[str, list[Finding]] = field(default_factory=dict)
     ran_after: dict[int, list[tuple[str, bool]]] = field(default_factory=dict)
     looped: set[int] = field(default_factory=set)  # failures that are part of a retry loop
+    known_files: set[str] = field(default_factory=set)  # files read or changed so far
+    changes_at: dict[int, int] = field(default_factory=dict)  # ``changes`` per failure
+    trips: dict[int, tuple[float, float]] = field(default_factory=dict)  # see ``_promote``
     key_of: dict[int, str] = field(default_factory=dict)  # command key per failure
     # failures for which another command stood in, per failed command
     replaced: dict[str, list[Finding]] = field(default_factory=dict)
@@ -1706,7 +1779,11 @@ class _Detector:
             self._drop({id(f) for f in state.missing_reads.pop(path, [])})
         # Creating the module a command could not import is test-first development: the
         # failure becomes red -> change, and is forgotten when the command goes green.
-        for entry in [m for m in state.missing if provides(path, m[2], m[3])]:
+        # Only a new file counts. Editing a package that was there all along did not
+        # supply it: there the command was run in a way that could not find it.
+        created = call.op == model.OP_WRITE and path not in state.known_files
+        state.known_files.add(path)
+        for entry in [m for m in state.missing if created and provides(path, m[2], m[3])]:
             state.missing.remove(entry)
             state.red_then_edited.setdefault(entry[1], []).append(entry[0])
         # Any successful change resets read-loop tracking for the file.
@@ -1863,6 +1940,7 @@ class _Detector:
             return
         state = self.state
         key = (path, action.call.read_range)
+        state.known_files.add(key[0])
         count = state.reads.get(key, 0) + 1
         state.reads[key] = count
         if count == READ_LOOP_MIN_READS:
@@ -1993,10 +2071,13 @@ class _Detector:
             # evidence: its summary line, or a setup error that can be pinned on it.
             red_step = next((s for s in _candidates(cmd) if own.get(s.key) == "red"), None)
             setup_error = False
-            if red_step is None and is_invocation_error(result.output, None, self.ctx.first_party):
+            own_module = own_module_missing(result.output, self.ctx.first_party)
+            if red_step is None and (
+                own_module or is_invocation_error(result.output, None, self.ctx.first_party)
+            ):
                 blamed, sure = self._blamed_step(cmd, result.output)
                 if sure and blamed is not None and own.get(blamed.key) != "green":
-                    red_step, setup_error = blamed, True
+                    red_step, setup_error = blamed, not own_module
             verdict = "red" if red_step is not None else own.get(key)
             ok = verdict != "red"
         elif hidden:
@@ -2013,7 +2094,7 @@ class _Detector:
                 # (`make check` printing "All checks passed!" for an earlier red `ruff`).
                 for failed_key in [k for k in state.cycles if k != key]:
                     if key_verdict(failed_key, result.output) == "green":
-                        self._went_green(failed_key)
+                        self._went_green(failed_key, by=key)
         if unknown and key in state.cycles:
             state.cycles[key].unknown = True
         if not cmd.inspection and result.error != model.ERR_INTERRUPTED and not unknown:
@@ -2070,6 +2151,14 @@ class _Detector:
                     )
                     if unfound and other is not None:
                         finding.detail["works_as"] = unfound + other.group(1)
+                    # ... or with a variable in front: `PYTHONPATH=src pytest`
+                    prefix = _env_prefix(action.call.command or "", self.ctx.command_key is str)
+                    unchanged = state.changes_at.get(id(finding)) == state.changes
+                    plain = not _env_prefix(finding.detail["command"], True)
+                    if (prefix and unchanged and plain) and (
+                        finding.detail["variant"] != "ordinary" or self._promote(finding)
+                    ):
+                        finding.detail["works_with"] = f"{prefix} {label}"
                     self._recover(finding, action)
                 elif finding.detail["variant"] != "ordinary" and is_typo_of(failed_key, key):
                     # `npm run biuld`, then `npm run build`: a slip of the keyboard that
@@ -2091,7 +2180,11 @@ class _Detector:
             return
         code = None if hidden else result.exit_code
         if cmd.inspection:
-            return  # probing (ls, cat, git status, ...) is not friction
+            # Probing (ls, cat, git status, ...) is not friction, whatever it answers.
+            # `docker ps` that cannot reach the daemon answered nothing, though.
+            down = environment_error(result.output)
+            if down is None or down[0] == ENV_VARIABLE or result.ok:
+                return
         if code == 1 and cmd.last_program in MATCH_FILTERS and cmd.last_program != cmd.program:
             return  # `... | grep x` with nothing matched
         call = action.call
@@ -2154,6 +2247,12 @@ class _Detector:
             "variant": "invocation" if invocation else "ordinary",
             "command": call.command or "",
         }
+        if (
+            not invocation
+            and not inline
+            and own_module_missing(result.output, self.ctx.first_party)
+        ):
+            detail["own_module"] = "1"
         if environment is not None:
             detail["variant"] = "environment"
             detail["environment"] = environment[0]
@@ -2185,7 +2284,8 @@ class _Detector:
             result,
             summary,
             targets,
-            excerpt=f"$ {call.command}\n{result.output}",
+            # In `a; b; c` the tail of the output is c's; show the step that failed.
+            excerpt=f"$ {call.command}\n{_up_to_verdict(red_step, result.output)}",
             weight=1.0 if invocation or environment else ORDINARY_FAILURE_WEIGHT,
             # An ordinary failure (a red test) is information, not lost time.
             interval=self._round_trip(action) if invocation or environment else None,
@@ -2193,6 +2293,11 @@ class _Detector:
         )
         finding.run = _capped(_epoch(call), _epoch(result))
         state.key_of[id(finding)] = key
+        state.changes_at[id(finding)] = state.changes
+        if "own_module" in detail:
+            trip = self._round_trip(action)
+            if trip is not None:
+                state.trips[id(finding)] = trip
         state.pending.append((finding, key, RECOVERY_LOOKAHEAD))
         if hook_fixed:
             state.red_then_edited.setdefault(key, []).append(finding)
@@ -2234,7 +2339,7 @@ class _Detector:
                 step, certain = named, True
         return step, certain
 
-    def _went_green(self, key: str, exact: bool = False) -> None:
+    def _went_green(self, key: str, exact: bool = False, by: str = "") -> None:
         """``key`` ran green: close what a green run of it, or of its job, closes.
 
         red -> edit -> green is the development loop working, so those failures are
@@ -2243,6 +2348,7 @@ class _Detector:
         runs every check (`make check`, `npm run ci`, `pre-commit run`).
         """
         state = self.state
+        actual = by or key  # the command that was run; ``key`` may be a check it printed
 
         def closes(failed_key: str) -> bool:
             if failed_key == key:
@@ -2255,9 +2361,16 @@ class _Detector:
 
         for failed_key in [k for k in state.cycles if closes(k)]:
             del state.cycles[failed_key]
+        # What went green was not waiting for a file to be created (test-first).
+        state.missing = [m for m in state.missing if not closes(m[1])]
         fixed: set[int] = set()
         for failed_key in [k for k in state.red_then_edited if closes(k)]:
-            fixed |= {id(f) for f in state.red_then_edited.pop(failed_key)}
+            for finding in state.red_then_edited.pop(failed_key):
+                # A module of the repo that could not be imported, an edit, and then
+                # *another* command for the job passes: the edit proves nothing about the
+                # import, and the command that failed has still not been seen to work.
+                if failed_key == actual or not self._promote(finding):
+                    fixed.add(id(finding))
         # Green after nothing but commands, with no file edited: what was wrong was the
         # environment, and the command that put it right is worth writing down.
         for failed_key in [k for k in state.red_then_ran if closes(k)]:
@@ -2265,7 +2378,12 @@ class _Detector:
                 ran = state.ran_after.pop(id(finding), [])
                 setups = list(dict.fromkeys(label for label, setup in ran if setup))
                 others = [label for label, setup in ran if not setup]
+                if failed_key != actual and self._promote(finding):
+                    # A package of the repo could not be imported, and what passed in
+                    # the end was another command: that, not the setup step, is the lead.
+                    continue
                 if setups:
+                    self._promote(finding)
                     # ... and the files on its command line were not what was wrong
                     finding.targets = [t for t in finding.targets if t.kind == model.COMMAND]
                     finding.detail["fixed_by_setup"] = " && ".join(setups)
@@ -2282,8 +2400,24 @@ class _Detector:
                     fixed.add(id(finding))
         # Green with no change in between: those red runs stay on the record for good.
         for failed_key in [k for k in state.red if closes(k)]:
-            del state.red[failed_key]
+            for finding in state.red.pop(failed_key):
+                if failed_key != actual:
+                    # the package was there; another way of running the job found it
+                    self._promote(finding)
         self._drop(fixed, DROPPED_DEV_LOOP)
+
+    def _promote(self, finding: Finding) -> bool:
+        """An "own module not found" failure turned out to be about how the command is run."""
+        if finding.detail.pop("own_module", None) is None:
+            return False
+        finding.detail["variant"] = "invocation"
+        finding.weight = 1.0
+        # ... and so it cost a round trip, like any other command that could not run
+        trip = self.state.trips.pop(id(finding), None)
+        finding.interval = finding.interval or trip or finding.run
+        finding.summary = finding.summary.replace("ordinary failure", "setup/invocation error")
+        finding.targets = [t for t in finding.targets if t.kind == model.COMMAND]
+        return True
 
     def _red_run(
         self, key: str, label: str, action: _Action, result: Event, hidden: bool = False

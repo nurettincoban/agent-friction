@@ -1412,3 +1412,63 @@ def test_a_transcript_outside_home_is_not_cited_by_its_absolute_path(tmp_path: P
         assert source == cited or (source.startswith("~/") and source.endswith(cited))
         listed = out["sources"][0]["path"]
         assert listed == cited or (listed.startswith("~/") and listed.endswith(cited))
+
+
+# ---- round 13 -------------------------------------------------------------------------------
+
+OWN_MODULE = (
+    "ImportError while loading conftest '/x/tests/conftest.py'.\n"
+    "tests/conftest.py:1: in <module>\n    from app import x\n"
+    "E   ModuleNotFoundError: No module named 'app'"
+)
+
+
+@pytest.mark.parametrize(
+    ("second", "between", "title"),
+    [
+        ("make test", None, "Tell agents to use `make test`"),
+        ("python -m pytest", None, "Tell agents to use `python -m pytest`"),
+        ("PYTHONPATH=src pytest -q", None, "Tell agents to use `PYTHONPATH=src pytest`"),
+        ("pytest -q", "pip install -e .", "Document the setup `pytest` needs"),
+    ],
+)
+def test_the_wrong_test_command_survives_later_work_on_the_package(
+    tmp_path: Path, second: str, between: str | None, title: str
+) -> None:
+    package = tmp_path / "repo" / "src" / "app" / "__init__.py"
+    package.parent.mkdir(parents=True)
+    package.write_text("x = 1\n")
+
+    def body(s: Session) -> None:
+        s.bash("pytest -q", OWN_MODULE, exit_code=4)
+        if between:
+            s.bash(between, "ok")
+        s.bash(second, "3 passed in 0.1s")
+        s.read(str(package)).edit(str(package)).bash(second, "3 passed in 0.1s")
+
+    out = _scan(tmp_path, _sessions(tmp_path, 3, body))
+    (row,) = out["commands"]
+    assert (row["path"], row["events"], row["confidence"]) == ("pytest", 3, "medium")
+    assert [r["title"] for r in row["recommendations"]] == [title]
+    assert out["totals"]["dropped_red_runs"] == 0 and out["hotspots"] == []
+    if "PYTHONPATH" in second:  # the value is transcript text: not without excerpts
+        hidden = _scan(tmp_path, [], include_excerpts=False)
+        titles = [r["title"] for c in hidden["commands"] for r in c["recommendations"]]
+        assert titles == ["Tell agents to use `PYTHONPATH=... pytest`"]
+
+
+def test_a_command_that_keeps_ending_red_gets_a_question(tmp_path: Path) -> None:
+    def stuck(s: Session) -> None:
+        s.bash("npm run e2e", "2 failed", exit_code=1, took=40)
+        s.read(str(tmp_path / "repo" / "a.py"))
+        s.bash("npm run e2e -- --debug", "2 failed", exit_code=1, took=40)
+
+    out = _scan(tmp_path, _sessions(tmp_path, 3, stuck))
+    (rule,) = out["commands"][0]["recommendations"]
+    assert (rule["id"], rule["title"]) == (
+        "say-if-it-is-known-broken",
+        "`npm run e2e` keeps ending red",
+    )
+    assert "failed 6 times in 3 sessions and was still red" in rule["detail"]
+    fewer = _scan(tmp_path / "two", _sessions(tmp_path / "two", 2, stuck))
+    assert fewer["commands"][0]["recommendations"] == []

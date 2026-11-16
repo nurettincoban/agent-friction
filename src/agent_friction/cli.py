@@ -273,8 +273,12 @@ def build_parser() -> argparse.ArgumentParser:
     cmp_.add_argument("before", type=Path, help="earlier `scan -f json` result")
     cmp_.add_argument("after", type=Path, help="later `scan -f json` result")
     cmp_.add_argument(
-        "-f", "--format", choices=("terminal", "markdown", "json"), default="terminal"
+        "-f",
+        "--format",
+        choices=("terminal", "markdown", "json"),
+        help="output format (default: terminal, or inferred from --output extension)",
     )
+    cmp_.add_argument("-o", "--output", type=Path, metavar="FILE", help="write to FILE")
     cmp_.add_argument(
         "--threshold",
         type=float,
@@ -543,11 +547,16 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
             + (", so the regression gate is not applied" if args.fail_on_regression else "")
             + "\n"
         )
-    if args.format == "json":
+    output = None if args.output is None or str(args.output) == "-" else args.output
+    fmt = args.format
+    if fmt is None and output is not None:
+        fmt = {".md": "markdown", ".json": "json"}.get(output.suffix.lower())
+    if fmt == "json":
         payload = [c.to_dict() for c in changes]
-        stdout.write(json.dumps({"changes": payload}, indent=2, sort_keys=True) + "\n")
+        text = json.dumps({"changes": payload}, indent=2, sort_keys=True) + "\n"
     else:
-        stdout.write(render_compare(before, after, changes, markdown=args.format == "markdown"))
+        text = render_compare(before, after, changes, markdown=fmt == "markdown")
+    _write(text, output, stdout)
     if (
         args.fail_on_regression
         and not low_sample

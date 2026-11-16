@@ -69,6 +69,7 @@ RULE_IDS: tuple[str, ...] = (
     "run-it-in-the-background",
     "give-it-more-time",
     "explain-the-failing-check",
+    "say-if-it-is-known-broken",
 )
 
 
@@ -531,6 +532,7 @@ class _Rules:
         setups = _top([f.detail.get("fixed_by_setup", "") for f in failures], 1)
         names = _top([f.detail.get("works_as", "") for f in invocation], 1)
         places = _top([f.detail.get("works_in", "") for f in invocation], 1)
+        forms = _top([f.detail.get("works_with", "") for f in invocation], 1)
         environment = self.get(signals.COMMAND_FAILURE, "environment")
         if names and names[0][1] >= MIN_EVENTS:
             # `python: command not found`, then the same line with `python3`
@@ -542,6 +544,17 @@ class _Rules:
                 f"{code(key)} failed {_in_sessions(invocation)} because {code(old)} is not on "
                 f"the PATH here; {_times(count)} the same command then ran with {code(name)}. "
                 f'Add a line to AGENTS.md such as: "use {code(name)}, not {code(old)}".',
+                [signals.COMMAND_FAILURE],
+            )
+        elif forms and forms[0][1] >= MIN_EVENTS:
+            form, count = forms[0]
+            self.add(
+                "use-the-working-command",
+                f"Tell agents to use {code(form)}",
+                f"{code(key)} failed {_in_sessions(invocation)} with setup or invocation "
+                f"errors; {_times(count)} the same command then ran as {code(form)}, with no "
+                f'file edited in between. Add a line to AGENTS.md such as: "use {code(form)}", '
+                "or set the variable where the command is defined.",
                 [signals.COMMAND_FAILURE],
             )
         elif places and places[0][1] >= MIN_EVENTS:
@@ -610,6 +623,17 @@ class _Rules:
                 "output did not lead them to a fix: note the known cause in AGENTS.md, or "
                 "make the command fail fast with a message that says what to do.",
                 [signals.RETRY_LOOP],
+            )
+        standing = [f for f in failures if f.detail.get("recurring_red")]
+        if standing and not self.get(signals.NO_CONVERGENCE):
+            self.add(
+                "say-if-it-is-known-broken",
+                f"{code(key)} keeps ending red",
+                f"{code(key)} failed {_in_sessions(standing)} and was still red when each of "
+                "those sessions ended. If it is known to be broken, or needs something agents "
+                "do not have, say so in AGENTS.md together with what to run instead; "
+                "otherwise fix it, so that a red run means something again.",
+                [signals.COMMAND_FAILURE],
             )
         self.no_convergence(key)
         self.rejections()
