@@ -51,7 +51,7 @@ agent-friction show src/api/client.py        # why one file scores high, with ev
 agent-friction show "npm test"               # the same for a command, or a directory
 agent-friction sources                       # which transcripts it found
 agent-friction scan -f prompt                # the fixes, as a task for your agent
-agent-friction install-skill                 # or let Claude Code apply them (see below)
+agent-friction scan --since before.json      # only what came after a saved scan
 ```
 
 By default it finds Claude Code sessions for the repo (its subdirectories, its git worktrees, and
@@ -84,6 +84,9 @@ agent-friction scan --until 2026-11-01 -f json -o before.json
 agent-friction scan --since 2026-11-01 -f json -o after.json
 agent-friction compare before.json after.json
 ```
+
+`--since before.json` is a shorthand for "after the last event in that saved scan": the later
+scan then holds only sessions the earlier one did not see, which is what `compare` needs.
 
 `compare` measures each file and command against the sessions that actually touched it (events per
 10 exposed sessions) and gives each one a verdict:
@@ -146,18 +149,42 @@ tripped.
 
 A report is only useful once its advice is in the repository. Two ways to get it there:
 
-**With Claude Code**, install the skill once:
+**With Claude Code**, install the plugin once. In Claude Code:
 
-```sh
-agent-friction install-skill             # into ~/.claude/skills, for every repository
-agent-friction install-skill --project . # or into this repository, for everyone who clones it
+```text
+/plugin install agent-friction --marketplace nurettincoban/agent-friction
 ```
 
-Then, in Claude Code inside the repository, type `/agent-friction-fix` (or ask it to fix agent
-friction). It scans, checks each recommendation against the repository, shows the changes it
-proposes with the evidence behind each one, applies only the ones you approve, and saves the
-scan under `.agent-friction/`. Run it again after a week or two of agent work: it compares
-against that scan first and tells you what went down.
+On Claude Code older than 2.1.275, add the marketplace first, then install from it:
+
+```text
+/plugin marketplace add nurettincoban/agent-friction
+/plugin install agent-friction@agent-friction
+```
+
+From a shell, `claude plugin marketplace add nurettincoban/agent-friction` and
+`claude plugin install agent-friction@agent-friction` do the same (add `--scope project` to
+share it with everyone who works in the repository). The plugin carries its own copy of
+agent-friction, so there is nothing else to install; it needs Python 3.10 or newer.
+
+Then, inside a repository:
+
+- `/agent-friction:scan` maps the friction, lists what to fix first, and saves the scan and an
+  interactive map under `.agent-friction/`. It changes nothing else.
+- `/agent-friction:fix` scans, checks each recommendation against the repository, shows the
+  changes it proposes with the evidence behind each one, and applies only the ones you approve.
+  Run it again later and it first tells you what went down since the last time.
+- `/agent-friction:compare` reads only the sessions since the last saved scan
+  (`scan --since that-scan.json`) and compares the two, file by file and command by command.
+  Run it after a week or two of agent work.
+
+Each of them accepts scan options, such as `/agent-friction:scan --since 30d`. The scan files
+quote transcript text, so the first run asks whether to add `.agent-friction/` to
+`.gitignore`.
+
+If you installed the command line tool instead, `agent-friction install-skill` puts the fix
+workflow alone into `~/.claude/skills` (or `--project .` for this repository), as
+`/agent-friction-fix`.
 
 **With any agent**, print the fixes as a task and paste it into a session:
 

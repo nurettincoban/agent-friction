@@ -177,6 +177,26 @@ def parse_when(value: str, *, now: datetime | None = None) -> datetime:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def _since(value: str) -> datetime:
+    """``--since``: a time as for :func:`parse_when`, or a saved scan (``.json``).
+
+    A saved scan stands for "the second after its last event", so a later scan holds
+    only sessions the saved one did not see, and the two can be compared.
+    """
+    if not value.strip().lower().endswith(".json"):
+        return parse_when(value)
+    try:
+        saved = json.loads(Path(value).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"can't read the saved scan {value!r}: {exc}") from None
+    last = _event_span(saved)[1] if isinstance(saved, dict) else None
+    if last is None:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not a saved scan with events (`agent-friction scan -f json`)"
+        )
+    return last + timedelta(seconds=1)
+
+
 def _positive_int(value: str) -> int:
     try:
         n = int(value)
@@ -235,10 +255,11 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
     )
     g.add_argument(
         "--since",
-        type=parse_when,
+        type=_since,
         metavar="WHEN",
         help="only events from WHEN on (30d, 2w, 12h, 3m = three months, or 2026-01-31; "
-        "dates and times without a zone are UTC); a session that straddles it is cut",
+        "dates and times without a zone are UTC), or after the last event of a saved "
+        "scan (scan.json), to compare with it; a session that straddles it is cut",
     )
     g.add_argument(
         "--until", type=parse_when, metavar="WHEN", help="only events before WHEN (same forms, UTC)"

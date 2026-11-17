@@ -1,0 +1,13 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agent-friction",
+  "description": "agent-friction as a Claude Code plugin: /agent-friction:scan, /agent-friction:fix and /agent-friction:compare.",
+  "owner": { "name": "Nurettin Coban" },
+  "plugins": [
+    {
+      "name": "agent-friction",
+      "source": "./",
+      "description": "Find where coding agents keep losing time in a repository, fix the causes with your approval, and measure whether the fix worked."
+    }
+  ]
+}

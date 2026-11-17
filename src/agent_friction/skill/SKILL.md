@@ -18,11 +18,16 @@ it yourself.
 
 ## 2. Look for an earlier scan first
 
-If `.agent-friction/` holds a `scan-*.json` from an earlier run, this is a follow-up:
-run a new scan (step 3), then compare the newest earlier file with the new one:
-`agent-friction compare .agent-friction/<earlier>.json .agent-friction/<new>.json`
-and tell the user, in a few lines, what went down and what did not, before proposing
-anything new.
+If `.agent-friction/` holds a `scan-*.json` from an earlier run, this is a follow-up. Before
+anything else, see whether the earlier fixes helped. `--since` with a saved scan reads only the
+events after it, so no session is counted twice. As one command:
+
+```sh
+before=$(ls .agent-friction/scan-*.json | sort | tail -n 1) && after=.agent-friction/after-$(date +%Y-%m-%d-%H%M).json && agent-friction scan --since "$before" -f json -o "$after" && agent-friction compare "$before" "$after" --color never
+```
+
+Tell the user, in a few lines, what went down and what did not. If no session came after
+the earlier scan, say so in one line and go on.
 
 ## 3. Scan
 
@@ -58,5 +63,5 @@ The `-f prompt` output is your task list. Follow its "How to work" rules. In sho
 ## 5. Close the loop
 
 Summarise what you changed and what you skipped. Tell the user to run this skill again
-after a week or two of agent work: it will compare against today's scan and show
-whether the friction went down.
+after a week or two of agent work: it will measure the sessions since today's scan against
+it and show whether the friction went down.

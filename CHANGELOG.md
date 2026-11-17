@@ -33,6 +33,12 @@ All notable changes to this project are documented here. The format follows
 - `scan -f prompt`: the recommendations as a task for any coding agent, with the evidence behind
   each item and rules to check each claim and wait for approval. `scan --from saved.json`
   renders a saved scan in any format.
+- A Claude Code plugin, installable from this repository as a marketplace
+  (`/plugin install agent-friction --marketplace nurettincoban/agent-friction`), with
+  `/agent-friction:scan`, `/agent-friction:fix` and `/agent-friction:compare`. It runs its own
+  copy of the package with any Python 3.10+, so nothing else needs installing.
+- `scan --since saved.json`: only events after the last one in a saved scan, so the two can
+  be compared without overlap.
 - `agent-friction install-skill`: a Claude Code skill (`/agent-friction-fix`) that scans,
   proposes each fix with its evidence, applies only what you approve, and compares against the
   last scan next time.

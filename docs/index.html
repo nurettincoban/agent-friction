@@ -121,13 +121,13 @@ h2 { font-size: clamp(26px, 3.6vw, 36px); letter-spacing: -0.02em; line-height: 
 
 /* steps */
 .steps { counter-reset: s; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
-@media (max-width: 860px) { .steps { grid-template-columns: 1fr; } }
+@media (max-width: 860px) { .steps { grid-template-columns: minmax(0, 1fr); } }
 .step { counter-increment: s; position: relative; padding: 22px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; }
 .step::before { content: counter(s); display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%;
   background: var(--accent); color: var(--accent-ink); font-weight: 700; font-size: 15px; margin-bottom: 12px; }
 .step h3 { margin: 0 0 6px; font-size: 18px; }
 .step p { margin: 0 0 12px; color: var(--muted); font-size: 16px; }
-.step pre { margin: 0; background: var(--chip); border-radius: 8px; padding: 10px 12px; overflow-x: auto; font: 13px/1.5 var(--mono); }
+.step pre { margin: 0; background: var(--chip); border-radius: 8px; padding: 10px 12px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.5 var(--mono); }
 
 /* signals */
 .signals { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
@@ -193,6 +193,7 @@ footer a { color: var(--muted); }
       <li>Runs locally, no network calls</li>
       <li>No model calls, same input gives the same report</li>
       <li>No sessions yet? Run the same command with <code>demo</code> instead of <code>scan</code></li>
+      <li>In Claude Code, it is also a plugin: <a href="#how"><code>/agent-friction:scan</code></a></li>
     </ul>
     <figure class="shot">
       <a href="demo/" aria-label="Open the interactive demo report">
@@ -274,15 +275,18 @@ agent-friction show pytest</pre>
       </div>
       <div class="step">
         <h3>Let your agent fix it</h3>
-        <p>Claude Code proposes each change with its evidence and applies only what you approve. Any other agent: <code>scan -f prompt</code> prints the same fixes as a task.</p>
-<pre tabindex="0">agent-friction install-skill
-# then, in Claude Code:
-/agent-friction-fix</pre>
+        <p>The Claude Code plugin proposes each change with its evidence and applies only what you approve. Any other agent: <code>scan -f prompt</code> prints the same fixes as a task.</p>
+<pre tabindex="0"># in Claude Code, once:
+/plugin install agent-friction --marketplace nurettincoban/agent-friction
+# then, in any repository:
+/agent-friction:fix</pre>
       </div>
       <div class="step">
         <h3>Prove it helped</h3>
         <p>Compare before and after, per session that actually touched each target. Fail a job on regressions.</p>
-<pre tabindex="0">agent-friction compare \
+<pre tabindex="0">/agent-friction:compare
+# or, from a shell:
+agent-friction compare \
   before.json after.json</pre>
       </div>
     </div>

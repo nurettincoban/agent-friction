@@ -878,3 +878,40 @@ def test_the_agent_tools_own_rules_are_reported_apart_and_counted_nowhere(tmp_pa
     assert "## Nothing to change yet" in prompt
     html = run("scan", *argv, "-f", "html")[1]
     assert 'id="agenttool"' in html
+
+
+# ---- --since with a saved scan ---------------------------------------------------------
+
+
+def test_since_a_saved_scan_reads_only_what_came_after_it(tmp_path: Path) -> None:
+    before, after = tmp_path / "before.json", tmp_path / "after.json"
+    assert run("scan", *INPUT, "--until", "2026-11-05", "-o", str(before))[0] == EXIT_OK
+    assert run("scan", *INPUT, "--since", str(before), "-o", str(after))[0] == EXIT_OK
+    last = json.loads(before.read_text(encoding="utf-8"))["window"]["last_event"]
+    first = json.loads(after.read_text(encoding="utf-8"))["window"]["first_event"]
+    assert first > last
+    # No session on both sides, so compare needs no --allow-overlap.
+    code, out, err = run("compare", str(before), str(after), "--color", "never")
+    assert code == EXIT_OK, err
+    assert "overlap" not in err
+    assert "schema_gen.py" in out
+    # Nothing came after the later scan.
+    code, _, err = run("scan", *INPUT, "--since", str(after))
+    assert code == EXIT_ERROR
+    assert "no agent session touched" in err
+
+
+def test_since_a_saved_scan_that_is_missing_or_empty_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run("scan", *INPUT, "--since", str(tmp_path / "nope.json"))[0] == EXIT_USAGE
+    assert "can't read the saved scan" in capsys.readouterr().err
+    empty = tmp_path / "empty.json"
+    empty.write_text('{"window": {}}', encoding="utf-8")
+    assert run("scan", *INPUT, "--since", str(empty))[0] == EXIT_USAGE
+    assert "not a saved scan with events" in capsys.readouterr().err
+    listed = tmp_path / "list.json"
+    listed.write_text("[]", encoding="utf-8")
+    assert run("scan", *INPUT, "--since", str(listed))[0] == EXIT_USAGE
+    # Anything not ending in .json is still a time.
+    assert run("scan", *INPUT, "--since", "2026-11-05", "--color", "never")[0] == EXIT_OK

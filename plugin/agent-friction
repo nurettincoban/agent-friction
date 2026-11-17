@@ -1,0 +1,24 @@
+#!/bin/sh
+# Runs the copy of agent-friction that ships inside this Claude Code plugin, with
+# the first Python 3.10+ on PATH. Nothing gets installed: the package uses only
+# the standard library, so its source directory is enough.
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd) || exit 1
+case "$(uname -s 2>/dev/null)" in
+  MINGW* | MSYS*)
+    # Git Bash: Windows Python needs C:/... and ';' between entries.
+    here=$(CDPATH='' cd -- "$here" && pwd -W) || exit 1
+    PYTHONPATH="$here/src${PYTHONPATH:+;$PYTHONPATH}" ;;
+  *) PYTHONPATH="$here/src${PYTHONPATH:+:$PYTHONPATH}" ;;
+esac
+export PYTHONPATH
+check='import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'
+for py in python3 python; do
+  if command -v "$py" >/dev/null 2>&1 && "$py" -c "$check" >/dev/null 2>&1; then
+    exec "$py" -m agent_friction "$@"
+  fi
+done
+if command -v py >/dev/null 2>&1 && py -3 -c "$check" >/dev/null 2>&1; then
+  exec py -3 -m agent_friction "$@"
+fi
+echo "agent-friction: needs Python 3.10 or newer on PATH (python3, python or py)." >&2
+exit 127

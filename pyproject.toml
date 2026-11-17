@@ -46,7 +46,7 @@ path = "src/agent_friction/__init__.py"
 
 [tool.hatch.build.targets.sdist]
 include = [
-  "src", "tests", "docs", "examples", "scripts",
+  "src", "tests", "docs", "examples", "scripts", "plugin", ".claude-plugin",
   "README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md",
   "AGENTS.md", "Makefile", "uv.lock",
 ]
