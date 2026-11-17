@@ -9,8 +9,8 @@ What to fix first
      with an until-loop. To wait for a command you started, use run_in_background: true." Nothing
      in the repository needs to change. If the round trips cost too much, one line in AGENTS.md
      (or CLAUDE.md) with that alternative makes the first attempt the right one.
-  2 more suggestions rest on fewer than 5 events each and are left out here. Each item's own details
-  list them, marked "thin evidence" (in the terminal: `agent-friction show <path>`).
+  Only the agent tool's own rules came up: nothing in this repository needs fixing. A line in
+  AGENTS.md naming what the refusal suggests saves the round trips.
 
 Commands that keep failing
   score            command                                sess events    lost  top signals

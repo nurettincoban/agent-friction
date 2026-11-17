@@ -320,8 +320,11 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
       list.appendChild(li);
     });
     var thinShown = shown.some(function (p) { return p[1].evidence === "thin"; }), left = 0;
+    var toolOnly = shown.every(function (p) { return p[1].origin === "agent-tool"; });
     items.forEach(function (h) { (h.recommendations || []).forEach(function (r) { if (r.evidence === "thin") left++; }); });
-    document.getElementById("fixfirst-note").textContent = thinShown
+    document.getElementById("fixfirst-note").textContent = toolOnly
+      ? "Only the agent tool's own rules came up: nothing in this repository needs fixing. A line in AGENTS.md naming what the refusal suggests saves the round trips."
+      : thinShown
       ? "Each of these rests on fewer than " + THIN + " events: a lead to look at, not yet a reason to change the repository."
       : left ? plural(left, "more suggestion") + " " + (left === 1 ? "rests" : "rest") + " on fewer than " + THIN + " events each and " +
         (left === 1 ? "is" : "are") + " left out here. Each item's own details list them, marked \"thin evidence\"." : "";

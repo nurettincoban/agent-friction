@@ -144,8 +144,16 @@ def thin_count(result: dict[str, Any]) -> int:
     )
 
 
+AGENT_TOOL_NOTE = (
+    "Only the agent tool's own rules came up: nothing in this repository needs fixing. "
+    "A line in AGENTS.md naming what the refusal suggests saves the round trips."
+)
+
+
 def thin_note(result: dict[str, Any], shown: list[tuple[dict[str, Any], dict[str, Any]]]) -> str:
     """The line under "What to fix first" about advice left out for thin evidence."""
+    if shown and all(is_agent_tool(rec) for _, rec in shown):
+        return AGENT_TOOL_NOTE
     if any(is_thin(rec) for _, rec in shown):
         return (
             f"Each of these rests on fewer than {THIN_EVIDENCE_EVENTS} events: a lead to "

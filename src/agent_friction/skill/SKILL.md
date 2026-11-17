@@ -33,11 +33,10 @@ Then, from the repository root (the time in the name keeps an earlier scan from 
 day):
 
 ```sh
-mkdir -p .agent-friction
-scan=.agent-friction/scan-$(date +%Y-%m-%d-%H%M).json
-agent-friction scan -f json -o "$scan"
-agent-friction scan --from "$scan" -f prompt
+mkdir -p .agent-friction && scan=.agent-friction/scan-$(date +%Y-%m-%d-%H%M).json && agent-friction scan -f json -o "$scan" && agent-friction scan --from "$scan" -f prompt
 ```
+
+Run it as one command: the variable does not survive between separate shell calls.
 
 If the scan fails because no session touched the repository, show the user its message
 (it names `--repo-alias` and `--since` when they would help) and stop.
