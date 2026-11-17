@@ -2214,7 +2214,7 @@ def test_a_script_outside_the_repo_is_not_its_command(tmp_path: Path, command: s
     s = Session().user("go").bash(command, "Traceback\nKeyError: 1", exit_code=1)
     assert detect(s, tmp_path) == []
     inside = Session().user("go").bash("python3 scripts/r7c.py", "KeyError: 1", exit_code=1)
-    assert keys(detect(inside, tmp_path)[0])[0] == ("command", "python scripts/r7c.py")
+    assert keys(detect(inside, tmp_path)[0])[0] == ("command", "python3 scripts/r7c.py")
 
 
 def test_the_same_command_in_two_packages_is_two_commands(tmp_path: Path) -> None:
@@ -5263,3 +5263,173 @@ def test_a_push_without_an_upstream_has_its_own_wording(tmp_path: Path) -> None:
     s = Session().user("go").bash("git push", output, exit_code=128).bash("git push", "ok")
     (found,) = detect(s, tmp_path)
     assert "push_recovered" not in found.detail
+
+
+# ---- round 38 ------------------------------------------------------------------------------
+
+_NO_RULE = "make: *** No rule to make target 'typecheck'.  Stop."
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "code", "key"),
+    [
+        ("make test && make typecheck", _NO_RULE, 2, "make typecheck"),
+        ("make build && make lint && make typecheck", _NO_RULE, 2, "make typecheck"),
+        ("make lint typecheck", _NO_RULE, 2, "make typecheck"),
+        ("make -C packages/web lint typecheck", _NO_RULE, 2, "make typecheck (packages/web/)"),
+        (
+            "cargo fmt && cargo clippy && cargo nextest run",
+            "error: no such command: `nextest`\n\n\tView all installed commands",
+            101,
+            "cargo nextest",
+        ),
+        (
+            "just fmt && just typecheck",
+            "error: Justfile does not contain recipe `typecheck`.",
+            1,
+            "just typecheck",
+        ),
+        (
+            "npm run build && npm run typecheck",
+            'npm error Missing script: "typecheck"',
+            1,
+            "npm run typecheck",
+        ),
+    ],
+)
+def test_a_target_that_does_not_exist_names_its_step(
+    tmp_path: Path, command: str, output: str, code: int, key: str
+) -> None:
+    (found,) = detect(Session().user("go").bash(command, output, exit_code=code), tmp_path)
+    assert keys(found) == [("command", key)]
+    assert found.detail["variant"] == "invocation" and "ambiguous_step" not in found.detail
+    if not command.startswith("cargo"):
+        assert found.detail["no_target"] == "typecheck"
+
+
+def test_a_missing_target_nobody_asked_for_blames_no_step(tmp_path: Path) -> None:
+    # neither step asks for `typecheck`: a target of the Makefile needs it, which one is unknown
+    s = Session().user("go").bash("make test && make lint", _NO_RULE, exit_code=2)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["ambiguous_step"] == "1" and "no_target" not in found.detail
+    assert found.summary.startswith("A chain of commands ending in `make lint` failed")
+    # one step alone is that step, and still no missing target of its own
+    s = Session().user("go").bash("make test", _NO_RULE.replace("typecheck", "tst"), exit_code=2)
+    (found,) = detect(s, tmp_path)
+    assert keys(found) == [("command", "make test")] and "no_target" not in found.detail
+    # a first target that is the missing one keeps its key
+    s = Session().user("go").bash("make typecheck lint", _NO_RULE, exit_code=2)
+    assert keys(detect(s, tmp_path)[0]) == [("command", "make typecheck")]
+
+
+def test_a_variable_the_tool_asks_to_be_set_is_an_environment_failure(tmp_path: Path) -> None:
+    output = (
+        "✘ [ERROR] In a non-interactive environment, it's necessary to set a "
+        "CLOUDFLARE_API_TOKEN environment variable for wrangler to work."
+    )
+    (found,) = detect(Session().user("go").bash("wrangler deploy", output, exit_code=1), tmp_path)
+    assert found.detail["environment"] == "variable"
+    assert found.detail["env_var"] == "CLOUDFLARE_API_TOKEN"
+    assert signals.environment_error("Please set the DATABASE_URL environment variable") == (
+        "variable",
+        "DATABASE_URL",
+    )
+    assert signals.environment_error("we set a timeout variable in the environment") is None
+
+
+@pytest.mark.parametrize(("code", "down"), [(7, True), (28, True), (22, False), (1, False)])
+def test_a_silent_curl_that_could_not_connect_is_a_service_down(
+    tmp_path: Path, code: int, down: bool
+) -> None:
+    s = Session().user("go").bash("curl -s http://localhost:3000/health", "", exit_code=code)
+    (found,) = detect(s, tmp_path)
+    assert (found.detail["variant"] == "environment") is down
+    if down:
+        assert found.detail["service"] == "the service on port 3000"
+        assert "the service on port 3000 was not reachable" in found.summary
+    # another program's exit 7 is its own business
+    s = Session().user("go").bash("./scripts/probe.sh", "", exit_code=7)
+    assert detect(s, tmp_path)[0].detail["variant"] == "ordinary"
+
+
+def test_a_launcher_that_could_not_spawn_names_its_step_in_a_chain(tmp_path: Path) -> None:
+    output = (
+        "All checks passed!\nerror: Failed to spawn: `mypy`\n"
+        "  Caused by: No such file or directory (os error 2)\ndone"
+    )
+    s = Session().user("go").bash("ruff check .; uv run mypy src; echo done", output)
+    (found,) = detect(s, tmp_path)
+    assert keys(found) == [("command", "uv run mypy")]
+    assert found.detail["variant"] == "invocation" and found.detail["status"] == "hidden"
+    # no step launches the program it names: nothing can be pinned, nothing is reported
+    s = Session().user("go").bash("ruff check .; uv run pyright src; echo done", output)
+    assert detect(s, tmp_path) == []
+    # and without the error there is nothing to report
+    s = Session().user("go").bash("ruff check .; uv run mypy src; echo done", "ok\nSuccess\ndone")
+    assert detect(s, tmp_path) == []
+
+
+_STANDING = "no, stop using print in packages/api/main.py, use the logger. I told you this already"
+
+
+def test_a_correction_naming_a_file_not_yet_touched_is_pinned_to_it(tmp_path: Path) -> None:
+    named = "packages/api/main.py"
+    # nothing had been edited: the named file is the only place it can be about
+    s = Session().user("add logging").read("/repo/packages/api/routes.py").user(_STANDING)
+    s.edit(f"/repo/{named}").user("thanks")
+    (found,) = detect(s, tmp_path, known=(named,))
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", named)]
+    assert found.detail["corroborated"] == "followed" and "also_named" not in found.detail
+    assert f"the agent then changed {named})" in found.summary
+    assert f"names {named}, which it had not changed" in found.summary
+    # the agent had been editing elsewhere, and then goes to the file the human named
+    s = Session().user("add logging").edit("/repo/packages/api/routes.py").user(_STANDING)
+    s.edit(f"/repo/{named}").user("thanks")
+    (found,) = detect(s, tmp_path, known=(named,))
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", named)]
+    assert f"the agent then changed {named}, the file the user named" in found.summary
+    assert "also_named" not in found.detail
+
+
+def test_a_named_untouched_file_without_a_follow_up_stays_probable(tmp_path: Path) -> None:
+    named = "packages/api/main.py"
+    # nothing edited before, nothing changed after: probable, but no longer unattributed
+    s = Session().user("add logging").read("/repo/packages/api/routes.py").user(_STANDING)
+    s.bash("ls", "x").user("thanks")
+    (found,) = detect(s, tmp_path, known=(named,))
+    assert found.signal == signals.PROBABLE_CORRECTION and keys(found) == [("file", named)]
+    assert "the agent did not go on to change that file" in found.summary
+    # it went back to its own work instead: the correction stays with that work
+    s = Session().user("add logging").edit("/repo/packages/api/routes.py").user(_STANDING)
+    s.edit("/repo/packages/api/routes.py", "x", "y").user("thanks")
+    (found,) = detect(s, tmp_path, known=(named,))
+    assert keys(found) == [("file", "packages/api/routes.py")]
+    assert found.detail["also_named"] == named
+    # "wrong file" names where to go, not what was done wrong: unchanged
+    s = Session().user("add logging").read("/repo/packages/api/routes.py")
+    s.user(f"no, wrong file, that's not right - it is {named}").edit(f"/repo/{named}")
+    (found,) = detect(s.user("thanks"), tmp_path, known=(named,))
+    assert found.signal == signals.PROBABLE_CORRECTION and found.targets == []
+    # a path that is no file of the repository pins nothing
+    s = Session().user("add logging").read("/repo/packages/api/routes.py")
+    s.user("no, stop using print in /etc/app/main.cfg. I told you this already").bash("ls", "x")
+    assert all(f.targets == [] for f in detect(s.user("thanks"), tmp_path))
+
+
+def test_a_traceback_that_is_shown_not_raised_is_no_verdict(tmp_path: Path) -> None:
+    shown = (
+        "  src/shop/cart.py  score 41.2\n"
+        "    evidence:\n"
+        "      > Traceback (most recent call last):\n"
+        '      >   File "src/shop/cart.py", line 3, in total\n'
+        "      > KeyError: 'sku'"
+    )
+    indented = shown.replace("      > ", "        ")
+    for output in (shown, indented):
+        s = Session().user("go").bash("agent-friction show src/shop/cart.py | head -40", output)
+        assert detect(s, tmp_path) == []
+        assert signals.output_verdict(output) is None
+    raised = "Traceback (most recent call last):\n  File \"x.py\", line 3, in f\nKeyError: 'sku'"
+    s = Session().user("go").bash("python scripts/gen.py 2>&1 | tail -4", raised)
+    (found,) = detect(s, tmp_path, files=("scripts/gen.py",))
+    assert found.detail["status"] == "hidden" and signals.output_verdict(raised) == "red"

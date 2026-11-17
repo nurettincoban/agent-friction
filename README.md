@@ -291,6 +291,8 @@ in any release; from 0.1.0 on, each one is listed in the CHANGELOG.
   or make the next green run a fix. Changes made outside the transcript (your editor, another
   agent) are missed, so a check someone else fixed can still show as failing. Agents that edit
   mostly through shell commands also leave fewer traces of edit friction.
+- Remote CI is not inspected. An agent that pushes, watches CI go red (`gh run watch`), fixes
+  and pushes again leaves no failing local command, so that loop is not counted.
 
 Reports of wrong or missed hotspots are the most valuable contribution you can make:
 [open one here](https://github.com/nurettincoban/agent-friction/issues/new?template=false_positive.yml).

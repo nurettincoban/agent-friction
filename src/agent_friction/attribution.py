@@ -447,6 +447,9 @@ class Step:
     #: workspace web``), if the selector reads as a directory. Where that is on disk
     #: (``web/``, ``packages/web/``) only the repository can say.
     workspace: str = ""
+    #: The container call it was run through, without options: ``docker compose exec
+    #: web``, ``docker exec``, ``kubectl exec``. Empty for a command run on the host.
+    container: str = ""
 
 
 #: Programs that, with their output redirected into a file (or, for ``tee``, given one),
@@ -501,8 +504,26 @@ def _strip_heredocs(command: str) -> str:
 _ARMOR_RE = re.compile(r"-----BEGIN [^-\n]*-----.*?(?:-----END [^-\n]*-----|\Z)", re.S)
 
 
+#: A single word or quoted string longer than this is data (a blob, a generated file
+#: passed inline), never a command name or a path. `shlex` builds a token one character
+#: at a time, which is quadratic: 400 KB takes ten seconds. It is cut out beforehand.
+MAX_WORD_CHARS = 65536
+_N = f"{{{MAX_WORD_CHARS},}}"  # the quantifier "{65536,}"
+_LONG_WORD_RES = (
+    (re.compile(r"'[^']" + _N + "'"), "'LONG-DATA'"),
+    (re.compile(r'"(?:[^"\\]|\\.)' + _N + '"', re.S), '"LONG-DATA"'),
+    (re.compile(r"[^\s'\"]" + _N), "LONG-DATA"),
+    # ... and a quote that opens and never closes
+    (re.compile(r"'[^']" + _N + r"\Z"), "'LONG-DATA'"),
+    (re.compile(r'"(?:[^"\\]|\\.)' + _N + r"\Z", re.S), '"LONG-DATA"'),
+)
+
+
 def _tokenize(command: str) -> list[str]:
     text = _ARMOR_RE.sub("ARMORED-DATA", _strip_heredocs(command))
+    if len(text) > MAX_WORD_CHARS:
+        for pattern, stand_in in _LONG_WORD_RES:
+            text = pattern.sub(stand_in, text)
     lines = text.replace("\\\n", " ")
     lexer = shlex.shlex(lines.replace("\n", " ; "), posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
@@ -619,6 +640,30 @@ def _skip_container_options(words: list[str]) -> list[str]:
         if option in _CONTAINER_VALUE_OPTIONS and out:
             out.pop(0)
     return out
+
+
+_CONTAINER_TOOLS = frozenset({"docker", "podman", "docker-compose", "podman-compose", "kubectl"})
+
+
+def _container_prefix(stripped: Sequence[str]) -> str:
+    """How the words in front of a command put it in a container (see ``Step.container``).
+
+    A compose service is named (``docker compose exec web``): services are part of
+    the project. A container or pod is not: its name is often an id of the moment.
+    """
+    names = [_program_name(w) for w in stripped]
+    at = next((i for i, name in enumerate(names) if name in _CONTAINER_TOOLS), None)
+    if at is None:
+        return ""
+    head, rest = names[at], list(stripped[at + 1 :])
+    verb = next((w for w in rest if w in ("exec", "run")), "")
+    if not verb:
+        return ""
+    if head == "kubectl" or (head in ("docker", "podman") and "compose" not in rest):
+        return f"{head} exec" if verb == "exec" or head == "kubectl" else ""
+    tool = head if head.endswith("-compose") else f"{head} compose"
+    service = rest[-1] if rest[-1] not in ("exec", "run", "--") else ""
+    return f"{tool} {verb} {service}".strip()
 
 
 def _container_command(words: Sequence[str]) -> list[str]:
@@ -1090,6 +1135,7 @@ def _steps(command: str, depth: int = 0, moves: tuple[str, ...] = ()) -> list[St
                 segment.into,
                 wrappers,
                 _workspace(program, words[1:]),
+                _container_prefix(stripped),
             )
         )
     return steps

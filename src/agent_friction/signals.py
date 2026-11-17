@@ -7,6 +7,7 @@ constant here and is explained in docs/signals.md.
 
 from __future__ import annotations
 
+import dataclasses
 import fnmatch
 import posixpath
 import re
@@ -40,6 +41,7 @@ from agent_friction.attribution import (
     is_shell_edit,
     is_snippet,
     is_windows_path,
+    launcher_split,
     looked_at,
     may_change_files,
     normalize_argv,
@@ -425,6 +427,7 @@ INVOCATION_ERROR_RE = re.compile(
     r"|Usage: .*\n(?:.*\n)*?.*Error: .*"
     # the project is not set up the way the command assumes
     r"|[\w.-]*make[\w.-]*(?:\[\d+\])?: \*\*\* No rule to make target .*"
+    r"|error: Justfile does not contain recipes? .*"
     r"|npm (?:ERR!|error) (?:Missing script|enoent|code ENOENT).*"
     r"|error Command \"[^\"\n]+\" not found\.?"
     r"|\s*(?:ERROR\s+)?ERR_PNPM_NO_SCRIPT\b.*"
@@ -534,6 +537,8 @@ VERDICT_SIGNATURES: dict[str, tuple[re.Pattern[str], re.Pattern[str] | None]] = 
 RED_OUTPUT_RE = re.compile(
     "|".join((_TEST_RED, _LINT_RED, _TYPE_RED, _FORMAT_RED, _BUILD_RED)), re.M
 )
+#: The first line of an uncaught Python exception, where the interpreter prints it.
+_TRACEBACK_START_RE = re.compile(r"(?m)^Traceback \(most recent call last\)")
 #: The last line of an uncaught Python exception.
 _TRACEBACK_END_RE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt)(?::|$)")
 #: Output of a check that passed.
@@ -795,8 +800,10 @@ def output_verdict(
         return "red"  # it did not run, whichever kind of failure that turns out to be
     # A traceback at the end is the judged command's own, unless the caller knows that
     # the end of the output belongs to a later step that only looks at something.
-    traceback = traceback and bool(lines) and "Traceback (most recent call last)" in output
-    if traceback and _TRACEBACK_END_RE.match(lines[-1].strip()):
+    # One that is indented or quoted (`    Traceback ...`, `> KeyError: 'sku'`) is being
+    # shown, not raised: a report, a log excerpt, this tool's own evidence.
+    traceback = traceback and bool(lines) and _TRACEBACK_START_RE.search(output) is not None
+    if traceback and _TRACEBACK_END_RE.match(lines[-1]):
         return "red"
     if GREEN_OUTPUT_RE.search(output):
         return "green"
@@ -858,6 +865,46 @@ _GIT_STEP_SIGNATURES: dict[str, re.Pattern[str]] = {
 }
 
 
+#: A runner saying that the target, recipe or subcommand it was asked for does not exist:
+#: the programs that say it this way, and the pattern whose first group is the name.
+_NO_SUCH_TARGET_RES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
+    (
+        frozenset({"make", "gmake"}),
+        re.compile(r"\*\*\* No rule to make target [`'\"]([^`'\"\n]+)['\"]\.\s+Stop\."),
+    ),
+    (frozenset({"cargo"}), re.compile(r"(?m)^error: no such (?:sub)?command: `([\w-]+)`")),
+    (
+        frozenset({"just"}),
+        re.compile(r"(?m)^error: Justfile does not contain recipes? `([\w-]+)`"),
+    ),
+)
+
+
+def _asked_for_missing(steps: Sequence[Step], output: str) -> tuple[Step | None, bool] | None:
+    """The step that asked for a target its runner says it does not have.
+
+    ``make test && make typecheck`` answering "No rule to make target 'typecheck'"
+    is about the second step; ``make lint typecheck`` is one step, and what failed
+    in it is ``make typecheck``. ``(None, False)`` when the output names a target
+    that no step of the line asks for; ``None`` when it names none.
+    """
+    for programs, pattern in (*_NO_SUCH_TARGET_RES, (_NODE_RUNNERS, _NO_SCRIPT_RE)):
+        found = pattern.search(output)
+        if found is None:
+            continue
+        name = found.group(1)
+        for step in steps:
+            if step.program not in programs or name not in step.args:
+                continue
+            words = step.key.split(" (", 1)[0].split()
+            if len(words) == 2 and words[1] != name and words[1] in step.args:
+                # several targets on one line: the key names the first, not this one
+                step = dataclasses.replace(step, key=step.key.replace(words[1], name, 1))
+            return step, True
+        return None, False
+    return None
+
+
 def failing_step(cmd: ParsedCommand, output: str) -> tuple[Step | None, bool]:
     """Which command of a chain failed, judged by what the output looks like.
 
@@ -872,8 +919,14 @@ def failing_step(cmd: ParsedCommand, output: str) -> tuple[Step | None, bool]:
         for s in cmd.steps
         if not s.inspection and s.program not in SETUP_PROGRAMS | HOUSEKEEPING_PROGRAMS
     ]
+    # The runner says which target it does not have: the step that asked for it.
+    asked = _asked_for_missing(candidates, output)
+    if asked is not None and asked[0] is not None:
+        return asked
     if len({s.key for s in candidates}) <= 1:
         return primary, True
+    if asked is not None:
+        return primary, False  # a target nobody on this line asked for by name
     # Nothing in the output was printed by a step sent to /dev/null.
     heard = [s for s in candidates if not s.silenced]
     # The runner names its target (`make: *** [Makefile:20: test] Error 1`) ...
@@ -1083,6 +1136,8 @@ def _search_words(text: str) -> set[str]:
 #: Where a build target or script the agent asked for turned out not to exist.
 TARGETS_IN_MAKEFILE = "Makefile"
 TARGETS_IN_PACKAGE = "package.json"
+TARGETS_IN_JUSTFILE = "justfile"
+_NO_RECIPE_RE = re.compile(r"(?m)^error: Justfile does not contain recipes? `([\w-]+)`")
 # "needed by" is a missing prerequisite of a target that does exist: not this.
 _NO_MAKE_TARGET_RE = re.compile(
     r"(?m)^[\w.-]*make[\w.-]*(?:\[\d+\])?: \*\*\* No rule to make target "
@@ -1103,6 +1158,9 @@ def missing_target(output: str) -> tuple[str, str] | None:
     found = _NO_SCRIPT_RE.search(output)
     if found is not None:
         return TARGETS_IN_PACKAGE, found.group(1)
+    found = _NO_RECIPE_RE.search(output)
+    if found is not None:
+        return TARGETS_IN_JUSTFILE, found.group(1)
     return None
 
 
@@ -1264,7 +1322,9 @@ _ENV_VAR_RE = re.compile(
     rf"[Mm]issing(?: required)? env(?:ironment)? var(?:iable)?s?:? {_VAR}"
     rf"|[Ee]nv(?:ironment)? var(?:iable)? {_VAR} (?:is )?(?:not set|missing|required|undefined)"
     rf"|\b{_VAR}: unbound variable|^KeyError: {_VAR}\s*$"
-    rf"|\b{_VAR} (?:is not set|must be set|environment variable (?:is )?(?:not set|required))",
+    rf"|\b{_VAR} (?:is not set|must be set|environment variable (?:is )?(?:not set|required))"
+    # wrangler: "it's necessary to set a CLOUDFLARE_API_TOKEN environment variable"
+    rf"|\bset (?:an?|the|your) {_VAR} env(?:ironment)? var(?:iable)?\b",
     re.M,
 )
 #: Services named only from a fixed vocabulary, so that no transcript text is passed on.
@@ -1360,6 +1420,11 @@ def _same_job_other_manager(failed_key: str, key: str, unfound: str) -> bool:
 
 
 #: A command told to watch for changes (`tsc -w`, `jest --watch`, `vitest watch`).
+#: curl's exit statuses for "could not connect" and "timed out".
+_CURL_UNREACHABLE = frozenset({7, 28})
+#: uv naming the program it could not start: ``error: Failed to spawn: `mypy```.
+_SPAWN_RE = re.compile(r"(?m)^error: Failed to spawn: `([^`\n]+)`")
+_PYTHON3_RE = re.compile(r"^python3(?:\.\d+)?$")
 _NO_UPSTREAM_RE = re.compile(r"has no upstream branch")
 _SET_UPSTREAM_RE = re.compile(r"\s(?:-u|--set-upstream)(?=\s|=|$)")
 #: Exit statuses of a process that was ended from outside: SIGINT, SIGKILL, SIGTERM.
@@ -2152,6 +2217,11 @@ class _Unconfirmed:
     elsewhere: frozenset[str] = frozenset()
     #: The human said which file it is about: going back elsewhere does not change that.
     settled: bool = False
+    #: Files the human named that the agent had not touched, without saying "wrong
+    #: file": if the agent goes and changes one next, that is the file it was about.
+    named: frozenset[str] = frozenset()
+    #: ... and it is a file the agent had not changed: nothing to "go back" to.
+    untouched: bool = False
     redirected: bool = False
     followed: list[str] = field(default_factory=list)  # which of ``files`` it went back to
 
@@ -2351,7 +2421,20 @@ class _Detector:
         ``npm test (web/)``. At the repo root the key stands alone.
         """
         detached = key.endswith(" -d")  # a setup label: `docker compose up -d`
-        name = self.ctx.command_key(key[:-3] if detached else key) + (" -d" if detached else "")
+        typed = key[:-3] if detached else key
+        if step is not None and step.key == key:
+            # What was typed is part of how to run it: `python3 -m pytest` where there
+            # is no `python`, and `docker compose exec web pytest` is not the host's
+            # `pytest`. Matching red and green runs goes by the key, as before.
+            if (
+                typed.startswith("python ")
+                and _PYTHON3_RE.match(step.program)
+                and not is_snippet(key)
+            ):
+                typed = "python3" + typed[6:]
+            if step.container:
+                typed = f"{step.container} {typed}"
+        name = self.ctx.command_key(typed) + (" -d" if detached else "")
         if key.split(" ", 1)[0] not in DIRECTORY_TOOLS and command_role(key) is None:
             return name  # `git push`, `curl`, `docker ps`: the same thing wherever it runs
         here = self._where(step, cwd)
@@ -2922,6 +3005,10 @@ class _Detector:
         ):
             pending.note = f"the agent then went to {path}, the file the user named instead"
             pending.redirected = True
+        elif pending is not None and not pending.note and path in pending.named:
+            pending.note = f"the agent then changed {path}, the file the user named"
+            pending.followed.append(path)
+            pending.finding.detail.pop("also_named", None)
         self._note_rework({path}, action)
         if call.op == model.OP_WRITE:
             # Reading a file to see whether it exists, then creating it, is not a miss.
@@ -3762,6 +3849,21 @@ class _Detector:
         # A setup/invocation error says nothing about the files on the command line, and
         # neither does a failure we cannot pin on one step.
         environment = None if invocation or inline else environment_error(result.output)
+        if (
+            environment is None
+            and not invocation
+            and step is not None
+            and step.program == "curl"
+            and code in _CURL_UNREACHABLE
+            and not _said_anything(result.output)
+        ):
+            # `curl -s` says nothing; its status does: 7 could not connect, 28 timed out
+            port = _PORT_RE.search(" ".join(step.args))
+            number = port.group(1) if port is not None else ""
+            environment = (
+                ENV_SERVICE,
+                _SERVICE_PORTS.get(number, f"the service on port {number}" if number else ""),
+            )
         blameless = invocation or not certain or environment is not None
         for candidate in () if blameless else path_candidates(tokens):
             rel = self.ctx.resolver.resolve(candidate, self._where(step, call.cwd))
@@ -3946,6 +4048,16 @@ class _Detector:
             )
             if named is not None:
                 step, certain = named, True
+        spawn = _SPAWN_RE.search(output)
+        if spawn is not None and not certain:
+            # ... and so does a launcher: `ruff check .; uv run mypy src` is about mypy
+            launched = [
+                s
+                for s in cmd.steps
+                if launcher_split(s.key)[0] and inner_key(s.key).split()[0] == spawn.group(1)
+            ]
+            if len({s.key for s in launched}) == 1:
+                step, certain = launched[0], True
         return step, certain
 
     def _covered(
@@ -4369,8 +4481,9 @@ class _Detector:
                 back = pending.followed[:CORRECTION_MAX_FILES]
                 finding.targets = [Target(model.FILE, rel, 1.0 / len(back)) for rel in back]
                 how = "attributed to " + ", ".join(back)
+            note = pending.note.removesuffix(" again") if pending.untouched else pending.note
             finding.summary = self._correction_summary(
-                CORRECTION_STRONG, pending.matched, pending.note, how
+                CORRECTION_STRONG, pending.matched, note, how
             )
             finding.detail["corroborated"] = "redirected" if pending.redirected else "followed"
             return
@@ -4382,7 +4495,9 @@ class _Detector:
         finding.summary = self._correction_summary(
             CORRECTION_PROBABLE,
             pending.matched,
-            "not corroborated: the agent did not change those files again",
+            "not corroborated: the agent did not go on to change that file"
+            if pending.untouched
+            else "not corroborated: the agent did not change those files again",
             pending.how,
         )
 
@@ -4636,6 +4751,7 @@ class _Detector:
             if self.ctx.exists(rel) or self.ctx.is_known_file(rel):
                 others.append(rel)
         wrong_place = _WRONG_PLACE_RE.search(event.text[:CORRECTION_HEAD_CHARS]) is not None
+        pinned: list[str] = []
         blamed = [
             rel
             for rel in others
@@ -4656,6 +4772,13 @@ class _Detector:
             edited = edited[:CORRECTION_MAX_FILES]
             targets = [Target(model.FILE, rel, 1.0 / len(edited)) for rel in edited]
             how = "after edits to " + ", ".join(edited)
+        elif others and not wrong_place:
+            # Nothing had been edited, so there is no other work the message can be
+            # about: the file the human names is the only place to put it. It is a
+            # correction for certain only if the agent then goes and changes that file.
+            pinned = others[:CORRECTION_MAX_FILES]
+            targets = [Target(model.FILE, rel, 1.0 / len(pinned)) for rel in pinned]
+            how = "names " + ", ".join(pinned) + ", which it had not changed"
         else:
             targets = []
             how = "no file edited in the preceding turn, so not attributed to a path"
@@ -4673,7 +4796,7 @@ class _Detector:
             note = "weaker cues only, no clear correction phrase"
         elif named_changed and not stale and not tentative:
             note, corroborated = f"the user names {named_changed[0]}, which it had changed", "named"
-        elif changed:
+        elif changed or pinned:
             confidence = CORRECTION_STRONG
             note = "awaiting the agent's response"
         else:
@@ -4690,11 +4813,16 @@ class _Detector:
             detail={"confidence": f"{confidence:g}", **({"quote": event.text} if certain else {})},
         )
         self.state.corrected = frozenset(t.key for t in targets)
-        if others and not blamed and targets:
+        if others and not blamed and not pinned and targets:
             finding.detail["also_named"] = others[0]  # recommendations say so
         if corroborated:
             finding.detail["corroborated"] = corroborated
             self.state.rework = _Rework(finding, frozenset(named_changed))
+        elif strong and pinned and not changed:
+            self.state.unconfirmed = _Unconfirmed(
+                finding, frozenset(pinned), matched, how, settled=True, untouched=True
+            )
+            self.state.rework = _Rework(finding, frozenset(pinned))
         elif strong and changed:
             about = frozenset(named_changed) or changed | frozenset(blamed)
             elsewhere: set[str] = set()
@@ -4714,6 +4842,7 @@ class _Detector:
                 fallback=fallback,
                 elsewhere=frozenset(elsewhere - set(touched)),
                 settled=bool(blamed),
+                named=frozenset() if blamed or wrong_place else frozenset(others),
             )
             self.state.rework = _Rework(finding, about)
 

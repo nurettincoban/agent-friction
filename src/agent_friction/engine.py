@@ -337,6 +337,7 @@ WORKSPACE_MAX_DIRS = 5000
 #: Existing make targets or package scripts listed next to "this target does not exist".
 MAX_KNOWN_TARGETS = 12
 MAX_TARGETS_FILE_BYTES = 512_000
+_JUST_RECIPE_RE = re.compile(r"(?m)^@?([A-Za-z_][\w-]*)(?:[ \t]+[^:=\n]*)?:(?!=)")
 _MAKE_TARGET_RE = re.compile(r"(?m)^([A-Za-z0-9_][\w-]*)[ \t]*:(?![=:])")
 
 #: Sessions in which the same command must stay red for its failures to count in full,
@@ -1762,6 +1763,13 @@ class _Analysis:
                         text = path.read_text(encoding="utf-8", errors="replace")
                         names = _MAKE_TARGET_RE.findall(text)
                         break
+            elif holder == signals.TARGETS_IN_JUSTFILE:
+                for name in ("justfile", "Justfile", ".justfile"):
+                    path = base / name
+                    if path.is_file() and path.stat().st_size <= MAX_TARGETS_FILE_BYTES:
+                        text = path.read_text(encoding="utf-8", errors="replace")
+                        names = _JUST_RECIPE_RE.findall(text)
+                        break
             else:
                 path = base / "package.json"
                 if path.is_file() and path.stat().st_size <= MAX_TARGETS_FILE_BYTES:
@@ -1769,6 +1777,9 @@ class _Analysis:
                     names = [str(name) for name in scripts] if isinstance(scripts, dict) else []
         except (OSError, ValueError, AttributeError):
             return ()
+        # the one that was asked for comes first, so that a long list cannot cut it off
+        asked = {f.detail.get("no_target", "") for f in found}
+        names = [n for n in names if n in asked] + [n for n in names if n not in asked]
         return tuple(dict.fromkeys(names))[:MAX_KNOWN_TARGETS]
 
     def _decorate(self, entry: dict[str, Any], items: Sequence[Item]) -> None:
@@ -1792,7 +1803,7 @@ class _Analysis:
             quote,
             shares,
             self.guidance,
-            self._known_targets(key, found) if kind == model.COMMAND and quote else (),
+            self._known_targets(key, found) if kind == model.COMMAND else (),
         )
         entry["evidence"] = [self._evidence(f) for f in _pick_evidence(found, options.max_evidence)]
         transcript_sessions = entry["episodes"] - entry["agent_commits"]

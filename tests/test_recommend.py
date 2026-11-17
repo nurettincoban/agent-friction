@@ -943,7 +943,7 @@ def test_corrections_are_called_different_only_when_they_can_be_told_apart() -> 
 
 
 def test_the_repo_wide_note_does_not_call_every_file_above_the_rate() -> None:
-    base = scoring.baseline({f"f{i}.py": (2, 2, 4) for i in range(7)})
+    base = scoring.baseline({f"f{i}.py": (3, 3, 6) for i in range(7)})
     assert len(base.above) == base.files == 7
     item = recommend.repo_wide(signals.EDIT_MISS, base, 4, 0)
     assert item is not None
@@ -958,6 +958,22 @@ def test_the_repo_wide_note_does_not_call_every_file_above_the_rate() -> None:
     assert "1 file is clearly above that rate and has its own entry: `hot.py`." in str(
         mixed["detail"]
     )
+
+
+def test_a_rate_over_a_handful_of_visits_is_not_reported() -> None:
+    # 5 events in 5 visits: "100% of file visits" would be five events, not a rate
+    few = scoring.baseline({f"f{i}.py": (1, 1, 1) for i in range(5)})
+    assert few.events == 5 and few.visits == 5
+    assert recommend.repo_wide(signals.EDIT_MISS, few, 5, 0) is None
+    below = scoring.baseline(
+        {f"f{i}.py": (1, 1, 1) for i in range(recommend.REPO_WIDE_MIN_VISITS - 1)}
+    )
+    assert recommend.repo_wide(signals.EDIT_MISS, below, 5, 0) is None
+    enough = scoring.baseline(
+        {f"f{i}.py": (1, int(i < 5), int(i < 5)) for i in range(recommend.REPO_WIDE_MIN_VISITS)}
+    )
+    item = recommend.repo_wide(signals.EDIT_MISS, enough, 5, 0)
+    assert item is not None and str(item["title"]).startswith("Edit misses run at 25% of")
 
 
 def test_a_small_line_count_is_not_cited_for_a_file_too_large_to_read() -> None:

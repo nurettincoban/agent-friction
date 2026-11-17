@@ -3958,3 +3958,128 @@ def _built(build: Any, i: int) -> Session:
     s = Session(f"s{i}", cwd="/repo").user("go")
     build(s)
     return s
+
+
+# ---- round 38 ------------------------------------------------------------------------------
+
+_NO_RULE = "make: *** No rule to make target 'typecheck'.  Stop."
+
+
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [
+        ("make test && make typecheck", "make typecheck"),
+        ("make build && make lint && make typecheck", "make typecheck"),
+        ("make lint typecheck", "make typecheck"),
+    ],
+)
+def test_a_missing_target_is_blamed_on_the_step_that_asked_for_it(
+    tmp_path: Path, command: str, key: str
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "Makefile").write_text("test:\n\tpytest\nlint:\n\truff check .\nbuild:\n\ttrue\n")
+    sessions = [
+        Session(f"s{i}", cwd=str(repo)).user("go").bash(command, _NO_RULE, exit_code=2)
+        for i in range(2)
+    ]
+    (row,) = scan(tmp_path, sessions, repo)["commands"]
+    (rec,) = row["recommendations"]
+    assert row["path"] == key
+    assert rec["title"] == "`make typecheck` does not exist: say what to run instead"
+    assert "the Makefile has no target `typecheck`." in rec["detail"]
+    assert "What it does define: `test`, `lint`, `build`." in rec["detail"]
+
+
+@pytest.mark.parametrize(
+    ("holder", "body", "now", "command", "output", "thing"),
+    [
+        (
+            "Makefile",
+            "test:\n\tpytest\n",
+            "test:\n\tpytest\ntypecheck:\n\tmypy\n",
+            "make test && make typecheck",
+            _NO_RULE,
+            "target",
+        ),
+        (
+            "package.json",
+            '{"scripts": {"test": "jest"}}',
+            '{"scripts": {"test": "jest", "typecheck": "tsc --noEmit"}}',
+            "npm run typecheck",
+            'npm error Missing script: "typecheck"',
+            "script",
+        ),
+        (
+            "justfile",
+            "test:\n    pytest\n",
+            "test:\n    pytest\n\ntypecheck *args:\n    mypy {{args}}\n",
+            "just typecheck",
+            "error: Justfile does not contain recipe `typecheck`.",
+            "recipe",
+        ),
+    ],
+)
+def test_a_target_that_has_been_added_since_is_not_called_missing(
+    tmp_path: Path, holder: str, body: str, now: str, command: str, output: str, thing: str
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sessions = [
+        Session(f"s{i}", cwd=str(repo)).user("go").bash(command, output, exit_code=2)
+        for i in range(2)
+    ]
+    key = command.rsplit("&& ", 1)[-1]
+    (repo / holder).write_text(body)
+    (row,) = scan(tmp_path / "before", sessions, repo)["commands"]
+    (rec,) = row["recommendations"]
+    assert rec["title"] == f"`{key}` does not exist: say what to run instead"
+    assert (
+        f"because the {holder} has no {thing} `typecheck`. What it does define: `test`."
+        in (rec["detail"])
+    )
+    (repo / holder).write_text(now)
+    (row,) = scan(tmp_path / "after", sessions, repo)["commands"]
+    (rec,) = row["recommendations"]
+    assert rec["id"] == "name-the-missing-target"
+    assert rec["title"] == f"`{key}` was missing in these sessions; it is defined now"
+    assert (
+        f"because the {holder} had no {thing} `typecheck`. The {holder} defines it now"
+        in (rec["detail"])
+    )
+    assert "re-scan with `--since <date>`" in rec["detail"]
+    assert "does not exist" not in json.dumps(row) and "What it does define" not in rec["detail"]
+    # without excerpts the name is not shown, and the advice is still not stale
+    (row,) = scan(tmp_path / "bare", sessions, repo, include_excerpts=False)["commands"]
+    (rec,) = row["recommendations"]
+    assert "it is defined now" in rec["title"] and f"had no {thing}." in rec["detail"]
+
+
+def test_python3_and_a_container_stay_in_the_command_name(tmp_path: Path) -> None:
+    red = "1 failed, 3 passed in 1s"
+
+    def build(s: Session) -> None:
+        s.bash("python3 -m pytest -q", red, exit_code=1).user("ok")
+        s.bash("python -m pytest -q", red, exit_code=1).user("ok")
+        s.bash("docker compose exec web pytest -q", red, exit_code=1).user("ok")
+        s.bash("docker exec -it 3f2a9c pytest -q", red, exit_code=1).user("ok")
+        s.bash("kubectl exec api-7d9 -- pytest", red, exit_code=1).user("ok")
+        s.bash("pytest -q", red, exit_code=1)
+
+    rows = {row["path"] for row in _commands(tmp_path, build, count=1)}
+    assert rows == {
+        "python3 -m pytest",
+        "python -m pytest",
+        "docker compose exec web pytest",
+        "docker exec pytest",
+        "kubectl exec pytest",
+        "pytest",
+    }
+    # the service is a name of the project: hidden without excerpts
+    bare = scan(
+        tmp_path / "bare",
+        [_built(lambda s: s.bash("docker compose exec zebra pytest", red, exit_code=1), 0)],
+        include_excerpts=False,
+    )
+    assert "zebra" not in json.dumps(bare)
+    assert bare["commands"][0]["path"].startswith("docker compose exec <")

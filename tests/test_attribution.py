@@ -894,3 +894,48 @@ def test_a_shell_test_is_inspection(command: str) -> None:
 )
 def test_selects_failures(command: str, expected: bool) -> None:
     assert attribution.selects_failures(command) is expected
+
+
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [
+        ("echo " + "a" * 400_000 + " && pytest -q", "pytest"),
+        ("python -c '" + "x = 1\n" * 70_000 + "' && pytest -q", "pytest"),
+        ('echo "' + "a b " * 100_000 + '" | wc -c', "wc"),
+        ("echo '" + "a b " * 500_000, "echo"),  # a quote that never closes, 2 MB
+        ('pytest -k "' + "a b " * 500_000, "pytest"),
+    ],
+)
+def test_a_huge_word_does_not_stall_the_parser(command: str, key: str) -> None:
+    import time
+
+    started = time.perf_counter()
+    assert attribution.parse_command(command).key == key
+    assert time.perf_counter() - started < 5.0  # was ten seconds and more
+
+
+def test_words_below_the_limit_are_parsed_as_before() -> None:
+    long = "x" * (attribution.MAX_WORD_CHARS - 10)
+    parsed = attribution.parse_command(f"pytest tests/{long}.py")
+    assert parsed.tokens == (f"tests/{long}.py",)
+    cut = attribution.parse_command(f"pytest tests/{'x' * attribution.MAX_WORD_CHARS}")
+    assert cut.key == "pytest" and cut.tokens == ("LONG-DATA",)
+
+
+@pytest.mark.parametrize(
+    ("command", "container"),
+    [
+        ("docker compose exec web pytest -q", "docker compose exec web"),
+        ("docker compose run --rm api npm test", "docker compose run api"),
+        ("docker-compose exec -T web pytest", "docker-compose exec web"),
+        ("docker exec -it 3f2a9c pytest", "docker exec"),
+        ("kubectl exec api-7d9 -- pytest", "kubectl exec"),
+        ("pytest -q", ""),
+        ("sudo pytest", ""),
+    ],
+)
+def test_the_container_a_command_ran_in_is_kept(command: str, container: str) -> None:
+    parsed = attribution.parse_command(command)
+    step = next(s for s in parsed.steps if s.key == parsed.key)
+    assert step.container == container
+    assert parsed.key in ("pytest", "npm test")  # what it is does not change

@@ -120,6 +120,9 @@ RULE_IDS: tuple[str, ...] = (
 REPO_WIDE_MIN_EVENTS = 5
 REPO_WIDE_MIN_FILES = 3
 REPO_WIDE_MIN_SESSIONS = 3
+#: ... and file visits before a share of them is called a rate: "100% of file visits"
+#: over five visits is five events, not a property of the repository.
+REPO_WIDE_MIN_VISITS = scoring.BASELINE_MIN_VISITS
 #: Files named in such an item.
 REPO_WIDE_MAX_FILES = 10
 
@@ -868,10 +871,24 @@ class _Rules:
         if len(absent) * 2 <= len(invocation):
             return False
         holder = absent[0].detail.get("no_target_in", "")
-        thing = "target" if holder == signals.TARGETS_IN_MAKEFILE else "script"
+        thing = {signals.TARGETS_IN_MAKEFILE: "target", signals.TARGETS_IN_JUSTFILE: "recipe"}.get(
+            holder, "script"
+        )
         name = ""
         if self.quote is not None:
             name = " " + code(self.quote(absent[0].detail["no_target"], QUOTE_CHARS))
+        if all(f.detail["no_target"] in self.known_targets for f in absent):
+            # It has been added since: "does not exist" would be advice about the past.
+            self.add(
+                "name-the-missing-target",
+                f"{_located(key)} was missing in these sessions; it is defined now",
+                f"{_located(key)} failed {_in_sessions(absent)} because the {holder} had no "
+                f"{thing}{name}. The {holder} defines it now, so there is nothing to write "
+                "down: re-scan with `--since <date>`, with a date after it was added, to "
+                "confirm that these failures have stopped.",
+                [signals.COMMAND_FAILURE],
+            )
+            return True
         exists = ""
         if self.known_targets and self.quote is not None:
             listed = ", ".join(code(self.quote(t, QUOTE_CHARS)) for t in self.known_targets)
@@ -1392,6 +1409,7 @@ def repo_wide(
         base.events < REPO_WIDE_MIN_EVENTS
         or base.files < REPO_WIDE_MIN_FILES
         or sessions < REPO_WIDE_MIN_SESSIONS
+        or base.visits < REPO_WIDE_MIN_VISITS
     ):
         return None
     percent = f"{100.0 * base.hit_visits / base.visits:.0f}%" if base.visits else "0%"

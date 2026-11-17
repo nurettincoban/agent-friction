@@ -338,7 +338,15 @@ come from a fixed vocabulary that names the kind of phrase ("that's wrong",
 never the human's own words: the summary is also shown without excerpts.
 
 **Attribution:** files the agent touched in the preceding turn that the
-message names (by path, or by bare file name if unambiguous). If it names
+message names (by path, or by bare file name if unambiguous). A file of the
+repository that the human names and the agent had *not* touched yet ("no,
+stop using print in packages/api/main.py, I told you this already") gets
+the correction in two cases, neither with "wrong file": the agent then goes
+and changes that file (the correction is certain, "the agent then changed
+..., the file the user named"), or nothing had been edited in the preceding
+turn, so there is no other work it can be about (it stays probable unless
+the agent then changes the file, but it is listed on that file and no
+longer unattributed). If it names
 none and the agent then went back to some of the files it had changed, the
 correction belongs to exactly those files. A probable correction is split
 evenly over the files edited in the preceding turn (the 5 most recent). If
@@ -931,7 +939,8 @@ command's" below.
   found`, `bash: ./x.sh: No such file or directory | Permission denied`,
   `ModuleNotFoundError: No module named ...`, `ImportError while loading
   conftest`, `can't open file`, `Cannot find module`, `error: unrecognized
-  arguments`, `make: *** No rule to make target`, `npm error Missing script`, yarn's
+  arguments`, `make: *** No rule to make target`, just's `Justfile does not
+  contain recipe`, `npm error Missing script`, yarn's
   `error Command "test" not found.`, `ERR_PNPM_NO_SCRIPT` (each at the start
   of its line, as the tool prints it: a sentence that quotes the words
   further in is not one), npm's `Unsupported
@@ -1039,7 +1048,12 @@ command's" below.
     end of the output makes the command red only if the end is its own:
     not when the last step of the line prints text written elsewhere
     (`...; git log -1`, `git show`, `git diff`, `cat`/`tail`/`grep` of a
-    file, `docker logs`), where a commit message or a log may quote one;
+    file, `docker logs`), where a commit message or a log may quote one.
+    And only a traceback as the interpreter prints it, starting in the first
+    column: one that is indented or quoted (`      > Traceback (most recent
+    call last):` ... `      > KeyError: 'sku'`) is being shown, not raised,
+    as in a report, a log excerpt or this tool's own evidence (`agent-friction
+    show ... | head`);
   - **green** if it shows a passing summary (`N passed`, `Tests: N passed`,
     `ok pkg 0.1s`, `test result: ok`, `All checks passed`, `Success: no
     issues`, `Found 0 errors`, `Found N errors (N fixed, 0 remaining)`, `N
@@ -1115,9 +1129,17 @@ command's" below.
     failure in name resolution`, `getaddrinfo ENOTFOUND`): there is no
     network where the agent runs, or that host is not allowed;
   - `variable`: an environment variable is not set. `Missing required
-    environment variable X`, `X: unbound variable`, `X is not set`, a bare
+    environment variable X`, `X: unbound variable`, `X is not set`, "set a /
+    an / the X environment variable" (wrangler: "it's necessary to set a
+    CLOUDFLARE_API_TOKEN environment variable"), a bare
     `KeyError: 'X'` (upper-case names only). The name is shown only where
     excerpts are.
+
+  One status counts without any words: `curl` that exits 7 (could not
+  connect) or 28 (timed out) and printed nothing, as `curl -s` does, is a
+  `service` failure; the port is read from the URL on the command line
+  ("the service on port 3000"). Other statuses and other programs are judged
+  by their output as above.
 
   Such a failure blames no file on the command line. It is dropped like any
   red run when an edit and then a green run follow (the host name was wrong
@@ -1208,6 +1230,19 @@ command's" below.
 - *Which step printed it:* on a line with several commands the output is
   matched to the step it belongs to (`failing_step`, `step_verdicts`), in
   this order:
+  0. a runner that says what it does *not* have: `make: *** No rule to make
+     target 'typecheck'.  Stop.`, npm's `Missing script: "typecheck"`,
+     cargo's ``error: no such command: `nextest` `` and just's ``Justfile
+     does not contain recipe `typecheck` `` are about the step of that
+     runner whose arguments contain the name: in `make test && make
+     typecheck` that is `make typecheck`, not the first `make` on the line.
+     One step with several targets (`make lint typecheck`, `make -C
+     packages/web lint typecheck`) is keyed by the target that is missing
+     (`make typecheck`), not by the first one. If no step asks for the name
+     (`make test && make lint` answering "No rule to make target
+     'typecheck'": a prerequisite of one of them), no step is blamed: the
+     event is marked `ambiguous_step` and is no "missing target" (a single
+     step keeps the event, as a broken Makefile);
   1. a runner that names its target or script: `make: *** [Makefile:20:
      test] Error 1` is about the `make` step whose target is `test`, or about
      the one aggregate target on the line that may include it (`make
@@ -1216,7 +1251,11 @@ command's" below.
      `npm run lint` (`named_steps`); and git says which of its commands gave
      up: in `git merge origin/main && git push`, `! [rejected]` / `failed to
      push some refs` is about `git push`, `CONFLICT (...)` / `Automatic merge
-     failed` about `git merge`;
+     failed` about `git merge`; and a launcher that could not start its
+     program names it: ``error: Failed to spawn: `mypy` `` in `ruff check .;
+     uv run mypy src; echo done` is about `uv run mypy`, a setup error even
+     though the line exits 0 (only when exactly one launched command on the
+     line runs that program);
   2. a check's own summary (`Tests: 1 failed`, `1 failed, 40 passed in 2s`,
      `Found 3 errors`): it outranks the runner's generic line. In `npm run
      lint && npm test 2>&1 | tail -5` that ends in `Tests: 1 failed` and `npm

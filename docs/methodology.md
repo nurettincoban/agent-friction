@@ -187,7 +187,11 @@ together, and so that the key can be shown even when excerpts are off:
 3. **Name the executable.** Executables under `bin/`, `.venv/`,
    `node_modules/` or given by absolute path become their basename;
    `python3`, `python3.12` become `python`; `./scripts/build.sh` becomes
-   `scripts/build.sh`.
+   `scripts/build.sh`. That is the key red and green runs are matched by.
+   The *name shown* in the result keeps `python3` where that is what was
+   typed (`python3 -m pytest`, `python3 scripts/seed.py`; not for `-c` and
+   stdin snippets): on a machine without `python`, "run `python -m pytest`"
+   would be the wrong thing to write down, so the two are separate rows.
 4. **Keep arguments only where they are known to be names, not data:**
    - a script run through a shell is the script: `bash scripts/run.sh`, `sh
      -x ./scripts/run.sh` and `scripts/run.sh` are all `scripts/run.sh`;
@@ -252,7 +256,17 @@ together, and so that the key can be shown even when excerpts are off:
      -- pytest` are all `pytest`. Where a check runs does not change what it
      is, and it is the same job as a bare `pytest` for red-fix-green and
      replacement purposes. Without an inner command (`docker compose exec
-     web`) the key stays `docker compose exec`.
+     web`) the key stays `docker compose exec`. The *name shown* keeps the
+     container call, so that a run in a container and a run on the host are
+     separate rows: `docker compose exec web pytest` (the compose service is
+     named: it is part of the project; without excerpts it is a
+     placeholder), `docker compose run api pytest`, `docker exec pytest` and
+     `kubectl exec pytest` (a container or pod name is often an id of the
+     moment, and is left out).
+   - **a single word or quoted string of more than 64 KB is data**, not a
+     command name or a path (`MAX_WORD_CHARS`): it is replaced by `LONG-DATA`
+     before the line is split, also when its quote never closes. Splitting
+     such a word is quadratic (400 KB took ten seconds).
 
 5. **Sanitize.** A key is cut at the first word that is a number or that the
    redactor would change (`make 2` is `make`; a key that would start with
@@ -532,7 +546,9 @@ and are weak evidence from then on: they still count in the totals and in
 the score, but a file with nothing else is capped at 19, is "low"
 confidence and gets no advice, and its misses feed no recommendation.
 Generated files are exempt (one failed edit of generated output is already
-the pattern). When a signal has 5+ events in 3+ files and 3+ sessions, the
+the pattern). When a signal has 5+ events in 3+ files and 3+ sessions, over
+at least 20 file visits (`REPO_WIDE_MIN_VISITS`; a share of fewer visits is a
+handful of events, not a rate), the
 result's top-level `recommendations` carries one repository-level item,
 `note-the-background-rate`: "Edit misses run at 8% of file visits across the
 repository", the counts, and the files that are above it.
@@ -706,7 +722,7 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `document-the-setup-step` | 2+ failures of a command that then passed after the same setup step with no file edited in between (`pip install`, `npm ci`, `docker compose up`, `cp .env.example .env`, or any other command that did so in 2+ sessions), or that then passed on a line that first activated an environment (`source .venv/bin/activate && pytest`, `poetry shell`, `conda activate <env>`): "run X before Y". Each failure is bound to the steps run between it and the next run of the same command; every step that helped 2+ times is listed, in order, with its own count ("run `pip install`, then `docker compose up -d` before `pytest`"), and named so that it can be run as written (`npx playwright install`, `go mod download`) |
 | `document-the-environment` | 2+ *environment* failures of a command (and none of the above): a service that was not reachable ("say how to start PostgreSQL before `pytest`"; the service is named when the output identifies it), missing, expired or refused credentials (also a database, registry or cloud API that turns them down), an unset environment variable (named only with excerpts), a port that was already in use, a full disk, or a host name that could not be resolved (no network, or a host that is not allowed: "say what `curl` can reach from where agents work") |
 | `document-the-command` | 2+ setup/invocation failures of a command (and none of the above). If the same command then worked in a subdirectory, the advice names it ("run `npm test` from `web/`"). A command that is keyed by where it ran (`pytest (src/)`) is titled "Document how to run `pytest` in `src/`"; a command whose name is a placeholder without excerpts is titled "Document how to run this command (its name is hidden without excerpts)". When every one of those failures was the shell not finding one and the same program, the advice names it instead: "`gh` is not installed where agents run" (install it there, or say what to use instead) |
-| `name-the-missing-target` | 2+ setup/invocation failures of a command, most of which say that the make target or package script does not exist (`make: *** No rule to make target 'lint'.  Stop.`, npm's `Missing script`, `ERR_PNPM_NO_SCRIPT`, yarn's `Command "lint" not found`; a missing *prerequisite*, "needed by", is not this, and neither is an error that names another target than the one on the command line: `make test` answering "No rule to make target 'tst'" is a broken Makefile). Replaces `document-the-command`: there is nothing to document about running something that is not there. The text lists up to 12 targets or scripts the Makefile or `package.json` (in the directory the command ran in) does define, and asks for an alias or a line saying what to run instead. Without excerpts neither the missing name nor the list is shown |
+| `name-the-missing-target` | 2+ setup/invocation failures of a command, most of which say that the make target or package script does not exist (`make: *** No rule to make target 'lint'.  Stop.`, npm's `Missing script`, `ERR_PNPM_NO_SCRIPT`, yarn's `Command "lint" not found`; a missing *prerequisite*, "needed by", is not this, and neither is an error that names another target than the one on the command line: `make test` answering "No rule to make target 'tst'" is a broken Makefile). Replaces `document-the-command`: there is nothing to document about running something that is not there. The same for a `just` recipe (`Justfile does not contain recipe`). The text lists up to 12 targets, scripts or recipes the Makefile, `package.json` or justfile (in the directory the command ran in) does define, and asks for an alias or a line saying what to run instead. If the file defines the missing name *now*, the advice is in the past tense instead: "`make typecheck` was missing in these sessions; it is defined now", with "re-scan with `--since <date>`" to confirm that the failures have stopped. Without excerpts neither the missing name nor the list is shown |
 | `make-the-failure-actionable` | 1+ `retry-loop` on a command |
 | `run-it-in-the-background` | 2+ harness timeouts of a command that is a server or watcher (`npm run dev`, `uvicorn`, ...); replaces `document-the-command` for those |
 | `give-it-more-time` | 2+ harness timeouts of any other command (`npm run build` cut off after 2 minutes): say how long it takes, raise the timeout or run it in the background, or name a narrower command; replaces `document-the-command` for those |
@@ -716,7 +732,7 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `pull-before-pushing` | `git push` was rejected as non-fast-forward (the remote branch had commits the local one lacked) in 3+ sessions: "tell agents to bring the branch up to date before `git push`": say in AGENTS.md to fetch and rebase (or merge) before pushing, and whether a force-push is ever acceptable. No time is claimed |
 | `push-with-upstream` | `git push` failed with "has no upstream branch" and went through with `--set-upstream` / `-u` in 3+ sessions: "tell agents to push a new branch with `git push -u origin HEAD`", or set `push.autoSetupRemote` where agents run. No time is claimed |
 | `file-is-gone` | a file hotspot whose file is not in the working tree **and** whose last commit in git deleted or renamed it (`file.removed_at`; needs git). Replaces every rule about what the file is like (`edit-the-source-not-the-output`, `split-or-anchor-large-file`, `make-edits-land`, `document-what-rewrites-this-file`, `path-agents-expect`, `add-a-fast-check`, `state-the-constraint`, `add-a-pointer`, `summarize-this-file`): "This file was renamed to `src/client.ts`" or "This file is no longer in the tree", with the date of that commit and `--since <date>` to leave the history out. What a human said (`write-down-the-rule`, `state-the-boundary`, ...) is kept below it. A path git never tracked, or a scan without git, is not "gone": nothing is known, and nothing changes |
-| `note-the-background-rate` | repository-level only (top-level `recommendations`, never on a hotspot): `edit-miss` or `stale-edit` with 5+ events in 3+ files and 3+ sessions. States the rate per file visit and names the files clearly above it (see "The repository's base rate"). Mentions a rewriting command only when misses followed one |
+| `note-the-background-rate` | repository-level only (top-level `recommendations`, never on a hotspot): `edit-miss` or `stale-edit` with 5+ events in 3+ files and 3+ sessions, over 20+ file visits. States the rate per file visit and names the files clearly above it (see "The repository's base rate"). Mentions a rewriting command only when misses followed one |
 
 ### Which files count as generated
 
