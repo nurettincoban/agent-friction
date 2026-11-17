@@ -61,5 +61,15 @@ All notable changes to this project are documented here. The format follows
   API is `agent_friction.analyze(AnalyzeOptions(...))`.
 - Project website at https://nurettincoban.github.io/agent-friction/ (served from `docs/`),
   with the example report as a live demo. `make examples` regenerates the demo too.
+- "Ready to paste" in every report: the AGENTS.md lines and `.claude/settings.json` deny rules
+  the advice names, filled in from the evidence, each deny rule replayed against the sessions
+  (`paste` in the JSON). A generated file's advice names the source and command its header
+  gives.
+- A correction is stated as the rule the human gave ("use `PaymentClient`, not
+  `legacy_charge`"), and a weakly worded one about code the agent had just added counts once
+  the agent takes that code out. New advice `say-how-to-verify` when the agent said it was done
+  and the human found it failing. With only thin evidence, reports say "Nothing to fix yet".
+- `docs/comparison.md` re-measured: an answer key committed before the runs, three `/insights`
+  runs per dataset, two graders.
 
 [0.1.0]: https://github.com/nurettincoban/agent-friction/commits/main
