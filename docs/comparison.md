@@ -18,9 +18,13 @@ text to paste.
      twenty sessions of an agent watching a build, where Claude Code's own rule refuses
      `sleep N; gh run view` 280 times.
 - **Who built them:** the authors of agent-friction, around problems agent-friction was built
-  to find. That favours agent-friction. To limit it, the
+  to find. That favours agent-friction twice over: the datasets are home ground, and
+  agent-friction was **improved on these same datasets** after a first comparison earlier the
+  same day showed what it missed (see "What changed" below). The
   [answer key](comparison/answer-key.md) (what was planted, what counts as found, and three
-  decoys a careful tool should *not* flag) was committed before the runs below.
+  decoys a careful tool should *not* flag) was committed before the `/insights` runs below,
+  so it fixes how `/insights` is scored; it was written after agent-friction's changes, so it
+  does not protect agent-friction's score from that tuning.
 - **`/insights`:** run **three times per dataset**, each in a fresh, empty Claude Code config
   directory holding only that dataset: `CLAUDE_CONFIG_DIR=<dir> claude -p "/insights"`. The
   text of all six reports is saved under [`comparison/runs/`](comparison/runs).
@@ -30,7 +34,8 @@ text to paste.
   ([output](comparison/agent-friction-harness-blocks.txt)).
 - **Grading:** two graders scored every item with the key's rubric: one of us, and an
   independent model grader given only the key, the outputs and the transcripts. They agreed on
-  every score except one (H2 below, settled by the key's wording). Scores: **2** found (names
+  every score except one (H2 below, settled by the key's wording). Both score sheets are in
+  [comparison/scores.md](comparison/scores.md). Scores: **2** found (names
   the target and the mechanism), **1** partial (only a symptom or a count), **0** missed; and
   separately whether the fix offered would work as given.
 
@@ -58,9 +63,9 @@ Scores for `/insights` are run 1 / run 2 / run 3.
 | S2 | Generated `schema_gen.py` edited by hand | **2 / 2 / 2**, fix works: CLAUDE.md lines and a PreToolUse hook | **2**, fix works: the header's source and command named (`api/openapi.yaml`, `make codegen`), a line to paste and a deny rule, replayed: "would have refused 9 calls in 3 sessions, all on that file" |
 | S3 | `pytest` fails here, `make test` works | **1 / 1 / 1**: only "Command Failed: 6". Runs 1 and 3 advise running `pytest`, which fails here | **2**, fix works: "use `make test`, not `pytest`" (7 failures in 4 sessions, `make test` did the job 5 times) |
 | S4 | Agents search for a `RefundPolicy` that does not exist | **0 / 0 / 0** | **2**: 5 empty searches, the patterns listed. The fix is generic ("say where it is or that it does not exist") |
-| S5 | A human declines `rm -rf migrations/versions` and says why | **1 / 1 / 1**: only "User Rejected: 1" | **2**, fix works: the reason quoted, a line to paste and `Bash(rm -rf migrations/versions:*)` |
+| S5 | A human declines `rm -rf migrations/versions` and says why | **1 / 1 / 1**: only "User Rejected: 1" | **2**, fix works: the reason quoted and a line to paste; the `Bash(rm -rf migrations/versions:*)` rule it adds stops that command as typed, not `rm -r ./migrations/versions`, and the report says so |
 | S6 | "All tests pass", then the human finds it failing on staging | **2 / 2 / 2**, fix works: a definition of done, a verify skill | **2**, fix works: "said the work was done ... the last check it ran and saw pass was `make test`: it did not cover what broke", and a line to paste |
-| S7 | The Aider session | **0 / 0 / 0**: reads Claude Code sessions only (by design) | **2**: read |
+| S7 | The Aider session (coverage, not scored) | not read: `/insights` reads Claude Code sessions only, by design | read |
 | D1 | Decoy: one `curl` to staging fails | not raised | a low-confidence row, not in "What to fix first" |
 | D2 | Decoy: a red run the agent then fixed | not raised | "Not counted: 1 failed run of normal work" |
 
@@ -76,11 +81,14 @@ Scores for `/insights` are run 1 / run 2 / run 3.
 
 Both graders checked each report against the transcripts.
 
-- **`/insights`, shopfront, all 3 runs:** the corrected sessions "ended mid-fix" or
-  "without a test run". Each of them ends with `make test` passing. All 3 runs also say the
-  refunds were built on `payments/legacy.py`, which the agent never touched (it called
-  `legacy_charge` from `checkout/service.py`). Run 1 suggests adding a "DO NOT EDIT" header to
-  `schema_gen.py`, which already has one.
+- **`/insights`, shopfront:** all 3 runs say the corrected sessions ended mid-fix or
+  without a test run; the gift-message and refunds sessions end with `make test` passing (true
+  of the discount session, where the staging check after the fix failed). Run 1 suggests adding
+  a "DO NOT EDIT" header to `schema_gen.py`, which already has one, and says the agent
+  "declared work done before tests confirmed it", although `make test` had passed. (All 3 runs
+  also say the refunds were built on `payments/legacy.py`; the agent called `legacy_charge`
+  and never opened that file, but this is close to the human's own words, so we do not count
+  it.)
 - **`/insights`, harness blocks, all 3 runs:** "no mid-session corrections" or "without
   interrupting", although each session it read has a stopped `ls`, and two of them a declined
   `sleep 60`.
@@ -99,20 +107,20 @@ Both graders checked each report against the transcripts.
 
 ## Totals
 
-Planted items only (S1 to S7, H1, H2); decoys are scored as false positives.
+Planted items S1 to S6, H1 and H2; S7 is coverage and decoys are scored as false positives.
 
 | | `/insights` (per run) | agent-friction |
 | --- | --- | --- |
-| Score, out of 18 | 11 / 11 / 11 | 18 |
+| Score, out of 16 | 11 / 11 / 11 | 16 |
 | Items with a fix that works as given (7 expect one: S1 to S6, H1) | 3 / 3 / 3 (S1, S2, S6), plus a sound command for H1 next to a doubtful one | 7 (S4's is generic) |
 | Decoys raised as problems | 0 of 3 | 0 of 3 |
 | Statements the sessions contradict | several in every run (listed above) | none found |
 
 What these numbers support: on these planted items, in these runs, agent-friction found every
-one and `/insights` scored the same 11 of 18 three times; neither raised a decoy. What they do
+one and `/insights` scored the same 11 of 16 three times; neither raised a decoy. What they do
 not support: detection rates on real work, "more accurate" in general, or anything statistical.
-Eleven items in two datasets made by one side are far too few for that, and they were built
-around agent-friction's signals. They show what each tool can see.
+Eight items in two datasets made by one side, with agent-friction tuned on them, are far too
+few for that. They show what each tool can see.
 
 ## Cost and repeatability
 

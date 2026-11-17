@@ -391,6 +391,11 @@ def paste_deny(result: dict[str, Any]) -> list[tuple[str, str]]:
                 f"; Claude Code settings do not cover the {plural(others, 'session')} of "
                 "another agent that also did this"
             )
+        if str(item["rule"]).startswith("Bash("):
+            what += (
+                "; it stops the command as typed, not every way to do the same, so keep the "
+                "line in AGENTS.md too"
+            )
         out.append((str(item["rule"]), what))
     return out
 

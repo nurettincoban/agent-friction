@@ -2393,10 +2393,34 @@ _USE_INSTEAD_RE = re.compile(
 #: A human reporting that the result does not work ("still failing", "doesn't work").
 _REPORTS_FAILURE_RE = re.compile(
     r"\bstill\s+(?:fail(?:s|ing)?|broken|crash(?:es|ing)?|errors?|(?:does ?n[o']t|is ?n[o']t)\b)"
-    r"|\b(?:does ?n[o']t|did ?n[o']t|is ?n[o']t|not)\s+work(?:ing)?\b"
+    r"|\b(?:it|this|that|which|still)\s+(?:does ?n[o']t|did ?n[o']t|is ?n[o']t|does not|did not"
+    r"|is not)\s+work(?:ing)?\b(?!\s+(?:like|that way|the way|on it|today))"
     r"|\b(?:is|it's|it is) broken\b|\bfails? (?:on|in|for) (?:staging|prod|ci|my|me)\b",
     re.I,
 )
+
+
+#: A file name, not a name in code: ``README.md``, ``package.json``, ``node.js``.
+_FILE_SHAPED_RE = re.compile(
+    r"\.(?:md|json|jsonc|js|mjs|cjs|ts|tsx|jsx|py|pyi|yaml|yml|toml|txt|lock|cfg|ini|sh|go|rs"
+    r"|rb|java|kt|css|scss|html|xml|sql|env|csv|proto|c|h|cpp|hpp|cs|php|swift|vue)$",
+    re.I,
+)
+#: Product names written in camel case, never a name in this code.
+_PROSE_NAMES = frozenset(
+    name.casefold()
+    for name in [
+        *("GitHub", "GitLab", "macOS", "iOS", "iPadOS", "JavaScript", "TypeScript"),
+        *("PostgreSQL", "MySQL", "MongoDB", "OpenAI", "YouTube", "LinkedIn", "PowerShell"),
+        *("VSCode", "PyPI", "DevOps", "OAuth", "GraphQL", "WebSocket", "LaTeX", "NumPy"),
+        *("SciPy", "FastAPI", "WordPress", "DynamoDB", "CloudFlare", "BitBucket", "iPhone"),
+        *("eBay", "PayPal", "DockerHub", "NodeJS", "ChatGPT"),
+    ]
+)
+
+
+def _name_pattern(name: str) -> re.Pattern[str]:
+    return re.compile(r"(?<![\w.])" + re.escape(name) + r"(?!\w)")
 
 
 def code_names(text: str) -> list[str]:
@@ -2405,7 +2429,8 @@ def code_names(text: str) -> list[str]:
     for match in _CODE_NAME_RE.finditer(text):
         name = match.group(1)
         shaped = _CODE_SHAPE_RE.search(name) or match.group(0).rstrip("`").endswith("()")
-        if shaped and len(name) >= 4 and name not in out:
+        prose = _FILE_SHAPED_RE.search(name) or name.casefold() in _PROSE_NAMES
+        if shaped and not prose and len(name) >= 4 and name not in out:
             out.append(name)
     return out
 
@@ -2449,6 +2474,9 @@ class _Unconfirmed:
     untouched: bool = False
     redirected: bool = False
     followed: list[str] = field(default_factory=list)  # which of ``files`` it went back to
+    #: Weaker cues only, carried by naming code the agent had just added: only an edit
+    #: that takes that code out confirms it, not any change to the file.
+    needs_removal: bool = False
 
 
 @dataclass
@@ -2467,6 +2495,10 @@ class _State:
     """Mutable per-stream detector state."""
 
     rework: _Rework | None = None
+    #: The last correction and the names in code shape it used that the agent had just
+    #: added (and the files they went into): an edit that takes one out confirms which
+    #: name the human ruled out.
+    named_code: tuple[Finding, tuple[str, ...], frozenset[str]] | None = None
 
     turn: list[_Action] = field(default_factory=list)
     agent_seen: float | None = None  # last agent prose in this turn
@@ -3280,7 +3312,13 @@ class _Detector:
             state.removed.append((call.old_text, call.new_text))
             del state.removed[:-REMOVED_TEXTS_KEPT]
         self._explain_probes(path, call)
-        self._confirm_correction({path}, f"the agent then changed {path} again")
+        took_out = self._took_out_named_code(path, call)
+        pending = state.unconfirmed
+        # With weaker cues only, a change to the file is not enough: it must take out the
+        # code the human named.
+        if pending is None or not pending.needs_removal or took_out:
+            self._confirm_correction({path}, f"the agent then changed {path} again")
+
         pending = state.unconfirmed
         if (
             pending is not None
@@ -4796,6 +4834,7 @@ class _Detector:
         """The turn after a strongly worded correction is over: did the agent act on it?"""
         rework, self.state.rework = self.state.rework, None
         self.state.softened = None
+        self.state.named_code = None
         self._settle_wording()
         if rework is not None and rework.finding.signal == USER_CORRECTION:
             # A correction costs the rework it caused: from the agent's first call after
@@ -5043,12 +5082,17 @@ class _Detector:
                     files.append(rel)
         return files
 
-    def _added_names(self, text: str) -> tuple[str, set[str]]:
-        """The first name in code shape in ``text`` that an edit or write of this turn
-        put into a file (and was not there before), and the files it went into."""
+    def _added_names(self, text: str, instead: str) -> tuple[list[str], set[str]]:
+        """The names in code shape in ``text`` that an edit or write of this turn put
+        into a file (and were not there before), and the files they went into. The name
+        the human says to use instead is not one of them."""
+        names: list[str] = []
+        files: set[str] = set()
         for name in code_names(text):
-            pattern = re.compile(r"(?<![\w.])" + re.escape(name) + r"(?!\w)")
-            files = {
+            if instead and (name == instead or name.split(".")[0] == instead.split(".")[0]):
+                continue
+            pattern = _name_pattern(name)
+            into = {
                 action.file
                 for action in self.state.turn
                 if action.file is not None
@@ -5057,9 +5101,10 @@ class _Detector:
                 and pattern.search(action.call.new_text)
                 and not pattern.search(action.call.old_text)
             }
-            if files:
-                return name, files
-        return "", set()
+            if into:
+                names.append(name)
+                files |= into
+        return names, files
 
     def _last_green_check(self) -> str:
         """The command key of the turn's last shell command that succeeded, if any."""
@@ -5069,9 +5114,24 @@ class _Detector:
                 and action.result is not None
                 and action.result.ok
                 and action.call.op == model.OP_SHELL
+                and command_role(action.cmd.key) in ("test", "lint", "typecheck", "build")
             ):
                 return self.ctx.command_key(action.cmd.key)
         return ""
+
+    def _took_out_named_code(self, path: str, call: Event) -> bool:
+        """Did this edit take out a name the last correction used? Then that is the name
+        the human ruled out (``ruled_out`` on the correction)."""
+        named = self.state.named_code
+        if named is None or path not in named[2]:
+            return False
+        finding, names, _ = named
+        for name in names:
+            pattern = _name_pattern(name)
+            if pattern.search(call.old_text) and not pattern.search(call.new_text):
+                finding.detail.setdefault("ruled_out", name)
+                return True
+        return False
 
     def _turn_changes(self) -> tuple[list[str], list[str], bool]:
         """Files the turn so far touched and changed (most recent first), by any means.
@@ -5215,18 +5275,21 @@ class _Detector:
         touched, edited, blind = self._turn_changes()
         # A name the human writes that the agent had just put into a file ("you used
         # legacy_charge again"): the message is about that code, in those files.
-        ruled_out, added_in = self._added_names(event.text[:CORRECTION_SCAN_CHARS])
+        said = event.text[:CORRECTION_SCAN_CHARS]
+        added, added_in = self._added_names(said, use_instead(said, ""))
         if added_in and confidence > 0:
             edited = [rel for rel in edited if rel in added_in] or edited
         before = frozenset(edited)
         # An instruction that redirects the work just done ("don't use X here") is a
         # correction if the agent goes back to that work, and nothing if it does not.
         tentative = bool(instructed) and bool(before)
+        weak_by_name = False
         fallback = ""
         if tentative:
             fallback = ", ".join(f'"{label}"' for label in labels)
             confidence, labels = CORRECTION_STRONG, instructed
         elif added_in and before and 0 < confidence < CORRECTION_STRONG:
+            weak_by_name = True
             # Weaker cues only ("actually X is deprecated"), but about code the agent had
             # just written: a correction if the agent goes back and changes it.
             tentative = True
@@ -5370,9 +5433,9 @@ class _Detector:
             detail={"confidence": f"{confidence:g}", **({"quote": event.text} if certain else {})},
         )
         self.state.corrected = frozenset(t.key for t in targets)
-        if ruled_out:
-            finding.detail["ruled_out"] = ruled_out
-        instead = use_instead(event.text[:CORRECTION_SCAN_CHARS], ruled_out)
+        # Which name the human ruled out is known once an edit takes it out again.
+        self.state.named_code = (finding, tuple(added), frozenset(added_in)) if added else None
+        instead = use_instead(said, "")
         if instead:
             finding.detail["use_instead"] = instead
         if event.after_claim and reports_failure(head):
@@ -5408,6 +5471,7 @@ class _Detector:
                 how,
                 tentative=tentative,
                 fallback=fallback,
+                needs_removal=weak_by_name,
                 elsewhere=frozenset(elsewhere - set(touched)),
                 settled=bool(blamed),
                 named=frozenset() if blamed or wrong_place else frozenset(others),

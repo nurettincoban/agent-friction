@@ -297,20 +297,25 @@ corroborated: ...").
     more: a message with only weaker cues ("Actually `legacy_charge()` is
     deprecated, `PaymentClient.charge()` is what we use instead") that names,
     in code shape (an underscore inside, a lower-to-upper turn such as
-    `PaymentClient`, a dotted name or `()`), something an edit or write of the
-    turn before had just added to a file (in its new text, not its old):
-    that is about that code. It is attributed only to the files the name went
-    into, and if the agent then changes one of them again it is a correction
-    (`corroborated: followed`); if not, it stays the probable correction its
-    cues give. Any correction that names such code carries it as
-    `ruled_out`, and what the human said to use instead ("use X", "X only",
-    "X is what we use") as `use_instead`: the recommendation states the rule
-    with them. When the agent's last words before the message said the work
-    was done or passing ("all tests pass", "it works now"; only that one bit
-    of the agent's prose is kept) and the human reports it still does not
-    work ("still failing", "doesn't work", "is broken"), the correction
-    carries `claimed_done`, and `checked_with` names the last shell command of
-    the turn that succeeded. Not cues: "don't forget ...", "don't worry", "don't commit
+    `PaymentClient`, a dotted name or `()`; not a file name such as
+    `package.json`, nor a product name such as `GitHub`), something an edit or
+    write of the turn before had just added to a file (in its new text, not
+    its old): that is about that code. It is attributed only to the files the
+    name went into, and it is a correction (`corroborated: followed`) only if
+    the agent then takes that name out again in an edit; a change that keeps
+    it ("getUserById should also handle None") leaves the probable correction
+    its cues give. The name the human says to use instead ("use X", "X only",
+    "X is what we use") is never taken for the one ruled out. Any correction
+    carries what the human said to use as `use_instead`, and, once an edit
+    takes out a name it used that the agent had just added, that name as
+    `ruled_out`: the recommendation states the rule with them. When the
+    agent's last words before the message said the work was done or passing
+    ("all tests pass", "it works now"; not when the same paragraph mentions a
+    failure, an error, a "but" or a question; only that one bit of the
+    agent's prose is kept) and the human reports it still does not work
+    ("still failing", "it doesn't work", "is broken"), the correction carries
+    `claimed_done`, and `checked_with` names the last test, lint, type check
+    or build command of the turn that succeeded. Not cues: "don't forget ...", "don't worry", "don't commit
     yet", "use the factory instead" (may be the next step), "use tabs instead
     of spaces", "No tests are needed here", anything after praise, a
     dismissal, self-blame or "next task:", and an answer to a question the

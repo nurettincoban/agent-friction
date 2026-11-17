@@ -38,7 +38,7 @@ AGENTS.md (or CLAUDE.md):
 ```
 
 - `Edit(/src/shopfront/api/schema_gen.py)`: replayed, would have refused 9 calls in 3 sessions, all on src/shopfront/api/schema_gen.py; Claude Code settings do not cover the 1 session of another agent that also did this.
-- `Bash(rm -rf migrations/versions:*)`: replayed, would have refused 1 call in 1 session, all on rm -rf migrations/versions.
+- `Bash(rm -rf migrations/versions:*)`: replayed, would have refused 1 call in 1 session, all on rm -rf migrations/versions; it stops the command as typed, not every way to do the same, so keep the line in AGENTS.md too.
 
 _Not counted: 1 failed run of normal work (the agent fixed the failure, or was only waiting and polled until it passed; ~6s of run time)._
 

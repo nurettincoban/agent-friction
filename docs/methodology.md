@@ -774,8 +774,14 @@ deny rules, against every tool call of these sessions, and the report says what 
 would have refused (calls, sessions, and on which files or commands), so that a rule
 that would also refuse ordinary work shows it. Sessions of other agents are counted
 apart: Claude Code settings do not govern them. A `Bash(...)` rule is proposed only
-for a declined command whose stated reason forbids it ("never ...", "don't ...",
-"must not ..."). Nothing is applied: the text is a draft to check.
+for a declined command whose stated reason forbids it for good ("never ...", "must
+not ...", "not allowed"; not "don't, I'll do it myself" or "not yet"), for the step
+of the command line that the hotspot's command starts (`git push --force` of
+`git add . && git push --force`), and only when that step is plain words (no
+quotes, variables or globs). Such a prefix rule stops the command as typed, not
+every way to do the same, and the report says so. A file whose path holds glob
+characters (`app/[id]/page.tsx`) gets no `Edit(...)` rule, as it would match other
+files. Nothing is applied: the text is a draft to check.
 
 **Thin evidence.** Every recommendation carries `events`, the number of events
 it rests on (for most rules, the target's events of the signals it is based

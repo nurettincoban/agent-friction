@@ -1,9 +1,15 @@
 # Answer key for the `/insights` comparison
 
-Written and committed **before** the 2026-11-17 re-runs of both tools, so that what
-counts as "found" was fixed before anyone saw the results. The same people built the
-datasets and agent-friction, which favours agent-friction; the key says so, and lists
-decoys that a careful tool should *not* raise as a problem.
+Written and committed **before** the 2026-11-17 re-runs of `/insights`, so that what
+counts as "found" was fixed before anyone saw those results. It was written *after*
+agent-friction was improved on these same datasets, so it does not guard agent-friction's
+score against that tuning. The same people built the datasets and agent-friction, which
+favours agent-friction; the key lists decoys that a careful tool should *not* raise as a
+problem.
+
+*Amended after the runs, on a reviewer's advice, and only here: this paragraph, and S7
+(the Aider session) moved out of the score into coverage, as `/insights` does not read
+other agents' sessions by design. No item, rubric or decoy changed.*
 
 ## Scoring
 
