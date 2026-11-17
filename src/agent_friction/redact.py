@@ -80,7 +80,7 @@ _RULES: tuple[_Rule, ...] = (
     (
         "url-credentials",
         # also password-only: ``redis://:hunter2@host``
-        re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/:@]*:[^\s/@]+@"),
+        re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,30}://)[^\s/:@]*:[^\s/@]+@"),
         r"\1[REDACTED:credentials]@",
     ),
     (
@@ -97,7 +97,7 @@ _RULES: tuple[_Rule, ...] = (
         # `X-Api-Key: Tr0ub4dor&3`: a header value runs to the end of the line or the quote
         "header",
         re.compile(
-            rf"(?i)\b((?:(?:\w+-)+(?:{_SECRET_KEY_WORDS})(?:-\w+)*"  # a hyphenated name
+            rf"(?i)\b((?:(?:\w{{1,40}}-){{1,6}}(?:{_SECRET_KEY_WORDS})(?:-\w+)*"  # hyphenated
             rf"|(?:{_SECRET_KEY_WORDS})(?:-(?:key|token|secret|id|signature|value))+"
             r"|api-key|access-key|private-key)"
             r":[ \t]+)(?!\[REDACTED)([^\n\"']+)"
@@ -108,7 +108,7 @@ _RULES: tuple[_Rule, ...] = (
         # `PASSWORD='ab&cd ef'`, `"password": "ab cd"`: a quoted value ends at its quote
         "quoted-assignment",
         re.compile(
-            rf"(?i)\b([\w-]*(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"
+            rf"(?i)\b([\w-]{{0,60}}(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"
             r"[\"']?\s*[:=]\s*)([\"'])(?!\[REDACTED)[^\"'\n]{4,}\2"
         ),
         r"\1\2[REDACTED]\2",
@@ -117,7 +117,7 @@ _RULES: tuple[_Rule, ...] = (
         # `token: ab&cd`: only in `key=value&other=...` does `&` end the value
         "colon-assignment",
         re.compile(
-            rf"(?i)\b([\w-]*(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"
+            rf"(?i)\b([\w-]{{0,60}}(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"
             r"[\"']?\s*:\s*[\"']?)"
             r"(?!\[REDACTED)([^\s\"',;]{4,})"
         ),
@@ -126,7 +126,7 @@ _RULES: tuple[_Rule, ...] = (
     (
         "assignment",
         re.compile(
-            rf"(?i)\b([\w-]*(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"
+            rf"(?i)\b([\w-]{{0,60}}(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"
             r"[\"']?\s*[:=]\s*[\"']?)"
             r"(?!\[REDACTED)([^\s\"',;&]{4,})"
         ),
@@ -279,7 +279,10 @@ _RULES: tuple[_Rule, ...] = (
     (
         "email",
         # the host must end in a name, so ``root@10.0.0.1`` (an ssh target) is not an email
-        re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"),
+        re.compile(
+            r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*"
+            r"\.[A-Za-z]{2,}\b"
+        ),
         "[REDACTED:email]",
     ),
     (
@@ -312,9 +315,35 @@ _BASE64_40_RE = re.compile(r"(?<![A-Za-z0-9/+=])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+
 #: Terminal control characters and invisible direction marks. Text from a transcript may
 #: contain escape sequences that clear a screen or reorder what a reader sees.
 _ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])")
+#: ... and zero-width characters (U+200B-U+200F, U+2060, U+FEFF), which make two paths
+#: that look the same differ, or hide a break inside a word.
 _CONTROL_RE = re.compile(
-    "[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]"
+    "[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]"
 )
+#: A payment card number: 13 to 19 digits, unbroken or in the groups cards are printed
+#: in (4-4-4-1..7, or 4-6-5), with spaces or dashes. Only one that passes the Luhn
+#: check is masked: most long numbers in a transcript are ids and timestamps.
+_CARD_RE = re.compile(
+    r"(?<![\w.+-])(?:\d{13,19}|\d{4}([ -])\d{4}\1\d{4}\1\d{1,7}|\d{4}([ -])\d{6}\2\d{5})"
+    r"(?![\w+-]|\.\d)"
+)
+
+
+def _luhn(digits: str) -> bool:
+    total = 0
+    for index, char in enumerate(reversed(digits)):
+        value = int(char)
+        if index % 2:
+            value = value * 2 - 9 if value > 4 else value * 2
+        total += value
+    return total % 10 == 0
+
+
+def _card_sub(match: re.Match[str]) -> str:
+    digits = re.sub(r"\D", "", match.group(0))
+    if len(set(digits)) < 2 or not _luhn(digits):
+        return match.group(0)  # `0000000000000000`, an id, a timestamp
+    return "[REDACTED:card-number]"
 
 
 def strip_controls(text: str) -> str:
@@ -391,11 +420,24 @@ def redact_home(text: str, home: Path | str | None = None) -> str:
     return text
 
 
+#: Longest run without whitespace that is still read; anything longer is replaced.
+MAX_TOKEN_CHARS = 4096
+_LONG_TOKEN_RE = re.compile(rf"\S{{{MAX_TOKEN_CHARS + 1},}}")
+
+
+def _long_token_sub(match: re.Match[str]) -> str:
+    return f"[REDACTED:{len(match.group(0))} characters]"
+
+
 def redact(text: str, home: Path | str | None = None) -> str:
     """Return ``text`` with secrets, emails and home directories masked."""
     text = strip_controls(text)
+    # An unbroken run of several kilobytes is a blob (base64, a minified bundle), never
+    # something to show, and the patterns below must not be made to chew through it.
+    text = _LONG_TOKEN_RE.sub(_long_token_sub, text)
     for _name, pattern, replacement in _RULES:
         text = pattern.sub(replacement, text)
+    text = _CARD_RE.sub(_card_sub, text)
     text = _HEX_RE.sub(_hex_sub, text)
     text = _BASE64_40_RE.sub(_base64_sub, text)
     text = _ENTROPY_RE.sub(_entropy_sub, text)

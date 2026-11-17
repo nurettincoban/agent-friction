@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -343,6 +344,49 @@ def _asks_question(content: object) -> bool | None:
     return verdict
 
 
+#: Who a queued message is from, where the transcript says (`origin.kind`). Anything
+#: else (a task notification, a coordinator, a peer agent, a reminder) is not a human.
+_HUMAN_ORIGINS = frozenset({"user", "human"})
+#: A queued message and a user line with the same text this close together are one message.
+REPLAY_SECONDS = 600.0
+
+
+def _queued(obj: dict[str, Any]) -> dict[str, Any] | None:
+    """The user line a ``queued_command`` attachment stands for, or ``None``.
+
+    What is typed while the agent is working is not a ``user`` line: it is recorded as
+    ``{"type": "attachment", "attachment": {"type": "queued_command", "prompt": ...}}``
+    at the moment it reaches the agent, with the prompt as a string or as content
+    blocks. The same record carries what the harness and other agents queue (task
+    notifications, reminders, messages from a coordinator or a peer): those are
+    marked by ``origin``, ``commandMode`` or ``isMeta``, and are kept as a
+    non-human line, so that a task notification is still read as an outcome.
+    """
+    attachment = obj.get("attachment")
+    if obj.get("type") != "attachment" or not isinstance(attachment, dict):
+        return None
+    if attachment.get("type") != "queued_command":
+        return None
+    prompt = attachment.get("prompt")
+    if not isinstance(prompt, (str, list)):
+        return None
+    origin = attachment.get("origin")
+    kind = origin.get("kind") if isinstance(origin, dict) else origin
+    human = (
+        attachment.get("isMeta") is not True
+        and obj.get("isMeta") is not True
+        and (kind is None or kind in _HUMAN_ORIGINS)
+        and attachment.get("commandMode") in (None, "prompt")
+    )
+    return {
+        **obj,
+        "type": "user",
+        "isMeta": not human,
+        "timestamp": obj.get("timestamp") or attachment.get("timestamp"),
+        "message": {"role": "user", "content": prompt},
+    }
+
+
 def parse_file(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFile:
     """Parse one Claude Code ``.jsonl`` transcript.
 
@@ -360,6 +404,8 @@ def parse_file(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFi
     side = Stream(session_id=session, source=path, kind=KIND, sidechain=True)
     parsed = ParsedFile(path=path, kind=KIND, streams=[])
     asking = {False: False, True: False}  # per stream: did the agent just ask something?
+    # (stream, text) -> was it a queued one, and when
+    delivered: dict[tuple[bool, str], tuple[bool, datetime | None]] = {}
     with model.open_transcript(path) as handle:
         for number, raw in enumerate(handle, 1):
             raw = raw.strip()
@@ -373,6 +419,9 @@ def parse_file(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFi
             if not isinstance(obj, dict):
                 parsed.skipped_lines += 1
                 continue
+            queued = _queued(obj)
+            if queued is not None:
+                obj = queued  # typed while the agent was working: a user line in all but name
             if obj.get("type") not in ("user", "assistant"):
                 parsed.ignored_lines += 1
                 continue
@@ -390,6 +439,22 @@ def parse_file(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFi
                 parsed.skipped_lines += 1
                 continue
             target = side if in_subagent_dir or obj.get("isSidechain") is True else main
+            # A message typed mid-turn is recorded when it is delivered and may be
+            # recorded again as an ordinary user line: it was said once. The same words
+            # typed again much later are a second message.
+            for event in [e for e in events if e.kind == model.USER_MESSAGE and e.text]:
+                said = (target.sidechain, event.text.strip())
+                was_queued, at = delivered.get(said, (queued is not None, None))
+                near = (
+                    at is None
+                    or event.ts is None
+                    or abs((event.ts - at).total_seconds()) <= REPLAY_SECONDS
+                )
+                if said in delivered and (queued is not None) != was_queued and near:
+                    del delivered[said]
+                    events.remove(event)
+                else:
+                    delivered[said] = (queued is not None, event.ts)
             if obj["type"] == "assistant":
                 asked = _asks_question(obj["message"].get("content"))
                 if asked is not None:

@@ -345,3 +345,29 @@ def test_identical_unattributed_lines_are_collapsed() -> None:
     assert term.count("WebFetch failed") == 1 and "(×5)" in term
     md = render_markdown(result)
     assert md.count("WebFetch failed") == 1 and "(×5)" in md
+
+
+def test_terminal_table_fits_a_narrow_terminal() -> None:
+    result = sample_result()
+    wide = render_terminal(result, width=100)
+    narrow = render_terminal(result, width=60)
+    assert "█" in wide
+    rows = [line for line in narrow.splitlines() if re.match(r"\s+\d+\.\d ", line)]
+    assert rows
+    assert all(len(line) <= 60 for line in rows)
+    assert "█" not in narrow
+
+
+def test_not_counted_note_separates_calls_elsewhere_in_the_repository() -> None:
+    from agent_friction.report._common import dropped_note
+
+    package = dropped_note({"totals": {"events_outside_repo": 3, "events_elsewhere_in_repo": 3}})
+    assert package == (
+        "Not counted: 3 declined, denied, or failed calls that acted elsewhere in the "
+        "repository, outside the scanned directory."
+    )
+    mixed = dropped_note({"totals": {"events_outside_repo": 3, "events_elsewhere_in_repo": 1}})
+    assert mixed is not None
+    assert "1 declined, denied, or failed call that acted elsewhere in the repository" in mixed
+    assert "and 2 calls that acted outside this repository." in mixed
+    assert "events_elsewhere_in_repo" in render_html(sample_result())

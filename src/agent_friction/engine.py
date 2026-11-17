@@ -36,12 +36,13 @@ from agent_friction.attribution import (
 from agent_friction.discovery import (
     claude_config_dirs,
     discover_repo_transcripts,
+    enclosing_repositories,
     expand_transcript_paths,
     repo_name,
     repo_roots,
 )
 from agent_friction.errors import AgentFrictionError, BadTranscriptError, NoTranscriptsError
-from agent_friction.guidance import Guidance
+from agent_friction.guidance import Guidance, deny_rules, rule_denies
 from agent_friction.model import Finding, ParsedFile, Stream, Target
 
 __all__ = [
@@ -94,6 +95,15 @@ class AnalyzeOptions:
     #: ``include_git=False``) return an empty, valid result. A transcript path that
     #: does not exist, or a file that is no transcript, is still an error.
     allow_no_transcripts: bool = False
+
+    def __post_init__(self) -> None:
+        # Callers of the library pass strings: `AnalyzeOptions(repo="shop")`.
+        self.repo = Path(self.repo)
+        given = self.transcripts
+        if isinstance(given, str | os.PathLike):
+            given = [given]  # one path, not a sequence of its characters
+        if given is not None and not all(isinstance(path, Path) for path in given):
+            self.transcripts = [Path(path) for path in given]
 
 
 def _utc(value: datetime | None) -> datetime | None:
@@ -191,7 +201,8 @@ def read_error(exc: OSError) -> str:
     return "could not be read"
 
 
-#: A human prompt after this much silence starts a new episode of work in the session.
+#: A prompt (in a headless session: any activity) after this much silence starts a new
+#: episode of work in the session.
 EPISODE_IDLE_SECONDS = 2 * 3600.0
 
 
@@ -201,15 +212,28 @@ def episode_starts(streams: Sequence[Stream]) -> dict[str, list[float]]:
     A session id can live for days (``claude --continue``): ten tasks on ten days
     are ten independent occasions for the same friction, not one. A new episode
     starts at a human prompt that follows ``EPISODE_IDLE_SECONDS`` or more without
-    any event in the session. Subagent streams never start one: their prompts are
-    written by the agent that drives them, and they belong to its episode.
+    any event in the session. In a session nobody types into after its opening
+    prompt (a headless run resumed the next day, a container restarted) there is no
+    such prompt to go by: there the agent's next message or call after that much
+    silence starts one. A tool result never does: it is a long command finishing.
+    Subagent streams never start one either: they belong to the episode of the agent
+    that drives them.
     """
+    prompts: dict[str, int] = {}
+    for stream in streams:
+        if not stream.sidechain:
+            typed = sum(1 for e in stream.events if e.kind == model.USER_MESSAGE)
+            prompts[stream.session_id] = prompts.get(stream.session_id, 0) + typed
     by_session: dict[str, list[tuple[float, bool]]] = {}
     for stream in streams:
         marks = by_session.setdefault(stream.session_id, [])
+        headless = prompts.get(stream.session_id, 0) <= 1
         for event in stream.events:
             if event.ts is not None:
-                prompt = event.kind == model.USER_MESSAGE and not stream.sidechain
+                prompt = not stream.sidechain and (
+                    event.kind == model.USER_MESSAGE
+                    or (headless and event.kind != model.TOOL_RESULT)
+                )
                 marks.append((event.ts.timestamp(), prompt))
     starts: dict[str, list[float]] = {}
     for session, marks in by_session.items():
@@ -323,6 +347,7 @@ WORKSPACE_MAX_DIRS = 5000
 #: Existing make targets or package scripts listed next to "this target does not exist".
 MAX_KNOWN_TARGETS = 12
 MAX_TARGETS_FILE_BYTES = 512_000
+_JUST_RECIPE_RE = re.compile(r"(?m)^@?([A-Za-z_][\w-]*)(?:[ \t]+[^:=\n]*)?:(?!=)")
 _MAKE_TARGET_RE = re.compile(r"(?m)^([A-Za-z0-9_][\w-]*)[ \t]*:(?![=:])")
 
 #: Sessions in which the same command must stay red for its failures to count in full,
@@ -485,22 +510,38 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
             )
     # A push turned down because the remote had moved on: routine once, and a habit worth
     # a line of guidance from ``RECURRING_RED_MIN_SESSIONS`` sessions on.
-    pushes: dict[str, set[str]] = {}
-    turned_down = [f for f in findings if "push_rejected" in f.detail]
-    for finding in turned_down:
-        for key in _command_keys(finding):
-            pushes.setdefault(key, set()).add(finding.unit)
-    for finding in turned_down:
-        if any(
-            len(pushes.get(key, ())) >= RECURRING_RED_MIN_SESSIONS for key in _command_keys(finding)
-        ):
-            finding.detail["push_rejected"] = "recurring"
-    # ... and one that was put right by pulling, and is no habit, was the loop working.
-    dropped: list[Finding] = [
-        f
-        for f in turned_down
-        if f.detail.get("push_rejected") != "recurring" and "push_recovered" in f.detail
-    ]
+    # So is a first push of a new branch without `-u`, put right with `--set-upstream`.
+    dropped: list[Finding] = []
+    for habit in ("push_rejected", "no_upstream", "hook_rewrote"):
+        pushes: dict[str, set[str]] = {}
+        turned_down = [
+            f
+            for f in findings
+            if habit in f.detail and (habit == "push_rejected" or "push_recovered" in f.detail)
+        ]
+        for finding in turned_down:
+            for key in _command_keys(finding):
+                pushes.setdefault(key, set()).add(finding.unit)
+        for finding in turned_down:
+            if any(
+                len(pushes.get(key, ())) >= RECURRING_RED_MIN_SESSIONS
+                for key in _command_keys(finding)
+            ):
+                finding.detail[habit] = "recurring"
+                if habit == "hook_rewrote":
+                    finding.summary = re.sub(
+                        r" failed \(.*$",
+                        " was stopped by a pre-commit hook that rewrote files; it went "
+                        "through on the next attempt",
+                        finding.summary,
+                        count=1,
+                    )
+        # ... and one that was put right at once, and is no habit, was the loop working.
+        dropped += [
+            f
+            for f in turned_down
+            if f.detail.get(habit) != "recurring" and "push_recovered" in f.detail
+        ]
     for finding in pending:
         fix = finding.detail.pop("fixed_by_command")
         recurs = any(
@@ -595,17 +636,38 @@ def _is_git(finding: Finding) -> bool:
     return finding.signal == signals.HUMAN_REWORK
 
 
+def _beside_ordinary(items: Sequence[Item]) -> list[Item]:
+    """The evidence left when ordinary command failures are set aside (all of it if none)."""
+    return [
+        (f, share)
+        for f, share in items
+        if not scoring.is_ordinary_failure(f) and not scoring.is_guardrail_hit(f)
+    ]
+
+
 def _score(items: Sequence[Item], exposed: set[str]) -> scoring.Score:
     """Score a target. Git evidence may raise a score, never lower it.
 
     A rework finding adds a friction "session" (the agent commit) that can pull
     the mean down, so the score from transcripts alone is the floor.
+
+    Ordinary command failures count in full only in episodes that have other
+    evidence too. In episodes of their own they may lift the score no further than
+    the cap for weak evidence: eight red test runs in other sessions next to one
+    real error are one real error.
     """
     sessions = exposed | {f.unit for f, _ in items}
     full = scoring.score_items(items, len(sessions))
     if scoring.weak_only(f for f, _ in items):
         # Nothing but signals that also accompany productive work: a lead, never an alarm.
         return dataclasses.replace(full, score=min(full.score, scoring.WEAK_ONLY_SCORE_CAP))
+    rest = _beside_ordinary(items)
+    if len(rest) < len(items):
+        beside = {f.unit for f, _ in rest}
+        kept = [(f, share) for f, share in items if f.unit in beside]
+        ceiling = max(scoring.score_items(kept, len(sessions)).score, scoring.WEAK_ONLY_SCORE_CAP)
+        if full.score > ceiling:
+            full = dataclasses.replace(full, score=ceiling)
     transcript_items = [(f, share) for f, share in items if not _is_git(f)]
     if len(transcript_items) == len(items) or not transcript_items:
         return full
@@ -845,6 +907,7 @@ class _Analysis:
         self.git_used = False
         self.dropped: list[tuple[int, float, str]] = []
         self.events_outside_repo = 0
+        self.events_elsewhere_in_repo = 0
         self._dirs_by_name: dict[str, list[str]] | None = None
         self.untimed_sessions_excluded = 0
         self.unreadable: list[tuple[Path, str]] = []
@@ -1079,6 +1142,48 @@ class _Analysis:
     def quote(self, text: str, limit: int) -> str:
         return redact.one_line(text, min(limit, max(self.options.excerpt_chars, 1)))
 
+    def _denied_by_rule(self) -> Callable[[str, Sequence[str], str], bool]:
+        """Does a ``permissions.deny`` rule of the repository's settings refuse a call?"""
+        rules = deny_rules(self.repo)
+        return lambda tool, commands, rel: rule_denies(rules, tool, commands, rel)
+
+    def _enclosing(self) -> Callable[[str], bool]:
+        """Is an absolute path in the git repository the scanned directory is part of?"""
+        tops = [to_posix(str(top)) for top in enclosing_repositories(self.repo)]
+
+        def inside(absolute: str) -> bool:
+            return any(absolute == top or absolute.startswith(top + "/") for top in tops)
+
+        return inside
+
+    def _delegated(self, streams: Sequence[Stream]) -> Callable[[str, float, float], list[str]]:
+        """Which repo files the subagents of a session changed between two moments.
+
+        A subagent's edits are in a stream of their own. For the agent that launched
+        it they are what its Task call did, and a correction that follows is about
+        them as much as about its own edits.
+        """
+        changes: dict[str, list[tuple[float, str]]] = {}
+        for stream in streams:
+            if not stream.sidechain:
+                continue
+            calls: dict[str, model.Event] = {}
+            for event in stream.events:
+                if event.kind == model.TOOL_CALL and event.op in (model.OP_EDIT, model.OP_WRITE):
+                    calls[event.call_id] = event
+                elif event.kind == model.TOOL_RESULT and event.ok and event.call_id in calls:
+                    call = calls.pop(event.call_id)
+                    when = event.ts or call.ts
+                    rel = self.resolver.resolve(call.path, call.cwd) if call.path else None
+                    if rel and when is not None:
+                        changes.setdefault(stream.session_id, []).append((when.timestamp(), rel))
+
+        def between(session: str, start: float, end: float) -> list[str]:
+            found = [rel for at, rel in changes.get(session, ()) if start <= at <= end]
+            return list(dict.fromkeys(found))
+
+        return between
+
     def display_path(self, path: Path | str) -> str:
         """Home shown as ``~`` and forward slashes on every platform."""
         return redact.redact_home(str(path)).replace("\\", "/")
@@ -1177,6 +1282,9 @@ class _Analysis:
             unit=self.unit,
             exists=lambda rel: self._disk_is_file(rel) is not None,
             workspace_dir=self.workspace_dir,
+            delegated=self._delegated(streams),
+            enclosing=self._enclosing(),
+            denied_by_rule=self._denied_by_rule(),
         )
         findings: list[Finding] = []
         dropped: list[tuple[int, float, str]] = []
@@ -1199,8 +1307,10 @@ class _Analysis:
                     skipped_events=full.skipped_events,
                     dropped=[d for d in full.dropped if d[0] in inside],
                     outside=[line for line in full.outside if line in inside],
+                    nearby=[line for line in full.nearby if line in inside],
                 )
             self.events_outside_repo += len(detection.outside)
+            self.events_elsewhere_in_repo += len(detection.nearby)
             findings.extend(detection.findings)
             dropped.extend(detection.dropped)
             source_key = str(stream.source)
@@ -1565,6 +1675,7 @@ class _Analysis:
                 # Calls that were refused or failed while acting outside the repository
                 # (`cd ../other && ...`, a file under /tmp): seen, and not counted.
                 "events_outside_repo": self.events_outside_repo,
+                "events_elsewhere_in_repo": self.events_elsewhere_in_repo,
             },
             "signals": [
                 {
@@ -1624,8 +1735,20 @@ class _Analysis:
         exposed = len(friction | self.sessions_of(self.exposure.get((kind, key), set())))
         level = scoring.confidence((s.session_id for s in result.sessions), signal_counts)
         capped = scoring.weak_only(found)
+        rest = [f for f, _ in _beside_ordinary(items)]
+        guarded = sum(scoring.is_guardrail_hit(f) for f in found)
+        ordinary = len(found) - len(rest)
         if capped:
             level = "low"  # evidence that is routine on its own is a lead, never a pattern
+        elif ordinary and rest:
+            # ... and next to real evidence it corroborates nothing: the sessions and the
+            # kinds of evidence that count are those of the rest
+            level = scoring.confidence({f.unit for f in rest}, {f.signal for f in rest})
+        limited = (
+            not capped
+            and ordinary > 0
+            and result.score < scoring.score_items(items, result.exposure_sessions).score
+        )
         return {
             "path": key,
             "kind": kind,
@@ -1639,6 +1762,8 @@ class _Analysis:
             "events": len(found),
             "est_minutes_lost": scoring.lost_minutes(found),
             "signals": dict(ranked),
+            # refusals by a hook or a deny rule after which the agent went another way
+            "guardrail_hits": guarded,
             "confidence": level,
             "why": scoring.explain(
                 ranked,
@@ -1648,11 +1773,15 @@ class _Analysis:
                 commits,
                 capped=capped,
                 episodes=len(units) - commits,
+                ordinary=ordinary - guarded if limited else 0,
+                guardrail=guarded,
+                rewritten=sum(scoring.is_hook_habit(f) for f in found) if capped else 0,
             ),
             "recommendations": [],
             "evidence": [],
             "score_detail": {
                 "capped": capped,
+                "ordinary_limited": limited,
                 "severity": result.severity,
                 "recurrence": result.recurrence,
                 "consistency": result.consistency,
@@ -1710,6 +1839,13 @@ class _Analysis:
                         text = path.read_text(encoding="utf-8", errors="replace")
                         names = _MAKE_TARGET_RE.findall(text)
                         break
+            elif holder == signals.TARGETS_IN_JUSTFILE:
+                for name in ("justfile", "Justfile", ".justfile"):
+                    path = base / name
+                    if path.is_file() and path.stat().st_size <= MAX_TARGETS_FILE_BYTES:
+                        text = path.read_text(encoding="utf-8", errors="replace")
+                        names = _JUST_RECIPE_RE.findall(text)
+                        break
             else:
                 path = base / "package.json"
                 if path.is_file() and path.stat().st_size <= MAX_TARGETS_FILE_BYTES:
@@ -1717,6 +1853,9 @@ class _Analysis:
                     names = [str(name) for name in scripts] if isinstance(scripts, dict) else []
         except (OSError, ValueError, AttributeError):
             return ()
+        # the one that was asked for comes first, so that a long list cannot cut it off
+        asked = {f.detail.get("no_target", "") for f in found}
+        names = [n for n in names if n in asked] + [n for n in names if n not in asked]
         return tuple(dict.fromkeys(names))[:MAX_KNOWN_TARGETS]
 
     def _decorate(self, entry: dict[str, Any], items: Sequence[Item]) -> None:
@@ -1740,7 +1879,7 @@ class _Analysis:
             quote,
             shares,
             self.guidance,
-            self._known_targets(key, found) if kind == model.COMMAND and quote else (),
+            self._known_targets(key, found) if kind == model.COMMAND else (),
         )
         entry["evidence"] = [self._evidence(f) for f in _pick_evidence(found, options.max_evidence)]
         transcript_sessions = entry["episodes"] - entry["agent_commits"]

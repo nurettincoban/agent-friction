@@ -14,7 +14,7 @@ import sys
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, TextIO
+from typing import Any, NoReturn, TextIO
 
 from agent_friction import __version__
 from agent_friction.compare import compare, render_compare
@@ -90,7 +90,8 @@ def _resolve_repo(args: argparse.Namespace, err: TextIO) -> None:
         return
     cwd = Path.cwd()
     root = _find_repo_root(cwd)
-    if root is not None and root != cwd:
+    if root is not None and root != cwd and getattr(args, "command", None) != "show":
+        # `show` is run again and again from wherever you are; the note is for maps.
         err.write(
             f"agent-friction: using the repository root {root} "
             "(pass . to map only this directory)\n"
@@ -157,6 +158,23 @@ def _use_color(choice: str, stream: TextIO) -> bool:
     if choice == "never" or os.environ.get("NO_COLOR"):
         return False
     return bool(getattr(stream, "isatty", lambda: False)())
+
+
+def _term_width(output: object, stream: TextIO) -> int:
+    """Terminal width for the table: COLUMNS or the tty size, else 100. Files get 100."""
+    if output is not None:
+        return 100
+    env = os.environ.get("COLUMNS", "")
+    if env.isdigit() and int(env) > 0:
+        cols = int(env)
+    elif getattr(stream, "isatty", lambda: False)():
+        try:
+            cols = os.get_terminal_size(stream.fileno()).columns
+        except (OSError, ValueError, AttributeError):
+            cols = 100
+    else:
+        cols = 100
+    return max(40, min(cols, 110))
 
 
 def _add_input_options(p: argparse.ArgumentParser) -> None:
@@ -235,8 +253,15 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
     )
 
 
+class _Parser(argparse.ArgumentParser):
+    """Put the error first: a full usage block above it buries the one line that matters."""
+
+    def error(self, message: str) -> NoReturn:
+        self.exit(2, f"{self.prog}: error: {message}\n(see `{self.prog} --help`)\n")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="agent-friction",
         allow_abbrev=False,
         description="Map where coding agents lose time, make mistakes, and need human "
@@ -399,6 +424,21 @@ def _note_removed_worktrees(repo: Path, err: TextIO) -> None:
         )
 
 
+def _is_shallow(repo: Path) -> bool:
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--is-shallow-repository"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and proc.stdout.strip() == "true"
+
+
 def _analyze(args: argparse.Namespace, repo: Path, err: TextIO | None = None) -> dict[str, Any]:
     from agent_friction.engine import AnalyzeOptions, NoTranscriptsError, analyze
     from agent_friction.gitsignals import DEFAULT_AGENT_PATTERNS
@@ -439,6 +479,11 @@ def _analyze(args: argparse.Namespace, repo: Path, err: TextIO | None = None) ->
         ) from None
     if err is not None and args.transcripts is None and not args.repo_alias:
         _note_removed_worktrees(repo, err)
+    if err is not None and not args.no_git and _is_shallow(repo):
+        err.write(
+            "agent-friction: note: this is a shallow clone, so the git history (human rework "
+            "of agent commits) is cut short; run `git fetch --unshallow` for the full map\n"
+        )
     if int(result.get("totals", {}).get("sessions", 0)) == 0 and not args.allow_empty:
         from agent_friction.engine import session_directories
 
@@ -624,7 +669,9 @@ def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         text = render_html(result)
     else:
         color = args.output is None and _use_color(args.color, stdout)
-        text = render_terminal(result, color=color, top=args.top)
+        text = render_terminal(
+            result, color=color, top=args.top, width=_term_width(args.output, stdout)
+        )
     _write(text, args.output, stdout)
     if args.output is not None:
         stderr.write(f"wrote {fmt} report to {args.output}\n")
@@ -700,6 +747,7 @@ def _cmd_show(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         result = _analyze(args, args.repo, stderr)
     output = None if args.output is None or str(args.output) == "-" else args.output
     color = output is None and args.format == "text" and _use_color(args.color, stdout)
+    width = _term_width(output, stdout)
     target = _target_in_repo(args.target, getattr(args, "repo", None))
     item = find_target(result, target)
     node = find_dir(result, target)
@@ -726,16 +774,16 @@ def _cmd_show(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         _write(json.dumps(doc, indent=2, sort_keys=True) + "\n", output, stdout)
         return EXIT_OK
     if item is not None and item.get("kind") != "dir":
-        text = render_detail(result, item, color=color)
+        text = render_detail(result, item, color=color, width=width)
     else:
         # A directory: its rolled-up subtree first, then friction attributed to the
         # directory itself (for example searches that came back empty there).
-        text = render_dir_detail(result, node, color=color) if node is not None else ""
+        text = render_dir_detail(result, node, color=color, width=width) if node is not None else ""
         if item is not None:
             text += (
                 "\nFriction attributed to the directory itself "
                 "(for example searches in it that found nothing):\n\n"
-            ) + render_detail(result, item, color=color)
+            ) + render_detail(result, item, color=color, width=width)
     _write(text, output, stdout)
     return EXIT_OK
 

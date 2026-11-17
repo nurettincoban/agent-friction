@@ -25,7 +25,7 @@ All notable changes to this project are documented here. The format follows
   environment failures and normal red-then-green work, which is not counted.
 - `agent-friction show`: the score breakdown, recommendations and evidence for one file,
   directory or command.
-- `agent-friction compare`: before/after comparison per exposed session, with `replaced`,
+- `agent-friction compare`: before/after comparison per exposed session, with `replaced`, `enforced`,
   `resolved`, `inactive` and `too-little-data` verdicts, and a `--fail-on-regression` gate.
 - `agent-friction sources`: list the transcripts that would be analysed, and why any were not.
 - `scan --fail-on SCORE` gate. Exit codes: 0 ok, 1 error, 2 usage, 3 gate.

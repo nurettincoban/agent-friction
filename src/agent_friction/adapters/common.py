@@ -137,7 +137,8 @@ def edit_pairs(
     added = frozenset(
         (digest(old), digest(new))
         for old, new in pairs
-        if (old.strip() and old != new and old in new) or is_toggle(old, new)
+        if (old.strip() and old != new and (old in new or only_adds_lines(old, new)))
+        or is_toggle(old, new)
     )
     return hashed, added
 
@@ -146,6 +147,19 @@ _SWITCH_VALUE_RE = re.compile(
     r"\b(?:true|false|on|off|yes|no|0|1|debug|info|warn|warning|error|verbose|quiet|none|null)\b",
     re.I,
 )
+
+
+def only_adds_lines(old: str, new: str) -> bool:
+    """Do the lines of ``old`` all survive in ``new``, in order, with lines added between?
+
+    A pure-insert diff: a debug print put between two statements, or at several
+    points of the text that was matched. Nothing that was there is changed or gone.
+    """
+    was, now = old.split("\n"), new.split("\n")
+    if len(now) <= len(was):
+        return False
+    rest = iter(now)
+    return all(any(line == other for other in rest) for line in was)
 
 
 def is_toggle(old: str, new: str) -> bool:
@@ -161,7 +175,14 @@ def digest(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8", "replace"), usedforsecurity=False).hexdigest()[:16]
 
 
+#: Colour and style sequences (`ESC [ ... m`), which split the words that are matched on.
+_SGR_RE = re.compile(r"\x1b\[[0-9;:]*m")
+
+
 def clip_output(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
+    """Tool output as it is stored: without colour codes, long output cut in the middle."""
+    if "\x1b" in text:
+        text = _SGR_RE.sub("", text)
     if len(text) <= limit:
         return text
     head = limit // 4
@@ -333,6 +354,9 @@ _DENIED_RE = re.compile(
     r"Claude requested permissions? to [^\n]{1,300}, but you haven't granted it yet"
     r"|Permission to use \S+(?: with command [^\n]*)? has been (?:auto-)?denied"
     r"|Permission for this (?:command|tool|action|tool use) (?:was|has been) denied"
+    # a deny rule on a file tool: "Permission to read /repo/.env has been denied."
+    r"|Permission to (?:read|edit|write|create|delete|search|list|fetch|access|modify) "
+    r"[^\n]{1,400}? has been (?:auto-)?denied"
     r"|\S* ?(?:PreToolUse|PermissionRequest):\S* hook (?:error|blocking error|denied)"
     r"|[^\n]{0,80}\bhook (?:blocking error|returned blocking error|blocked this)"
     r"|\S+ operation blocked by hook\b"

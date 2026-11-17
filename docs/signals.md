@@ -103,8 +103,12 @@ read as a complaint about the agent.
 below makes a message a *candidate*. It becomes a correction with confidence
 1.0 only if behaviour corroborates it:
 
-1. the agent had changed files (Edit/Write) in the turn the human reacts to,
-   **and**
+1. the agent had changed files in the turn the human reacts to: with Edit or
+   Write, with a shell command that succeeded and rewrites a file it names
+   (`sed -i 's/a/b/' src/app.py`, `cat > src/app.py <<EOF`, a redirection
+   into a file), or through a subagent it launched in that turn (the
+   Edit/Write calls in `<session>/subagents/*.jsonl` that succeeded between
+   the launching call and its result), **and**
 2. either the human names one of those files, **or** in the turn that
    follows the agent changes one of those same files again (an edit, a
    write, or a shell command that rewrites, removes or restores it: `sed -i`,
@@ -117,6 +121,15 @@ getting the error? If so edit src/app.py again": the sentence that carries
 agent's work** ("the tests are still failing on main since yesterday, can you
 look at ..."), and a **negation** ("that broke nothing as far as I can tell",
 "that broke no tests").
+
+A command that changes files without naming them (`ruff format .`, a
+codemod, a script) changed *something*, and the evidence says so instead of
+claiming a file was untouched: "names src/app.py, which a command in the
+preceding turn may have changed", and "not corroborated: which files the
+preceding turn changed is not known" where the human names none. Such a
+candidate is a correction only if the human blames a file and the agent
+then goes and changes it. A command that failed, or one that only reads
+(`grep foo src/app.py`), changed nothing.
 
 A candidate without corroboration (nothing was changed before it, the agent
 went on to other things, or the session ends there) is not a
@@ -134,8 +147,9 @@ corroborated: ...").
   - "you broke / removed / deleted / forgot / missed / ignored / overwrote",
     "you've broken / removed / forgotten ..." (not "you forgot nothing"),
     "you didn't run | read | follow | use | fix | check ..." (not "you didn't
-    do anything wrong"), "you shouldn't have", "you weren't supposed", "you
-    keep <doing>";
+    do anything wrong"), "you shouldn't have", "you were / weren't supposed
+    (to)" (not "you are supposed to be careful with migrations"), "you keep
+    <doing>";
   - "you're editing the wrong file | branch | directory | function ...", "you
     changed the wrong thing | part | section | field ...";
   - "I told you", "I already said", "I asked you to", "I said use / don't /
@@ -143,6 +157,9 @@ corroborated: ...").
     you to" (not "I didn't ask before, but ..."), "I didn't want that". Not
     "I told you about X", and not when the sentence ends by asking for
     confirmation ("I told you to use pnpm, right?");
+  - "as / like I said | told you | mentioned | explained | asked before |
+    earlier | already | above", closing its clause ("As I said before, the
+    public names stay"; not "like I said earlier today in standup, ...");
   - "not | isn't | wasn't what I asked | wanted | meant | said";
   - "why did you delete | remove | change | add | use | skip | ignore ...";
   - an undo of the agent's own change: "revert" / "undo" / "roll back" at the
@@ -182,7 +199,9 @@ corroborated: ...").
     don't use moment in this codebase, use date-fns"), "don't use X, use Y"
     ("don't use any here, use unknown"), "never" plus something an agent does
     ("never commit directly to main"; a fixed list of verbs; not "never
-    mind", "never seen this"), and a leading "again:" ("again: never ...").
+    mind", "never seen this"), and a leading "again:" ("again: never ...")
+    or "Again, we use | use | I said ..." ("Again, we use pnpm here not npm";
+    not "Again, thanks" or "Again, please run the tests").
     Like every verdict they make a correction only if the human names a file
     the agent changed or the agent goes back to one; otherwise they are a
     probable correction;
@@ -243,7 +262,26 @@ corroborated: ...").
     use that instead", "again, no mocks in these tests", "can you not change
     the public API? restore the old name" (`instruction_cues`; labels
     "don't …", "I don't want …", "you're over… this", "use that instead",
-    "no … here", "can you not …", "restore the old …"). Behaviour decides:
+    "no … here", "can you not …", "restore the old …"). The same holds for
+    what a change did, said as it is found out, and for a question about
+    work in progress: "the tests fail now", "Now the build fails", "it now
+    crashes on startup" (an outcome with "now"), "this doesn't compile" (a
+    pronoun and "doesn't compile | build | start | run | pass | import |
+    load"; not "It doesn't compile on Windows"), "Why are you using
+    requests? We use httpx" ("why are you using | changing | adding |
+    skipping ..."), "we use pnpm, not npm", and an undo or a verdict by file
+    name: "Revert src/app.py", "src/app.py is still failing" (labels "it
+    fails now", "why are you …", "we use X, not Y", "revert/still failing,
+    by file"), "The test in tests/test_app.py still fails, please fix it"
+    (an outcome, where it is, and "still ...": label "still failing, in a
+    file"; not "... fails on main"), and one construct named in place of
+    another: "Instead of a class, use a function in src/app.py" ("instead
+    of X, use | write | keep | make it ...": label "instead of X, use Y";
+    not "Instead of the README, start with the changelog", and not "Use a
+    function instead of a class in the new module"). Without "now" or a pronoun the same words describe a bug to
+    work on ("the build fails on Windows, can you look", "The app crashes
+    when the list is empty"), and "Revert README.md to last week's version"
+    is a task. Behaviour decides:
     if the agent had changed files in the turn before and changes one of
     them again in reply, the message is a correction (confidence 1,
     `corroborated: followed`, attributed to the files it went back to). If
@@ -338,7 +376,20 @@ come from a fixed vocabulary that names the kind of phrase ("that's wrong",
 never the human's own words: the summary is also shown without excerpts.
 
 **Attribution:** files the agent touched in the preceding turn that the
-message names (by path, or by bare file name if unambiguous). If it names
+message names (by path, or by bare file name if unambiguous). Files a shell
+command rewrote and files a subagent of that turn changed are files of the
+turn like any other: "You broke src/app.py" after `sed -i ... src/app.py`
+names a file the agent had changed, and `git checkout -- src/app.py` or
+`git restore src/app.py` in reply is the agent going back to it ("the agent
+then ran `git checkout` on src/app.py"). A file of the
+repository that the human names and the agent had *not* touched yet ("no,
+stop using print in packages/api/main.py, I told you this already") gets
+the correction in two cases, neither with "wrong file": the agent then goes
+and changes that file (the correction is certain, "the agent then changed
+..., the file the user named"), or nothing had been edited in the preceding
+turn, so there is no other work it can be about (it stays probable unless
+the agent then changes the file, but it is listed on that file and no
+longer unattributed). If it names
 none and the agent then went back to some of the files it had changed, the
 correction belongs to exactly those files. A probable correction is split
 evenly over the files edited in the preceding turn (the 5 most recent). If
@@ -369,7 +420,9 @@ strong wording.
 **False negatives (many, by design):** a real correction after which the
 agent fixes a *different* file, runs only commands, or the session ends (it
 is kept as probable); a correction of something the agent did with a command
-rather than an edit ("No, I told you not to push"); a real "Stop." or "No,
+that changes no file it names ("No, I told you not to push"; a formatter or
+a script run over the tree, unless the human blames a file and the agent
+then changes it); a real "Stop." or "No,
 ..." right after the agent asked something; corrections that do not open the
 message ("I ran it. It's still failing."); a verdict with a long subject ("the
 checkout page is still broken"); polite or indirect corrections ("hmm, could
@@ -665,8 +718,28 @@ in its first 200 characters (no, not, don't, stop, wrong, instead, never,
 wait, why, revert, undo, actually, rather), they cut in to extend the task,
 not because the agent was going wrong. The interrupt is dropped.
 
+*Stopping a command that was still running* is judged differently from
+cutting in after it had finished (the tool result is the harness's
+"interrupted" notice):
+
+- **A server or watcher** (`npm run dev`, `uvicorn`, `... --watch`; the same
+  list as for timeouts): it never returns, so stopping it is the only way
+  on. The event is about how the command was run: it goes to the command
+  with a share of 0.3 (`STOPPED_SERVER_SHARE`, detail `server`), **no file
+  is blamed**, whatever had been edited, and two or more give
+  `run-it-in-the-background` on the command's row.
+- **Any other command**: if the human's next message carries no correction,
+  no instruction that redirects and no word of objection (the list above),
+  as in "looks good, thanks. now commit", they had seen enough of it and
+  **nothing is recorded**. With an objection, or with nothing said
+  afterwards, the event stands as described under Attribution.
+- **No time is claimed** for a stopped command in either case: how long it
+  had been running is how long the human let it run.
+
 **False positives:** people also interrupt because they ran out of time, or
-to add information in other words than those above.
+to add information in other words than those above. **False negatives:** a
+redirect phrased without any of the objection words after a running command
+was stopped ("use the other branch") is not recorded.
 
 ## `human-rework` — Human rework (git)
 
@@ -685,7 +758,28 @@ days by default), **and** that human commit either
   next one to touch the file), or
 - *says it is a repair:* its subject starts with or contains `fix`, `fixes`,
   `fixed`, `revert`, `undo`, `rollback`, `hotfix`, `regression`, `broke`,
-  `broken`, `oops`, `mistake` (`FIX_SUBJECT_RE`).
+  `broken`, `oops`, `mistake` (`FIX_SUBJECT_RE`). A subject alone counts only
+  if the commit also removes or changes lines of the file: a `fix: ...` that
+  only adds lines to it (`+N/-0`) put new code next to the agent's and took
+  nothing back, so it is not rework unless the lines went inside what the
+  agent wrote (the first case). A commit that says it reverts, undoes or
+  rolls back (`UNDO_SUBJECT_RE`) counts either way: taking back a deletion
+  only adds lines.
+
+**In plain terms, what a human commit must do to count:**
+
+| The human commit ... | Counts? |
+| --- | --- |
+| has any subject, and one of its hunks changes, deletes, or inserts into the middle of lines the agent commit added or modified in that file | yes (`overlap`) |
+| has a subject without a repair word and only touches other lines of the file, or appends after the agent's last line | no |
+| has a repair word in its subject (`fix`, `revert`, ...) and removes or changes at least one line of the file, anywhere in it | yes (`subject`) |
+| has a repair word in its subject and only adds lines to the file (`+N/-0`), outside what the agent wrote | no |
+| says it reverts, undoes or rolls back, and only adds lines | yes (`subject`) |
+| announces new work (`feat: ...`, "add ...") and rewrites the agent's lines more than 2 days later | no |
+
+So a commit that is not called a fix counts on one ground only: it rewrote
+at least one line the agent commit had written, and one such hunk is
+enough. There is no minimum number of lines or share of the file.
 
 A commit whose subject says a tool rewrote the files (`style: ...`, `format:
 ...`, `lint: ...`, "run black", "apply prettier", "reformat ...", `gofmt`,
@@ -847,7 +941,9 @@ a different version was written in between. Strings are compared by hash.
 
 *Temporary debugging is not a revert:* if the earlier edit only **added**
 text (its old string survives inside its new string, e.g. a `print` after an
-existing line), a command ran successfully while it was in place, and the
+existing line; or every line of its old string survives in the new one, in
+order, with lines added in between: a `print` put between two statements,
+or at several points of the text that was matched), a command ran successfully while it was in place, and the
 edit is then exactly undone, nothing is recorded. The agent looked at
 something and cleaned up after itself. The same goes for a **switch** that
 is flipped, run with and flipped back: a one-line replacement that differs
@@ -919,7 +1015,7 @@ The cases, in the order of the rules below:
 | Red, an edit, green (also by another command for the same job) | dropped (`dropped_red_runs`) | nothing | never |
 | Red, a setup step with no file edited, green | kept, `fixed_by_setup` | 1.0, until it passed | 2+ events: `document-the-setup-step` |
 | Failed, then passed untouched 3+ times, or a probe of a starting server | dropped (waiting) | nothing | never |
-| Read-only inspection (`ls`, `grep`, `git status`), a `cd` that failed, a time-boxed server start | not a failure (a failed `cd` is a `path-miss`) | nothing | never |
+| Read-only inspection (`ls`, `grep`, `git status`), a `cd` that failed, a time-boxed server start | not a failure (a failed `cd` is a `path-miss`). One exception: the shell could not find the inspection program itself (`rg: command not found`, also behind a pipe): that is a setup/invocation error with `not_found` like any other missing program, and if the agent then does the job with another tool (`grep` or `ag` after `rg`, `find` after `fd` or `tree`, `python3` or `node` after `jq`, `cat` after `bat`, `curl` after `wget` or `gh`), that tool is recorded as `works_as`. `rg` exiting 1 because nothing matched, `which rg`, `type rg` and `command -v rg` stay looks | nothing | never |
 
 Which step of a line is blamed, and how a status hidden behind a pipe is
 judged, is under "Which step printed it" and "The exit status may not be the
@@ -931,12 +1027,18 @@ command's" below.
   found`, `bash: ./x.sh: No such file or directory | Permission denied`,
   `ModuleNotFoundError: No module named ...`, `ImportError while loading
   conftest`, `can't open file`, `Cannot find module`, `error: unrecognized
-  arguments`, `make: *** No rule to make target`, `npm error Missing script`, yarn's
+  arguments`, `make: *** No rule to make target`, just's `Justfile does not
+  contain recipe`, `npm error Missing script`, yarn's
   `error Command "test" not found.`, `ERR_PNPM_NO_SCRIPT` (each at the start
   of its line, as the tool prints it: a sentence that quotes the words
   further in is not one), npm's `Unsupported
   engine` / `EBADENGINE` (the wrong Node version is a setup problem),
-  `fatal: not a git repository`, `curl: (N) ...`, and install/build failures
+  `fatal: not a git repository`, `curl: (N) ...`, a launcher that could not
+  start its program (uv's `error: Failed to spawn: pytest`, poetry's
+  `Command not found: pytest`), a machine that is not set up for the job
+  (`ensurepip is not available`, npm's `code EPERM` / `EACCES` /
+  `SELF_SIGNED_CERT_IN_CHAIN`, git's `Author identity unknown` and `gpg
+  failed to sign the data`), and install/build failures
   (`npm error code ERESOLVE | ETARGET | ...`, `Failed to build ...`, `error:
   subprocess-exited-with-error`, `ERROR: Failed building wheel`, `No solution
   found when resolving dependencies`). The full list is
@@ -971,6 +1073,17 @@ command's" below.
     package.
 
   If neither happens (the session ends red), it stays ordinary.
+- *A watcher is not a slow command:* when the harness timeout hits a command
+  whose output shows it had finished and was waiting for the next change
+  ("Watch Usage: Press w to show more", "Waiting for file changes...",
+  "watching for file changes", "press q to quit"; `WATCH_OUTPUT_RE`), or
+  whose line asks for a watcher, the event says so (detail `watcher`: "ran
+  until the harness timed it out: it was in watch mode, waiting for file
+  changes, and never exits on its own"). The advice is the command that
+  worked instead where one did in 2+ sessions (`CI=true npm test`, `npm test
+  -- --watchAll=false`, `npx vitest run`: an option after `--` counts as an
+  added flag, and a replacement is quoted as typed where it is short), and
+  otherwise `run-it-once-not-in-watch-mode`; never "give it more time".
 - *A foreground server is not a failed command:* when the harness timeout hits
   a command that never exits by design (`npm run dev`, `vite`, `uvicorn`,
   `flask run`, `rails s`, `manage.py runserver`, `docker compose up` without
@@ -999,6 +1112,10 @@ command's" below.
 - *"command not found" names its program:* if the shell says which program
   it could not find and that program is a step or pipeline stage of the line
   (`cat x | jqq . | sort`), the event is keyed to that stage.
+- *Colour codes are removed first.* Tool output is stored without ANSI
+  colour and style sequences (`ESC[31m`, `ESC[0m`, ...), so `pytest
+  --color=yes`, `uv` and `cargo` are read like their plain output: a summary
+  line or an "error:" prefix split by colour codes is still recognised.
 - *An exit status that is not the command's own is no verdict.* In `pytest
   2>&1 | tail -5` the shell reports the status of `tail`; in `make test; echo
   done` that of `echo`; `pytest || true` always succeeds. When the command a
@@ -1026,7 +1143,16 @@ command's" below.
     the document's text and the command's output cannot be told apart, and a
     document about errors quotes them. `pytest > out.log 2>&1; tail out.log`
     prints what the run itself wrote and is judged as usual. An echoed
-    status (`; echo "exit $?"`) still counts;
+    status (`; echo "exit $?"`) still counts. Likewise a traceback at the
+    end of the output makes the command red only if the end is its own:
+    not when the last step of the line prints text written elsewhere
+    (`...; git log -1`, `git show`, `git diff`, `cat`/`tail`/`grep` of a
+    file, `docker logs`), where a commit message or a log may quote one.
+    And only a traceback as the interpreter prints it, starting in the first
+    column: one that is indented or quoted (`      > Traceback (most recent
+    call last):` ... `      > KeyError: 'sku'`) is being shown, not raised,
+    as in a report, a log excerpt or this tool's own evidence (`agent-friction
+    show ... | head`);
   - **green** if it shows a passing summary (`N passed`, `Tests: N passed`,
     `ok pkg 0.1s`, `test result: ok`, `All checks passed`, `Success: no
     issues`, `Found 0 errors`, `Found N errors (N fixed, 0 remaining)`, `N
@@ -1102,9 +1228,17 @@ command's" below.
     failure in name resolution`, `getaddrinfo ENOTFOUND`): there is no
     network where the agent runs, or that host is not allowed;
   - `variable`: an environment variable is not set. `Missing required
-    environment variable X`, `X: unbound variable`, `X is not set`, a bare
+    environment variable X`, `X: unbound variable`, `X is not set`, "set a /
+    an / the X environment variable" (wrangler: "it's necessary to set a
+    CLOUDFLARE_API_TOKEN environment variable"), a bare
     `KeyError: 'X'` (upper-case names only). The name is shown only where
     excerpts are.
+
+  One status counts without any words: `curl` that exits 7 (could not
+  connect) or 28 (timed out) and printed nothing, as `curl -s` does, is a
+  `service` failure; the port is read from the URL on the command line
+  ("the service on port 3000"). Other statuses and other programs are judged
+  by their output as above.
 
   Such a failure blames no file on the command line. It is dropped like any
   red run when an edit and then a green run follow (the host name was wrong
@@ -1172,7 +1306,12 @@ command's" below.
   And when the command is a server or a watcher (`npm run dev`, `uvicorn`,
   `tsc -w`, `jest --watch`, ...; `DEV_SERVER_RE`, `--watch` / `-w`): it never
   exits by itself, so the time box ending it is the plan, whatever it had
-  logged. For any other command with output that is not such a banner, with
+  logged. A watcher that was killed (`npm test -- --watch` ending with exit
+  130, 137 or 143, cut off by the harness's time limit, or ended without a
+  word) is the same thing without the time box: how it was ended says
+  nothing about the tests, so it is not a red run and cannot be the red half
+  of a flaky pair. One whose output shows a red result is judged like any
+  other run. For any other command with output that is not such a banner, with
   another exit status, or without `timeout` in front, it is judged like any
   other run. (An invocation error in the output is always a failure.)
 - *A `cd` that failed:* in `cd missing-dir && npm test`, when the shell
@@ -1190,22 +1329,47 @@ command's" below.
 - *Which step printed it:* on a line with several commands the output is
   matched to the step it belongs to (`failing_step`, `step_verdicts`), in
   this order:
+  0. a runner that says what it does *not* have: `make: *** No rule to make
+     target 'typecheck'.  Stop.`, npm's `Missing script: "typecheck"`,
+     cargo's ``error: no such command: `nextest` `` and just's ``Justfile
+     does not contain recipe `typecheck` `` are about the step of that
+     runner whose arguments contain the name: in `make test && make
+     typecheck` that is `make typecheck`, not the first `make` on the line.
+     One step with several targets (`make lint typecheck`, `make -C
+     packages/web lint typecheck`) is keyed by the target that is missing
+     (`make typecheck`), not by the first one. If no step asks for the name
+     (`make test && make lint` answering "No rule to make target
+     'typecheck'": a prerequisite of one of them), no step is blamed: the
+     event is marked `ambiguous_step` and is no "missing target" (a single
+     step keeps the event, as a broken Makefile);
   1. a runner that names its target or script: `make: *** [Makefile:20:
      test] Error 1` is about the `make` step whose target is `test`, or about
      the one aggregate target on the line that may include it (`make
      check`); `npm ERR! Test failed.`, ``npm error Lifecycle script `lint`
      failed`` and `npm ERR! shop@1.0.0 lint: ...` are about `npm test` and
      `npm run lint` (`named_steps`); and git says which of its commands gave
-     up: in `git merge origin/main && git push`, `! [rejected]` / `failed to
+     up; a Python traceback that begins in `<string>` or `<stdin>` was
+     raised by the one inline snippet on the line (`agent-friction show x
+     --json | python -c "..." && agent-friction scan`: the `KeyError` is the
+     snippet's, keyed `python <inline>`, not the tool's that fed it or
+     followed it; a traceback out of a file, or one printed indented by
+     something else, pins nothing): in `git merge origin/main && git push`, `! [rejected]` / `failed to
      push some refs` is about `git push`, `CONFLICT (...)` / `Automatic merge
-     failed` about `git merge`;
+     failed` about `git merge`; and a launcher that could not start its
+     program names it: ``error: Failed to spawn: `mypy` `` in `ruff check .;
+     uv run mypy src; echo done` is about `uv run mypy`, a setup error even
+     though the line exits 0 (only when exactly one launched command on the
+     line runs that program);
   2. a check's own summary (`Tests: 1 failed`, `1 failed, 40 passed in 2s`,
      `Found 3 errors`): it outranks the runner's generic line. In `npm run
      lint && npm test 2>&1 | tail -5` that ends in `Tests: 1 failed` and `npm
      ERR! Test failed.`, the red step is `npm test`, although `npm ERR!` fits
      `npm run lint` just as well;
   3. the runner's generic line (`npm ERR!`, `make: ***`, `error: could not
-     compile`), for the first step it fits, as before.
+     compile`), for the first step it fits, as before;
+  4. where the output decides nothing and the line ends in `; last` with a
+     non-zero status, the status is that last step's own: `make build;
+     python3 -c "..."` failing is the snippet failing.
 
   The excerpt of such a line ends at the line that decided it: the red
   step's own verdict, or before it a line that reads as a setup/invocation
@@ -1257,7 +1421,18 @@ command's" below.
   same turn (`npm test` after the edit) is the agent verifying its fix
   another way, and the red run is dropped. Not for a checker that could not
   run at all (a setup/invocation error), not across turns, and not for a
-  red test: lint passing says nothing about it. A failure stays on the record when the
+  red test: lint passing says nothing about it. A **filtered re-run that
+  prints nothing** closes the loop as well, when something was changed since
+  the red run: the same command through a filter that selects only failure
+  lines (`pytest | grep -E "^FAILED|^E  "`, `... | rg 'error|panicked'`;
+  `grep` exits 1 for "nothing matched") has no failures left to show, and a
+  type checker or linter that is silent when clean (`npx tsc --noEmit |
+  head`) has nothing to say. The earlier red run is dropped
+  (`totals.dropped_red_runs`). Not when nothing was changed in between
+  (silence then proves nothing and the red run stays), not for a filter that
+  asks for passes or for both (`grep passed`, `grep -E "passed|failed"`,
+  `grep -v`, `grep -c`), and not for a test runner behind `tail` or `head`,
+  which always prints something when it ran. A failure stays on the record when the
   command goes green with nothing but looks and other checks in between
   (flaky, or fixed outside the transcript), never goes green in the session,
   or was part of a [retry loop](#retry-loop--retry-loop).
@@ -1322,7 +1497,29 @@ command's" below.
     treated as if nothing had run: the red run stays what it was, and a
     test that then passes untouched is judged by the flaky rule;
   - **version control** (`git`, `gh`) is never the fix: the failure is
-    dropped.
+    dropped;
+  - **a command run to be read** (`mytool dump | head -3`, `... | less`,
+    `... | grep x`: piped into a pager or filter) is a look and never the
+    fix, unless it is a known setup step (`npm install | tail -3`).
+
+  **It has to be the line that failed which passes.** A command in between
+  gets the credit only if the green run is the red one again:
+  - for a known setup step, the same things named (switches aside; the
+    green run may name fewer: `pytest` after `pytest tests/test_a.py -x`);
+  - for any other command, the same argument line, a launcher or
+    activation in front aside (`uv run pytest -q` is `pytest -q`).
+
+  Otherwise the agent corrected its own invocation, and the failure is
+  dropped as normal work, whatever ran in between: `python
+  scripts/analyze.py --month 2026-13` (ValueError), `mytool dump`, `python
+  scripts/analyze.py --month 2026-12`. For **ad-hoc code** (`python -c`, a
+  heredoc, and what is written on the line of `psql -c`, `mysql -e`,
+  `sqlite3`, `jq`, `awk`, `sed`) the text of the snippet is part of the
+  line: a snippet that failed and another that passed is the agent
+  rewriting its code, an edit like any other, and dropped, with or without
+  a command in between. The same goes for a command with no role as a
+  check (a script, a tool) that failed and then passed with other
+  arguments and nothing changed.
 
   A setup step that succeeds is never itself "the check going green": `npx
   playwright install` running fine says nothing about `npm run e2e`.
@@ -1340,7 +1537,8 @@ command's" below.
   the advice is that step, never both), it is a standing failure, not "a red test during development":
   those failures count in full, claim their run time, are attributed to the
   test file too if it exists, and lead to `say-if-it-is-known-broken` ("fix
-  it, or mark it as a known failure and say so"). The test is named only
+  it, or mark it as a known failure and say so"). The advice is given once: on
+  the test file's row, or on the command's row for a test without a file. The test is named only
   with excerpts: its name comes from command output. Names are read from
   pytest (`FAILED tests/test_a.py::test_x`), go (`--- FAIL: TestX`), jest
   (`● cart › adds an item` under `FAIL src/cart.test.ts`, named
@@ -1368,6 +1566,13 @@ command's" below.
   fixed, the branch was behind. Below 3 episodes such a push is not
   reported at all (it is in `totals.dropped_red_runs`). A push refused for want of
   credentials is an `auth` failure as above.
+- *A first push without an upstream:* `git push` answering "The current
+  branch ... has no upstream branch", followed by `git push --set-upstream
+  ...` (or `-u`) going through, is handled the same way (detail
+  `no_upstream`, wording "the branch had no upstream to push to"): dropped
+  below 3 episodes, and from 3 on a habit that gets `push-with-upstream`
+  ("push a new branch with `git push -u origin HEAD`, or set
+  `push.autoSetupRemote` where agents run"). No time is claimed.
 - *A program that is only there by its path:* `zebractl: command not found`
   followed by `./bin/zebractl ...` succeeding records `works_as:
   ./bin/zebractl`, and the advice is "use `./bin/zebractl`, not `zebractl`"
@@ -1464,8 +1669,26 @@ command's" below.
   nothing changed is dropped (see [retry loop](#retry-loop--retry-loop)).
 - *`git commit` routines:* "nothing to commit" is a no-op and not recorded. A
   commit stopped by a pre-commit hook that reformatted files ("files were
-  modified by this hook") is dropped when the next `git commit` succeeds; a
-  hook that rejects the commit for another reason is an ordinary failure.
+  modified by this hook") is dropped when the next `git commit` succeeds,
+  unless that happens in 3 or more sessions: then every session pays a round
+  trip for it, and the events are kept as weak evidence (detail
+  `hook_rewrote: recurring`; "`git commit` was stopped by a pre-commit hook
+  that rewrote files; it went through on the next attempt"; score capped at
+  19, no time claimed) with the advice `format-before-committing`, naming
+  the hook ids pre-commit printed. A hook that rejects the commit for
+  another reason is an ordinary failure.
+- *Selecting no tests is not a failure:* `pytest -k name` / `-m marker`
+  that exits 5 because everything collected was deselected ("12 deselected
+  in 0.10s", "no tests ran, 12 deselected", "12 deselected / 0 selected") is
+  not recorded: the selection missed, nothing was red, and it must not add
+  to the setup failures of `pytest`. Exit 5 with nothing collected at all
+  ("collected 0 items", "no tests ran") is still an ordinary failure.
+- *A setup step on the same line:* `npm test` fails and `npm install; npm
+  test` (or `&&`) then passes with no file edited: the setup step in front
+  of the command on the line that passed is what the red run lacked
+  (`fixed_by_setup`, "run `npm install` before `npm test`"), exactly as when
+  it is run as a call of its own. Only steps that prepare something count
+  (`is_setup_command`), and not one the failed line already had.
 - *Which step of a chain failed:* for `a && b` the exit status does not say
   whether `b` ever ran. The output is matched against what each kind of step
   prints (`STEP_SIGNATURES`: `npm error code E401`, `Failed to build`,
@@ -1500,6 +1723,17 @@ command's" below.
   run on a script outside it (`python3 /tmp/x/repro.py`). A `cd` that
   cannot be followed (`cd -`, `cd "$DIR"`) changes nothing. The same applies
   to declined and denied commands.
+  "Ran outside the repo" is about whose failure it is, not about what the
+  command may have done. A script that lives elsewhere but was run with the
+  working directory inside the repo (`python /tmp/sp/p1.py`, `uv run python
+  /tmp/p.py`, `python ~/bin/fix.py`, also as one step of a `;` chain that
+  writes the script first) can patch the repo's files like any in-repo
+  script, so it counts as "may have changed something" for everything that
+  asks whether anything changed between a red and a green run: red, such a
+  script, green is the development loop, not a flaky test, and a retry loop
+  is broken by it. Only a step that really ran somewhere else (`cd /tmp/sp &&
+  python p1.py`) and looks (`cat /tmp/sp/p1.py`) leave "nothing changed"
+  standing.
 - *... and commands that go into the repository are:* the same rule in the
   other direction. A session started in a parent directory (`~`, a monorepo
   root) whose command is `cd repo && make build` or `cd /abs/repo && make
@@ -1611,7 +1845,9 @@ blocked by hook: ...", "Bash operation blocked by hook: ..."), or a safety
 check ("Permission for this command was denied by ..."), or the harness
 refusing a command pattern outright ("Blocked: sleep 30 followed by: ...";
 variant `blocked`, with advice to document the alternative it suggests rather
-than to add an allow rule). Who refused is said where the transcript says
+than to add an allow rule; attributed to the step the message names first,
+here `sleep`, not to whatever the line ends in, and to no command if it
+names none). Who refused is said where the transcript says
 it: "denied by the auto-mode classifier" (variant `classifier`: "Permission
 for this action was denied by the Claude Code auto mode classifier") and
 "denied by a built-in safety check" (variant `safety`), each only when the
@@ -1636,6 +1872,30 @@ names in words of its own, else the first destructive step, so `ls build; rm
 -f build/out.bin` is keyed to `rm`. The harness usually quotes the whole
 command line in its message; that quotation is ignored when looking for the
 step it names).
+
+**A guardrail that holds is weak evidence.** A refusal by a hook, or one
+that a `permissions.deny` rule of the repository's `.claude/settings.json`
+matches, is there on purpose (detail `deliberate`: `hook` or `rule`). If
+the agent never got the refused thing to run afterwards in that session
+(the same command; the same file changed by any tool) and went on to
+something else, the event is a *guardrail hit* (detail `guardrail`): the
+summary ends "; the agent then used `make test`" (a successful command of
+the same job and family that followed, detail `alternative`) or "; the
+agent moved on". It weighs 0.3, does not count towards confidence, cannot
+lift a row past 19 on its own, and is counted per row in `guardrail_hits`.
+The advice is `the-guardrail-works` ("The guardrail works; agents still try
+`pytest` first"), with the alternative, the hook's own stated reason
+(quoted, so not without excerpts) and the instruction line that already
+names the alternative. In the other direction: the same command running
+later, or the same file changed by `sed -i` after an Edit was refused
+(detail `got_through`), is a guardrail that leaks and stays a full event;
+so does a refusal the session ends on. A missing permission, or a "has been
+denied" that no deny rule of the settings accounts for, is never a
+guardrail hit. For none of the deliberate refusals is an allow rule
+suggested (see methodology, "Guardrails that hold").
+
+**Time:** the refusal itself, call to result. The agent's thinking before
+its next call is not counted.
 
 **False negatives:** harnesses and hooks word their refusals freely; only the
 shapes above are recognised, anything else that is flagged as an error is

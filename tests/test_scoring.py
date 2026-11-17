@@ -320,3 +320,25 @@ def test_baseline_says_which_files_had_nothing_to_be_compared_with() -> None:
     # the same file next to 30 quiet visits elsewhere has a rest to stand out from
     busy = scoring.baseline({"only.py": (3, 3, 6), **{f"f{i}.py": (3, 0, 0) for i in range(10)}})
     assert busy.above == ("only.py",) and busy.sparse == ()
+
+
+def test_ordinary_failures_are_named_in_the_explanation() -> None:
+    counts = [(signals.COMMAND_FAILURE, 5)]
+    text = scoring.explain(counts, 4, 4, "low", ordinary=4)
+    assert text.endswith(
+        "4 of the events are ordinary failures (a red test, a probe that answers no): they do "
+        "not count towards confidence, and in sessions with nothing else they cannot lift the "
+        "score past 19."
+    )
+    assert "1 of the events is an ordinary failure" in scoring.explain(
+        counts, 4, 4, "low", 0, False, 0, 1
+    )
+    assert "ordinary" not in scoring.explain(counts, 4, 4, "low")
+    # a capped row says the stronger thing instead
+    assert "ordinary failures" not in scoring.explain(counts, 4, 4, "low", capped=True, ordinary=4)
+    red = finding(signals.COMMAND_FAILURE)
+    red.detail["variant"] = "ordinary"
+    assert scoring.is_ordinary_failure(red)
+    red.detail["recurring_red"] = "1"
+    assert not scoring.is_ordinary_failure(red)
+    assert not scoring.is_ordinary_failure(finding(signals.EDIT_THRASH))

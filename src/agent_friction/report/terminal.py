@@ -139,6 +139,27 @@ def _hotspot_rows(
     label: str = "path",
 ) -> list[str]:
     lines: list[str] = []
+    # Narrow terminals drop the bar and the events column; the top signal is cut to fit.
+    if width < 86:
+        path_w = max(12, width - 42)
+        sig_w = max(8, width - 25 - path_w)
+        lines.append(st.dim(f"  {'score':<5} {label:<{path_w}} {'sess':>4} {'lost':>7}  signal"))
+        for h in items:
+            score = float(h.get("score", 0))
+            sig = ", ".join(f"{sid}×{n}" for sid, n in top_signals(h, 1))
+            if len(sig) > sig_w:
+                sig = sig[: sig_w - 1] + "…"
+            conf_mark = {"high": "●", "medium": "◐"}.get(h.get("confidence", "low"), "○")
+            lines.append(
+                "  "
+                + st.heat(score, f"{score:>5.1f}")
+                + f" {_truncate(str(h.get('path', '')) + gone_note(h), path_w):<{path_w}}"
+                + f" {h.get('sessions', 0):>4}"
+                + f" {fmt_lost(float(h.get('est_minutes_lost', 0))):>7}  "
+                + st.dim(f"{conf_mark} ")
+                + sig
+            )
+        return lines
     path_w = max(24, min(48, width - 62))
     header = f"  {'score':<16} {label:<{path_w}} {'sess':>4} {'events':>6} {'lost':>7}  top signals"
     lines.append(st.dim(header))
@@ -179,7 +200,10 @@ def render_terminal(
     if sessions:
         who = plural(sessions, "session")
     else:
-        who = "git history only, no agent sessions" if git_on else "no agent sessions"
+        windowed = bool(window.get("since") or window.get("until"))
+        who = "no agent sessions in this time window" if windowed else "no agent sessions"
+        if git_on:
+            who = f"git history only, {who}"
     out.append(
         st.dim(
             f"{who}"
@@ -347,7 +371,12 @@ def render_detail(
 
 
 def render_dir_detail(
-    result: dict[str, Any], node: dict[str, Any], *, color: bool = False, top: int = 10
+    result: dict[str, Any],
+    node: dict[str, Any],
+    *,
+    color: bool = False,
+    top: int = 10,
+    width: int = 100,
 ) -> str:
     """Render a directory: its rolled-up totals and its hottest descendants."""
     st = Style(color)
@@ -369,5 +398,5 @@ def render_dir_detail(
     inside = [h for h in result.get("hotspots", []) if str(h.get("path", "")).startswith(prefix)]
     if inside:
         out.append(st.bold("Hottest files inside"))
-        out.extend(_hotspot_rows(inside[:top], st, signal_titles(result), 100))
+        out.extend(_hotspot_rows(inside[:top], st, signal_titles(result), width))
     return "\n".join(out) + "\n"

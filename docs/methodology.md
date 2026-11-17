@@ -82,6 +82,22 @@ directory) if set, otherwise `~/.claude` and `~/.config/claude`.
   `<id>`: subagents do not inflate session counts.
 - Lines with a `uuid` already seen in another file are skipped (resumed
   sessions replay earlier lines).
+- **What is read from a Claude Code transcript:** `user` and `assistant`
+  lines, and one kind of `attachment` line: a `queued_command`, which is how
+  a message typed *while the agent is working* is recorded when it reaches
+  the agent (`{"type": "attachment", "attachment": {"type":
+  "queued_command", "prompt": ...}}`, the prompt a string or a list of
+  content blocks). It is read as a human message at that point of the turn,
+  so "No, revert that" typed mid-turn is a correction like any other, and
+  taking the change back is following it, not an `edit-revert`. The same
+  record carries what the harness and other agents queue. Those are not the
+  human: an `origin.kind` other than `user`/`human` (`task-notification`,
+  `coordinator`, `peer`, ...), a `commandMode` other than `prompt`, `isMeta`,
+  or text that is a system block (`<system-reminder>`, `<task-notification>`,
+  ...). A queued `<task-notification>` is still read for how a background
+  command ended. Where the same text is recorded both as a queued message
+  and as a `user` line within 10 minutes (`REPLAY_SECONDS`), it was said
+  once. Every other line type is counted in `ignored_lines`.
 - A session with no activity in the repo (no working directory inside it, no
   path that resolves into it, and no command that `cd`s into it) is left out and reported as
   `sessions_outside_repo`.
@@ -108,6 +124,12 @@ work**:
   middle of somebody's working day.
 - Only a human prompt can start one. An agent that works on its own for
   five hours, however long its commands take, is in one episode.
+- **A headless session** has no prompt to go by: one that nobody typed into
+  after its opening prompt (a scheduled run resumed the next day, a
+  container that was restarted). There the agent's next message or tool
+  call after 2 hours or more of silence starts a new episode. A tool result
+  never does: a result that arrives three hours after its call is the
+  command finishing.
 - **Subagents never start an episode** and are never episodes of their own.
   Their prompts are written by the agent that spawned them, and seventeen
   subagents hitting the same wall in one afternoon are one coordinator's one
@@ -152,7 +174,9 @@ together, and so that the key can be shown even when excerpts are off:
    `done`, `fi`, ...) are looked through, and `bash -c '<script>'` is replaced
    by the commands of its script. Redirections, leading `VAR=value`
    assignments and wrappers (`sudo`, `env`, `time`, `timeout N`, `nohup`,
-   `xargs`, `nice`, `watch`, ...; also by absolute path, `/usr/bin/time -v`)
+   `xargs`, `nice`, `watch`, ...; also by absolute path, `/usr/bin/time -v`;
+   when the wrapper itself is what the shell cannot find, the row is still
+   the command behind it, with "`time` is not installed where agents run")
    are stripped from each command, together
    with the wrapper's own options and their values (`WRAPPER_VALUE_OPTIONS`:
    `sudo -u alice pytest` -> `pytest`, `xargs -n 1 pytest` -> `pytest`).
@@ -181,7 +205,11 @@ together, and so that the key can be shown even when excerpts are off:
 3. **Name the executable.** Executables under `bin/`, `.venv/`,
    `node_modules/` or given by absolute path become their basename;
    `python3`, `python3.12` become `python`; `./scripts/build.sh` becomes
-   `scripts/build.sh`.
+   `scripts/build.sh`. That is the key red and green runs are matched by.
+   The *name shown* in the result keeps `python3` where that is what was
+   typed (`python3 -m pytest`, `python3 scripts/seed.py`; not for `-c` and
+   stdin snippets): on a machine without `python`, "run `python -m pytest`"
+   would be the wrong thing to write down, so the two are separate rows.
 4. **Keep arguments only where they are known to be names, not data:**
    - a script run through a shell is the script: `bash scripts/run.sh`, `sh
      -x ./scripts/run.sh` and `scripts/run.sh` are all `scripts/run.sh`;
@@ -246,7 +274,17 @@ together, and so that the key can be shown even when excerpts are off:
      -- pytest` are all `pytest`. Where a check runs does not change what it
      is, and it is the same job as a bare `pytest` for red-fix-green and
      replacement purposes. Without an inner command (`docker compose exec
-     web`) the key stays `docker compose exec`.
+     web`) the key stays `docker compose exec`. The *name shown* keeps the
+     container call, so that a run in a container and a run on the host are
+     separate rows: `docker compose exec web pytest` (the compose service is
+     named: it is part of the project; without excerpts it is a
+     placeholder), `docker compose run api pytest`, `docker exec pytest` and
+     `kubectl exec pytest` (a container or pod name is often an id of the
+     moment, and is left out).
+   - **a single word or quoted string of more than 64 KB is data**, not a
+     command name or a path (`MAX_WORD_CHARS`): it is replaced by `LONG-DATA`
+     before the line is split, also when its quote never closes. Splitting
+     such a word is quadratic (400 KB took ten seconds).
 
 5. **Sanitize.** A key is cut at the first word that is a number or that the
    redactor would change (`make 2` is `make`; a key that would start with
@@ -301,6 +339,41 @@ commands (`pip install`, `npm ci`, `uv sync`, `docker compose up`, ...) are
 *setup commands*. A command can stand in for another only if it has the same
 role or wraps the same tool.
 
+**Same job means same ecosystem, same place.** `pytest` and `npm test` are
+both test runners, and neither says anything about the other's code. A role
+match therefore also needs the same *tool family* (`TOOL_FAMILIES`,
+`tool_family`): python (`pytest`, `tox`, `nox`, `python -m ...`, `uv run
+...`, `poetry run ...`, `ruff`, `mypy`, `black`, ...), js (`npm`, `pnpm`,
+`yarn`, `bun`, `npx ...`, `jest`, `vitest`, `tsc`, `eslint`, `prettier`,
+...), rust (`cargo ...`), go, ruby, php, jvm, dotnet, c, shell. Make-style
+wrappers (`make test`, `just lint`, `task build`, `rake`, `pre-commit run`)
+and the repository's own scripts (`./scripts/test.sh`) belong to no family
+and fit any: `make lint` can stand in for `ruff check` and for `npx eslint`;
+`npx eslint` never stands in for `ruff check`, nor `npx tsc` for `mypy`,
+`prettier` for `black`, `npm run build` for `cargo build`.
+
+Directories count too. A green run of *another* command is about a red run
+only if it ran in the same directory of the repository; a wrapper or an
+aggregate check also when it ran in a directory above (`make test` at the
+root after `cd backend && pytest`). The *same* command pairs with itself in
+the same directory, above it, or below it (red at the root, green in
+`web/`: "run it in `web/`"), never side by side: `cd frontend && make
+build` going green says nothing about `cd backend && make build`. One
+failure is not about a place at all: a program that was not found. `cd
+src; pytest` answered with "not recognized" and `python -m pytest` passing
+from the root is the same tool started another way, and the advice names
+it ("Tell agents to use `python -m pytest`"); a tool of another family
+passing elsewhere (`cd web && npm test`) is still not a replacement.
+
+The same test decides three things: whether a command "worked instead"
+(`use-the-working-command`), whether a red run that goes green under
+another runner with nothing changed is the wrong runner (`green_as`), and
+whether red, edit, green is the development loop and dropped. So edit,
+`pytest` red, edit, `npm test` green leaves the `pytest` run on the record:
+it never went green. The same holds for the rule that a red type-check or
+lint run is closed by any green check after an edit: only a check of the
+same family, in the same place.
+
 More examples: `CI=1 npm test -- foo` -> `npm test`;
 `cat <<EOF > x.py ... EOF` + `python x.py` -> `python x.py`;
 `if ! make lint; then exit 1; fi` -> `make lint`;
@@ -348,7 +421,14 @@ outside, a file tool pointed at a path outside) says nothing about this
 repository and produces no event. It is counted, so that the headline can
 be checked against the transcript: `totals.events_outside_repo` is the
 number of such calls (each call once; read-only inspection commands,
-interrupted calls and calls the harness never started are not in it). On a
+interrupted calls and calls the harness never started are not in it).
+When the scanned directory is one package of a larger git repository,
+`totals.events_elsewhere_in_repo` says how many of them acted inside that
+same repository (a sibling package, the monorepo's root): every place the
+call went to that is not the scanned directory lies in the enclosing
+repository or one of its worktrees. It is a subset of `events_outside_repo`
+and 0 when the scanned directory is the repository's root or git is not
+available. On a
 machine where most permission denials are for commands run elsewhere, this
 is where they went.
 
@@ -432,6 +512,17 @@ score       = 100 x severity x recurrence x consistency
   that wanted a hit is lifted out of the cap (see "What lifts it" under
   `search-miss` in the [catalog](signals.md)); `edit-thrash` and `read-loop`
   on their own stay capped however often they recur.
+- **Ordinary failures next to real evidence.** When a target has both, an
+  ordinary `command-failure` counts in full only in an episode that has
+  other evidence on that target too. Episodes that contain nothing but
+  ordinary failures cannot lift the score past the same **19**: the score is
+  the smaller of the plain formula and `max(19, the formula without those
+  episodes' events)`, and `score_detail.ordinary_limited` is true when that
+  made a difference (the factors in `score_detail` are then those of the
+  plain formula, and `score` is lower than their product). One invocation
+  error plus eight red test runs in other sessions is one invocation error,
+  not a command that fails everywhere. The `why` sentence of such a row
+  says how many of its events are ordinary failures.
 - **share** is 1 except when one correction is split over several files.
 - **log2 per session** gives diminishing returns: a session contributes one
   more point each time its friction doubles, so one pathological session
@@ -515,7 +606,9 @@ and are weak evidence from then on: they still count in the totals and in
 the score, but a file with nothing else is capped at 19, is "low"
 confidence and gets no advice, and its misses feed no recommendation.
 Generated files are exempt (one failed edit of generated output is already
-the pattern). When a signal has 5+ events in 3+ files and 3+ sessions, the
+the pattern). When a signal has 5+ events in 3+ files and 3+ sessions, over
+at least 20 file visits (`REPO_WIDE_MIN_VISITS`; a share of fewer visits is a
+handful of events, not a rate), the
 result's top-level `recommendations` carries one repository-level item,
 `note-the-background-rate`: "Edit misses run at 8% of file visits across the
 repository", the counts, and the files that are above it.
@@ -543,7 +636,8 @@ nanoseconds according to their size.
 | `edit-miss`, `stale-edit` | one round trip; extended to the edit of the same file that lands only if every tool call in between failed too |
 | `command-failure` (setup/invocation) | one round trip; extended to the end of the command that recovered it (the same command succeeding, or a replacement doing the same job, within the next 5 shell calls of the turn, read-only inspection such as `ls`, `which` or `cat` not counted) only if every tool call in between failed too |
 | `command-failure` (ordinary) | none |
-| `path-miss`, `file-too-large`, `permission-denied` | one round trip (a `path-miss` that is a routine probe for an optional file: none) |
+| `path-miss`, `file-too-large` | one round trip (a `path-miss` that is a routine probe for an optional file: none) |
+| `permission-denied` | the refusal itself: from the call to its result. A refusal that comes back in 0.2 s costs 0.2 s; what the agent thought about before its next call is its next step, not time the refusal took |
 | any interval that starts at a call | starts later where a person had to approve the call: see "A person's time at a permission prompt" below |
 | `tool-rejected` | from the human's answer to the next event in the transcript; the time the permission prompt was open (call to result) is a human's time and is never counted |
 | `search-miss`, `probable-correction`, `tool-failure` | none: weak signals never claim time |
@@ -633,6 +727,11 @@ when `max_evidence` hides some events).
 | `medium` | 2 or more distinct sessions |
 | `low` | a single session, **or** a target whose score is capped because all its evidence is weak (see Score), in however many sessions |
 
+Ordinary command failures never count towards confidence: on a target that
+also has other evidence, the sessions and signal types counted are those of
+the other evidence. A real error in one session with red test runs in three
+more is "low".
+
 A signal that is computed from other events is not a second kind of evidence
 next to them: `retry-loop` and `no-convergence` are derived from
 `command-failure`, so a command with them has one signal type (`DERIVED_SIGNALS`).
@@ -671,9 +770,10 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `make-edits-land` | 2+ `edit-miss` (above the repository's base rate, see Score) on a file that is neither large nor generated. Mostly ambiguous: "Repeated blocks: make edit targets unique". Mostly not-found: "Agents misremember this file: check what rewrites it" **only with evidence of a rewrite** (a `stale-edit` on the file, or a miss before which a command that rewrites files, such as a formatter, a fixer, `sed -i` or a commit hook, ran since the agent last read or edited the file; `rewritten` on the event); otherwise the neutral "Edits to this file keep missing their target", which asserts no cause |
 | `document-what-rewrites-this-file` | 2+ `stale-edit` of the "modified since read" kind |
 | `path-agents-expect` | 2+ `path-miss` (a read, an edit, a test command pointed at a missing test file, or a `cd` into a missing directory) |
-| `write-down-the-rule` | corroborated `user-correction` events whose attributed shares sum to 0.5 or more; quotes up to 3. "The rule the human keeps repeating" is claimed only when 2+ of the corrections share wording (two content words, or one distinctive word of 7+ letters, e.g. the same class name); otherwise the recommendation only asks whether the correction(s) reflect a standing rule. A `probable-correction` never counts |
+| `write-down-the-rule` | corroborated `user-correction` events whose attributed shares sum to 0.5 or more; quotes up to 3. "The rule the human keeps repeating" is claimed only when 2+ of the corrections share wording (two content words, or one distinctive word of 7+ letters, e.g. the same class name); otherwise the recommendation only asks whether the correction(s) reflect a standing rule. A `probable-correction` never counts. When an instruction file that applies here has a line with a name the human used in the correction (a class or function name such as `PaymentClient` or `schema_gen`, a file name or path; not the hotspot's own file), the advice takes its "already written" form instead: "The rule seems to be written down already: make it harder to miss" (`AGENTS.md:3` already says something about what the human corrected here ...; make it more prominent, move it closer to the code, or enforce it), with `documented_as: "instruction"` |
 | `state-the-boundary` | 2+ `tool-rejected`, or 1 with a stated reason |
-| `allow-or-document-the-boundary` | 2+ `permission-denied` |
+| `allow-or-document-the-boundary` | 2+ `permission-denied` that are not guardrail hits. "Add an allow rule, or say it is off limits" only where nobody is known to have decided (a missing permission). Where a hook or a deny rule of `.claude/settings.json` refused the call, an allow rule is never suggested: "Tell agents this is off limits, or close the way around" when the agent then got the same thing done anyway (the same command in another form, the same file by another tool), "Tell agents this is off limits, and what to do instead" when the sessions end on the refusal |
+| `the-guardrail-works` | 2+ guardrail hits (`guardrail_hits` on the row): a hook or a deny rule of the settings refused the call and the agent never got the refused thing to run afterwards. "The guardrail works; agents still try `pytest` first": names the command agents used instead where one of the same job followed (`replacement`), quotes the hook's own reason, and cites the instruction line that already names the alternative, if any. It is the one piece of advice a row of weak evidence gets; it never proposes an allow rule, a hook or a permission rule |
 | `clarify-before-acting` | 2+ `user-interrupt`. On a command (one that humans stopped in 3+ sessions, see the signal) the advice is to say when it should be run and what to run instead |
 | `add-a-fast-check` | 2+ `edit-revert` events with no check run between the edit and its undoing (see `state-the-constraint`), or `edit-thrash` events of turns that did not end on a successful command and ran no test, lint or type check (thrash next to a check was not for want of one). Not when the file has 2+ `no-convergence` events: a check that will not pass needs `explain-the-failing-check`, not another check. The text names only what was seen ("2 reverted edits in 2 sessions") |
 | `state-the-constraint` | 2+ `edit-revert` where `add-a-fast-check` does not apply because a test, lint, type-check or build command ran between an edit and its undoing (`checked` on the event): the agents had a check and used it, and backed the change out. The advice is to write down what the file does not allow. Not when the file has 2+ `no-convergence` events |
@@ -683,17 +783,20 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `use-the-working-command` | 2+ *setup/invocation* failures of a command were followed by the same successful command *doing the same job* (same role, or a wrapper of the same tool), in sessions where the failing command never worked afterwards. Never an install, version-control or housekeeping command. Also: 2+ `command not found` failures after which the same command ran under a versioned name of the program ("use `python3`, not `python`"), and 2+ setup/invocation failures after which the same command ran with a variable set in front of it and no file edited in between ("use `PYTHONPATH=src pytest`"; the value is shown only for a fixed set of variables such as `PYTHONPATH`, `NODE_ENV`, `DJANGO_SETTINGS_MODULE`, and only with excerpts, otherwise `NAME=...`) or with an option added ("use `npm install --legacy-peer-deps`"; only with excerpts). Also: ordinary failures after which another command for the same job passed with nothing changed, in 3+ sessions (`pnpm test` after a red `yarn test`: the wrong runner); never when the green run ran less than the red one (a path, a node id, `-k`, `--filter` ... the red line lacks, or under half its tests, unless the failing tests it named are in the selection) or when that runner went red in the session too. On Windows the launcher counts as a name of the program ("use `py`, not `python`") |
 | `document-the-setup-step` | 2+ failures of a command that then passed after the same setup step with no file edited in between (`pip install`, `npm ci`, `docker compose up`, `cp .env.example .env`, or any other command that did so in 2+ sessions), or that then passed on a line that first activated an environment (`source .venv/bin/activate && pytest`, `poetry shell`, `conda activate <env>`): "run X before Y". Each failure is bound to the steps run between it and the next run of the same command; every step that helped 2+ times is listed, in order, with its own count ("run `pip install`, then `docker compose up -d` before `pytest`"), and named so that it can be run as written (`npx playwright install`, `go mod download`) |
 | `document-the-environment` | 2+ *environment* failures of a command (and none of the above): a service that was not reachable ("say how to start PostgreSQL before `pytest`"; the service is named when the output identifies it), missing, expired or refused credentials (also a database, registry or cloud API that turns them down), an unset environment variable (named only with excerpts), a port that was already in use, a full disk, or a host name that could not be resolved (no network, or a host that is not allowed: "say what `curl` can reach from where agents work") |
-| `document-the-command` | 2+ setup/invocation failures of a command (and none of the above). If the same command then worked in a subdirectory, the advice names it ("run `npm test` from `web/`"). A command that is keyed by where it ran (`pytest (src/)`) is titled "Document how to run `pytest` in `src/`"; a command whose name is a placeholder without excerpts is titled "Document how to run this command (its name is hidden without excerpts)" |
-| `name-the-missing-target` | 2+ setup/invocation failures of a command, most of which say that the make target or package script does not exist (`make: *** No rule to make target 'lint'.  Stop.`, npm's `Missing script`, `ERR_PNPM_NO_SCRIPT`, yarn's `Command "lint" not found`; a missing *prerequisite*, "needed by", is not this, and neither is an error that names another target than the one on the command line: `make test` answering "No rule to make target 'tst'" is a broken Makefile). Replaces `document-the-command`: there is nothing to document about running something that is not there. The text lists up to 12 targets or scripts the Makefile or `package.json` (in the directory the command ran in) does define, and asks for an alias or a line saying what to run instead. Without excerpts neither the missing name nor the list is shown |
+| `document-the-command` | 2+ setup/invocation failures of a command (and none of the above). If the same command then worked in a subdirectory, the advice names it ("run `npm test` from `web/`"). A command that is keyed by where it ran (`pytest (src/)`) is titled "Document how to run `pytest` in `src/`"; a command whose name is a placeholder without excerpts is titled "Document how to run this command (its name is hidden without excerpts)". When every one of those failures was the shell not finding one and the same program, the advice names it instead: "`gh` is not installed where agents run" (install it there, or say what to use instead) |
+| `name-the-missing-target` | 2+ setup/invocation failures of a command, most of which say that the make target or package script does not exist (`make: *** No rule to make target 'lint'.  Stop.`, npm's `Missing script`, `ERR_PNPM_NO_SCRIPT`, yarn's `Command "lint" not found`; a missing *prerequisite*, "needed by", is not this, and neither is an error that names another target than the one on the command line: `make test` answering "No rule to make target 'tst'" is a broken Makefile). Replaces `document-the-command`: there is nothing to document about running something that is not there. The same for a `just` recipe (`Justfile does not contain recipe`). The text lists up to 12 targets, scripts or recipes the Makefile, `package.json` or justfile (in the directory the command ran in) does define, and asks for an alias or a line saying what to run instead. If the file defines the missing name *now*, the advice is in the past tense instead: "`make typecheck` was missing in these sessions; it is defined now", with "re-scan with `--since <date>`" to confirm that the failures have stopped. Without excerpts neither the missing name nor the list is shown |
 | `make-the-failure-actionable` | 1+ `retry-loop` on a command |
-| `run-it-in-the-background` | 2+ harness timeouts of a command that is a server or watcher (`npm run dev`, `uvicorn`, ...); replaces `document-the-command` for those |
-| `give-it-more-time` | 2+ harness timeouts of any other command (`npm run build` cut off after 2 minutes): say how long it takes, raise the timeout or run it in the background, or name a narrower command; replaces `document-the-command` for those |
+| `run-it-in-the-background` | 2+ times a server or watcher (`npm run dev`, `uvicorn`, `... --watch`) run in the foreground sat until the harness timed it out or a human had to stop it (a `user-interrupt` of that command); replaces `document-the-command` for those. No file is blamed and no time is claimed for a stopped server |
+| `give-it-more-time` | 2+ harness timeouts of any other command (`npm run build` cut off after 2 minutes): say how long it takes, raise the timeout or run it in the background, or name a narrower command; replaces `document-the-command` for those. Not when agents then got the job done another way in 2+ sessions (the same command with a variable or an option in front, `CI=true npm test`, `npm test -- --watchAll=false`, or another command of the same job and family, quoted as typed where short: `npx vitest run`): the advice is then `use-the-working-command` with the most common working form, the others named after it, and no word about a longer timeout. And not for a watcher (next row) |
+| `run-it-once-not-in-watch-mode` | 2+ harness timeouts of a command most of which were in watch mode: the output shows it had finished and was waiting for file changes ("Watch Usage", "Waiting for file changes", "watching for file changes", "press q to quit", ...; `WATCH_OUTPUT_RE`), or the line asked for it (`--watch`). With no working alternative seen: "`npm test` runs in watch mode by default", say how to run it once. More time would not help |
 | `explain-the-failing-check` | 2+ `no-convergence` events from 2+ sessions, on the command ("Agents cannot get `pytest` to pass") or on a file edited during the rounds: document how to run and debug the check and what it expects |
-| `say-if-it-is-known-broken` | A command lifted out of the weak class because it stays red: it failed 2+ times and was still red at the end, in 3+ sessions (and there is no `no-convergence` event on it): "`npm run e2e` keeps ending red": say that it is known to be broken and what to run instead, or fix it. Also: the same test named as failed in 3+ sessions, none of which made it pass, and at least once before the session had changed any file ("`tests/test_legacy.py::test_old` is red session after session": fix it, or mark it as a known failure and say so); this form also appears on the test file's row |
+| `say-if-it-is-known-broken` | A command lifted out of the weak class because it stays red: it failed 2+ times and was still red at the end, in 3+ sessions (and there is no `no-convergence` event on it): "`npm run e2e` keeps ending red": say that it is known to be broken and what to run instead, or fix it. Also: the same test named as failed in 3+ sessions, none of which made it pass, and at least once before the session had changed any file ("`tests/test_legacy.py::test_old` is red session after session": fix it, or mark it as a known failure and say so); this form is given once: on the test file's row where the failure is attributed to a file of the repository, and on the command's row only for a test that has no such file |
 | `fix-the-flaky-test` | A test command failed and then passed on a plain re-run, with nothing changed in between, in 3+ sessions (variant `flaky`): "`npm test` looks flaky": fix or quarantine the flaky test, and say in AGENTS.md that a red run should be re-run once before anything is changed |
 | `pull-before-pushing` | `git push` was rejected as non-fast-forward (the remote branch had commits the local one lacked) in 3+ sessions: "tell agents to bring the branch up to date before `git push`": say in AGENTS.md to fetch and rebase (or merge) before pushing, and whether a force-push is ever acceptable. No time is claimed |
+| `push-with-upstream` | `git push` failed with "has no upstream branch" and went through with `--set-upstream` / `-u` in 3+ sessions: "tell agents to push a new branch with `git push -u origin HEAD`", or set `push.autoSetupRemote` where agents run. No time is claimed |
+| `format-before-committing` | `git commit` was stopped by a pre-commit hook that rewrote files ("files were modified by this hook") and went through on the next attempt, in 3+ sessions: "run the formatter (`pre-commit run <hook id>`, or the hook's own command) before committing". The events are weak (score capped at 19, no time claimed); in fewer sessions they are the loop working and are not recorded |
 | `file-is-gone` | a file hotspot whose file is not in the working tree **and** whose last commit in git deleted or renamed it (`file.removed_at`; needs git). Replaces every rule about what the file is like (`edit-the-source-not-the-output`, `split-or-anchor-large-file`, `make-edits-land`, `document-what-rewrites-this-file`, `path-agents-expect`, `add-a-fast-check`, `state-the-constraint`, `add-a-pointer`, `summarize-this-file`): "This file was renamed to `src/client.ts`" or "This file is no longer in the tree", with the date of that commit and `--since <date>` to leave the history out. What a human said (`write-down-the-rule`, `state-the-boundary`, ...) is kept below it. A path git never tracked, or a scan without git, is not "gone": nothing is known, and nothing changes |
-| `note-the-background-rate` | repository-level only (top-level `recommendations`, never on a hotspot): `edit-miss` or `stale-edit` with 5+ events in 3+ files and 3+ sessions. States the rate per file visit and names the files clearly above it (see "The repository's base rate"). Mentions a rewriting command only when misses followed one |
+| `note-the-background-rate` | repository-level only (top-level `recommendations`, never on a hotspot): `edit-miss` or `stale-edit` with 5+ events in 3+ files and 3+ sessions, over 20+ file visits. States the rate per file visit and names the files clearly above it (see "The repository's base rate"). Mentions a rewriting command only when misses followed one |
 
 ### Which files count as generated
 
@@ -789,7 +892,13 @@ repository's instruction files are searched for what it is about
   `make test` locally", "never pytest directly", "`make test` was removed",
   "we no longer use make test" (a negation in the 40 characters before the
   name within its sentence, or "was removed / is deprecated / no longer",
-  "is slow / is flaky / is too expensive" right after it). Terms
+  "is slow / is flaky / is too expensive" right after it). A setup step
+  may be one bare word (`mytool`), so for `document-the-setup-step` every
+  term must stand where a command stands (in backticks, in a code fence,
+  after run/use/with/via), never in a Markdown heading: the title "#
+  mytool" and "This repo is mytool, a widget library" document nothing.
+  The repository's own name (its directory name) alone is never a mention
+  of any kind, unless it stands where a command stands. Terms
   shorter than 4 characters, bare launchers (`make`, `npm`... alone) and
   pseudonymized keys are not looked for, so with `--no-excerpts` only paths
   and public command names can match.
@@ -833,6 +942,41 @@ repository's instruction files are searched for what it is about
   after the sessions that were analysed; the text says so ("if that line is
   newer than these sessions, give it time first"). The instruction files
   are never quoted, with or without excerpts: only `file:line` is shown.
+
+### Guardrails that hold
+
+Advice such as "enforce it: a hook or permission rule that blocks `pytest`"
+has to be something a repository can follow and then see closed. So a
+refusal is read for who refused and what the agent did next:
+
+- **Deliberate** is a refusal by a hook, or one that a `permissions.deny`
+  rule of `.claude/settings.json` / `.claude/settings.local.json` matches
+  (`Edit(src/gen/**)` covers Edit, Write and MultiEdit on files under it,
+  matched like a gitignore line; `Bash(pytest:*)` covers a command line or a
+  step of one that starts with `pytest`). A missing permission ("you haven't
+  granted it yet") or a refusal no rule accounts for is not: nobody is known
+  to have decided.
+- A deliberate refusal is a **guardrail hit** when the agent never got the
+  refused thing to run later in the session (the same command, or a change
+  to the same file by any tool, `sed -i` included) and did something else
+  afterwards. Where a successful command of the same job and family followed
+  (`make test` after `pytest`), it is recorded as the alternative.
+- A guardrail hit is weak evidence, like a red test: weight 0.3
+  (`GUARDRAIL_SHARE`), no part in confidence, and on a row with nothing but
+  weak evidence the score is capped at 19, below every band a threshold
+  such as `--fail-on 45` would be set to. Each row carries the count as
+  `guardrail_hits`, so a comparison can tell "still failing" from
+  "enforced".
+- The row gets `the-guardrail-works`, and nothing that tells the reader to
+  add what is already there: no allow rule (it does not override a hook and
+  would contradict a deny rule), no "enforce it with a hook or a permission
+  rule" in the note about instruction files (dropped whenever a refusal on
+  the row was deliberate, or the only place the subject is mentioned is the
+  deny rule itself).
+- If the session ends on the refusal, nobody knows what came next: it stays
+  an ordinary `permission-denied`, with advice that still never proposes an
+  allow rule. If the agent got the same thing done anyway, the guardrail
+  leaks, and the advice says so.
 
 ### One session is a lead
 
@@ -895,10 +1039,15 @@ Transcripts contain secrets. The engine therefore:
   character; home directories (`/home/x`, `/Users/x`, `C:\Users\x`, the real
   home) become `~`.
 
+**Card numbers.** A run of 13 to 19 digits, unbroken or in the groups cards
+are printed in (4-4-4-4, 4-6-5; spaces or dashes), that passes the Luhn
+check becomes `[REDACTED:card-number]`. Other long numbers (ids, epoch
+timestamps) fail the check nine times out of ten and are left alone.
+
 **Control characters.** Transcripts can contain terminal escape sequences
 (`ESC[2J`, OSC title changes) and invisible direction marks (U+202E). ANSI
-sequences, C0/C1 control characters other than newline and tab, and bidi
-controls are removed from every excerpt and, in a final pass, from every
+sequences, C0/C1 control characters other than newline and tab, bidi
+controls and zero-width characters (U+200B-U+200F, U+2060, U+FEFF) are removed from every excerpt and, in a final pass, from every
 string of the result: paths, command keys, summaries, recommendation text.
 
 Redaction is pattern matching and will miss secrets that look like ordinary

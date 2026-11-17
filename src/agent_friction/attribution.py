@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import itertools
 import os
 import posixpath
 import re
@@ -171,6 +172,10 @@ class PathResolver:
             here = there
         return here
 
+    def absolute(self, raw: str, cwd: str | None = None) -> str | None:
+        """``raw`` as a normalized absolute path, or ``None`` if that cannot be told."""
+        return self._absolute(raw, cwd)
+
     def outside(self, raw: str, cwd: str | None = None) -> bool:
         """True if ``raw`` is a path that provably lies outside every root."""
         absolute = self._absolute(raw, cwd)
@@ -247,7 +252,8 @@ SETUP_PROGRAMS = frozenset(
 )
 #: Prefixes stripped in front of the real program.
 WRAPPER_PROGRAMS = frozenset(
-    {"sudo", "time", "env", "nohup", "command", "exec", "nice", "xargs", "watch", "stdbuf"}
+    {"sudo", "time", "gtime", "env", "nohup", "command", "exec", "nice", "xargs", "watch"}
+    | {"stdbuf"}
     | {"timeout", "ionice", "doas", "caffeinate", "setsid", "chronic", "unbuffer"}
 )
 #: Options of those wrappers that take a separate value (``sudo -u alice pytest``).
@@ -264,6 +270,7 @@ WRAPPER_VALUE_OPTIONS: dict[str, frozenset[str]] = {
     "watch": frozenset({"-n", "-d", "--interval"}),
     "stdbuf": frozenset({"-i", "-o", "-e"}),
     "time": frozenset({"-f", "-o", "--format", "--output"}),
+    "gtime": frozenset({"-f", "-o", "--format", "--output"}),
     "exec": frozenset({"-a"}),
 }
 #: Shell keywords that may precede a command; stripped (``if ! make lint`` is ``make lint``).
@@ -444,6 +451,9 @@ class Step:
     #: workspace web``), if the selector reads as a directory. Where that is on disk
     #: (``web/``, ``packages/web/``) only the repository can say.
     workspace: str = ""
+    #: The container call it was run through, without options: ``docker compose exec
+    #: web``, ``docker exec``, ``kubectl exec``. Empty for a command run on the host.
+    container: str = ""
 
 
 #: Programs that, with their output redirected into a file (or, for ``tee``, given one),
@@ -498,8 +508,26 @@ def _strip_heredocs(command: str) -> str:
 _ARMOR_RE = re.compile(r"-----BEGIN [^-\n]*-----.*?(?:-----END [^-\n]*-----|\Z)", re.S)
 
 
+#: A single word or quoted string longer than this is data (a blob, a generated file
+#: passed inline), never a command name or a path. `shlex` builds a token one character
+#: at a time, which is quadratic: 400 KB takes ten seconds. It is cut out beforehand.
+MAX_WORD_CHARS = 65536
+_N = f"{{{MAX_WORD_CHARS},}}"  # the quantifier "{65536,}"
+_LONG_WORD_RES = (
+    (re.compile(r"'[^']" + _N + "'"), "'LONG-DATA'"),
+    (re.compile(r'"(?:[^"\\]|\\.)' + _N + '"', re.S), '"LONG-DATA"'),
+    (re.compile(r"[^\s'\"]" + _N), "LONG-DATA"),
+    # ... and a quote that opens and never closes
+    (re.compile(r"'[^']" + _N + r"\Z"), "'LONG-DATA'"),
+    (re.compile(r'"(?:[^"\\]|\\.)' + _N + r"\Z", re.S), '"LONG-DATA"'),
+)
+
+
 def _tokenize(command: str) -> list[str]:
     text = _ARMOR_RE.sub("ARMORED-DATA", _strip_heredocs(command))
+    if len(text) > MAX_WORD_CHARS:
+        for pattern, stand_in in _LONG_WORD_RES:
+            text = pattern.sub(stand_in, text)
     lines = text.replace("\\\n", " ")
     lexer = shlex.shlex(lines.replace("\n", " ; "), posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
@@ -616,6 +644,30 @@ def _skip_container_options(words: list[str]) -> list[str]:
         if option in _CONTAINER_VALUE_OPTIONS and out:
             out.pop(0)
     return out
+
+
+_CONTAINER_TOOLS = frozenset({"docker", "podman", "docker-compose", "podman-compose", "kubectl"})
+
+
+def _container_prefix(stripped: Sequence[str]) -> str:
+    """How the words in front of a command put it in a container (see ``Step.container``).
+
+    A compose service is named (``docker compose exec web``): services are part of
+    the project. A container or pod is not: its name is often an id of the moment.
+    """
+    names = [_program_name(w) for w in stripped]
+    at = next((i for i, name in enumerate(names) if name in _CONTAINER_TOOLS), None)
+    if at is None:
+        return ""
+    head, rest = names[at], list(stripped[at + 1 :])
+    verb = next((w for w in rest if w in ("exec", "run")), "")
+    if not verb:
+        return ""
+    if head == "kubectl" or (head in ("docker", "podman") and "compose" not in rest):
+        return f"{head} exec" if verb == "exec" or head == "kubectl" else ""
+    tool = head if head.endswith("-compose") else f"{head} compose"
+    service = rest[-1] if rest[-1] not in ("exec", "run", "--") else ""
+    return f"{tool} {verb} {service}".strip()
 
 
 def _container_command(words: Sequence[str]) -> list[str]:
@@ -1087,6 +1139,7 @@ def _steps(command: str, depth: int = 0, moves: tuple[str, ...] = ()) -> list[St
                 segment.into,
                 wrappers,
                 _workspace(program, words[1:]),
+                _container_prefix(stripped),
             )
         )
     return steps
@@ -1120,6 +1173,57 @@ def _pieces(command: str) -> list[tuple[list[str], str]]:
     return pieces
 
 
+_TEXT_PRINTERS = frozenset(
+    {"git log", "git show", "git diff", "git blame", "docker logs", "kubectl logs", "journalctl"}
+)
+
+
+def ends_looking(command: str) -> bool:
+    """Does the last pipeline of a line of several print other text (``...; git log -3``)?
+
+    What stands at the end of the output is then that step's: a traceback quoted in a
+    commit message or a log file is not the failure of the command before it.
+    """
+    try:
+        pieces = _pieces(command)
+    except (IndexError, ValueError, RecursionError):
+        return False
+    start = len(pieces) - 1
+    while start > 0 and pieces[start - 1][1] in ("|", "|&"):
+        start -= 1
+    if start <= 0:
+        return False
+    program, args = _program_of(pieces[start][0])
+    # only what prints text written elsewhere: `git status` or `ls` quote nothing
+    return program in FILE_READERS or _raw_key([program, *args]) in _TEXT_PRINTERS
+
+
+_FAILURE_WORD_RE = re.compile(r"fail|error|\^E\b|\bE {2,}|✗|✘|×|traceback|exception|warn", re.I)
+_SUCCESS_WORD_RE = re.compile(r"pass|\bok\b|success|✓|✔|\bdone\b|\d+ tests?\b|summary", re.I)
+
+
+def selects_failures(command: str) -> bool:
+    """Does the line end in a filter that lets only failure lines through?
+
+    ``pytest | grep -E "^FAILED|^E  "``: no output then means no failure. A pattern
+    that would also show a passing summary (``grep -E "passed|failed"``) printing
+    nothing means that nothing ran, which proves nothing.
+    """
+    try:
+        pieces = _pieces(command)
+    except (IndexError, ValueError, RecursionError):
+        return False
+    if len(pieces) < 2 or pieces[-2][1] not in ("|", "|&"):
+        return False
+    program, args = _program_of(pieces[-1][0])
+    if program not in ("grep", "egrep", "fgrep", "rg"):
+        return False
+    if any(a in ("-v", "--invert-match", "-c", "--count", "-L") for a in args):
+        return False
+    pattern = next((a for a in args if not a.startswith("-")), "")
+    return bool(_FAILURE_WORD_RE.search(pattern)) and not _SUCCESS_WORD_RE.search(pattern)
+
+
 def in_sequence(command: str) -> bool:
     """Does ``command`` run commands one after another (``a; b``, ``a && b``)?
 
@@ -1138,6 +1242,76 @@ FILE_READERS = frozenset(
     | {"awk"}
 )
 _PATTERN_FIRST = frozenset({"grep", "egrep", "fgrep", "rg", "sed", "awk"})
+
+
+#: What output is piped into to be read: a pager or a filter.
+_READ_THROUGH = FILE_READERS | {"wc", "sort", "uniq", "cut", "jq", "column", "fold", "tr", "xxd"}
+
+
+def looked_at(command: str) -> frozenset[str]:
+    """Programs of ``command`` whose output goes into a pager or filter (``x | head``).
+
+    Running something to read what it prints is a look, whatever the program is.
+    """
+    try:
+        pieces = _pieces(command)
+    except (IndexError, ValueError, RecursionError):
+        return frozenset()
+    found: set[str] = set()
+    for (words, operator), (after, _) in itertools.pairwise(pieces):
+        if operator in ("|", "|&") and _program_of(after)[0] in _READ_THROUGH:
+            found.add(_program_of(words)[0])
+    return frozenset(found)
+
+
+def same_invocation(red: str, green: str, key: str, other: str = "", loose: bool = False) -> bool:
+    """Is ``green`` the command line ``red`` again, as far as its arguments go?
+
+    Compared are the words of the step keyed ``key`` in ``red`` and of the step
+    keyed ``other`` (default: the same key) in ``green``. A launcher or activation
+    in front of either does not count (``uv run pytest -q`` is ``pytest -q``). For
+    ad-hoc code (``python -c``, a heredoc, SQL given to ``psql -c``) the text of the
+    snippet is part of the line. With ``loose``, switches are ignored and the green
+    run may name fewer things than the red one (``pytest`` after ``pytest
+    tests/test_a.py -x``): enough for "the same job", where a changed value
+    (``--month 2026-13``, then ``2026-12``) is not.
+    """
+    if is_snippet(key):
+        return normalize_argv(red) == normalize_argv(green)
+    try:
+        was = next((s for s in parse_command(red).steps if s.key == key), None)
+        now = next((s for s in parse_command(green).steps if s.key == (other or key)), None)
+    except Exception:
+        return False
+    if was is None or now is None:
+        return False
+    a, b = (was.program, *was.args), (now.program, *now.args)
+    if loose:
+        named = [w for w in b if not w.startswith("-")]
+        return all(w in a for w in named[1:])
+    short, long = sorted((a, b), key=len)
+    return long[len(long) - len(short) :] == short
+
+
+#: Programs that are handed code or a query on the command line.
+_QUERY_FLAGS: dict[str, frozenset[str]] = {
+    "psql": frozenset({"-c", "--command"}),
+    "mysql": frozenset({"-e", "--execute"}),
+    "mariadb": frozenset({"-e", "--execute"}),
+    "sqlite3": frozenset(),
+    "duckdb": frozenset({"-c"}),
+    "jq": frozenset(),
+    "yq": frozenset(),
+    "awk": frozenset(),
+    "sed": frozenset(),
+    "redis-cli": frozenset(),
+    "mongosh": frozenset({"--eval"}),
+}
+
+
+def is_snippet(key: str) -> bool:
+    """Is ``key`` a command that runs code written on its line (inline code, SQL, a filter)?"""
+    return is_inline_code(key) or key.split(" ", 1)[0].rsplit("/", 1)[-1] in _QUERY_FLAGS
 
 
 def _program_of(words: list[str]) -> tuple[str, list[str]]:
@@ -1496,12 +1670,61 @@ def is_aggregate_check(key: str) -> bool:
     return any(part in AGGREGATE_WORDS for part in _key_words(" ".join(words[1:])))
 
 
+#: The ecosystem a tool belongs to. ``pytest`` and ``npm test`` are both test runners,
+#: and neither says anything about the other's code.
+TOOL_FAMILIES: dict[str, frozenset[str]] = {
+    "python": frozenset(
+        {"python", "pytest", "tox", "nox", "uv", "uvx", "poetry", "pipenv", "pdm", "hatch"}
+        | {"ruff", "flake8", "pylint", "mypy", "pyright", "black", "isort", "unittest", "pip"}
+        | {"ty", "coverage", "pipx", "conda", "django-admin", "alembic", "flask"}
+    ),
+    "js": frozenset(
+        {"npm", "pnpm", "yarn", "bun", "bunx", "npx", "node", "deno", "jest", "vitest", "mocha"}
+        | {"eslint", "tsc", "prettier", "playwright", "cypress", "karma", "ava", "webpack"}
+        | {"biome", "stylelint", "vite", "turbo", "nx", "next", "tsx", "ts-node", "rollup"}
+    ),
+    "rust": frozenset({"cargo", "rustc", "rustfmt", "clippy", "nextest", "rustup"}),
+    "go": frozenset({"go", "gofmt", "golangci-lint", "staticcheck", "gotestsum"}),
+    "ruby": frozenset({"bundle", "rspec", "rubocop", "rails", "ruby", "gem"}),
+    "php": frozenset({"php", "phpunit", "composer", "phpstan", "artisan"}),
+    "jvm": frozenset({"gradle", "gradlew", "mvn", "mvnw", "sbt", "java", "javac", "kotlinc"}),
+    "dotnet": frozenset({"dotnet", "msbuild", "nuget"}),
+    "c": frozenset({"cmake", "ctest", "ninja", "gcc", "clang", "cc", "meson", "bazel"}),
+    "shell": frozenset({"shellcheck", "shfmt", "bats"}),
+}
+
+
+def tool_family(key: str) -> str | None:
+    """``python``, ``js``, ``rust``, ... for a key whose tool says so; ``None`` otherwise.
+
+    ``make test``, ``just lint``, ``task build``, ``pre-commit run`` and a script of
+    the repository (``./scripts/test.sh``) are neutral: they wrap whatever the
+    project uses, and say nothing about which ecosystem that is.
+    """
+    for word in key.split(" (", 1)[0].split():
+        name = word.rsplit("/", 1)[-1]
+        if _SCRIPT_RE.search(name):
+            continue  # a script's name is the project's, not a tool's
+        for family, names in TOOL_FAMILIES.items():
+            if name in names:
+                return family
+    return None
+
+
+def same_family(one: str, other: str) -> bool:
+    """Could ``one`` and ``other`` be about the same code? Not ``pytest`` and ``npm test``."""
+    mine, theirs = tool_family(one), tool_family(other)
+    return mine is None or theirs is None or mine == theirs
+
+
 def is_replacement(failed: str, other: str) -> bool:
     """Can ``other`` stand in for ``failed``? (``make test`` for ``pytest``.)
 
-    True when both do the same job (same role) or one wraps the other's tool
-    (``uv run pytest`` for ``pytest``). Never for setup, version-control,
-    housekeeping or inspection commands.
+    True when both do the same job (same role) in the same tool family, with
+    make-style wrappers fitting any family (``make lint`` for ``ruff check``, never
+    ``npx eslint``), or when one wraps the other's tool (``uv run pytest`` for
+    ``pytest``). Never for setup, version-control, housekeeping or inspection
+    commands.
     """
     if not failed or not other or failed == other:
         return False
@@ -1514,6 +1737,8 @@ def is_replacement(failed: str, other: str) -> bool:
     program = other.split()[0]
     if program in ("git", "gh", "glab") or program in HOUSEKEEPING_PROGRAMS | SETUP_PROGRAMS:
         return False
+    if not same_family(failed, other):
+        return False  # another ecosystem's tool: it ran other code
     role = command_role(failed)
     if role is not None and role == command_role(other):
         return True

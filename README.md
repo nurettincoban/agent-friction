@@ -20,7 +20,7 @@ with the evidence quoted so you can check it yourself.
 ```console
 $ agent-friction scan
 agent-friction · shopfront
-6 sessions · 74 tool calls · 33 friction events (11 weak) · ~9m lost · 4 human corrections
+6 sessions · 74 tool calls · 33 friction events (11 weak) · ~9m lost · 4 human corrections · 2026-10-26 → 2026-11-12
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals
@@ -116,8 +116,10 @@ agent-friction compare before.json after.json
 10 exposed sessions), so a file nobody worked on afterwards shows up as "not touched", not as
 "resolved". When the fix was "use `make test`, not `pytest`", success means agents stop running
 `pytest`, so `compare` checks the recommended command instead: if it ran cleanly afterwards, the
-old one is reported as "replaced". A fix that keeps agents away from a file (a denied edit) can
-only show as "not touched"; that is the expected outcome, not proof. It ignores changes too small to mean anything, warns when either side has too few
+old one is reported as "replaced". When the fix was a hook or deny rule and agents still try
+the refused call but then go another way, those refusals count as the guardrail holding: they
+stay weak in the scan, and `compare` reports the target as "enforced". A file agents simply stop
+touching shows as "not touched"; that is the expected outcome, not proof. It ignores changes too small to mean anything, warns when either side has too few
 sessions, refuses to compare scans of different repositories, and refuses scans whose time windows overlap
 (a later scan without `--since` contains the earlier one, which would only dilute it). Both scans must use the
 same privacy mode: compare two `--no-excerpts` scans, or two scans without it.
@@ -270,10 +272,11 @@ in any release; from 0.1.0 on, each one is listed in the CHANGELOG.
   friction, and the rules try hard not to count it; they will sometimes be wrong both ways.
   `show` exists so you can check.
 - A correction is counted only when the human's words address the agent's work and behaviour
-  backs it up: they name a file the agent just changed, or the agent goes back to one. Anything
-  else that merely sounds like a correction is "probable": shown as evidence, weighted lower,
-  never quoted, and excluded from the headline count. It is English-only and still a heuristic,
-  so treat the count as a floor.
+  backs it up: they name a file the agent just changed (with an edit, a shell command or a
+  subagent), or the agent goes back to one. Messages typed while the agent is still working are
+  read as well. Anything else that merely sounds like a correction is "probable": shown as
+  evidence, weighted lower, never quoted, and excluded from the headline count. It is
+  English-only and still a heuristic, so treat the count as a floor.
 - Time lost is a floor, not a measurement of human time.
 - Failures of tools that are neither file, search nor shell tools (MCP servers, `WebFetch`, a
   subagent launch) have no file or command to pin to. They are counted as weak `tool-failure`
@@ -291,6 +294,8 @@ in any release; from 0.1.0 on, each one is listed in the CHANGELOG.
   or make the next green run a fix. Changes made outside the transcript (your editor, another
   agent) are missed, so a check someone else fixed can still show as failing. Agents that edit
   mostly through shell commands also leave fewer traces of edit friction.
+- Remote CI is not inspected. An agent that pushes, watches CI go red (`gh run watch`), fixes
+  and pushes again leaves no failing local command, so that loop is not counted.
 
 Reports of wrong or missed hotspots are the most valuable contribution you can make:
 [open one here](https://github.com/nurettincoban/agent-friction/issues/new?template=false_positive.yml).

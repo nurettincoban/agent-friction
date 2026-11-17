@@ -687,3 +687,138 @@ def test_generic_exit_code_may_be_a_numeric_string(
     result = generic.parse_file(path).streams[0].events[1]
     assert result.ok is not failed and result.exit_code == status
     assert result.error == (model.ERR_EXIT if failed else "")
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Permission to read /repo/.env has been denied.", "permission"),
+        ("Permission to edit /repo/src/gen.py has been denied.", "permission"),
+        (
+            "<tool_use_error>Permission to write /repo/a b.txt has been denied.</tool_use_error>",
+            "permission",
+        ),
+        ("cat: /repo/.env: Permission denied", None),
+        ("deploy: Permission to read bucket has been denied", None),
+    ],
+)
+def test_a_deny_rule_on_a_file_tool_is_a_denial(text: str, expected: str | None) -> None:
+    assert common.denial(text) == expected
+
+
+def test_colour_codes_are_stripped_from_tool_output(tmp_path: Path) -> None:
+    coloured = (
+        "\x1b[1m\x1b[31mFAILED\x1b[0m tests/test_a.py::test_x\n\x1b[31m1 failed\x1b[0m in 0.1s"
+    )
+    s = Session().user("go").bash("pytest --color=yes 2>&1 | tail -3", coloured)
+    parsed = parse_transcript(s.save(tmp_path))
+    outputs = [e.output for st in parsed.streams for e in st.events if e.output]
+    assert outputs == ["FAILED tests/test_a.py::test_x\n1 failed in 0.1s"]
+    assert common.clip_output("plain \x1b[38;5;196mred\x1b[m text") == "plain red text"
+    assert common.clip_output("no codes here") == "no codes here"
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "expected"),
+    [
+        ("a\nb", "a\nprint(1)\nb", True),
+        ("a\nb", "x\na\ny\nb\nz", True),
+        ("a\nb", "a\nb", False),
+        ("a\nb", "a\nprint(1)\nc", False),
+        ("a\nb", "b\nprint(1)\na", False),
+        ("a\nb\nc", "a\nc", False),
+        ("a\na", "a\nx", False),
+    ],
+)
+def test_only_adds_lines(old: str, new: str, expected: bool) -> None:
+    assert common.only_adds_lines(old, new) is expected
+
+
+def _said(session: Session, tmp_path: Path) -> list[str]:
+    (stream,) = parse_transcript(session.save(tmp_path)).streams
+    return [e.text for e in stream.events if e.kind == model.USER_MESSAGE]
+
+
+def test_a_message_typed_while_the_agent_works_is_a_user_message(tmp_path: Path) -> None:
+    text = "No, keep the old names"
+    for as_blocks in (False, True):
+        s = Session().user("go").read("/repo/a.py").queued(text, as_blocks=as_blocks)
+        parsed = parse_transcript(s.read("/repo/b.py").save(tmp_path))
+        assert parsed.ignored_lines == 0 and parsed.skipped_lines == 0
+        (stream,) = parsed.streams
+        said = [e for e in stream.events if e.kind == model.USER_MESSAGE]
+        assert [e.text for e in said] == ["go", text]
+        # it sits where it was delivered, with the time it was delivered at
+        assert kinds(parsed)[3] == model.USER_MESSAGE and said[1].ts is not None
+    # other attachments, and a queued command without a prompt, are still not messages
+    s = Session().user("go")
+    s.raw({"type": "attachment", "attachment": {"type": "todo_reminder", "content": "x"}})
+    s.raw({"type": "attachment", "attachment": {"type": "queued_command"}})
+    s.raw({"type": "attachment", "attachment": "queued_command"})
+    parsed = parse_transcript(s.save(tmp_path))
+    assert parsed.ignored_lines == 3 and _said(s, tmp_path) == ["go"]
+
+
+@pytest.mark.parametrize(
+    "marks",
+    [
+        {"origin": {"kind": "task-notification", "producer": "session-task"}},
+        {"origin": {"kind": "coordinator"}},
+        {"origin": {"kind": "peer", "from": "another session"}},
+        {"origin": "coordinator"},
+        {"mode": "task-notification"},
+        {"mode": "bash"},
+        {"meta": True},
+    ],
+)
+def test_a_queued_message_from_anything_but_the_human_is_not_theirs(
+    tmp_path: Path, marks: dict[str, object]
+) -> None:
+    s = Session().user("go").read("/repo/a.py")
+    s.queued("No, that's wrong, revert that", **marks)  # type: ignore[arg-type]
+    assert _said(s, tmp_path) == ["go"]
+
+
+def test_a_queued_message_marked_as_the_humans_or_with_system_text(tmp_path: Path) -> None:
+    for origin in ({"kind": "user"}, {"kind": "human"}, None):
+        s = Session().user("go").queued("use pnpm", origin=origin, mode=None)
+        assert _said(s, tmp_path) == ["go", "use pnpm"]
+    # no origin, but the text is the harness speaking: the usual detection applies
+    s = Session().user("go").queued("<system-reminder>\nkeep going\n</system-reminder>")
+    assert _said(s, tmp_path) == ["go"]
+
+
+def test_a_task_notification_that_arrives_queued_is_still_an_outcome(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.tool(
+        "Bash",
+        {"command": "npm run build", "run_in_background": True},
+        LAUNCHED.format("b7"),
+        tool_use_result={"stdout": "", "backgroundTaskId": "b7"},
+    )
+    s.queued(
+        "<task-notification>\n<task-id>b7</task-id>\n<status>failed</status>\n"
+        "<summary>Background command failed with exit code 127</summary>\n</task-notification>",
+        origin={"kind": "task-notification"},
+        mode="task-notification",
+    )
+    assert shell_events(s, tmp_path) == [
+        ("npm run build", True, True, None),
+        ("npm run build", False, False, 127),
+    ]
+    assert _said(s, tmp_path) == ["go"]
+
+
+def test_a_queued_message_recorded_again_as_a_user_line_was_said_once(tmp_path: Path) -> None:
+    text = "No, keep the old names"
+    assert _said(Session().user("go").queued(text).user(text), tmp_path) == ["go", text]
+    assert _said(Session().user("go").user(text).queued(text), tmp_path) == ["go", text]
+    # said twice the ordinary way, or queued twice, is said twice
+    assert _said(Session().user("go").user(text).user(text), tmp_path) == ["go", text, text]
+    assert _said(Session().user("go").queued(text).queued(text), tmp_path) == ["go", text, text]
+    # ... as are the same words typed again much later
+    late = Session().user("go").queued("yes").tick(claude_code.REPLAY_SECONDS + 60).user("yes")
+    assert _said(late, tmp_path) == ["go", "yes", "yes"]
+    # a different message in between does not hide either
+    s = Session().user("go").queued(text).user("and add a test").user(text)
+    assert _said(s, tmp_path) == ["go", text, "and add a test"]

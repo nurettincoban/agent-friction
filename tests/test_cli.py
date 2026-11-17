@@ -335,6 +335,8 @@ def test_scan_from_a_subdirectory_uses_the_repo_root(
     _, _, err = run("sources", "-t", str(tmp_path / "none.jsonl"))
     assert f"using the repository root {tmp_path}" in err
     assert "pass . to map only this directory" in err
+    _, _, err = run("show", "pytest", "-t", str(tmp_path / "none.jsonl"))
+    assert "using the repository root" not in err
 
 
 def test_show_accepts_repo_positionally() -> None:
@@ -681,3 +683,36 @@ def test_show_from_a_saved_scan_refuses_flags_it_cannot_honour(tmp_path: Path) -
     hidden = json.loads(private.read_text(encoding="utf-8"))["commands"][0]["path"]
     code, _, _ = run("show", hidden, "--from", str(private), "--no-excerpts")
     assert code == EXIT_OK
+
+
+def test_argument_errors_lead_with_the_message(capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(["scan", "--top", "0"])
+    assert code == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert err.startswith("agent-friction scan: error: argument --top")
+    assert "usage:" not in err and "--help" in err
+
+
+def test_a_shallow_clone_is_noted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import agent_friction.cli as cli
+
+    monkeypatch.setattr(cli, "_is_shallow", lambda repo: True)
+    with_git = [a for a in INPUT if a != "--no-git"]
+    _, _, err = run("scan", *with_git)
+    assert "shallow clone" in err
+    _, _, err = run("scan", *INPUT)
+    assert "shallow clone" not in err
+    monkeypatch.undo()
+    assert cli._is_shallow(tmp_path / "missing") is False
+
+
+def test_columns_narrows_the_terminal_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_friction.cli import _term_width
+
+    monkeypatch.setenv("COLUMNS", "60")
+    assert _term_width(None, io.StringIO()) == 60
+    assert _term_width(Path("out.txt"), io.StringIO()) == 100
+    monkeypatch.setenv("COLUMNS", "20")
+    assert _term_width(None, io.StringIO()) == 40
+    monkeypatch.delenv("COLUMNS")
+    assert _term_width(None, io.StringIO()) == 100

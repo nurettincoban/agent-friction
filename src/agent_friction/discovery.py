@@ -161,6 +161,24 @@ def removed_sibling_sessions(
     return sorted(found.items(), key=lambda pair: (-pair[1], pair[0]))
 
 
+def enclosing_repositories(repo: Path) -> list[Path]:
+    """The git repository ``repo`` is a subdirectory of, as each of its worktrees.
+
+    Empty when ``repo`` is the repository's root, is in no repository, or git is
+    unavailable: there is then nothing "elsewhere in the same repository".
+    """
+    shown = _git(repo, "rev-parse", "--show-prefix")
+    top = _git(repo, "rev-parse", "--show-toplevel")
+    if shown is None or top is None or not shown.strip().strip("/") or not top.strip():
+        return []
+    found = [Path(top.strip())]
+    for line in (_git(repo, "worktree", "list", "--porcelain") or "").splitlines():
+        root = line[len("worktree ") :].strip() if line.startswith("worktree ") else ""
+        if root and Path(root) not in found:
+            found.append(Path(root))
+    return found
+
+
 def repo_roots(repo: Path, include_worktrees: bool = True) -> list[Path]:
     """Absolute directories that count as the repo: itself, its realpath, its worktrees."""
     roots: list[Path] = []

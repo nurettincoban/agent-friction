@@ -292,6 +292,8 @@ FIX_SUBJECT_RE = re.compile(
     r"|\b(?:reverts?|reverted|fix(?:es|ed)?|undo|regression|broke|broken|oops|mistake)\b",
     re.I,
 )
+#: ... and those that say a change was taken back, which may be done by adding lines only.
+UNDO_SUBJECT_RE = re.compile(r"\b(?:reverts?|reverted|reverting|undo|rollback|roll back)\b", re.I)
 #: Commits whose patches are read to compare line ranges, at most (newest first).
 MAX_PATCH_COMMITS = 400
 
@@ -607,8 +609,9 @@ def find_rework(
     A candidate is a human commit that is the next commit to touch a file after
     an agent commit, within the window. It counts only if it (a) changes lines
     the agent commit wrote (needs ``hunks``), or (b) says in its subject that
-    it fixes or reverts something. A human simply continuing work elsewhere in
-    the file is not rework.
+    it fixes or reverts something and removes or changes lines of the file (a
+    revert may also only add lines). A human simply continuing work elsewhere
+    in the file, or a fix that only adds lines outside the agent's, is not rework.
     """
     window = timedelta(days=window_days)
     last_touch: dict[str, Commit] = {}
@@ -648,6 +651,13 @@ def find_rework(
                 )
             overlap = reworked_lines(agent_new, human_old)
         by_subject = bool(FIX_SUBJECT_RE.search(commit.subject))
+        added, deleted = commit.files[path]
+        if by_subject and added and not deleted and not UNDO_SUBJECT_RE.search(commit.subject):
+            # "fix: handle empty carts" that only adds lines to the file took nothing of
+            # the agent's back: the fix is new code next to it. Lines put inside what the
+            # agent wrote still count, as an overlap. A revert that only adds lines
+            # restores what the agent had deleted.
+            by_subject = False
         if not overlap and not by_subject:
             continue
         if isinstance(hunks, HunkReader) and path in hunks.version_only(commit.sha):
@@ -658,7 +668,6 @@ def find_rework(
             # project moving on. A commit that announces new work counts only if it
             # follows the agent's commit closely.
             continue
-        added, deleted = commit.files[path]
         gap = commit.date - previous.date
         hours = gap.total_seconds() / 3600
         after = f"{hours:.0f} h" if hours < 48 else f"{gap.days} days"

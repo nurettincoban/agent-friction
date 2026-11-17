@@ -943,7 +943,7 @@ def test_corrections_are_called_different_only_when_they_can_be_told_apart() -> 
 
 
 def test_the_repo_wide_note_does_not_call_every_file_above_the_rate() -> None:
-    base = scoring.baseline({f"f{i}.py": (2, 2, 4) for i in range(7)})
+    base = scoring.baseline({f"f{i}.py": (3, 3, 6) for i in range(7)})
     assert len(base.above) == base.files == 7
     item = recommend.repo_wide(signals.EDIT_MISS, base, 4, 0)
     assert item is not None
@@ -958,6 +958,22 @@ def test_the_repo_wide_note_does_not_call_every_file_above_the_rate() -> None:
     assert "1 file is clearly above that rate and has its own entry: `hot.py`." in str(
         mixed["detail"]
     )
+
+
+def test_a_rate_over_a_handful_of_visits_is_not_reported() -> None:
+    # 5 events in 5 visits: "100% of file visits" would be five events, not a rate
+    few = scoring.baseline({f"f{i}.py": (1, 1, 1) for i in range(5)})
+    assert few.events == 5 and few.visits == 5
+    assert recommend.repo_wide(signals.EDIT_MISS, few, 5, 0) is None
+    below = scoring.baseline(
+        {f"f{i}.py": (1, 1, 1) for i in range(recommend.REPO_WIDE_MIN_VISITS - 1)}
+    )
+    assert recommend.repo_wide(signals.EDIT_MISS, below, 5, 0) is None
+    enough = scoring.baseline(
+        {f"f{i}.py": (1, int(i < 5), int(i < 5)) for i in range(recommend.REPO_WIDE_MIN_VISITS)}
+    )
+    item = recommend.repo_wide(signals.EDIT_MISS, enough, 5, 0)
+    assert item is not None and str(item["title"]).startswith("Edit misses run at 25% of")
 
 
 def test_a_small_line_count_is_not_cited_for_a_file_too_large_to_read() -> None:
@@ -984,3 +1000,111 @@ def test_a_correction_that_names_an_untouched_file_says_so() -> None:
     plain = [finding(signals.USER_CORRECTION, f"s{i}", quote="No, not like that") for i in (1, 2)]
     (rec,) = recommend.recommend(model.FILE, "src/a.py", plain, None, quote)
     assert "corrected the agent here" in str(rec["detail"]) and "also named" not in str(rec)
+
+
+def test_a_missing_tool_is_named_with_or_without_a_stand_in() -> None:
+    missing = [
+        finding(signals.COMMAND_FAILURE, f"s{i}", variant="invocation", not_found="gh")
+        for i in range(3)
+    ]
+    (rec,) = recommend.recommend(model.COMMAND, "gh pr list", missing)
+    assert rec["id"] == "document-the-command"
+    assert rec["title"] == "`gh` is not installed where agents run"
+    assert rec["detail"] == (
+        "`gh pr list` failed 3 times in 3 sessions because `gh` is not on the PATH where "
+        "agents run. Install it there (a setup script, the container image), or say in "
+        "AGENTS.md that it is not available and what to use instead."
+    )
+    swapped = [
+        finding(
+            signals.COMMAND_FAILURE,
+            f"s{i}",
+            variant="invocation",
+            not_found="rg",
+            works_as="grep",
+            stand_in="1",
+        )
+        for i in range(3)
+    ]
+    (rec,) = recommend.recommend(model.COMMAND, "rg", swapped)
+    assert rec["id"] == "use-the-working-command" and rec["title"] == "Tell agents to use `grep`"
+    assert "3 times the agent then did the job with `grep`. Install `rg` where agents run, or " in (
+        str(rec["detail"])
+    )
+    # other setup errors keep the general advice
+    other = [finding(signals.COMMAND_FAILURE, f"s{i}", variant="invocation") for i in range(3)]
+    (rec,) = recommend.recommend(model.COMMAND, "gh pr list", other)
+    assert rec["title"] == "Document how to run `gh pr list`"
+
+
+def test_only_a_newline_ends_a_line_of_output() -> None:
+    odd = finding(signals.COMMAND_FAILURE, variant="invocation")
+    odd.excerpt = "$ tool run\ntool: error: unknown option --x see the manual\x0cpage 2"
+    assert recommend._error_line(odd) == "tool: error: unknown option --x see the manual\x0cpage 2"
+
+
+def test_a_corrected_rule_that_is_already_written_down_says_so(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "AGENTS.md").write_text(
+        "# Shop\n\nPayments go through PaymentClient, never the legacy module.\n"
+    )
+    said = "No, use PaymentClient here, never the legacy module. I told you this already"
+    found = [finding(signals.USER_CORRECTION, f"s{i}", quote=said) for i in range(2)]
+    guide = Guidance(repo)
+    (rec,) = recommend.recommend(model.FILE, "src/pay/checkout.py", found, None, quote, None, guide)
+    assert rec["title"] == "The rule seems to be written down already: make it harder to miss"
+    text = str(rec["detail"])
+    assert text.startswith(
+        "`AGENTS.md:3` already says something about what the human corrected here 2 times in "
+        "2 sessions (`PaymentClient`). If that is this rule, it is written down and still not "
+        "followed: make it more prominent or move it closer to the code"
+    )
+    assert "In their words:" in text and "Put the rule in" not in text
+    assert rec["documented_in"] == [{"file": "AGENTS.md", "line": 3}]
+    assert rec["documented_as"] == "instruction"
+    # without excerpts the name is not shown, the place still is
+    (rec,) = recommend.recommend(model.FILE, "src/pay/checkout.py", found, None, None, None, guide)
+    assert "PaymentClient" not in str(rec["detail"]) and "`AGENTS.md:3` already" in str(
+        rec["detail"]
+    )
+    # the files say nothing about it: the advice is to write it down, as before
+    (repo / "AGENTS.md").write_text("# Shop\n\nRun the tests with pytest.\n")
+    (rec,) = recommend.recommend(
+        model.FILE, "src/pay/checkout.py", found, None, quote, None, Guidance(repo)
+    )
+    assert rec["title"] == "Write down the rule the human keeps repeating"
+    assert "documented_as" not in rec and "Put the rule in AGENTS.md" in str(rec["detail"])
+    # a correction that names nothing has nothing to look for
+    plain = [finding(signals.USER_CORRECTION, f"s{i}", quote="No, not like that") for i in range(2)]
+    (repo / "AGENTS.md").write_text("# Shop\n\nNot like that: never use the legacy module.\n")
+    (rec,) = recommend.recommend(
+        model.FILE, "src/pay/checkout.py", plain, None, quote, None, Guidance(repo)
+    )
+    assert "already" not in str(rec["title"]).lower()
+
+
+def test_deny_rules_of_the_settings_are_read_and_matched(tmp_path: Path) -> None:
+    from agent_friction.guidance import deny_rules, rule_denies
+
+    (tmp_path / ".claude").mkdir()
+    rules_text = (
+        '{"permissions": {"deny": ["Edit(src/gen/**)", "Read(.env)", "Bash(pytest:*)", '
+        '"Bash(rm -rf *)", "Bash(git push --force)", "WebFetch", 7], "allow": ["Bash(ls:*)"]}}'
+    )
+    (tmp_path / ".claude" / "settings.json").write_text(rules_text, encoding="utf-8")
+    (tmp_path / ".claude" / "settings.local.json").write_text("not json", encoding="utf-8")
+    rules = deny_rules(tmp_path)
+    assert ("edit", "src/gen/**") in rules and ("webfetch", "") in rules and len(rules) == 6
+    assert rule_denies(rules, "Edit", rel="src/gen/schema.py")
+    assert rule_denies(rules, "Write", rel="src/gen/deep/er.py")  # an Edit rule covers writes
+    assert not rule_denies(rules, "Edit", rel="src/app.py")
+    assert not rule_denies(rules, "Read", rel="src/gen/schema.py")
+    assert rule_denies(rules, "Read", rel="config/.env") and rule_denies(rules, "Read", rel=".env")
+    assert rule_denies(rules, "Bash", ["pytest -q"]) and rule_denies(rules, "Bash", ["pytest"])
+    assert not rule_denies(rules, "Bash", ["pytest-watch"])
+    assert rule_denies(rules, "Bash", ["cd x && rm -rf build", "rm -rf build"])
+    assert rule_denies(rules, "Bash", ["git push --force"])
+    assert not rule_denies(rules, "Bash", ["git push"]) and not rule_denies(rules, "Bash", ["ls"])
+    assert rule_denies(rules, "WebFetch") and not rule_denies(rules, "WebSearch")
+    assert deny_rules(None) == [] and deny_rules(tmp_path / "missing") == []

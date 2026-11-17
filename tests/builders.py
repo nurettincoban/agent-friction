@@ -122,6 +122,46 @@ class Session:
         self._line("user", {"role": "user", "content": content}, **extra)
         return self
 
+    def queued(
+        self,
+        text: str,
+        *,
+        as_blocks: bool = False,
+        origin: dict[str, Any] | None = None,
+        mode: str | None = "prompt",
+        meta: bool = False,
+    ) -> Session:
+        """A message delivered while the agent was working (a `queued_command` attachment)."""
+        self.tick(1)
+        stamp = self.now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        attachment: dict[str, Any] = {
+            "type": "queued_command",
+            "prompt": [{"type": "text", "text": text}] if as_blocks else text,
+            "source_uuid": str(uuid.UUID(self._id())),
+            "timestamp": stamp,
+        }
+        if mode is not None:
+            attachment["commandMode"] = mode
+        if origin is not None:
+            attachment["origin"] = origin
+        if meta:
+            attachment["isMeta"] = True
+        line_uuid = str(uuid.UUID(self._id()))
+        self.raw(
+            {
+                "parentUuid": self._parent,
+                "isSidechain": self.sidechain,
+                "cwd": self.cwd,
+                "sessionId": self.session_id,
+                "type": "attachment",
+                "attachment": attachment,
+                "uuid": line_uuid,
+                "timestamp": stamp,
+            }
+        )
+        self._parent = line_uuid
+        return self
+
     def say(self, text: str, thinking: str | None = None) -> Session:
         blocks: list[dict[str, Any]] = []
         if thinking:

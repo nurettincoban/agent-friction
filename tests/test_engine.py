@@ -1624,11 +1624,17 @@ def test_advice_that_is_already_written_down_says_so(tmp_path: Path) -> None:
     )
     assert "Check that the cited line says not to edit it by hand." in schema["detail"]
     assert "Say in AGENTS.md" not in schema["detail"]
-    # other documentable advice about the same file keeps its text and gains a note
+    # the correction names what that line names: the rule is there, and was not followed
     rule = recommendation(out, SCHEMA, "write-down-the-rule")
     assert rule["documented_in"] == schema["documented_in"]
-    assert "(Also mentioned at `AGENTS.md:3`: check whether it already says" in rule["detail"]
-    assert rule["documented_as"] == "mention"
+    assert rule["title"] == "The rule seems to be written down already: make it harder to miss"
+    assert rule["detail"].startswith(
+        "`AGENTS.md:3` already says something about what the human corrected here 2 times in "
+        "2 sessions (`api/openapi.yaml`"
+    )
+    assert "make it more prominent or move it closer to the code" in rule["detail"]
+    assert "In their words:" in rule["detail"] and "Put the rule in" not in rule["detail"]
+    assert rule["documented_as"] == "instruction"
     # ... advice that is not about documentation is left alone
     split = recommendation(out, SCHEMA, "split-or-anchor-large-file")
     assert split["documented_in"] == [] and "already" not in split["detail"]
@@ -2302,16 +2308,17 @@ def test_the_same_red_test_in_three_sessions_is_a_standing_failure(tmp_path: Pat
 
     out = scan(tmp_path / "five", sessions(5), repo)
     (command,) = out["commands"]
-    (advice,) = command["recommendations"]
-    assert command["score"] > 19 and advice["id"] == "say-if-it-is-known-broken"
-    assert advice["title"] == "`tests/test_legacy.py::test_old` is red session after session"
+    # the advice is given once, on the test's file; the command's row only counts it
+    assert command["score"] > 19 and command["recommendations"] == []
     (row,) = out["hotspots"]
     assert row["path"] == "tests/test_legacy.py" and row["signals"] == {"command-failure": 5}
-    assert [r["id"] for r in row["recommendations"]] == ["say-if-it-is-known-broken"]
+    (advice,) = row["recommendations"]
+    assert advice["id"] == "say-if-it-is-known-broken"
+    assert advice["title"] == "`tests/test_legacy.py::test_old` is red session after session"
     # without excerpts the test is not named, the file (a repo path) still is
     bare = scan(tmp_path / "bare", sessions(5), repo, include_excerpts=False)
     assert "test_old" not in json.dumps(bare)
-    assert bare["commands"][0]["recommendations"][0]["title"] == (
+    assert bare["hotspots"][0]["recommendations"][0]["title"] == (
         "The same test is red session after session"
     )
     # twice is not a pattern, and a test the session fixed is the development loop
@@ -3620,3 +3627,967 @@ def test_a_line_that_does_not_say_to_run_the_failing_command_is_no_conflict(
     assert rec.get("documented_as") == documented and rec["replacement"] == "pytest"
     if documented != "instruction":
         assert 'such as: "use `pytest`, not `make test`"' in rec["detail"]
+
+
+def test_a_headless_session_picked_up_after_a_long_silence_is_a_new_episode(
+    tmp_path: Path,
+) -> None:
+    from agent_friction.adapters import parse_transcript
+    from agent_friction.engine import episode_starts
+
+    headless = Session("h").user("run the nightly job").bash("make build", "ok")
+    headless.tick(17 * 3600).bash("make build", "ok")  # the container was restarted
+    (stream,) = parse_transcript(headless.save(tmp_path / "h")).streams
+    assert len(episode_starts([stream])["h"]) == 1
+    # a command that itself ran for hours is not a silence
+    slow = Session("l").user("train it").bash("make train", "done", took=5 * 3600)
+    slow.bash("make eval", "ok")
+    (stream,) = parse_transcript(slow.save(tmp_path / "l")).streams
+    assert episode_starts([stream]) == {}
+
+
+KEY_ERROR = "Traceback (most recent call last):\n  File \"<stdin>\", line 2\nKeyError: 'k'"
+
+
+@pytest.mark.parametrize(
+    ("red", "output", "between", "green"),
+    [
+        # the real shape: a heredoc with its own bug, the project's tool, another heredoc
+        (
+            "python3 - <<E\nimport json\nprint(json.load(open('a'))['k'])\nE",
+            KEY_ERROR,
+            "mytool show src/a.py",
+            "python3 - <<E\nimport json\nprint(json.load(open('a')).get('k'))\nE",
+        ),
+        (
+            "python3 -c \"print(open('nope.txt').read())\"",
+            "FileNotFoundError: [Errno 2] No such file or directory: 'nope.txt'",
+            "mytool list",
+            "python3 -c \"print(open('there.txt').read())\"",
+        ),
+        (
+            'psql -c "select nme from users"',
+            'ERROR:  column "nme" does not exist',
+            "mytool schema users",
+            'psql -c "select name from users"',
+        ),
+        (
+            "python scripts/analyze.py --month 2026-13",
+            "Traceback (most recent call last):\nValueError: month must be in 1..12",
+            "mytool dump | head -3",
+            "python scripts/analyze.py --month 2026-12",
+        ),
+        (
+            "python scripts/analyze.py --month 2026-13",
+            "Traceback (most recent call last):\nValueError: month must be in 1..12",
+            "mytool dump",
+            "python scripts/analyze.py --month 2026-12",
+        ),
+    ],
+)
+def test_a_changed_invocation_that_passes_credits_nothing_that_ran_in_between(
+    tmp_path: Path, red: str, output: str, between: str, green: str
+) -> None:
+    def build(s: Session) -> None:
+        s.bash(red, output, exit_code=1).bash(between, "x").bash(green, "ok")
+
+    sessions = [stashed_session(i, build) for i in range(3)]
+    out = scan(tmp_path, sessions)
+    assert out["commands"] == [] and out["totals"]["friction_events"] == 0
+    assert out["totals"]["dropped_red_runs"] == 3
+
+
+def test_the_same_line_passing_after_another_command_still_names_that_command(
+    tmp_path: Path,
+) -> None:
+    red = "E   fixture data missing\n1 failed"
+
+    def build(s: Session) -> None:
+        s.bash("pytest", red, exit_code=1).bash("mytool seed", "seeded").bash("pytest", "9 passed")
+
+    (row,) = _commands(tmp_path / "same", build, count=3)
+    (rec,) = row["recommendations"]
+    assert rec["id"] == "document-the-setup-step" and rec["setup"] == "mytool seed"
+
+    # a known setup step keeps the credit when only switches changed
+    def flags(s: Session) -> None:
+        s.bash("pytest tests/test_a.py -x", PG_DOWN, exit_code=1)
+        s.bash("docker compose up -d db", "Started").bash("pytest tests/test_a.py", "9 passed")
+
+    (row,) = _commands(tmp_path / "flags", flags, count=3)
+    assert row["recommendations"][0]["id"] == "document-the-setup-step"
+
+    # ... but something run only to be read through a pager or filter is a look
+    def looked(s: Session) -> None:
+        s.bash("pytest", red, exit_code=1).bash("mytool seed | head -3", "x")
+        s.bash("pytest", "9 passed")
+
+    rows = _commands(tmp_path / "looked", looked, count=3)
+    assert "document-the-setup-step" not in [r["id"] for c in rows for r in c["recommendations"]]
+
+
+@pytest.mark.parametrize(
+    ("text", "documented"),
+    [
+        ("# mytool", None),
+        ("# mytool\n\nThis repo is mytool, a widget library.", None),
+        ("## Using mytool", "mention"),
+        ("mytool is our widget CLI.", None),  # the repository's own name mentions nothing
+        ("Run `mytool` before the tests.", "instruction"),
+        ("Before testing:\n\n```\nmytool\n```", "instruction"),
+    ],
+)
+def test_a_title_or_a_sentence_does_not_document_a_setup_step(
+    tmp_path: Path, text: str, documented: str | None
+) -> None:
+    repo = tmp_path / "mytool"
+    repo.mkdir()
+    (repo / "AGENTS.md").write_text(text + "\n")
+    sessions = []
+    for i in range(3):
+        s = Session(f"s{i}", cwd=str(repo)).user("go")
+        s.bash("pytest", "E   fixture data missing\n1 failed", exit_code=1)
+        sessions.append(s.bash("mytool --seed", "seeded").bash("pytest", "9 passed"))
+    (row,) = scan(tmp_path / "t", sessions, repo)["commands"]
+    (rec,) = row["recommendations"]
+    assert rec["id"] == "document-the-setup-step" and rec["setup"] == "mytool"
+    assert rec.get("documented_as") == documented
+    assert ("is documented, yet agents start without it" in rec["title"]) == (
+        documented == "instruction"
+    )
+
+
+_RED_RUN = "FAILED tests/test_a.py::test_x - AssertionError\n1 failed, 40 passed in 2s"
+
+
+@pytest.mark.parametrize(
+    "fix",
+    [
+        "python /tmp/sp/p1.py",
+        "uv run python /tmp/sp/p1.py",
+        "python ~/bin/fix.py",
+        "sed -i s/a/b/ src/a.py",
+    ],
+)
+def test_a_fix_applied_by_a_script_outside_the_repo_is_a_change(tmp_path: Path, fix: str) -> None:
+    def build(s: Session) -> None:
+        s.bash("pytest", _RED_RUN, exit_code=1).bash(fix, "patched").bash("pytest", "41 passed")
+
+    out = scan(tmp_path, [_built(build, i) for i in range(4)])
+    assert out["commands"] == [] and out["totals"]["dropped_red_runs"] == 4
+
+
+def test_a_script_written_and_run_in_one_chain_is_a_change(tmp_path: Path) -> None:
+    chain = "cat > /tmp/p.py <<E\nprint(1)\nE\nuv run python /tmp/p.py; pytest | tail -3"
+    sessions = []
+    for i in range(4):
+        s = Session(f"s{i}", cwd="/repo").user("go")
+        s.bash("pytest", _RED_RUN, exit_code=1).bash(chain, "patched\n41 passed in 2s")
+        sessions.append(s)
+    out = scan(tmp_path, sessions)
+    assert out["commands"] == [] and out["totals"]["dropped_red_runs"] == 4
+
+
+@pytest.mark.parametrize(
+    "between",
+    [
+        "cd /tmp/sp && python p1.py",  # run somewhere else: this repository was not its subject
+        "cat /tmp/sp/p1.py",  # a look changes nothing
+        "git status",
+    ],
+)
+def test_what_changes_nothing_leaves_a_rerun_flaky(tmp_path: Path, between: str) -> None:
+    (row,) = _commands(
+        tmp_path,
+        lambda s: (
+            s.bash("pytest", _RED_RUN, exit_code=1).bash(between, "x").bash("pytest", "41 passed")
+        ),
+    )
+    assert [r["id"] for r in row["recommendations"]] == ["fix-the-flaky-test"]
+
+
+@pytest.mark.parametrize(
+    ("command", "red", "edited"),
+    [
+        (
+            'uv run pytest -q 2>&1 | grep -E "^FAILED|^E  "',
+            "FAILED tests/test_a.py::test_x - AssertionError",
+            "/repo/src/a.py",
+        ),
+        (
+            "npx tsc --noEmit | head",
+            "src/a.ts(3,5): error TS2322: Type 'string' is not assignable to type 'number'.",
+            "/repo/src/a.ts",
+        ),
+    ],
+)
+def test_a_filtered_rerun_that_prints_nothing_after_a_change_is_green(
+    tmp_path: Path, command: str, red: str, edited: str
+) -> None:
+    code = 1 if "grep" in command else 0
+
+    def fixed(s: Session) -> None:
+        s.edit(edited).bash(command, red).edit(edited, "x", "y").bash(command, "", exit_code=code)
+
+    sessions = []
+    for i in range(4):
+        s = Session(f"s{i}", cwd="/repo").user("go")
+        fixed(s)
+        sessions.append(s)
+    out = scan(tmp_path, sessions)
+    assert out["commands"] == [] and out["totals"]["dropped_red_runs"] == 4
+
+    # nothing was changed in between: silence proves nothing, the red run stays
+    (row,) = _commands(
+        tmp_path / "unchanged", lambda s: s.bash(command, red).bash(command, "", exit_code=code)
+    )
+    assert row["events"] == 4
+
+
+def test_a_filter_for_passes_that_prints_nothing_is_not_green(tmp_path: Path) -> None:
+    # `grep passed` with no match says nothing passed
+    command = "pytest -q 2>&1 | grep passed"
+    (row,) = _commands(
+        tmp_path,
+        lambda s: (
+            s.bash("pytest -q", _RED_RUN, exit_code=1)
+            .edit("/repo/src/a.py")
+            .bash(command, "", exit_code=1)
+        ),
+    )
+    assert row["events"] == 4
+
+
+def _ordinary_next_to_one_error(s: Session, error: bool) -> None:
+    if error:
+        s.bash(
+            "uv run pytest -q",
+            "error: Failed to spawn: `pytest`\n  Caused by: No such file or directory (os error 2)",
+            exit_code=2,
+        )
+    s.edit("/repo/src/a.py", f"a{s.session_id}", "b")
+    s.bash("uv run pytest -q", _RED_RUN.replace("test_x", f"test_{s.session_id}"), exit_code=1)
+    s.user("leave it, thanks")
+
+
+def test_ordinary_failures_do_not_lift_a_row_past_its_real_evidence(tmp_path: Path) -> None:
+    def sessions(error_in: int) -> list[Session]:
+        made = []
+        for i in range(4):
+            s = Session(f"s{i}", cwd="/repo").user("go")
+            _ordinary_next_to_one_error(s, i < error_in)
+            made.append(s)
+        return made
+
+    (alone,) = scan(
+        tmp_path / "alone",
+        sessions(1)[:1]
+        + [
+            Session(f"q{i}", cwd="/repo").user("go").bash("uv run pytest -q", "41 passed")
+            for i in range(3)
+        ],
+    )["commands"]
+    (row,) = scan(tmp_path / "mixed", sessions(1))["commands"]
+    assert row["events"] == 5 and row["sessions"] == 4
+    # one real error in one session: the four red test runs corroborate nothing
+    assert row["confidence"] == "low" == alone["confidence"]
+    assert alone["score"] < row["score"] <= scoring.WEAK_ONLY_SCORE_CAP
+    detail = row["score_detail"]
+    assert detail["ordinary_limited"] is True and detail["capped"] is False
+    assert "4 of the events are ordinary failures" in row["why"]
+    assert "in sessions with nothing else they cannot lift the score past 19" in row["why"]
+    # ... and ordinary failures alone stay a capped lead
+    (weak,) = scan(tmp_path / "weak", sessions(0))["commands"]
+    assert weak["score_detail"]["capped"] and not weak["score_detail"]["ordinary_limited"]
+    assert weak["score"] <= scoring.WEAK_ONLY_SCORE_CAP and weak["confidence"] == "low"
+    # the real error in every session is a pattern, with or without the red runs
+    (real,) = scan(tmp_path / "real", sessions(4))["commands"]
+    assert real["confidence"] == "medium" and real["score"] > scoring.WEAK_ONLY_SCORE_CAP
+    assert real["score_detail"]["ordinary_limited"] is False  # every session has both
+    assert "ordinary failures" not in real["why"]
+
+
+@pytest.mark.parametrize(
+    ("code", "output"),
+    [(137, "Watching for file changes..."), (143, ""), (1, "")],
+)
+def test_a_watcher_that_was_killed_is_not_a_red_run(tmp_path: Path, code: int, output: str) -> None:
+    rows = _commands(
+        tmp_path,
+        lambda s: s.bash("npm test -- --watch", output, exit_code=code).bash(
+            "npm test", "Tests: 4 passed, 4 total"
+        ),
+    )
+    assert rows == []
+    # a watcher that showed a red test, and a green run with nothing changed, is a flaky pair
+    (row,) = _commands(
+        tmp_path / "red",
+        lambda s: s.bash(
+            "npm test -- --watch", "Tests: 1 failed, 3 passed, 4 total", exit_code=143
+        ).bash("npm test", "Tests: 4 passed, 4 total"),
+    )
+    assert [r["id"] for r in row["recommendations"]] == ["fix-the-flaky-test"]
+    # ... and the same status from a run that is no watcher is a failure like any other
+    (row,) = _commands(tmp_path / "plain", lambda s: s.bash("npm test", "", exit_code=137))
+    assert row["events"] == 4
+
+
+_NO_UPSTREAM = (
+    "fatal: The current branch feat has no upstream branch.\n"
+    "To push the current branch and set the remote as upstream, use\n\n"
+    "    git push --set-upstream origin feat\n"
+)
+
+
+@pytest.mark.parametrize(
+    "again", ["git push --set-upstream origin feat", "git push -u origin HEAD"]
+)
+def test_pushing_without_an_upstream_session_after_session_gets_advice(
+    tmp_path: Path, again: str
+) -> None:
+    def build(s: Session) -> None:
+        s.bash("git push", _NO_UPSTREAM, exit_code=128).bash(again, "branch 'feat' set up")
+
+    (row,) = _commands(tmp_path, build, count=3)
+    (advice,) = row["recommendations"]
+    assert advice["id"] == "push-with-upstream"
+    assert advice["title"] == "Tell agents to push a new branch with `git push -u origin HEAD`"
+    assert "failed 3 times in 3 sessions because the branch had no upstream" in advice["detail"]
+    assert "the branch had no upstream to push to" in row["evidence"][0]["summary"]
+    assert row["est_minutes_lost"] == 0
+    # twice is how new branches go: not reported
+    out = scan(tmp_path / "twice", [_built(build, i) for i in range(2)])
+    assert out["commands"] == [] and out["totals"]["dropped_red_runs"] == 2
+
+
+def _built(build: Any, i: int) -> Session:
+    s = Session(f"s{i}", cwd="/repo").user("go")
+    build(s)
+    return s
+
+
+# ---- round 38 ------------------------------------------------------------------------------
+
+_NO_RULE = "make: *** No rule to make target 'typecheck'.  Stop."
+
+
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [
+        ("make test && make typecheck", "make typecheck"),
+        ("make build && make lint && make typecheck", "make typecheck"),
+        ("make lint typecheck", "make typecheck"),
+    ],
+)
+def test_a_missing_target_is_blamed_on_the_step_that_asked_for_it(
+    tmp_path: Path, command: str, key: str
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "Makefile").write_text("test:\n\tpytest\nlint:\n\truff check .\nbuild:\n\ttrue\n")
+    sessions = [
+        Session(f"s{i}", cwd=str(repo)).user("go").bash(command, _NO_RULE, exit_code=2)
+        for i in range(2)
+    ]
+    (row,) = scan(tmp_path, sessions, repo)["commands"]
+    (rec,) = row["recommendations"]
+    assert row["path"] == key
+    assert rec["title"] == "`make typecheck` does not exist: say what to run instead"
+    assert "the Makefile has no target `typecheck`." in rec["detail"]
+    assert "What it does define: `test`, `lint`, `build`." in rec["detail"]
+
+
+@pytest.mark.parametrize(
+    ("holder", "body", "now", "command", "output", "thing"),
+    [
+        (
+            "Makefile",
+            "test:\n\tpytest\n",
+            "test:\n\tpytest\ntypecheck:\n\tmypy\n",
+            "make test && make typecheck",
+            _NO_RULE,
+            "target",
+        ),
+        (
+            "package.json",
+            '{"scripts": {"test": "jest"}}',
+            '{"scripts": {"test": "jest", "typecheck": "tsc --noEmit"}}',
+            "npm run typecheck",
+            'npm error Missing script: "typecheck"',
+            "script",
+        ),
+        (
+            "justfile",
+            "test:\n    pytest\n",
+            "test:\n    pytest\n\ntypecheck *args:\n    mypy {{args}}\n",
+            "just typecheck",
+            "error: Justfile does not contain recipe `typecheck`.",
+            "recipe",
+        ),
+    ],
+)
+def test_a_target_that_has_been_added_since_is_not_called_missing(
+    tmp_path: Path, holder: str, body: str, now: str, command: str, output: str, thing: str
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sessions = [
+        Session(f"s{i}", cwd=str(repo)).user("go").bash(command, output, exit_code=2)
+        for i in range(2)
+    ]
+    key = command.rsplit("&& ", 1)[-1]
+    (repo / holder).write_text(body)
+    (row,) = scan(tmp_path / "before", sessions, repo)["commands"]
+    (rec,) = row["recommendations"]
+    assert rec["title"] == f"`{key}` does not exist: say what to run instead"
+    assert (
+        f"because the {holder} has no {thing} `typecheck`. What it does define: `test`."
+        in (rec["detail"])
+    )
+    (repo / holder).write_text(now)
+    (row,) = scan(tmp_path / "after", sessions, repo)["commands"]
+    (rec,) = row["recommendations"]
+    assert rec["id"] == "name-the-missing-target"
+    assert rec["title"] == f"`{key}` was missing in these sessions; it is defined now"
+    assert (
+        f"because the {holder} had no {thing} `typecheck`. The {holder} defines it now"
+        in (rec["detail"])
+    )
+    assert "re-scan with `--since <date>`" in rec["detail"]
+    assert "does not exist" not in json.dumps(row) and "What it does define" not in rec["detail"]
+    # without excerpts the name is not shown, and the advice is still not stale
+    (row,) = scan(tmp_path / "bare", sessions, repo, include_excerpts=False)["commands"]
+    (rec,) = row["recommendations"]
+    assert "it is defined now" in rec["title"] and f"had no {thing}." in rec["detail"]
+
+
+def test_python3_and_a_container_stay_in_the_command_name(tmp_path: Path) -> None:
+    red = "1 failed, 3 passed in 1s"
+
+    def build(s: Session) -> None:
+        s.bash("python3 -m pytest -q", red, exit_code=1).user("ok")
+        s.bash("python -m pytest -q", red, exit_code=1).user("ok")
+        s.bash("docker compose exec web pytest -q", red, exit_code=1).user("ok")
+        s.bash("docker exec -it 3f2a9c pytest -q", red, exit_code=1).user("ok")
+        s.bash("kubectl exec api-7d9 -- pytest", red, exit_code=1).user("ok")
+        s.bash("pytest -q", red, exit_code=1)
+
+    rows = {row["path"] for row in _commands(tmp_path, build, count=1)}
+    assert rows == {
+        "python3 -m pytest",
+        "python -m pytest",
+        "docker compose exec web pytest",
+        "docker exec pytest",
+        "kubectl exec pytest",
+        "pytest",
+    }
+    # the service is a name of the project: hidden without excerpts
+    bare = scan(
+        tmp_path / "bare",
+        [_built(lambda s: s.bash("docker compose exec zebra pytest", red, exit_code=1), 0)],
+        include_excerpts=False,
+    )
+    assert "zebra" not in json.dumps(bare)
+    assert bare["commands"][0]["path"].startswith("docker compose exec <")
+
+
+# ---- round 39 ------------------------------------------------------------------------------
+
+
+def _polyglot(tmp_path: Path, build: Any, count: int = 4) -> Any:
+    repo = tmp_path / "repo"
+    for name in ("backend", "frontend", "src"):
+        (repo / name).mkdir(parents=True, exist_ok=True)
+    sessions = []
+    for i in range(count):
+        s = Session(f"s{i}", cwd=str(repo)).user("go")
+        build(s, str(repo))
+        sessions.append(s)
+    return scan(tmp_path, sessions, repo)
+
+
+@pytest.mark.parametrize(
+    ("red", "green"),
+    [
+        ("ruff check backend", "cd frontend && npx eslint ."),
+        ("mypy src", "npx tsc --noEmit"),
+        ("black --check .", "npx prettier --check ."),
+        ("cargo build", "npm run build"),
+    ],
+)
+def test_another_ecosystems_tool_is_not_the_working_command(
+    tmp_path: Path, red: str, green: str
+) -> None:
+    missing = f"bash: {red.split()[0]}: command not found"
+    out = _polyglot(tmp_path, lambda s, _: s.bash(red, missing, exit_code=127).bash(green, "ok"))
+    (row,) = out["commands"]
+    (rec,) = row["recommendations"]
+    assert (
+        rec["id"] == "document-the-command"
+        and "is not installed where agents run" in (rec["title"])
+    )
+    assert green.split("&& ")[-1].rsplit(" ", 1)[0] not in json.dumps(row["recommendations"])
+
+
+@pytest.mark.parametrize(
+    ("red", "green"), [("ruff check .", "make lint"), ("pytest", "uv run pytest")]
+)
+def test_a_wrapper_or_the_same_family_is_still_the_working_command(
+    tmp_path: Path, red: str, green: str
+) -> None:
+    missing = f"bash: {red.split()[0]}: command not found"
+    out = _polyglot(tmp_path, lambda s, _: s.bash(red, missing, exit_code=127).bash(green, "ok"))
+    (row,) = out["commands"]
+    (rec,) = row["recommendations"]
+    assert (
+        rec["id"] == "use-the-working-command" and rec["title"] == f"Tell agents to use `{green}`"
+    )
+
+
+def test_a_green_run_of_another_ecosystem_closes_no_red_test(tmp_path: Path) -> None:
+    red = "FAILED tests/test_a.py::test_x - AssertionError\n1 failed, 10 passed in 2s"
+    green = "Tests: 3 passed, 3 total"
+
+    # nothing changed in between: pytest is red, and `npm test` is not what to use instead
+    out = _polyglot(
+        tmp_path / "unchanged",
+        lambda s, _: s.bash("pytest -q", red, exit_code=1).bash("npm test", green),
+    )
+    (row,) = out["commands"]
+    assert row["path"] == "pytest"
+    assert [r["id"] for r in row["recommendations"]] == ["say-if-it-is-known-broken"]
+    assert "npm test" not in json.dumps(row["recommendations"])
+
+    # edit, red, edit, and then the other ecosystem's tests pass: pytest never went green
+    def loop(s: Session, repo: str, check: str, said: str) -> None:
+        s.edit(f"{repo}/src/a.py").bash("pytest -q", red, exit_code=1)
+        s.edit(f"{repo}/src/a.py", "x", "y").bash(check, said)
+
+    out = _polyglot(tmp_path / "js", lambda s, repo: loop(s, repo, "npm test", green))
+    (row,) = out["commands"]
+    assert row["path"] == "pytest" and row["events"] == 4
+    assert out["totals"]["dropped_red_runs"] == 0
+    # ... while a wrapper, or a runner of the same family, closes the loop
+    for check in ("make test", "uv run pytest -q", "tox"):
+        out = _polyglot(
+            tmp_path / check.split()[0],
+            lambda s, repo, check=check: loop(s, repo, check, "11 passed in 1s"),
+        )
+        assert out["commands"] == [] and out["totals"]["dropped_red_runs"] == 4, check
+
+
+def test_a_green_run_in_another_directory_closes_nothing(tmp_path: Path) -> None:
+    failed = "make: *** [Makefile:3: build] Error 1"
+
+    def build(s: Session, repo: str, then: str) -> None:
+        s.edit(f"{repo}/backend/a.py").bash("cd backend && make build", failed, exit_code=2)
+        s.edit(f"{repo}/backend/a.py", "x", "y").bash(then, "built")
+
+    # side by side: `frontend/` building says nothing about `backend/`
+    out = _polyglot(tmp_path / "beside", lambda s, r: build(s, r, "cd frontend && make build"))
+    (row,) = out["commands"]
+    assert row["path"] == "make build (backend/)" and row["events"] == 4
+    # the same directory, and a wrapper run above it, do
+    for then in ("cd backend && make build", "make build", "make all"):
+        out = _polyglot(tmp_path / then.replace(" ", "_"), lambda s, r, t=then: build(s, r, t))
+        assert out["commands"] == [] and out["totals"]["dropped_red_runs"] == 4, then
+    # a typed linter passing next door does not verify a red type check here
+    red = "src/a.py:1: error: Incompatible types\nFound 1 error in 1 file"
+
+    def checked(s: Session, repo: str, then: str) -> None:
+        s.edit(f"{repo}/src/a.py").bash("mypy src", red, exit_code=1)
+        s.edit(f"{repo}/src/a.py", "x", "y").bash(then, "Tests: 3 passed, 3 total")
+
+    out = _polyglot(tmp_path / "ts", lambda s, r: checked(s, r, "npm test"))
+    assert [row["path"] for row in out["commands"]] == ["mypy"]
+    out = _polyglot(tmp_path / "py", lambda s, r: checked(s, r, "pytest -q"))
+    assert out["commands"] == []
+
+
+def test_a_server_stopped_in_the_foreground_gets_the_background_advice(tmp_path: Path) -> None:
+    def build(s: Session) -> None:
+        s.edit("/repo/src/app.py", "a", "b")
+        s.tool("Bash", {"command": "npm run dev"}, builders.INTERRUPT_TOOL, is_error=True, took=90)
+        s.user(builders.INTERRUPT_TOOL, as_blocks=True)
+        s.user("looks good in the browser, thanks. now commit")
+
+    out = scan(tmp_path, [_built(build, i) for i in range(4)])
+    assert out["hotspots"] == []  # the file that had been edited is not blamed
+    (row,) = out["commands"]
+    assert row["path"] == "npm run dev" and row["signals"] == {"user-interrupt": 4}
+    assert row["est_minutes_lost"] == 0 and out["totals"]["est_minutes_lost"] == 0
+    (rec,) = row["recommendations"]
+    assert rec["id"] == "run-it-in-the-background"
+    assert "sat until a human had to stop it 4 times in 4 sessions" in rec["detail"]
+    assert rec["signals"] == ["user-interrupt"]
+
+    # an ordinary command that was stopped, and nothing said against it: no event at all
+    def suite(s: Session) -> None:
+        s.edit("/repo/src/app.py", "a", "b")
+        s.tool("Bash", {"command": "pytest -q"}, builders.INTERRUPT_TOOL, is_error=True, took=90)
+        s.user(builders.INTERRUPT_TOOL, as_blocks=True)
+        s.user("looks good, thanks. now commit")
+
+    out = scan(tmp_path / "suite", [_built(suite, i) for i in range(4)])
+    assert out["hotspots"] == [] and out["commands"] == []
+    assert out["totals"]["friction_events"] == 0
+
+
+def test_paths_may_be_given_as_strings(tmp_path: Path) -> None:
+    s = Session("s0", cwd="/repo").user("go").bash("make lint", "boom", exit_code=2)
+    file = s.save(tmp_path / "t")
+    typed = analyze(AnalyzeOptions(repo=Path("/repo"), transcripts=[file], include_git=False))
+    as_text: Any = {"repo": "/repo", "transcripts": [str(file)], "include_git": False}
+    assert analyze(AnalyzeOptions(**as_text))["commands"] == typed["commands"]
+    one: Any = {"repo": "/repo", "transcripts": str(file), "include_git": False}
+    assert analyze(AnalyzeOptions(**one))["commands"] == typed["commands"]
+    relative: Any = {"repo": "shop", "transcripts": [file], "include_git": False}
+    assert analyze(AnalyzeOptions(**relative))["totals"]["sessions"] >= 0  # no crash
+
+
+def _delegating(repo: Path, name: str, said: str, *, edits: bool) -> tuple[Session, Session]:
+    app = str(repo / "src" / "app.py")
+    main = Session(name, cwd=str(repo)).user("rename the helpers").tick(5)
+    side = Session(name, cwd=str(repo), sidechain=True)
+    side.now = main.now
+    side.user("rename the helpers")
+    if edits:
+        side.edit(app, "a", "b")
+    else:
+        side.read(app)
+    task = {"description": "rename", "prompt": "rename helpers", "subagent_type": "general"}
+    main.tool("Task", task, "done", took=120)
+    main.user(said).edit(app, "b", "a").user("thanks")
+    return main, side
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "No, you broke src/app.py. I told you not to change the public API, revert that",
+        "No, that's wrong. I told you not to change the public API, revert that",
+    ],
+)
+def test_what_a_subagent_changed_is_a_change_of_the_turn_that_launched_it(
+    tmp_path: Path, said: str
+) -> None:
+    def run(edits: bool) -> dict[str, Any]:
+        root = tmp_path / str(edits)
+        repo = root / "repo"
+        (repo / "src").mkdir(parents=True)
+        (repo / "src" / "app.py").write_text("a = 1\n", encoding="utf-8")
+        files = []
+        for index in range(3):
+            main, side = _delegating(repo, f"d{index}", said, edits=edits)
+            files.append(main.save(root / "t"))
+            files.append(side.save(root / "t" / main.session_id / "subagents", "agent-a1"))
+        return analyze(AnalyzeOptions(repo=repo, transcripts=files, include_git=False, now=NOW))
+
+    out = run(True)
+    assert out["totals"]["corrections"] == 3 and out["totals"]["probable_corrections"] == 0
+    (spot,) = out["hotspots"]
+    assert spot["path"] == "src/app.py" and "user-correction" in spot["signals"]
+    assert "had not touched" not in json.dumps(out)
+    # the subagent only read the file: nothing had been changed when the human spoke
+    assert run(False)["totals"]["corrections"] == 0
+
+
+def test_a_missing_program_names_the_way_that_worked_from_any_directory(tmp_path: Path) -> None:
+    missing = "'pytest' is not recognized as an internal or external command,\noperable program"
+
+    def sessions(after: str) -> list[Session]:
+        return [
+            Session(f"w{i}")
+            .user("run the tests")
+            .bash("cd src; pytest", missing, exit_code=1)
+            .bash(after, "3 passed in 1s")
+            for i in range(3)
+        ]
+
+    (entry,) = scan(tmp_path / "a", sessions("python -m pytest"))["commands"]
+    (advice,) = entry["recommendations"]
+    assert advice["id"] == "use-the-working-command"
+    assert advice["title"] == "Tell agents to use `python -m pytest`"
+    # another tool passing somewhere else says nothing about how to start pytest
+    (entry,) = scan(tmp_path / "b", sessions("cd web && npm test"))["commands"]
+    (advice,) = entry["recommendations"]
+    assert advice["id"] == "document-the-command" and "is not installed" in advice["title"]
+
+
+def test_calls_in_a_sibling_package_are_counted_apart(tmp_path: Path) -> None:
+    mono = tmp_path / "mono"
+    for package in ("web", "api"):
+        (mono / "packages" / package).mkdir(parents=True)
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+    subprocess.run(["git", "init", "-q", str(mono)], check=True, env=env)
+    web, api = mono / "packages" / "web", mono / "packages" / "api"
+    s = Session("s0", cwd=str(web)).user("go")
+    s.bash(f"cd {api} && make test", "boom", exit_code=2)  # next door, same repository
+    s.edit(f"{mono}/README.md", error=builders.EDIT_NOT_FOUND)  # above, same repository
+    s.bash("cd /srv/other && make test", "boom", exit_code=2)  # somewhere else entirely
+    s.bash("make test", "boom", exit_code=2)  # ours
+    totals = scan(tmp_path, [s], repo=web)["totals"]
+    assert totals["events_outside_repo"] == 3 and totals["events_elsewhere_in_repo"] == 2
+    assert totals["friction_events"] == 1
+    # scanned from the repository's root there is no "elsewhere in the repository"
+    whole = Session("s1", cwd=str(mono)).user("go")
+    whole.bash("cd /srv/other && make test", "boom", exit_code=2)
+    totals = scan(tmp_path / "w", [whole], repo=mono)["totals"]
+    assert totals["events_outside_repo"] == 1 and totals["events_elsewhere_in_repo"] == 0
+
+
+_HOOK_SAYS = (
+    "PreToolUse:Bash hook error: [python3 .claude/hooks/guard.py]: "
+    "Use `make test` instead of calling pytest directly"
+)
+_EDIT_DENIED = "Permission to use Edit has been denied."
+
+
+def _guarded(
+    tmp_path: Path, build: Any, *, settings: dict[str, Any] | None = None, count: int = 5
+) -> dict[str, Any]:
+    repo = tmp_path / "repo"
+    (repo / "src" / "gen").mkdir(parents=True)
+    (repo / "src" / "gen" / "schema.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "AGENTS.md").write_text("# Notes\n\nUse `make test` to run the tests.\n", "utf-8")
+    if settings is not None:
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+    sessions = []
+    for index in range(count):
+        s = Session(f"g{index}", cwd=str(repo)).user("do it")
+        build(s, str(repo))
+        sessions.append(s)
+    (entry,) = scan(tmp_path, sessions, repo=repo)["commands" if settings is None else "hotspots"]
+    return dict(entry)
+
+
+def _said(entry: dict[str, Any]) -> str:
+    return " ".join(f"{r['title']} {r['detail']}" for r in entry["recommendations"])
+
+
+def test_a_hook_that_sends_agents_to_the_documented_command_is_a_guardrail(tmp_path: Path) -> None:
+    def blocked(s: Session, repo: str) -> None:
+        s.tool("Bash", {"command": "pytest -q"}, _HOOK_SAYS, is_error=True)
+        s.bash("make test", "5 passed")
+
+    entry = _guarded(tmp_path, blocked)
+    assert entry["path"] == "pytest" and entry["signals"] == {"permission-denied": 5}
+    assert entry["guardrail_hits"] == 5 and entry["score"] <= scoring.WEAK_ONLY_SCORE_CAP
+    assert entry["confidence"] == "low" and entry["score_detail"]["capped"]
+    assert "guardrails doing their job" in entry["why"]
+    assert "nothing is recommended" not in entry["why"]
+    (advice,) = entry["recommendations"]
+    assert advice["id"] == "the-guardrail-works" and advice["replacement"] == "make test"
+    assert advice["title"] == "The guardrail works; agents still try `pytest` first"
+    assert "(5 times with `make test`)" in advice["detail"]
+    assert 'The hook says: "Use `make test` instead of calling pytest directly"' in advice["detail"]
+    assert advice["documented_in"] == [{"file": "AGENTS.md", "line": 3}]
+    assert "`AGENTS.md:3` already names `make test`" in advice["detail"]
+    said = _said(entry)
+    assert "allow rule" not in said and "enforce" not in said
+    assert "then used `make test`" in entry["evidence"][0]["summary"]
+
+
+def test_a_hook_the_agent_gets_around_or_stalls_on_is_not_a_guardrail_hit(tmp_path: Path) -> None:
+    def around(s: Session, repo: str) -> None:
+        s.tool("Bash", {"command": "pytest -q"}, _HOOK_SAYS, is_error=True)
+        s.bash("pytest tests/", "5 passed")  # the same command got through after all
+
+    entry = _guarded(tmp_path / "a", around)
+    assert entry["guardrail_hits"] == 0 and entry["score"] > scoring.WEAK_ONLY_SCORE_CAP
+    (advice,) = entry["recommendations"]
+    assert advice["title"] == "Tell agents this is off limits, or close the way around"
+    assert "allow rule" not in _said(entry) and "enforce it" not in _said(entry)
+
+    def stalled(s: Session, repo: str) -> None:
+        s.tool("Bash", {"command": "pytest -q"}, _HOOK_SAYS, is_error=True)
+
+    entry = _guarded(tmp_path / "b", stalled)  # the session ends on the refusal
+    assert entry["guardrail_hits"] == 0
+    (advice,) = entry["recommendations"]
+    assert advice["title"] == "Tell agents this is off limits, and what to do instead"
+    assert "allow rule" not in _said(entry) and "enforce it" not in _said(entry)
+
+    def unconfigured(s: Session, repo: str) -> None:  # no hook, no rule: nobody decided
+        denied = "Claude requested permissions to use Bash, but you haven't granted it yet."
+        s.tool("Bash", {"command": "pytest -q"}, denied, is_error=True)
+        s.bash("make test", "5 passed")
+
+    entry = _guarded(tmp_path / "c", unconfigured)
+    assert entry["guardrail_hits"] == 0 and "add an allow rule" in _said(entry)
+
+
+def test_a_deny_rule_on_a_file_that_holds_is_a_guardrail(tmp_path: Path) -> None:
+    rule = {"permissions": {"deny": ["Edit(src/gen/**)"]}}
+
+    def refused(s: Session, repo: str) -> None:
+        change = {"file_path": f"{repo}/src/gen/schema.py", "old_string": "x", "new_string": "y"}
+        s.tool("Edit", change, _EDIT_DENIED, is_error=True)
+
+    def moved_on(s: Session, repo: str) -> None:
+        refused(s, repo)
+        s.edit(f"{repo}/src/app.py", "x", "y")
+
+    entry = _guarded(tmp_path / "a", moved_on, settings=rule)
+    assert entry["path"] == "src/gen/schema.py" and entry["guardrail_hits"] == 5
+    assert entry["score"] <= scoring.WEAK_ONLY_SCORE_CAP
+    (advice,) = entry["recommendations"]
+    assert advice["id"] == "the-guardrail-works"
+    assert advice["title"] == "The guardrail works; agents still try to change this file"
+    assert "refused by a deny rule in the settings" in advice["detail"]
+    said = _said(entry)
+    assert "allow rule" not in said and "enforce" not in said and "permission rule" not in said
+    assert ".claude/settings.json" not in said  # the rule itself is not cited as guidance
+
+    # the same refusal with no rule that matches it: nobody is known to have decided
+    other = {"permissions": {"deny": ["Edit(docs/**)", "Bash(rm:*)"]}}
+    entry = _guarded(tmp_path / "b", moved_on, settings=other)
+    assert entry["guardrail_hits"] == 0 and "add an allow rule" in _said(entry)
+
+    def around(s: Session, repo: str) -> None:
+        refused(s, repo)
+        s.bash("sed -i s/x/y/ src/gen/schema.py", "")  # changed anyway, by another tool
+
+    entry = _guarded(tmp_path / "c", around, settings=rule)
+    assert entry["guardrail_hits"] == 0
+    assert "close the way around" in _said(entry) and "allow rule" not in _said(entry)
+
+
+_WATCHING = (
+    "Command timed out after 2m 0s\n PASS  src/app.test.js\n\nTests: 3 passed, 3 total\n\n"
+    "Watch Usage: Press w to show more.\n"
+)
+_STILL_RUNNING = "Command timed out after 2m 0s\ncollected 900 items\n\ntests/test_a.py ....."
+
+
+def _timed_out(tmp_path: Path, command: str, output: str, after: list[str]) -> dict[str, Any]:
+    sessions = []
+    for index in range(4):
+        s = Session(f"t{index}").user("run the tests")
+        s.bash(command, output, exit_code=143, took=120)
+        if after:
+            s.bash(after[index % len(after)], "Tests: 3 passed, 3 total")
+        sessions.append(s)
+    (entry,) = scan(tmp_path, sessions)["commands"]
+    return dict(entry)
+
+
+def test_a_command_that_times_out_in_watch_mode_is_told_apart_from_a_slow_one(
+    tmp_path: Path,
+) -> None:
+    forms = ["CI=true npm test", "CI=true npm test", "npm test -- --watchAll=false"]
+    entry = _timed_out(tmp_path / "a", "npm test", _WATCHING, forms)
+    (advice,) = entry["recommendations"]
+    assert advice["id"] == "use-the-working-command"
+    assert advice["title"] == "Tell agents to use `CI=true npm test`"
+    assert advice["replacement"] == "CI=true npm test"
+    assert "(also with `npm test -- --watchAll=false`)" in advice["detail"]
+    assert "waiting for file changes (watch mode)" in advice["detail"]
+    assert "longer timeout" not in _said(entry) and "background" not in _said(entry)
+    assert "it was in watch mode" in entry["evidence"][0]["summary"]
+    # another command of the same kind, named as it was typed
+    entry = _timed_out(tmp_path / "b", "npm test", _WATCHING, ["npx vitest run"])
+    (advice,) = entry["recommendations"]
+    assert advice["title"] == "Tell agents to use `npx vitest run`"
+    # a watcher and nothing that worked: say what it is, not "give it more time"
+    entry = _timed_out(tmp_path / "c", "npm test", _WATCHING, [])
+    (advice,) = entry["recommendations"]
+    assert advice["id"] == "run-it-once-not-in-watch-mode"
+    assert advice["title"] == "`npm test` runs in watch mode by default"
+    assert "longer timeout" not in advice["detail"]
+    # a slow command with nothing that worked is still a slow command
+    entry = _timed_out(tmp_path / "d", "pytest", _STILL_RUNNING, [])
+    (advice,) = entry["recommendations"]
+    assert advice["id"] == "give-it-more-time" and "longer timeout" in advice["detail"]
+    # ... one working alternative in a single session does not change that
+    one = Session("t9").user("run").bash("pytest", _STILL_RUNNING, exit_code=143, took=120)
+    slow = [
+        Session(f"t{i}").user("run").bash("pytest", _STILL_RUNNING, exit_code=143, took=120)
+        for i in range(3)
+    ]
+    (entry,) = scan(tmp_path / "e", [*slow, one.bash("make test", "5 passed")])["commands"]
+    assert "give-it-more-time" in [r["id"] for r in entry["recommendations"]]
+    # ... and a replacement seen in every session is what to use
+    entry = _timed_out(tmp_path / "f", "pytest", _STILL_RUNNING, ["make test"])
+    (advice,) = entry["recommendations"]
+    assert advice["title"] == "Tell agents to use `make test`"
+    assert "longer timeout" not in advice["detail"] and "watch mode" not in advice["detail"]
+
+
+def _committing(count: int) -> list[Session]:
+    hook = "ruff-format....Failed\n- hook id: ruff-format\n- files were modified by this hook"
+    return [
+        Session(f"c{i}")
+        .user("commit it")
+        .edit("/repo/src/app.py", "a", "b")
+        .bash("git commit -am 'x'", hook, exit_code=1)
+        .bash("git commit -am 'x'", "[main 1a2b3c4] x")
+        for i in range(count)
+    ]
+
+
+def test_a_formatting_hook_that_stops_every_commit_is_a_habit_worth_a_line(tmp_path: Path) -> None:
+    out = scan(tmp_path / "a", _committing(4))
+    (entry,) = out["commands"]
+    assert entry["path"] == "git commit" and entry["events"] == 4
+    assert entry["score"] <= scoring.WEAK_ONLY_SCORE_CAP and entry["confidence"] == "low"
+    assert "nothing is recommended" not in entry["why"]
+    (advice,) = entry["recommendations"]
+    assert advice["id"] == "format-before-committing"
+    assert advice["title"] == "Tell agents to run the formatter before `git commit`"
+    assert "(`ruff-format`)" in advice["detail"]
+    assert "`pre-commit run ruff-format`" in advice["detail"]
+    assert "stopped by a pre-commit hook that rewrote files" in entry["evidence"][0]["summary"]
+    # twice is the loop working: nothing
+    quiet = scan(tmp_path / "b", _committing(2))
+    assert quiet["commands"] == [] and quiet["totals"]["friction_events"] == 0
+    # without excerpts the hook is not named
+    bare = scan(tmp_path / "c", _committing(4), include_excerpts=False)
+    assert "ruff-format" not in json.dumps(bare)
+
+
+@pytest.mark.parametrize("joiner", [";", " &&"])
+def test_a_setup_step_in_front_of_the_green_run_on_one_line_is_the_fix(
+    tmp_path: Path, joiner: str
+) -> None:
+    def sessions(green: str) -> list[Session]:
+        return [
+            Session(f"n{i}")
+            .user("run the tests")
+            .bash("npm test", "sh: 1: jest: not found", exit_code=127)
+            .bash(green, "Tests: 3 passed, 3 total")
+            for i in range(4)
+        ]
+
+    (entry,) = scan(tmp_path / "a", sessions(f"npm install{joiner} npm test"))["commands"]
+    (advice,) = entry["recommendations"]
+    assert advice["id"] == "document-the-setup-step"
+    assert "run `npm install` before `npm test`" in advice["detail"]
+    # a step in front that prepares nothing is no setup step
+    (entry,) = scan(tmp_path / "b", sessions(f"git status{joiner} npm test"))["commands"]
+    assert "document-the-setup-step" not in [r["id"] for r in entry["recommendations"]]
+
+
+def test_a_deny_rule_cited_as_guidance_is_not_followed_by_enforce_it(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / ".claude").mkdir()
+    rule = {"permissions": {"deny": ["Read(src/old_schema.py)"]}}
+    (repo / ".claude" / "settings.json").write_text(json.dumps(rule, indent=1), encoding="utf-8")
+    sessions = [
+        Session(f"e{i}", cwd=str(repo))
+        .user("go")
+        .read(f"{repo}/src/old_schema.py", missing=True)
+        .read(f"{repo}/src/old_schema.py", missing=True)
+        for i in range(3)
+    ]
+    (entry,) = scan(tmp_path, sessions, repo=repo)["hotspots"]
+    said = _said(entry)
+    assert "Also mentioned at `.claude/settings.json:" in said and "enforce it" not in said
+    # the same file mentioned in AGENTS.md: the note still says what the next step is
+    (repo / ".claude" / "settings.json").unlink()
+    (repo / "AGENTS.md").write_text("src/old_schema.py held the schema.\n", encoding="utf-8")
+    (entry,) = scan(tmp_path / "b", sessions, repo=repo)["hotspots"]
+    assert "enforce it with a hook" in _said(entry)

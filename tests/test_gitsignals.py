@@ -545,3 +545,28 @@ def test_removal_says_when_a_file_left_the_tree_and_what_it_became(repo: Repo) -
 def test_removal_without_git_knows_nothing(tmp_path: Path) -> None:
     assert gitsignals.removal(tmp_path, "a.py") == (None, None)
     assert gitsignals.removal(tmp_path / "missing", "a.py") == (None, None)
+
+
+def test_a_fix_that_only_adds_lines_elsewhere_is_not_rework(repo: Repo) -> None:
+    files = ("a.py", "b.py", "c.py", "d.py")
+    repo.commit(1, "initial", dict.fromkeys(files, BASE))
+    by_agent = lines(BASE, l3="agent 3", l4="agent 4")
+    repo.commit(2, f"feat: agent work\n\n{CLAUDE}", dict.fromkeys(files, by_agent))
+    # +2/-0 after the agent's lines: a fix made next to its work, not of it
+    repo.commit(3, "fix: handle empty carts", {"a.py": by_agent + "guard 1\nguard 2\n"})
+    # the same subject with a line changed elsewhere: counted on the subject, as before
+    repo.commit(3, "fix: handle empty carts", {"b.py": lines(by_agent, l8="h") + "guard\n"})
+    # only adds lines, but inside what the agent wrote: an overlap whatever the subject
+    inside = by_agent.replace("agent 3\n", "agent 3\nguard\n")
+    repo.commit(3, "fix: guard the handler", {"c.py": inside})
+    # a revert that only adds lines puts back what the agent had removed
+    repo.commit(4, f"drop the tail\n\n{CLAUDE}", {"d.py": "".join(by_agent.splitlines(True)[:5])})
+    repo.commit(5, 'Revert "drop the tail"', {"d.py": by_agent})
+    history = gitsignals.read_history(repo.path)
+    assert history.commits[2].files == {"a.py": (2, 0)}
+    assert history.commits[-1].files["d.py"][1] == 0
+    for hunks in (gitsignals.HunkReader(repo.path), None):
+        found = gitsignals.find_rework(history.commits, hunks=hunks)
+        got = [(f.targets[0].key, f.detail["variant"]) for f in found]
+        expected = [("b.py", "subject"), ("c.py", "overlap"), ("d.py", "subject")]
+        assert got == (expected if hunks else [e for e in expected if e[1] == "subject"])

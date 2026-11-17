@@ -874,3 +874,104 @@ def test_a_shell_running_code_or_nothing_is_not_a_script() -> None:
 @pytest.mark.parametrize("command", ["[[ -f x ]]", "[ -f x ]", "test -f x", "[[ -d a && -f b ]]"])
 def test_a_shell_test_is_inspection(command: str) -> None:
     assert parse_command(command).inspection
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('pytest -q 2>&1 | grep -E "^FAILED|^E  "', True),
+        ("pytest | grep FAILED", True),
+        ("npx tsc --noEmit | grep -i error", True),
+        ("cargo test 2>&1 | rg 'panicked|FAILED'", True),
+        ("pytest | grep passed", False),  # nothing matched: nothing passed
+        ('pytest | grep -E "passed|failed"', False),  # the summary either way
+        ("pytest | grep -v FAILED", False),  # everything but the failures
+        ("pytest | grep -c FAILED", False),  # prints a count, never nothing
+        ("pytest | tail -3", False),
+        ("pytest", False),
+        ("grep -rn FAILED logs/", False),  # reading a log, no run behind the pipe
+    ],
+)
+def test_selects_failures(command: str, expected: bool) -> None:
+    assert attribution.selects_failures(command) is expected
+
+
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [
+        ("echo " + "a" * 400_000 + " && pytest -q", "pytest"),
+        ("python -c '" + "x = 1\n" * 70_000 + "' && pytest -q", "pytest"),
+        ('echo "' + "a b " * 100_000 + '" | wc -c', "wc"),
+        ("echo '" + "a b " * 500_000, "echo"),  # a quote that never closes, 2 MB
+        ('pytest -k "' + "a b " * 500_000, "pytest"),
+    ],
+)
+def test_a_huge_word_does_not_stall_the_parser(command: str, key: str) -> None:
+    import time
+
+    started = time.perf_counter()
+    assert attribution.parse_command(command).key == key
+    assert time.perf_counter() - started < 5.0  # was ten seconds and more
+
+
+def test_words_below_the_limit_are_parsed_as_before() -> None:
+    long = "x" * (attribution.MAX_WORD_CHARS - 10)
+    parsed = attribution.parse_command(f"pytest tests/{long}.py")
+    assert parsed.tokens == (f"tests/{long}.py",)
+    cut = attribution.parse_command(f"pytest tests/{'x' * attribution.MAX_WORD_CHARS}")
+    assert cut.key == "pytest" and cut.tokens == ("LONG-DATA",)
+
+
+@pytest.mark.parametrize(
+    ("command", "container"),
+    [
+        ("docker compose exec web pytest -q", "docker compose exec web"),
+        ("docker compose run --rm api npm test", "docker compose run api"),
+        ("docker-compose exec -T web pytest", "docker-compose exec web"),
+        ("docker exec -it 3f2a9c pytest", "docker exec"),
+        ("kubectl exec api-7d9 -- pytest", "kubectl exec"),
+        ("pytest -q", ""),
+        ("sudo pytest", ""),
+    ],
+)
+def test_the_container_a_command_ran_in_is_kept(command: str, container: str) -> None:
+    parsed = attribution.parse_command(command)
+    step = next(s for s in parsed.steps if s.key == parsed.key)
+    assert step.container == container
+    assert parsed.key in ("pytest", "npm test")  # what it is does not change
+
+
+@pytest.mark.parametrize(
+    ("failed", "other", "expected"),
+    [
+        ("ruff check", "npx eslint", False),
+        ("mypy", "npx tsc", False),
+        ("black", "prettier", False),
+        ("cargo build", "npm run build", False),
+        ("pytest", "npm test", False),
+        ("go test", "cargo test", False),
+        ("python -m pytest", "uv run pytest", True),
+        ("pytest", "tox", True),
+        ("npm test", "npx jest", True),
+        ("yarn test", "pnpm test", True),
+        ("eslint", "npm run lint", True),
+        # make-style wrappers and the repository's own scripts fit any family
+        ("pytest", "make test", True),
+        ("npx eslint", "make lint", True),
+        ("make test", "npm test", True),
+        ("cargo build", "just build", True),
+        ("pytest", "scripts/test.sh", True),
+    ],
+)
+def test_a_replacement_is_of_the_same_tool_family(failed: str, other: str, expected: bool) -> None:
+    assert attribution.is_replacement(failed, other) is expected
+
+
+def test_tool_family() -> None:
+    family = attribution.tool_family
+    assert family("uv run pytest") == family("python -m pytest") == family("ruff check") == "python"
+    assert family("npx tsc") == family("pnpm test") == family("jest") == "js"
+    assert family("cargo nextest") == "rust" and family("go vet") == "go"
+    assert family("make test") is family("just lint") is family("task build") is None
+    assert family("pre-commit run") is None and family("scripts/test.py") is None
+    assert family("pytest (backend/)") == "python"

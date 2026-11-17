@@ -62,6 +62,7 @@
       "exposure_sessions": 4,
       "family": null,
       "friction_rate": 1.0,
+      "guardrail_hits": 0,
       "kind": "command",
       "path": "pytest",
       "recommendations": [
@@ -82,6 +83,7 @@
         "consistency": 0.88,
         "intensity": 7.503,
         "mean_session_points": 1.876,
+        "ordinary_limited": false,
         "recurrence": 0.774,
         "sessions": [
           {
@@ -139,6 +141,7 @@
       "exposure_sessions": 1,
       "family": null,
       "friction_rate": 1.0,
+      "guardrail_hits": 0,
       "kind": "command",
       "path": "rm",
       "recommendations": [
@@ -158,6 +161,7 @@
         "consistency": 0.7,
         "intensity": 1.807,
         "mean_session_points": 1.807,
+        "ordinary_limited": false,
         "recurrence": 0.333,
         "sessions": [
           {
@@ -197,6 +201,7 @@
       "exposure_sessions": 1,
       "family": null,
       "friction_rate": 1.0,
+      "guardrail_hits": 0,
       "kind": "command",
       "path": "curl",
       "recommendations": [],
@@ -206,6 +211,7 @@
         "consistency": 0.7,
         "intensity": 1.585,
         "mean_session_points": 1.585,
+        "ordinary_limited": false,
         "recurrence": 0.333,
         "sessions": [
           {
@@ -245,6 +251,7 @@
       "exposure_sessions": 1,
       "family": null,
       "friction_rate": 1.0,
+      "guardrail_hits": 0,
       "kind": "command",
       "path": "python -m pytest",
       "recommendations": [],
@@ -254,6 +261,7 @@
         "consistency": 0.7,
         "intensity": 1.585,
         "mean_session_points": 1.585,
+        "ordinary_limited": false,
         "recurrence": 0.333,
         "sessions": [
           {
@@ -334,6 +342,7 @@
       "exposure_episodes": 2,
       "exposure_sessions": 2,
       "friction_rate": 1.0,
+      "guardrail_hits": 0,
       "kind": "dir",
       "path": "src/shopfront",
       "recommendations": [
@@ -353,6 +362,7 @@
         "consistency": 0.8,
         "intensity": 3.585,
         "mean_session_points": 1.792,
+        "ordinary_limited": false,
         "recurrence": 0.528,
         "sessions": [
           {
@@ -471,6 +481,7 @@
         "renamed_to": null
       },
       "friction_rate": 1.0,
+      "guardrail_hits": 0,
       "kind": "file",
       "path": "src/shopfront/api/schema_gen.py",
       "recommendations": [
@@ -509,6 +520,7 @@
         "consistency": 0.88,
         "intensity": 10.782,
         "mean_session_points": 2.696,
+        "ordinary_limited": false,
         "recurrence": 0.774,
         "sessions": [
           {
@@ -617,6 +629,7 @@
         "renamed_to": null
       },
       "friction_rate": 1.0,
+      "guardrail_hits": 0,
       "kind": "file",
       "path": "src/shopfront/checkout/service.py",
       "recommendations": [
@@ -636,6 +649,7 @@
         "consistency": 0.85,
         "intensity": 6.217,
         "mean_session_points": 2.072,
+        "ordinary_limited": false,
         "recurrence": 0.667,
         "sessions": [
           {
@@ -696,6 +710,7 @@
         "renamed_to": null
       },
       "friction_rate": 1.0,
+      "guardrail_hits": 0,
       "kind": "file",
       "path": "src/shopfront/payments/refunds.py",
       "recommendations": [],
@@ -705,6 +720,7 @@
         "consistency": 0.7,
         "intensity": 1.0,
         "mean_session_points": 1.0,
+        "ordinary_limited": false,
         "recurrence": 0.333,
         "sessions": [
           {
@@ -750,6 +766,7 @@
         "renamed_to": null
       },
       "friction_rate": 0.5,
+      "guardrail_hits": 0,
       "kind": "file",
       "path": "api/openapi.yaml",
       "recommendations": [],
@@ -759,6 +776,7 @@
         "consistency": 0.6,
         "intensity": 1.0,
         "mean_session_points": 1.0,
+        "ordinary_limited": false,
         "recurrence": 0.333,
         "sessions": [
           {
@@ -804,6 +822,7 @@
         "renamed_to": null
       },
       "friction_rate": 1.0,
+      "guardrail_hits": 0,
       "kind": "file",
       "path": "tests/test_refunds.py",
       "recommendations": [],
@@ -813,6 +832,7 @@
         "consistency": 0.7,
         "intensity": 0.678,
         "mean_session_points": 0.678,
+        "ordinary_limited": false,
         "recurrence": 0.333,
         "sessions": [
           {
@@ -1043,6 +1063,7 @@
     "dropped_red_runs": 1,
     "episodes": 6,
     "est_minutes_lost": 8.8,
+    "events_elsewhere_in_repo": 0,
     "events_outside_repo": 0,
     "files_affected": 5,
     "friction_events": 33,

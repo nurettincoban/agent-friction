@@ -1582,7 +1582,11 @@ def test_git_commit_no_ops_and_hook_auto_fixes_are_not_friction(tmp_path: Path) 
     hook = "ruff-format....Failed\n- hook id: ruff-format\n- files were modified by this hook"
     s.bash("git add -A && git commit -m 'feat: x'", hook, exit_code=1)
     s.bash("git add -A && git commit -m 'feat: x'", "[main 1a2b3c4] feat: x")
-    assert detect(s, tmp_path) == []
+    # the no-op is nothing; the hook's rewrite is kept for the engine, which reports it
+    # only as a habit of three or more sessions (see test_engine)
+    (kept,) = detect(s, tmp_path)
+    assert kept.detail["hook_rewrote"] == "1" and kept.detail["push_recovered"] == "1"
+    assert kept.detail["hook_ids"] == "ruff-format" and scoring.is_weak(kept)
 
     rejected = Session().user("commit it")  # a hook that just says no stays on the record
     rejected.bash("git commit -m 'x'", "mypy....Failed\n- hook id: mypy\nerror: x", exit_code=1)
@@ -1727,7 +1731,7 @@ def test_calls_the_harness_never_started_are_not_failures(tmp_path: Path) -> Non
     )
     (denied,) = detect(blocked, tmp_path)
     assert denied.signal == signals.PERMISSION_DENIED and denied.detail["variant"] == "blocked"
-    assert denied.summary == "Bash on `gh run view` was denied by the harness; it did not run"
+    assert denied.summary == "Bash on `sleep` was denied by the harness; it did not run"
 
     # a command that really ran and printed the same words did fail
     ran = Session().user("go").bash("npm test", "Cancelled: parallel tool call", exit_code=1)
@@ -2214,7 +2218,7 @@ def test_a_script_outside_the_repo_is_not_its_command(tmp_path: Path, command: s
     s = Session().user("go").bash(command, "Traceback\nKeyError: 1", exit_code=1)
     assert detect(s, tmp_path) == []
     inside = Session().user("go").bash("python3 scripts/r7c.py", "KeyError: 1", exit_code=1)
-    assert keys(detect(inside, tmp_path)[0])[0] == ("command", "python scripts/r7c.py")
+    assert keys(detect(inside, tmp_path)[0])[0] == ("command", "python3 scripts/r7c.py")
 
 
 def test_the_same_command_in_two_packages_is_two_commands(tmp_path: Path) -> None:
@@ -2969,7 +2973,8 @@ def test_an_interrupted_command_is_named_on_the_event(tmp_path: Path) -> None:
     s.user(builders.INTERRUPT_TOOL, as_blocks=True)
     (found,) = detect(s, tmp_path)
     assert found.signal == signals.USER_INTERRUPT and found.targets == []
-    assert found.detail == {"interrupted": "npm run e2e"}
+    assert found.detail == {"interrupted": "npm run e2e", "running": "1"}
+    assert found.interval is None  # how long it ran is not time the agent lost
     s = Session().user("go").read(A).interrupt()
     (found,) = detect(s, tmp_path)
     assert "interrupted" not in found.detail and keys(found) == [("file", "src/a.py")]
@@ -4072,10 +4077,10 @@ def test_a_refused_redirected_write_is_about_the_file(
             '( /usr/bin/time -v mytool scan . ; echo "exit $?" ); ls; which time',
             "bash: line 1: /usr/bin/time: No such file or directory\nexit 127\nREADME.md",
             0,
-            "time",
+            "mytool",
             "invocation",
         ),
-        ("time -v pytest", "bash: time: command not found", 127, "time", "invocation"),
+        ("time -v pytest", "bash: time: command not found", 127, "pytest", "invocation"),
         ('mytool run; echo "exit $?"', "exit 127", 0, "mytool", "invocation"),
         ('pytest -q; echo "exit $?"', "some output\nexit 1", 0, "pytest", "ordinary"),
         # the wrapper is there and the command behind it failed: the command's failure
@@ -4193,7 +4198,7 @@ def test_which_step_owns_the_exit_status() -> None:
             "( /usr/bin/time -v mytool scan . ); ls; which time",
             "bash: line 1: /usr/bin/time: No such file or directory\nREADME.md",
             1,
-            ("time", "invocation", "hidden"),
+            ("mytool", "invocation", "hidden"),
         ),
         # ... while the output still says what the command before it did
         ("pytest -q; which time", "1 failed in 0.2s", 1, ("pytest", "ordinary", "hidden")),
@@ -5063,3 +5068,778 @@ def test_the_excerpt_of_a_line_of_several_commands_ends_at_the_error(tmp_path: P
     s = Session().user("go").bash("pytest -q -n0", error + "extra", exit_code=4)
     (failure,) = detect(s, tmp_path)
     assert failure.excerpt.endswith("extra")
+
+
+def _not_found(program: str) -> str:
+    return f"/bin/bash: line 1: {program}: command not found"
+
+
+@pytest.mark.parametrize(
+    ("command", "program", "key"),
+    [
+        ("rg -n foo src", "rg", "rg"),
+        ("cat package.json | jq .scripts", "jq", "jq"),
+        ("gh pr list", "gh", "gh pr list"),
+        ("docker ps", "docker", "docker ps"),
+        ("tree -L 2", "tree", "tree"),
+        ("fd -e py", "fd", "fd"),
+        ("git status", "git", "git status"),
+    ],
+)
+def test_a_tool_that_is_not_installed_counts_even_for_looking_around(
+    tmp_path: Path, command: str, program: str, key: str
+) -> None:
+    s = Session().user("go").bash(command, _not_found(program), exit_code=127)
+    (failure,) = detect(s, tmp_path)
+    assert keys(failure) == [("command", key)]
+    assert failure.detail["variant"] == "invocation" and failure.detail["not_found"] == program
+    # behind a pipe, where the status is the pipe's, the shell's own words say it
+    s = Session().user("go").bash(f"{command} | head -5", _not_found(program))
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["not_found"] == program
+
+
+def test_looking_around_that_answers_no_is_still_not_friction(tmp_path: Path) -> None:
+    for command, output, code in (
+        ("rg -n foo src", "", 1),  # nothing matched
+        ("grep -rn foo src", "grep: src: No such file or directory", 2),
+        ("which rg", "", 1),
+        ("command -v rg || echo missing", "missing", 0),
+        ("type rg", "bash: type: rg: not found", 1),  # a question about rg, answered
+        ("cat notes.txt", "see 'rg: command not found' in the log", 0),
+        ("git status", "fatal: not a git repository", 128),
+    ):
+        s = Session().user("go").bash(command, output, exit_code=code)
+        assert detect(s, tmp_path) == [], command
+
+
+def test_the_tool_that_stood_in_for_a_missing_one_is_named(tmp_path: Path) -> None:
+    for command, program, then, stand_in in (
+        ("rg -n foo src", "rg", "grep -rn foo src", "grep"),
+        ("cat package.json | jq .scripts", "jq", "python3 -c 'print(1)'", "python3"),
+        ("fd -e py", "fd", "find . -name '*.py'", "find"),
+    ):
+        s = Session().user("go").bash(command, _not_found(program), exit_code=127)
+        (failure,) = detect(s.bash(then, "ok"), tmp_path)
+        assert failure.detail["works_as"] == stand_in and failure.detail["stand_in"] == "1"
+    # any other command passing is not the same job
+    s = Session().user("go").bash("rg -n foo src", _not_found("rg"), exit_code=127)
+    (failure,) = detect(s.bash("ls src", "a.py").bash("pytest", "1 passed"), tmp_path)
+    assert "works_as" not in failure.detail
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "code"),
+    [
+        ("uv run pytest", "error: Failed to spawn: `pytest`\n  Caused by: No such file", 2),
+        ("poetry run pytest", "Command not found: pytest", 1),
+        (
+            "python3 -m venv .venv",
+            "not created successfully because ensurepip is not\navailable.",
+            1,
+        ),
+        ("npm install", "npm error code EPERM\nnpm error syscall open", 1),
+        ("npm install", "npm ERR! code SELF_SIGNED_CERT_IN_CHAIN", 1),
+        ("git commit -m x", "Author identity unknown\n\n*** Please tell me who you are.", 128),
+        ("git commit -m x", "error: gpg failed to sign the data\nfatal: failed to write", 128),
+    ],
+)
+def test_a_machine_that_is_not_set_up_is_a_setup_error(
+    tmp_path: Path, command: str, output: str, code: int
+) -> None:
+    s = Session().user("go").bash(command, output, exit_code=code)
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["variant"] == "invocation", command
+
+
+def test_a_traceback_printed_by_a_later_look_is_not_the_commands(tmp_path: Path) -> None:
+    trace = (
+        'Traceback (most recent call last):\n  File "app.py", line 3, in <module>\nValueError: x'
+    )
+    s = Session().user("go")
+    s.bash("python scripts/gen.py | tail -3; git log -1 --format=%B", f"done\nFix crash\n\n{trace}")
+    assert detect(s, tmp_path) == []
+    s = Session().user("go").bash("make build | tail -2; cat logs/old.log", f"ok\n{trace}")
+    assert detect(s, tmp_path) == []
+    # its own traceback, or one before a step that quotes nothing, still counts
+    for command in (
+        "python scripts/gen.py 2>&1 | tail -5",
+        "python scripts/gen.py 2>&1 | tail -5; git status --short",
+    ):
+        s = Session().user("go").bash(command, trace)
+        assert len(detect(s, tmp_path)) == 1, command
+
+
+def test_after_a_semicolon_the_status_is_the_last_steps_own(tmp_path: Path) -> None:
+    trace = "Traceback (most recent call last):\n  File \"<string>\", line 1\nKeyError: 'k'"
+    for first, said in (("make build", "built"), ("pytest -q 2>&1 | tail -3", "5 passed in 0.1s")):
+        s = Session().user("go")
+        s.bash(f"{first}; python3 -c 'print(d[\"k\"])'", f"{said}\n{trace}", exit_code=1)
+        (failure,) = detect(s, tmp_path)
+        assert keys(failure) == [("command", "python <inline>")]
+        assert failure.summary == "`python <inline>` failed (exit 1; ordinary failure)"
+    # with `&&` the output has to say which step it was, as before
+    s = Session().user("go").bash("make build && pytest -q", "boom", exit_code=1)
+    (failure,) = detect(s, tmp_path)
+    assert "the output does not show which" in failure.summary
+
+
+def test_a_harness_block_names_the_step_it_objects_to(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.tool(
+        "Bash",
+        {"command": "sleep 100; cat out.log"},
+        "Blocked: sleep 100 followed by: cat out.log. To wait for a condition, use Monitor",
+        is_error=True,
+    )
+    (denied,) = detect(s, tmp_path)
+    assert denied.signal == signals.PERMISSION_DENIED and keys(denied) == [("command", "sleep")]
+
+
+def test_a_search_that_confirms_a_rename_is_not_a_miss(tmp_path: Path) -> None:
+    s = Session().user("rename it").grep("OldName", "/repo/src", found=True)
+    s.edit(A, "OldName", "NewName").grep("OldName", "/repo/src")
+    assert detect(s, tmp_path) == []
+    s = Session().user("rename it").bash("grep -rn OldName src", "src/a.py:1:OldName")
+    s.bash("sed -i s/OldName/NewName/g src/a.py", "").bash("grep -rn OldName src", "", exit_code=1)
+    assert detect(s, tmp_path) == []
+
+
+def test_what_counts_as_the_same_invocation() -> None:
+    from agent_friction.attribution import looked_at, same_invocation
+
+    assert same_invocation("pytest -q", "uv run pytest -q", "pytest", "uv run pytest")
+    assert same_invocation("pytest -q", "source .venv/bin/activate && pytest -q", "pytest")
+    assert not same_invocation("pytest tests/a.py -x", "pytest tests/a.py", "pytest")
+    assert same_invocation("pytest tests/a.py -x", "pytest tests/a.py", "pytest", loose=True)
+    assert same_invocation("pytest tests/a.py", "pytest", "pytest", loose=True)
+    month = "python scripts/a.py --month 2026-1{}"
+    assert not same_invocation(month.format(3), month.format(2), "python scripts/a.py", loose=True)
+    sql = 'psql -c "select {} from users"'
+    assert not same_invocation(sql.format("nme"), sql.format("name"), "psql", loose=True)
+    assert same_invocation(sql.format("name"), sql.format("name"), "psql")
+    assert looked_at("mytool dump | head -3") == {"mytool"}
+    assert looked_at("npm install 2>&1 | tail -3; mytool sync") == {"npm"}
+    assert looked_at("mytool sync && pytest") == frozenset()
+
+
+def test_coloured_output_is_classified_like_plain_output(tmp_path: Path) -> None:
+    # the summary line is split by colour codes: "\x1b[31m1 failed\x1b[0m"
+    red = "\x1b[31m\x1b[1m1 failed\x1b[0m\x1b[31m in 0.1s\x1b[0m"
+    (found,) = detect(Session().user("go").bash("pytest --color=yes | tail -1", red), tmp_path)
+    assert found.signal == signals.COMMAND_FAILURE and found.detail["status"] == "hidden"
+    green = "\x1b[32m\x1b[1m5 passed\x1b[0m\x1b[32m in 0.2s\x1b[0m"
+    s = Session().user("go").bash("pytest", "1 failed in 0.1s", exit_code=1)
+    s.edit(A).bash("pytest --color=yes 2>&1 | tail -1", green)
+    assert detect(s, tmp_path) == []
+    spawn = (
+        "\x1b[1m\x1b[31merror\x1b[39m\x1b[0m: Failed to spawn: `pytest`\n  Caused by: No such file"
+    )
+    (found,) = detect(Session().user("go").bash("uv run pytest", spawn, exit_code=2), tmp_path)
+    assert found.detail["variant"] == "invocation"
+
+
+def test_a_silent_rerun_of_a_static_check_after_an_edit_closes_the_red(tmp_path: Path) -> None:
+    error = "src/a.ts(3,5): error TS2322: Type 'string' is not assignable to type 'number'."
+    s = Session().user("go").edit("/repo/src/a.ts").bash("npx tsc --noEmit | head", error)
+    s.edit("/repo/src/a.ts", "x", "y").bash("npx tsc --noEmit | head", "")
+    assert detect(s, tmp_path) == []
+    # a test runner always says something: silence through a pipe is no verdict
+    s = Session().user("go").bash("pytest", "1 failed in 0.1s", exit_code=1)
+    s.edit(A).bash("pytest 2>&1 | tail -1", "")
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.COMMAND_FAILURE]
+    # nothing changed in between: the type error is still there for all anyone knows
+    s = Session().user("go").bash("npx tsc --noEmit | head", error)
+    s.bash("npx tsc --noEmit | head", "")
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.COMMAND_FAILURE]
+
+
+def test_a_push_without_an_upstream_has_its_own_wording(tmp_path: Path) -> None:
+    output = "fatal: The current branch feat has no upstream branch.\nTo push the current ..."
+    s = Session().user("go").bash("git push", output, exit_code=128)
+    s.bash("git push --set-upstream origin feat", "branch 'feat' set up to track 'origin/feat'.")
+    (found,) = detect(s, tmp_path)
+    assert found.detail["no_upstream"] == "1" and found.detail["push_recovered"] == "1"
+    assert found.detail["variant"] == "ordinary" and scoring.is_weak(found)
+    assert "the branch had no upstream to push to" in found.summary
+    found.detail["no_upstream"] = "recurring"
+    assert not scoring.is_weak(found)
+    # a plain `git push` that then goes through was not put right with -u
+    s = Session().user("go").bash("git push", output, exit_code=128).bash("git push", "ok")
+    (found,) = detect(s, tmp_path)
+    assert "push_recovered" not in found.detail
+
+
+# ---- round 38 ------------------------------------------------------------------------------
+
+_NO_RULE = "make: *** No rule to make target 'typecheck'.  Stop."
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "code", "key"),
+    [
+        ("make test && make typecheck", _NO_RULE, 2, "make typecheck"),
+        ("make build && make lint && make typecheck", _NO_RULE, 2, "make typecheck"),
+        ("make lint typecheck", _NO_RULE, 2, "make typecheck"),
+        ("make -C packages/web lint typecheck", _NO_RULE, 2, "make typecheck (packages/web/)"),
+        (
+            "cargo fmt && cargo clippy && cargo nextest run",
+            "error: no such command: `nextest`\n\n\tView all installed commands",
+            101,
+            "cargo nextest",
+        ),
+        (
+            "just fmt && just typecheck",
+            "error: Justfile does not contain recipe `typecheck`.",
+            1,
+            "just typecheck",
+        ),
+        (
+            "npm run build && npm run typecheck",
+            'npm error Missing script: "typecheck"',
+            1,
+            "npm run typecheck",
+        ),
+    ],
+)
+def test_a_target_that_does_not_exist_names_its_step(
+    tmp_path: Path, command: str, output: str, code: int, key: str
+) -> None:
+    (found,) = detect(Session().user("go").bash(command, output, exit_code=code), tmp_path)
+    assert keys(found) == [("command", key)]
+    assert found.detail["variant"] == "invocation" and "ambiguous_step" not in found.detail
+    if not command.startswith("cargo"):
+        assert found.detail["no_target"] == "typecheck"
+
+
+def test_a_missing_target_nobody_asked_for_blames_no_step(tmp_path: Path) -> None:
+    # neither step asks for `typecheck`: a target of the Makefile needs it, which one is unknown
+    s = Session().user("go").bash("make test && make lint", _NO_RULE, exit_code=2)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["ambiguous_step"] == "1" and "no_target" not in found.detail
+    assert found.summary.startswith("A chain of commands ending in `make lint` failed")
+    # one step alone is that step, and still no missing target of its own
+    s = Session().user("go").bash("make test", _NO_RULE.replace("typecheck", "tst"), exit_code=2)
+    (found,) = detect(s, tmp_path)
+    assert keys(found) == [("command", "make test")] and "no_target" not in found.detail
+    # a first target that is the missing one keeps its key
+    s = Session().user("go").bash("make typecheck lint", _NO_RULE, exit_code=2)
+    assert keys(detect(s, tmp_path)[0]) == [("command", "make typecheck")]
+
+
+def test_a_variable_the_tool_asks_to_be_set_is_an_environment_failure(tmp_path: Path) -> None:
+    output = (
+        "✘ [ERROR] In a non-interactive environment, it's necessary to set a "
+        "CLOUDFLARE_API_TOKEN environment variable for wrangler to work."
+    )
+    (found,) = detect(Session().user("go").bash("wrangler deploy", output, exit_code=1), tmp_path)
+    assert found.detail["environment"] == "variable"
+    assert found.detail["env_var"] == "CLOUDFLARE_API_TOKEN"
+    assert signals.environment_error("Please set the DATABASE_URL environment variable") == (
+        "variable",
+        "DATABASE_URL",
+    )
+    assert signals.environment_error("we set a timeout variable in the environment") is None
+
+
+@pytest.mark.parametrize(("code", "down"), [(7, True), (28, True), (22, False), (1, False)])
+def test_a_silent_curl_that_could_not_connect_is_a_service_down(
+    tmp_path: Path, code: int, down: bool
+) -> None:
+    s = Session().user("go").bash("curl -s http://localhost:3000/health", "", exit_code=code)
+    (found,) = detect(s, tmp_path)
+    assert (found.detail["variant"] == "environment") is down
+    if down:
+        assert found.detail["service"] == "the service on port 3000"
+        assert "the service on port 3000 was not reachable" in found.summary
+    # another program's exit 7 is its own business
+    s = Session().user("go").bash("./scripts/probe.sh", "", exit_code=7)
+    assert detect(s, tmp_path)[0].detail["variant"] == "ordinary"
+
+
+def test_a_launcher_that_could_not_spawn_names_its_step_in_a_chain(tmp_path: Path) -> None:
+    output = (
+        "All checks passed!\nerror: Failed to spawn: `mypy`\n"
+        "  Caused by: No such file or directory (os error 2)\ndone"
+    )
+    s = Session().user("go").bash("ruff check .; uv run mypy src; echo done", output)
+    (found,) = detect(s, tmp_path)
+    assert keys(found) == [("command", "uv run mypy")]
+    assert found.detail["variant"] == "invocation" and found.detail["status"] == "hidden"
+    # no step launches the program it names: nothing can be pinned, nothing is reported
+    s = Session().user("go").bash("ruff check .; uv run pyright src; echo done", output)
+    assert detect(s, tmp_path) == []
+    # and without the error there is nothing to report
+    s = Session().user("go").bash("ruff check .; uv run mypy src; echo done", "ok\nSuccess\ndone")
+    assert detect(s, tmp_path) == []
+
+
+_STANDING = "no, stop using print in packages/api/main.py, use the logger. I told you this already"
+
+
+def test_a_correction_naming_a_file_not_yet_touched_is_pinned_to_it(tmp_path: Path) -> None:
+    named = "packages/api/main.py"
+    # nothing had been edited: the named file is the only place it can be about
+    s = Session().user("add logging").read("/repo/packages/api/routes.py").user(_STANDING)
+    s.edit(f"/repo/{named}").user("thanks")
+    (found,) = detect(s, tmp_path, known=(named,))
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", named)]
+    assert found.detail["corroborated"] == "followed" and "also_named" not in found.detail
+    assert f"the agent then changed {named})" in found.summary
+    assert f"names {named}, which it had not changed" in found.summary
+    # the agent had been editing elsewhere, and then goes to the file the human named
+    s = Session().user("add logging").edit("/repo/packages/api/routes.py").user(_STANDING)
+    s.edit(f"/repo/{named}").user("thanks")
+    (found,) = detect(s, tmp_path, known=(named,))
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", named)]
+    assert f"the agent then changed {named}, the file the user named" in found.summary
+    assert "also_named" not in found.detail
+
+
+def test_a_named_untouched_file_without_a_follow_up_stays_probable(tmp_path: Path) -> None:
+    named = "packages/api/main.py"
+    # nothing edited before, nothing changed after: probable, but no longer unattributed
+    s = Session().user("add logging").read("/repo/packages/api/routes.py").user(_STANDING)
+    s.bash("ls", "x").user("thanks")
+    (found,) = detect(s, tmp_path, known=(named,))
+    assert found.signal == signals.PROBABLE_CORRECTION and keys(found) == [("file", named)]
+    assert "the agent did not go on to change that file" in found.summary
+    # it went back to its own work instead: the correction stays with that work
+    s = Session().user("add logging").edit("/repo/packages/api/routes.py").user(_STANDING)
+    s.edit("/repo/packages/api/routes.py", "x", "y").user("thanks")
+    (found,) = detect(s, tmp_path, known=(named,))
+    assert keys(found) == [("file", "packages/api/routes.py")]
+    assert found.detail["also_named"] == named
+    # "wrong file" names where to go, not what was done wrong: unchanged
+    s = Session().user("add logging").read("/repo/packages/api/routes.py")
+    s.user(f"no, wrong file, that's not right - it is {named}").edit(f"/repo/{named}")
+    (found,) = detect(s.user("thanks"), tmp_path, known=(named,))
+    assert found.signal == signals.PROBABLE_CORRECTION and found.targets == []
+    # a path that is no file of the repository pins nothing
+    s = Session().user("add logging").read("/repo/packages/api/routes.py")
+    s.user("no, stop using print in /etc/app/main.cfg. I told you this already").bash("ls", "x")
+    assert all(f.targets == [] for f in detect(s.user("thanks"), tmp_path))
+
+
+def test_a_traceback_that_is_shown_not_raised_is_no_verdict(tmp_path: Path) -> None:
+    shown = (
+        "  src/shop/cart.py  score 41.2\n"
+        "    evidence:\n"
+        "      > Traceback (most recent call last):\n"
+        '      >   File "src/shop/cart.py", line 3, in total\n'
+        "      > KeyError: 'sku'"
+    )
+    indented = shown.replace("      > ", "        ")
+    for output in (shown, indented):
+        s = Session().user("go").bash("agent-friction show src/shop/cart.py | head -40", output)
+        assert detect(s, tmp_path) == []
+        assert signals.output_verdict(output) is None
+    raised = "Traceback (most recent call last):\n  File \"x.py\", line 3, in f\nKeyError: 'sku'"
+    s = Session().user("go").bash("python scripts/gen.py 2>&1 | tail -4", raised)
+    (found,) = detect(s, tmp_path, files=("scripts/gen.py",))
+    assert found.detail["status"] == "hidden" and signals.output_verdict(raised) == "red"
+
+
+# ---- round 39 ------------------------------------------------------------------------------
+
+
+def _stopped(command: str, said: str | None, took: float = 90) -> Session:
+    s = Session().user("show me").edit("/repo/src/app.py", "a", "b")
+    s.tool("Bash", {"command": command}, builders.INTERRUPT_TOOL, is_error=True, took=took)
+    s.user(builders.INTERRUPT_TOOL, as_blocks=True)
+    return s.user(said) if said is not None else s
+
+
+def test_a_foreground_server_that_was_stopped_is_about_the_command(tmp_path: Path) -> None:
+    for command in ("npm run dev", "uvicorn app:app --reload", "npm test -- --watch"):
+        s = _stopped(command, "looks good in the browser, thanks. now commit")
+        (found,) = detect(s, tmp_path)
+        assert found.signal == signals.USER_INTERRUPT and found.detail == {"server": "1"}
+        (target,) = found.targets  # no file is blamed, whatever had been edited
+        assert target.kind == "command" and target.share == signals.STOPPED_SERVER_SHARE
+        assert found.interval is None and found.intervals == ()
+        assert "a server or watcher that does not exit by itself" in found.summary
+
+
+def test_a_stopped_command_without_an_objection_is_not_an_event(tmp_path: Path) -> None:
+    for said in ("looks good, thanks. now commit", "ok that is enough output, carry on"):
+        assert detect(_stopped("pytest -q", said), tmp_path) == [], said
+    # an objection or a correction keeps it, on the files edited, with no time claimed
+    for said in ("no, don't run the whole suite", "stop, that is the wrong directory"):
+        found = by_signal(detect(_stopped("pytest -q", said), tmp_path), signals.USER_INTERRUPT)
+        assert [keys(f) for f in found] == [[("file", "src/app.py")]], said
+        assert found[0].interval is None
+    # nothing said afterwards: the interrupt stands
+    (found,) = detect(_stopped("pytest -q", None), tmp_path)
+    assert found.signal == signals.USER_INTERRUPT and found.interval is None
+    # a command that had finished when the human cut in is judged as before
+    s = Session().user("go").edit("/repo/src/app.py", "a", "b").bash("pytest -q", "5 passed")
+    s.interrupt().user("use the other branch")
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.USER_INTERRUPT and "running" not in found.detail
+
+
+def _debug_print(tmp_path: Path, old: str, new: str, ran: bool = True) -> list[Finding]:
+    s = Session().user("why is it slow").edit("/repo/src/app.py", old, new)
+    if ran:
+        s.bash("python scripts/run.py", "DEBUG 3")
+    s.edit("/repo/src/app.py", new, old)
+    return by_signal(detect(s, tmp_path, files=("scripts/run.py",)), signals.EDIT_REVERT)
+
+
+def test_a_debug_print_put_between_two_lines_is_not_a_revert(tmp_path: Path) -> None:
+    old = "    x = compute(y)\n    return x"
+    middle = "    x = compute(y)\n    print('DEBUG', x)\n    return x"
+    assert _debug_print(tmp_path, old, middle) == []
+    several = "    print('in')\n    x = compute(y)\n    print('DEBUG', x)\n    return x\n    # end"
+    assert _debug_print(tmp_path, old, several) == []
+    # nothing ran with the lines in place: put in and taken out again is a retreat
+    assert len(_debug_print(tmp_path, old, middle, ran=False)) == 1
+    # a line was changed as well as added: not "only added"
+    changed = "    x = compute(z)\n    print('DEBUG', x)\n    return x"
+    assert len(_debug_print(tmp_path, old, changed)) == 1
+    # the same lines in another order are a change too
+    swapped = "    return x\n    print('DEBUG', x)\n    x = compute(y)"
+    assert len(_debug_print(tmp_path, old, swapped)) == 1
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        # as stored: the first line has lost its leading space
+        "! [rejected]        main -> main (non-fast-forward)",
+        "Updates were rejected because the remote contains work that you do not have locally.",
+        "hint: Updates were rejected because the tip of your current branch is behind",
+        "error: failed to push some refs to 'origin'",
+    ],
+)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push && git merge origin/main",
+        "git push origin HEAD; git merge main",
+        "git commit -m x && git push && git checkout main && git merge feat",
+    ],
+)
+def test_a_push_hint_names_the_push_step(tmp_path: Path, command: str, output: str) -> None:
+    (found,) = detect(Session().user("go").bash(command, output, exit_code=1), tmp_path)
+    assert keys(found) == [("command", "git push")] and "ambiguous_step" not in found.detail
+    # ... and what a merge prints is still about the merge
+    conflict = "CONFLICT (content): Merge conflict in src/a.py\nAutomatic merge failed"
+    (found,) = detect(Session().user("go").bash(command, conflict, exit_code=1), tmp_path)
+    assert keys(found)[0] == ("command", "git merge")
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "code", "missing"),
+    [
+        ("/usr/bin/time -v pytest -q", "bash: /usr/bin/time: No such file or directory", 127, True),
+        ("time -v pytest -q", "bash: time: command not found", 127, True),
+        (
+            "/usr/bin/time -v pytest -q",
+            "1 failed in 1s\n\tCommand exited with non-zero status 1",
+            1,
+            False,
+        ),
+        ('/usr/bin/time -f "%e %M" -o /tmp/t.txt pytest -q', "1 failed in 1s", 1, False),
+        ("gtime -v pytest -q", "1 failed in 1s", 1, False),
+    ],
+)
+def test_time_is_a_wrapper_also_when_it_is_missing(
+    tmp_path: Path, command: str, output: str, code: int, missing: bool
+) -> None:
+    (found,) = detect(Session().user("go").bash(command, output, exit_code=code), tmp_path)
+    assert keys(found)[0] == ("command", "pytest")
+    assert found.detail["variant"] == ("invocation" if missing else "ordinary")
+    assert found.detail.get("not_found") == ("time" if missing else None)
+
+
+_BROKE = "You broke src/app.py, the public API must keep its names"
+_SED = "sed -i 's/foo/bar/g' src/app.py"
+
+
+@pytest.mark.parametrize(
+    ("change", "said", "after", "how"),
+    [
+        (_SED, _BROKE, "edit", "named"),
+        ("cat > src/app.py <<EOF\nx = 2\nEOF", _BROKE, "edit", "named"),
+        (_SED, _BROKE, "nothing", "named"),
+        (_SED, "you removed the public names, I told you to keep them", "edit", "followed"),
+        (_SED, "revert that", "git checkout -- src/app.py", "followed"),
+        (_SED, "No, that's wrong, revert that", "git restore src/app.py", "followed"),
+    ],
+)
+def test_a_change_made_by_a_shell_command_is_a_change_of_the_turn(
+    tmp_path: Path, change: str, said: str, after: str, how: str
+) -> None:
+    s = Session().user("rename the helpers").bash(change, "").user(said)
+    if after == "edit":
+        s.bash("git checkout -- src/app.py", "").edit("/repo/src/app.py", "x", "y")
+    elif after != "nothing":
+        s.bash(after, "")
+    (found,) = detect(s.user("thanks"), tmp_path, known=("src/app.py",))
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", "src/app.py")]
+    assert found.detail["corroborated"] == how
+    assert "had not touched" not in found.summary and "no file was changed" not in found.summary
+    if after.startswith("git"):
+        assert f"the agent then ran `{after.split(' --')[0].split(' src')[0]}` on" in found.summary
+
+
+def test_a_command_that_changed_nothing_does_not_corroborate_a_correction(tmp_path: Path) -> None:
+    known = ("src/app.py",)
+    # the sed failed, or the command only read the file: nothing of the agent's to blame
+    failed = Session().user("go").bash(_SED, "sed: can't read src/app.py", exit_code=2)
+    read = Session().user("go").bash("grep foo src/app.py", "foo")
+    for s in (failed, read):
+        found = detect(s.user(_BROKE).bash("ls", "x").user("thanks"), tmp_path, known=known)
+        (guess,) = by_signal(found, signals.PROBABLE_CORRECTION)
+        assert not by_signal(found, signals.USER_CORRECTION)
+        assert "no file was changed in the preceding turn" in guess.summary
+        assert "names src/app.py, which it had not touched" in guess.summary
+    # a shell edit followed by praise or a new task is nothing at all
+    s = Session().user("go").bash(_SED, "").user("great, now also update the docs")
+    assert detect(s.edit("/repo/src/app.py", "x", "y").user("thanks"), tmp_path, known=known) == []
+
+
+def test_a_command_that_changes_files_without_naming_them_is_said_so(tmp_path: Path) -> None:
+    known = ("src/app.py",)
+    # `ruff format .` changed something: the report must not claim the file was untouched
+    s = Session().user("go").bash("ruff format .", "3 files reformatted").user(_BROKE)
+    (found,) = detect(s.bash("ls", "x").user("thanks"), tmp_path, known=known)
+    assert found.signal == signals.PROBABLE_CORRECTION and keys(found) == [("file", "src/app.py")]
+    assert "which a command in the preceding turn may have changed" in found.summary
+    assert "had not touched" not in found.summary
+    # ... and it is a correction once the agent goes and changes the file the human blamed
+    s = Session().user("go").bash("ruff format .", "3 files reformatted").user(_BROKE)
+    (found,) = detect(s.edit("/repo/src/app.py", "x", "y").user("thanks"), tmp_path, known=known)
+    assert found.signal == signals.USER_CORRECTION and found.detail["corroborated"] == "followed"
+    # no file named: not attributed, and the reason given is the true one
+    s = Session().user("go").bash("ruff format .", "3 files reformatted")
+    s.user("No, that's wrong. I told you not to reformat").bash("ls", "x").user("thanks")
+    (found,) = detect(s, tmp_path, known=known)
+    assert found.signal == signals.PROBABLE_CORRECTION and found.targets == []
+    assert "which files the preceding turn changed is not known" in found.summary
+    assert "a command changed files in the preceding turn" in found.summary
+
+
+def test_a_correction_typed_while_the_agent_works_is_a_correction(tmp_path: Path) -> None:
+    said = "No, you broke src/app.py. I told you to use the PaymentClient, revert that"
+    s = Session().user("go").edit("/repo/src/app.py", "a", "b").queued(said)
+    found = detect(s.edit("/repo/src/app.py", "b", "a").user("thanks"), tmp_path)
+    (correction,) = by_signal(found, signals.USER_CORRECTION)
+    assert keys(correction) == [("file", "src/app.py")]
+    assert not by_signal(found, signals.EDIT_REVERT)  # taking it back was asked for
+    # the same words queued by a coordinator are not the human's: the revert stands
+    s = Session().user("go").edit("/repo/src/app.py", "a", "b")
+    s.queued(said, origin={"kind": "coordinator"}, meta=True)
+    found = detect(s.edit("/repo/src/app.py", "b", "a").user("thanks"), tmp_path)
+    assert not by_signal(found, signals.USER_CORRECTION)
+    assert by_signal(found, signals.EDIT_REVERT)
+    # a queued message that corrects nothing is nothing
+    s = Session().user("go").edit("/repo/src/app.py", "a", "b").queued("also bump the version")
+    assert detect(s.edit("/repo/src/app.py", "c", "d").user("thanks"), tmp_path) == []
+
+
+def _reply(text: str, tmp_path: Path, *, back: bool) -> list[Finding]:
+    s = Session().user("go").edit("/repo/src/app.py", "a", "b").user(text)
+    s = s.edit("/repo/src/app.py", "b", "c") if back else s.bash("ls", "x")
+    return detect(s.user("thanks"), tmp_path, known=("src/app.py", "README.md"))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "You were supposed to use the PaymentClient",
+        "As I said before, the public names stay",
+        "Again, we use pnpm here not npm",
+    ],
+)
+def test_reproaches_that_are_corrections_on_their_wording(tmp_path: Path, text: str) -> None:
+    (found,) = _reply(text, tmp_path, back=True)
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", "src/app.py")]
+    (found,) = _reply(text, tmp_path, back=False)
+    assert found.signal == signals.PROBABLE_CORRECTION
+    # as the first words of a session they are about nothing the agent did
+    assert detect(Session().user(text).edit("/repo/src/app.py"), tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Why are you using requests? We use httpx",
+        "we use pnpm, not npm",
+        "the tests fail now",
+        "Now the build fails",
+        "this doesn't compile",
+        "it now crashes on startup",
+        "Revert src/app.py",
+        "src/app.py is still failing",
+    ],
+)
+def test_verdicts_that_count_only_when_the_agent_goes_back_to_its_change(
+    tmp_path: Path, text: str
+) -> None:
+    (found,) = _reply(text, tmp_path, back=True)
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", "src/app.py")]
+    assert found.detail["corroborated"] == "followed"
+    # the agent does not go back, or had changed nothing: the same words are a briefing
+    assert _reply(text, tmp_path, back=False) == []
+    assert detect(Session().user(text).edit("/repo/src/app.py"), tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Again, thanks for that",
+        "Again, please run the tests",
+        "the build fails on Windows, can you look",
+        "The app crashes when the list is empty, fix it",
+        "It doesn't compile on Windows",
+        "Revert README.md to last week's version in the docs",
+        "we use pnpm in this repo",
+        "now add a test that fails",
+        "the tests run now, great",
+        "Now the build passes, commit it",
+        "this no longer loads the old config, good",
+        "Why are you so fast?",
+        "like I said earlier today in standup, ship it",
+        "You are supposed to be careful with migrations",
+    ],
+)
+def test_wording_near_the_new_correction_phrases_is_not_one(tmp_path: Path, text: str) -> None:
+    assert _reply(text, tmp_path, back=True) == []
+
+
+_KEY_ERROR = (
+    'Traceback (most recent call last):\n  File "<string>", line 1, in <module>\n'
+    "KeyError: 'hotspots'\n"
+)
+_SNIPPET = "python -c \"import json,sys; print(json.load(sys.stdin)['hotspots'])\""
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "key", "certain"),
+    [
+        # the snippet raised: it is the step that failed, wherever it stands on the line
+        (f"agent-friction show a --json | {_SNIPPET}", _KEY_ERROR, "python <inline>", True),
+        (
+            f"agent-friction scan --json | {_SNIPPET} && agent-friction show a",
+            _KEY_ERROR,
+            "python <inline>",
+            True,
+        ),
+        (
+            "agent-friction scan --json | python3 - <<'EOF'\nimport sys\nprint(x)\nEOF",
+            _KEY_ERROR.replace("<string>", "<stdin>"),
+            "python <stdin>",
+            True,
+        ),
+        # a traceback out of the tool's own files is not the snippet's
+        (
+            f"agent-friction scan --json | {_SNIPPET} && agent-friction show a",
+            _KEY_ERROR.replace("<string>", "/repo/src/agent_friction/cli.py"),
+            "agent-friction",
+            False,
+        ),
+        # ... nor is one that was only printed, indented, by something else
+        (
+            f"agent-friction scan --json | {_SNIPPET} && agent-friction show a",
+            "".join(f"    {line}\n" for line in _KEY_ERROR.splitlines()),
+            "agent-friction",
+            False,
+        ),
+        # no snippet on the line: nothing to pin it on
+        ("agent-friction scan --json | jq .x && make lint", _KEY_ERROR, "make lint", False),
+    ],
+)
+def test_a_traceback_out_of_an_inline_snippet_is_the_snippets_failure(
+    tmp_path: Path, command: str, output: str, key: str, certain: bool
+) -> None:
+    (found,) = detect(Session().user("go").bash(command, output, exit_code=1), tmp_path)
+    assert keys(found)[0] == ("command", key)
+    assert ("ambiguous_step" not in found.detail) == certain
+
+
+def test_selecting_no_tests_is_not_a_failure_of_the_test_command(tmp_path: Path) -> None:
+    none = "collected 12 items / 12 deselected / 0 selected\n\n===== 12 deselected in 0.10s ====="
+    s = Session().user("go").bash("pytest -k test_nope", none, exit_code=5)
+    assert detect(s, tmp_path) == []
+    s = (
+        Session()
+        .user("go")
+        .bash("pytest -m slow", "===== no tests ran, 12 deselected in 0.10s =====", exit_code=5)
+    )
+    assert detect(s, tmp_path) == []
+    # nothing collected at all is still on the record, as an ordinary failure
+    empty = "collected 0 items\n\n===== no tests ran in 0.01s ====="
+    (found,) = detect(Session().user("go").bash("pytest tests/x", empty, exit_code=5), tmp_path)
+    assert found.detail["variant"] == "ordinary"
+    # ... and so is a selection that ran and failed
+    red = "collected 12 items / 11 deselected / 1 selected\n\n=== 1 failed, 11 deselected in 1s ==="
+    (found,) = detect(Session().user("go").bash("pytest -k test_a", red, exit_code=1), tmp_path)
+    assert found.signal == signals.COMMAND_FAILURE
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The test in tests/test_app.py still fails, please fix it",
+        "the tests in test_app.py are still failing",
+        "Instead of a class, use a function in src/app.py",
+        "Instead of a class, use a function",
+    ],
+)
+def test_more_verdicts_that_count_only_when_the_agent_goes_back(tmp_path: Path, text: str) -> None:
+    (found,) = _reply(text, tmp_path, back=True)
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", "src/app.py")]
+    assert _reply(text, tmp_path, back=False) == []
+    assert detect(Session().user(text).edit("/repo/src/app.py"), tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Instead of the README, start with the changelog",
+        "instead of waiting, run the linter too",
+        "The test in tests/test_app.py fails on main, please fix it",
+        "Add a test in tests/test_app.py that still fails without the fix",
+        "Use a function instead of a class in the new module src/new.py",
+    ],
+)
+def test_wording_near_those_verdicts_is_not_one(tmp_path: Path, text: str) -> None:
+    assert _reply(text, tmp_path, back=True) == []
+
+
+def test_a_refusal_costs_its_own_round_trip_not_the_thinking_after_it(tmp_path: Path) -> None:
+    denied = "Claude requested permissions to use Bash, but you haven't granted it yet."
+    s = Session().user("go")
+    s.tool("Bash", {"command": "make deploy"}, denied, is_error=True, took=0.2)
+    s.tick(30).bash("ls", "x")  # half a minute of thinking before the next call
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.PERMISSION_DENIED and found.interval is not None
+    start, end = found.interval
+    assert end - start < 5
+
+
+def test_a_guardrail_hit_is_marked_on_the_refusal_itself(tmp_path: Path) -> None:
+    hook = "PreToolUse:Bash hook error: [guard.py]: use make test"
+    s = Session().user("go").tool("Bash", {"command": "pytest -q"}, hook, is_error=True)
+    (found,) = detect(s.bash("make test", "5 passed"), tmp_path)
+    assert found.detail["guardrail"] == "1" and found.detail["alternative"] == "make test"
+    assert found.detail["hook_said"] == "use make test" and scoring.is_weak(found)
+    assert found.weight == signals.GUARDRAIL_SHARE
+    assert found.summary.endswith("it did not run; the agent then used `make test`")
+    # nothing of its kind afterwards: it moved on
+    s = Session().user("go").tool("Bash", {"command": "pytest -q"}, hook, is_error=True)
+    (found,) = detect(s.read("/repo/a.py"), tmp_path)
+    assert found.detail["guardrail"] == "1" and "alternative" not in found.detail
+    # the same command ran afterwards: the guardrail did not hold
+    s = Session().user("go").tool("Bash", {"command": "pytest -q"}, hook, is_error=True)
+    (found,) = detect(s.bash("pytest tests/", "5 passed"), tmp_path)
+    assert "guardrail" not in found.detail and found.detail["got_through"] == "1"
+    assert not scoring.is_weak(found) and found.weight == 1.0
+    # a refusal nobody configured is not a guardrail, whatever follows
+    ask = "Claude requested permissions to use Bash, but you haven't granted it yet."
+    s = Session().user("go").tool("Bash", {"command": "pytest -q"}, ask, is_error=True)
+    (found,) = detect(s.bash("make test", "5 passed"), tmp_path)
+    assert "guardrail" not in found.detail and "deliberate" not in found.detail

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent_friction import attribution, model, scoring, signals
-from agent_friction.guidance import Guidance, Mention, path_terms
+from agent_friction.guidance import SETTINGS_FILES, Guidance, Mention, path_terms
 from agent_friction.model import Finding
 
 #: A file with at least this many lines is called "large" in recommendations.
@@ -93,6 +93,7 @@ RULE_IDS: tuple[str, ...] = (
     "write-down-the-rule",
     "state-the-boundary",
     "allow-or-document-the-boundary",
+    "the-guardrail-works",
     "clarify-before-acting",
     "add-a-fast-check",
     "state-the-constraint",
@@ -107,10 +108,13 @@ RULE_IDS: tuple[str, ...] = (
     "make-the-failure-actionable",
     "run-it-in-the-background",
     "give-it-more-time",
+    "run-it-once-not-in-watch-mode",
     "explain-the-failing-check",
     "say-if-it-is-known-broken",
     "fix-the-flaky-test",
     "pull-before-pushing",
+    "push-with-upstream",
+    "format-before-committing",
     "file-is-gone",
     "note-the-background-rate",
 )
@@ -119,6 +123,9 @@ RULE_IDS: tuple[str, ...] = (
 REPO_WIDE_MIN_EVENTS = 5
 REPO_WIDE_MIN_FILES = 3
 REPO_WIDE_MIN_SESSIONS = 3
+#: ... and file visits before a share of them is called a rate: "100% of file visits"
+#: over five visits is five events, not a property of the repository.
+REPO_WIDE_MIN_VISITS = scoring.BASELINE_MIN_VISITS
 #: Files named in such an item.
 REPO_WIDE_MAX_FILES = 10
 
@@ -281,6 +288,7 @@ DOCUMENTABLE: frozenset[str] = frozenset(
         "document-the-command",
         "make-the-failure-actionable",
         "pull-before-pushing",
+        "push-with-upstream",
         "run-it-in-the-background",
         "give-it-more-time",
         "explain-the-failing-check",
@@ -397,7 +405,11 @@ class _Rules:
                     list(already[0]),
                     self.near,
                     affirmed=rule_id in AFFIRMED_RULES,
-                    context="file" if rule_id == "edit-the-source-not-the-output" else "command",
+                    context="file"
+                    if rule_id == "edit-the-source-not-the-output"
+                    else "step"
+                    if rule_id == "document-the-setup-step"
+                    else "command",
                 )
             if mentions and already is not None:
                 title, detail = already[1], f"{_refs(mentions)} already {already[2]}"
@@ -405,7 +417,15 @@ class _Rules:
             else:
                 terms = [*self.subjects, *(already[0] if already is not None else ())]
                 mentions = guidance.mentions(terms, self.near)
-                if mentions:
+                enforced = any(
+                    "deliberate" in f.detail for f in self.get(signals.PERMISSION_DENIED)
+                ) or all(m.file in SETTINGS_FILES for m in mentions)
+                if mentions and enforced:
+                    # what is cited is the deny rule itself, or a hook or a rule already
+                    # refuses this: "enforce it" is what was done
+                    documented = "mention"
+                    detail += f" (Also mentioned at {_refs(mentions)}.)"
+                elif mentions:
                     documented = "mention"
                     detail += (
                         f" (Also mentioned at {_refs(mentions)}: check whether it already says "
@@ -447,6 +467,7 @@ class _Rules:
             if len(named) and all(f.detail.get("also_named") for f in found)
             else "here"
         )
+        said = ""
         detail = (
             f"A human corrected the agent {here} {_in_sessions(found)}. Put the rule in "
             "AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read "
@@ -469,7 +490,8 @@ class _Rules:
                 if text and text not in quotes:
                     quotes.append(text)
             if quotes:
-                detail += " In their words: " + " / ".join(f'"{q}"' for q in quotes[:MAX_QUOTES])
+                said = " In their words: " + " / ".join(f'"{q}"' for q in quotes[:MAX_QUOTES])
+                detail += said
         if named:
             detail += (
                 f" (The human also named {_and([code(name) for name, _ in named])}, which "
@@ -486,6 +508,37 @@ class _Rules:
             ),
             detail,
             [signals.USER_CORRECTION],
+            self._rule_written(found, said),
+        )
+
+    def _rule_written(self, found: Sequence[Finding], said: str) -> Already | None:
+        """The "already written down" form: the files name what the human named.
+
+        A correction that names `PaymentClient` in a repository whose AGENTS.md has a
+        line about `PaymentClient` is most likely that line being overlooked, and one
+        more line would be overlooked the same way.
+        """
+        names: list[str] = []
+        # The file itself being named there is the ordinary "also mentioned" note.
+        own = {part for subject in self.subjects for part in (subject, subject.rsplit("/", 1)[-1])}
+        for finding in found:
+            for name in _NAME_RE.findall(finding.detail.get("quote", "")):
+                if name not in names and name not in own and name.rsplit("/", 1)[-1] not in own:
+                    names.append(name)
+        if not names:
+            return None
+        about = ""
+        if self.quote is not None:
+            shown = [code(self.quote(name, QUOTE_CHARS)) for name in names[:MAX_QUOTES]]
+            about = f" ({_and(shown)})"
+        return (
+            names,
+            "The rule seems to be written down already: make it harder to miss",
+            f"says something about what the human corrected here {_in_sessions(found)}"
+            f"{about}. If that is this rule, it is written down and still not followed: "
+            "make it more prominent or move it closer to the code (a nested AGENTS.md, a "
+            "comment at the top of the file), or enforce it with a hook or a check, rather "
+            f"than adding another line.{said}",
         )
 
     def rejections(self) -> None:
@@ -565,11 +618,19 @@ class _Rules:
 
     # ---- file rules ------------------------------------------------------------------
 
-    def standing_test(self, when: str) -> bool:
-        """The same test is red in session after session and nothing makes it pass."""
+    def standing_test(self, when: str, command: bool = False) -> bool:
+        """The same test is red in session after session and nothing makes it pass.
+
+        The advice is given once: on the test's file where the failure is attributed
+        to one, and on the command only for a test that has no file in the repository.
+        """
         known = [f for f in self.get(signals.COMMAND_FAILURE) if f.detail.get("standing_test")]
         if not known:
             return False
+        if command:
+            known = [f for f in known if not any(t.kind == model.FILE for t in f.targets)]
+            if not known:
+                return True  # said on the file's row; nothing more to say here
         tests = _top([f.detail["standing_test"] for f in known], 3)
         if self.quote is not None:
             named = _and([code(self.quote(test, QUOTE_CHARS)) for test, _ in tests])
@@ -806,8 +867,62 @@ class _Rules:
                 [signals.READ_LOOP],
             )
 
+    def guardrail(self, what: str) -> None:
+        """A hook or a deny rule refused the call and the agent went another way."""
+        held = [f for f in self.get(signals.PERMISSION_DENIED) if scoring.is_guardrail_hit(f)]
+        if len(held) < MIN_EVENTS:
+            return
+        hooks = sum(f.detail.get("deliberate") == "hook" for f in held)
+        by = "a hook" if hooks * 2 > len(held) else "a deny rule in the settings"
+        ways = _top([f.detail["alternative"] for f in held if f.detail.get("alternative")])
+        went = (
+            f"and each time the agent went on without it ({_times(ways[0][1])} with "
+            f"{code(ways[0][0])})"
+            if ways
+            else "and each time the agent went on without retrying it"
+        )
+        reasons = _top([f.detail["hook_said"] for f in held if f.detail.get("hook_said")])
+        said = (
+            f' The hook says: "{self.quote(reasons[0][0], QUOTE_CHARS)}".'
+            if reasons and self.quote is not None
+            else ""
+        )
+        # where agents could have read it before trying
+        terms = [_bare(ways[0][0])] if ways else list(self.subjects)
+        written = self.guidance.mentions(terms, self.near) if self.guidance is not None else []
+        written = [m for m in written if m.file not in SETTINGS_FILES]
+        tell = code(_bare(ways[0][0])) if ways else "what to do instead"
+        if written:
+            closing = (
+                f"Nothing needs fixing: {_refs(written)} already names "
+                f"{tell if ways else 'it'}, and the refusal costs one round trip. If that "
+                "is too many, move that line to where agents read first."
+            )
+        else:
+            closing = (
+                "Nothing needs fixing in the guardrail. To save the round trip, say in "
+                f"AGENTS.md that this is refused and to use {tell}."
+                if ways
+                else "Nothing needs fixing in the guardrail. To save the round trip, say in "
+                "AGENTS.md that this is refused and what to do instead."
+            )
+        first = "try to change this file" if what.startswith("to ") else f"try {what} first"
+        self.add(
+            "the-guardrail-works",
+            f"The guardrail works; agents still {first}",
+            f"Agents tried {what} {_in_sessions(held)} and were refused by {by} before "
+            f"anything ran, {went}.{said} {closing}",
+            [signals.PERMISSION_DENIED],
+        )
+        if ways:
+            self.out[-1]["replacement"] = ways[0][0]
+        if written:
+            self.out[-1]["documented_in"] = [m.as_dict() for m in written]
+            self.out[-1]["documented_as"] = "instruction" if ways else "mention"
+
     def denials(self, what: str) -> None:
-        denied = self.get(signals.PERMISSION_DENIED)
+        self.guardrail(what)
+        denied = [f for f in self.get(signals.PERMISSION_DENIED) if not scoring.is_guardrail_hit(f)]
         if len(denied) < MIN_EVENTS:
             return
         hooks = sum(f.detail.get("variant") == "hook" for f in denied)
@@ -836,6 +951,36 @@ class _Rules:
             )
             return
         by = "a hook" if hooks * 2 > len(denied) else "permission settings"
+        deliberate = sum("deliberate" in f.detail for f in denied)
+        if deliberate * 2 > len(denied):
+            # A hook or a deny rule is there on purpose: an allow rule does not override
+            # a hook, and would contradict the rule.
+            by = "a hook" if hooks * 2 > len(denied) else "a deny rule in the settings"
+            around = sum("got_through" in f.detail for f in denied)
+            if around * 2 > len(denied):
+                self.add(
+                    "allow-or-document-the-boundary",
+                    "Tell agents this is off limits, or close the way around",
+                    f"Agents tried {what} {_in_sessions(denied)} and were refused by {by} "
+                    "before anything ran, and then got the same thing done anyway (the same "
+                    "command in another form, or the same file by another tool). If it is "
+                    "meant to be off limits, say so in AGENTS.md together with what to do "
+                    "instead, and check that the guardrail covers the form that got "
+                    "through; if it is fine, narrow the guardrail so the first attempt is "
+                    "not refused.",
+                    [signals.PERMISSION_DENIED],
+                )
+            else:
+                self.add(
+                    "allow-or-document-the-boundary",
+                    "Tell agents this is off limits, and what to do instead",
+                    f"Agents tried {what} {_in_sessions(denied)} and were refused by {by} "
+                    "before anything ran; the sessions end there, so no other way was "
+                    "seen. The guardrail is there on purpose: say in AGENTS.md that this "
+                    "is refused and what to do instead, or have the refusal itself say it.",
+                    [signals.PERMISSION_DENIED],
+                )
+            return
         self.add(
             "allow-or-document-the-boundary",
             "Allow it, or tell agents it is off limits",
@@ -854,10 +999,24 @@ class _Rules:
         if len(absent) * 2 <= len(invocation):
             return False
         holder = absent[0].detail.get("no_target_in", "")
-        thing = "target" if holder == signals.TARGETS_IN_MAKEFILE else "script"
+        thing = {signals.TARGETS_IN_MAKEFILE: "target", signals.TARGETS_IN_JUSTFILE: "recipe"}.get(
+            holder, "script"
+        )
         name = ""
         if self.quote is not None:
             name = " " + code(self.quote(absent[0].detail["no_target"], QUOTE_CHARS))
+        if all(f.detail["no_target"] in self.known_targets for f in absent):
+            # It has been added since: "does not exist" would be advice about the past.
+            self.add(
+                "name-the-missing-target",
+                f"{_located(key)} was missing in these sessions; it is defined now",
+                f"{_located(key)} failed {_in_sessions(absent)} because the {holder} had no "
+                f"{thing}{name}. The {holder} defines it now, so there is nothing to write "
+                "down: re-scan with `--since <date>`, with a date after it was added, to "
+                "confirm that these failures have stopped.",
+                [signals.COMMAND_FAILURE],
+            )
+            return True
         exists = ""
         if self.known_targets and self.quote is not None:
             listed = ", ".join(code(self.quote(t, QUOTE_CHARS)) for t in self.known_targets)
@@ -964,6 +1123,107 @@ class _Rules:
             )
         self.add("document-the-environment", title, detail, [signals.COMMAND_FAILURE])
 
+    def not_installed(self, key: str, invocation: list[Finding]) -> bool:
+        """Every failure was the shell not finding one and the same program."""
+        missing = {
+            f.detail.get("not_found_shown") or f.detail.get("not_found", "") for f in invocation
+        }
+        if len(missing) != 1 or "" in missing:
+            return False
+        (program,) = missing
+        self.add(
+            "document-the-command",
+            f"{code(program)} is not installed where agents run",
+            f"{_located(key)} failed {_in_sessions(invocation)} because {code(program)} is not "
+            "on the PATH where agents run. Install it there (a setup script, the container "
+            "image), or say in AGENTS.md that it is not available and what to use instead.",
+            [signals.COMMAND_FAILURE],
+        )
+        return True
+
+    def hook_habit(self, key: str) -> None:
+        """A pre-commit hook rewrote files and stopped the commit, session after session."""
+        stopped = [f for f in self.get(signals.COMMAND_FAILURE) if scoring.is_hook_habit(f)]
+        if not stopped:
+            return
+        ids = [h for f in stopped for h in f.detail.get("hook_ids", "").split("\n") if h]
+        hooks = [code(name) for name, _ in _top(ids)] if self.quote is not None else []
+        which = f" ({_and(hooks)})" if hooks else ""
+        run = (
+            f"`pre-commit run {_top(ids)[0][0]}`"
+            if hooks and len(set(ids)) == 1
+            else "`pre-commit run`"
+        )
+        self.add(
+            "format-before-committing",
+            f"Tell agents to run the formatter before {code(key)}",
+            f"{code(key)} was stopped {_in_sessions(stopped)} by a pre-commit hook that "
+            f"rewrote files{which}, and went through on the next attempt. Each time costs "
+            f"one round trip. Say in AGENTS.md to run the formatter ({run}, or the hook's "
+            "own command) before committing, or that a commit the hook modified files "
+            "for is to be staged and made again.",
+            [signals.COMMAND_FAILURE],
+        )
+
+    def timed_out(self, key: str, slow: Sequence[Finding]) -> bool:
+        """A command the harness cut off that needs another form, not more time.
+
+        Either agents then got the job done another way in two or more sessions (the
+        same command with a variable or an option, or another command of its kind), or
+        its output shows a watcher: it had finished and sat waiting for file changes.
+        """
+        if len(slow) < MIN_EVENTS:
+            return False
+        watchers = [f for f in slow if f.detail.get("watcher")]
+        watching = len(watchers) * 2 > len(slow)
+        ways: dict[str, set[str]] = {}
+        for finding in slow:
+            way = (
+                finding.detail.get("works_with")
+                or finding.detail.get("recovered_as")
+                or finding.detail.get("recovered_by")
+                or ""
+            )
+            if way and (self.quote is not None or "recovered_as" not in finding.detail):
+                ways.setdefault(way, set()).add(finding.unit)
+        sessions = {unit for units in ways.values() for unit in units}
+        ranked = sorted(ways, key=lambda way: (-len(ways[way]), way))
+        why = f"{code(key)} was cut off by the harness timeout {_in_sessions(slow)}" + (
+            ": its output shows that it had finished and was waiting for file changes "
+            "(watch mode), so more time would not have helped"
+            if watching
+            else ""
+        )
+        if len(sessions) >= MIN_EVENTS:
+            best = ranked[0]
+            others = [code(_bare(way)) for way in ranked[1:MAX_QUOTES]]
+            also = f" (also with {_and(others)})" if others else ""
+            self.add(
+                "use-the-working-command",
+                f"Tell agents to use {code(_bare(best))}",
+                f"{why}. In {_n(len(sessions), 'session')} the agent then got the same job "
+                f"done with {code(_bare(best))}{also}. Add a line to AGENTS.md such as: "
+                f'"{_agents_line(_place(key), "use " + _typed(best, _place(key)))}, not '
+                f'{code(_bare(key))}"'
+                + (", or make the command itself run once and exit." if watching else "."),
+                [signals.COMMAND_FAILURE],
+                self._use_instead(best, key, slow),
+                replacement=best,
+            )
+            return True
+        if watching:
+            self.add(
+                "run-it-once-not-in-watch-mode",
+                f"{code(key)} runs in watch mode by default",
+                f"{why}. Say in AGENTS.md how to run it once (the non-watch form: a `run` "
+                "subcommand, `CI=true`, an option such as `--watchAll=false` or "
+                "`--watch=false`), or make the command itself run once and exit where "
+                "agents call it.",
+                [signals.COMMAND_FAILURE],
+            )
+            return True
+        return False
+
     def _use_instead(self, better: str, worse: str, failures: Sequence[Finding]) -> Already:
         # A display key (`pnpm test (packages/web/)`) is nothing a file would say: the
         # command is looked for as it is typed, and the directory is said in words.
@@ -991,7 +1251,9 @@ class _Rules:
         invocation = [f for f in invocation if not f.detail.get("timeout")]
         if attribution.is_inline_code(key):
             invocation = []  # ad-hoc code is not a command anyone could document
-        if len(slow) >= MIN_EVENTS:
+        if self.timed_out(key, slow):
+            failures = [f for f in failures if not f.detail.get("timeout")]
+        elif len(slow) >= MIN_EVENTS:
             self.add(
                 "give-it-more-time",
                 f"{code(key)} outlasts the harness timeout",
@@ -1001,15 +1263,25 @@ class _Rules:
                 "inner loop.",
                 [signals.COMMAND_FAILURE],
             )
-        if len(servers) >= MIN_EVENTS:
+        halted = [f for f in self.get(signals.USER_INTERRUPT) if f.detail.get("server")]
+        if len(servers) + len(halted) >= MIN_EVENTS:
+            ended = _and(
+                [
+                    *([f"the harness timed it out {_in_sessions(servers)}"] if servers else []),
+                    *([f"a human had to stop it {_in_sessions(halted)}"] if halted else []),
+                ]
+            )
             self.add(
                 "run-it-in-the-background",
                 f"Tell agents to run {code(key)} in the background",
                 f"{code(key)} is a server or watcher that never exits; run in the foreground it "
-                f"sat until the harness timed it out {_in_sessions(servers)}. Say in "
+                f"sat until {ended}. Say in "
                 "AGENTS.md to start it in the background (and how to check that it is up "
                 "and how to stop it), or provide a script that does so.",
-                [signals.COMMAND_FAILURE],
+                [
+                    *([signals.COMMAND_FAILURE] if servers else []),
+                    *([signals.USER_INTERRUPT] if halted else []),
+                ],
             )
         fixes = _top([f.detail.get("recovered_by", "") for f in failures], 1)
         # every step that helped twice or more, in the order agents ran them
@@ -1030,8 +1302,14 @@ class _Rules:
                 "use-the-working-command",
                 f"Tell agents to use {code(name)}",
                 f"{code(key)} failed {_in_sessions(invocation)} because {code(old)} is not on "
-                f"the PATH here; {_times(count)} the same command then ran with {code(name)}. "
-                f'Add a line to AGENTS.md such as: "use {code(name)}, not {code(old)}".',
+                f"the PATH here; {_times(count)} "
+                + (
+                    f"the agent then did the job with {code(name)}. Install {code(old)} "
+                    "where agents run, or add"
+                    if any(f.detail.get("stand_in") for f in invocation)
+                    else f"the same command then ran with {code(name)}. Add"
+                )
+                + f' a line to AGENTS.md such as: "use {code(name)}, not {code(old)}".',
                 [signals.COMMAND_FAILURE],
                 self._use_instead(name, old, invocation),
             )
@@ -1133,7 +1411,9 @@ class _Rules:
             )
         elif len(environment) >= MIN_EVENTS:
             self.environment(key, environment)
-        elif len(invocation) >= MIN_EVENTS and self.no_such_target(key, invocation):
+        elif len(invocation) >= MIN_EVENTS and (
+            self.no_such_target(key, invocation) or self.not_installed(key, invocation)
+        ):
             pass
         elif len(invocation) >= MIN_EVENTS:
             detail = (
@@ -1172,7 +1452,7 @@ class _Rules:
                 [signals.RETRY_LOOP],
             )
         standing = [f for f in failures if f.detail.get("recurring_red")]
-        if self.standing_test(f"when agents ran {code(key)}"):
+        if self.standing_test(f"when agents ran {code(key)}", command=True):
             pass  # the test is named: that says more than "keeps ending red"
         elif standing and not self.get(signals.NO_CONVERGENCE):
             self.add(
@@ -1184,6 +1464,7 @@ class _Rules:
                 "otherwise fix it, so that a red run means something again.",
                 [signals.COMMAND_FAILURE],
             )
+        self.hook_habit(key)
         rejected = [f for f in failures if f.detail.get("push_rejected") == "recurring"]
         if rejected:
             self.add(
@@ -1193,6 +1474,17 @@ class _Rules:
                 "had commits the local one lacked (non-fast-forward). Say in AGENTS.md to "
                 "fetch and rebase (or merge) before pushing, and whether a force-push is ever "
                 "acceptable.",
+                [signals.COMMAND_FAILURE],
+            )
+        unset = [f for f in failures if f.detail.get("no_upstream") == "recurring"]
+        if unset:
+            self.add(
+                "push-with-upstream",
+                f"Tell agents to push a new branch with {code('git push -u origin HEAD')}",
+                f"{code(key)} failed {_in_sessions(unset)} because the branch had no upstream, "
+                "and went through once the agent added `--set-upstream`. Say in AGENTS.md to "
+                "push a new branch with `git push -u origin HEAD`, or set "
+                "`git config push.autoSetupRemote true` where agents run.",
                 [signals.COMMAND_FAILURE],
             )
         flaky = self.get(signals.COMMAND_FAILURE, "flaky")
@@ -1209,7 +1501,7 @@ class _Rules:
         self.no_convergence(key)
         self.rejections()
         self.denials(f"{code(key)}")
-        stopped = self.get(signals.USER_INTERRUPT)
+        stopped = [f for f in self.get(signals.USER_INTERRUPT) if not f.detail.get("server")]
         if len(stopped) >= MIN_EVENTS:
             self.add(
                 "clarify-before-acting",
@@ -1270,6 +1562,13 @@ SHARED_WORDS_MIN = 2
 SHARED_NAME_CHARS = 7
 
 
+#: Words of a correction that are names: `PaymentClient`, `schema_gen`, `src/pay/api.py`.
+_NAME_RE = re.compile(
+    r"(?<![\w./-])(?:[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+|[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+"
+    r"|(?:[\w.-]+/)+[\w.-]*\w|[\w-]+\.[A-Za-z]{1,4})(?![\w/-])"
+)
+
+
 def _content_words(text: str) -> set[str]:
     return set(_WORD_RE.findall(text.lower())) - _COMMON_WORDS
 
@@ -1310,7 +1609,8 @@ _EXCEPTION_LINE_RE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Warning)\b[
 
 def _error_line(finding: Finding) -> str:
     """The most telling line of a failed command's output: the last invocation-error line."""
-    lines = [ln.strip() for ln in finding.excerpt.splitlines() if ln.strip()]
+    # only a newline ends a line: U+2028 or a form feed inside a message does not
+    lines = [ln.strip() for ln in finding.excerpt.replace("\r", "").split("\n") if ln.strip()]
     # pytest prefixes the lines of an error with "E": the exception is what to quote
     lines = [_PYTEST_PREFIX_RE.sub("", ln) for ln in lines]
     for line in reversed(lines):
@@ -1340,6 +1640,7 @@ def repo_wide(
         base.events < REPO_WIDE_MIN_EVENTS
         or base.files < REPO_WIDE_MIN_FILES
         or sessions < REPO_WIDE_MIN_SESSIONS
+        or base.visits < REPO_WIDE_MIN_VISITS
     ):
         return None
     percent = f"{100.0 * base.hit_visits / base.visits:.0f}%" if base.visits else "0%"
@@ -1420,7 +1721,10 @@ def recommend(
     (default 1). ``guidance`` is what the repository's instruction files already
     say (see :mod:`agent_friction.guidance`); without it nothing counts as documented.
     """
-    if scoring.weak_only(findings):
+    held = scoring.weak_only(findings) and any(
+        scoring.is_guardrail_hit(f) or scoring.is_hook_habit(f) for f in findings
+    )
+    if scoring.weak_only(findings) and not held:
         return []  # nothing here that productive work does not also produce
     subjects: list[str] = []
     near, name = "", "it"
@@ -1431,6 +1735,12 @@ def recommend(
         base = located.group(1) if located else key
         subjects, near, name = [base], (located.group(2) if located else ""), code(base)
     rules = _Rules(findings, quote, shares or {}, guidance, subjects, near, name, known_targets)
+    if held:
+        # Nothing but weak evidence, some of it a guardrail that held: that much is said.
+        rules.guardrail("to change this file" if kind == model.FILE else code(key))
+        if kind == model.COMMAND:
+            rules.hook_habit(key)
+        return rules.out
     if kind == model.FILE:
         rules.file(facts)
         if facts is not None and not facts.exists and facts.removed_at:
