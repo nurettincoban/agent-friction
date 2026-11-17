@@ -95,6 +95,7 @@ RULE_IDS: tuple[str, ...] = (
     "allow-or-document-the-boundary",
     "clarify-before-acting",
     "add-a-fast-check",
+    "state-the-constraint",
     "learn-from-rework",
     "add-a-pointer",
     "summarize-this-file",
@@ -102,6 +103,7 @@ RULE_IDS: tuple[str, ...] = (
     "document-the-setup-step",
     "document-the-environment",
     "document-the-command",
+    "name-the-missing-target",
     "make-the-failure-actionable",
     "run-it-in-the-background",
     "give-it-more-time",
@@ -288,7 +290,9 @@ class _Rules:
         subjects: Sequence[str] = (),
         near: str = "",
         subject_name: str = "",
+        known_targets: Sequence[str] = (),
     ) -> None:
+        self.known_targets = tuple(known_targets)
         self.shares = shares
         self.guidance = guidance
         self.subjects = list(subjects)
@@ -607,10 +611,19 @@ class _Rules:
                 )
                 title = "Agents misremember this file: check what rewrites it"
             else:
+                # "More than the rest of the repository" needs a rest to compare with.
+                compared = (
+                    ". These sessions edited too little else in this repository to say how "
+                    "unusual that is; it is reported because it is well above "
+                    f"{scoring.BASELINE_FLOOR:.0%} of the sessions that touched the file, "
+                    "the rate taken as ordinary. "
+                    if any(f.detail.get(scoring.NO_COMPARISON) for f in misses)
+                    else ", clearly more often than in the rest of this repository. "
+                )
                 detail = (
                     f"{_n(len(misses), 'edit')} in {_n(_sessions(misses), 'session')} did not "
-                    "find the text the agent expected, clearly more often than in the rest "
-                    "of this repository. Nothing in the transcripts shows the file being "
+                    f"find the text the agent expected{compared}"
+                    "Nothing in the transcripts shows the file being "
                     "rewritten in between, so look at what makes its text hard to reproduce "
                     "exactly (tabs, CRLF line endings, long or near-identical lines) and at "
                     "whether agents edit it long after reading it."
@@ -655,6 +668,23 @@ class _Rules:
         # itself would not pass, `explain-the-failing-check` says what is needed.
         blind = [f for f in thrash if not f.detail.get("checked")]
         stuck = len(self.get(signals.NO_CONVERGENCE)) >= MIN_EVENTS
+        # A change that was tried, checked and then taken back was not made blind either:
+        # the check did its job. What the agent lacked was the rule the change broke.
+        tested = [f for f in reverts if f.detail.get("checked")]
+        untested = [f for f in reverts if not f.detail.get("checked")]
+        if len(blind) + len(untested) < MIN_EVENTS and len(reverts) >= MIN_EVENTS and not stuck:
+            self.add(
+                "state-the-constraint",
+                "Say what must not change in this file",
+                f"Agents made a change here and backed it out {_times(len(reverts))} in "
+                f"{_n(_sessions(reverts), 'session')}, {len(tested)} of them after a test, "
+                "lint or build command had run on it. A check exists and was used, so the "
+                "agents were not iterating blind: they tried something this file does not "
+                "allow. State the constraint in AGENTS.md or in a comment at the top of "
+                "the file, so the next agent does not try the same thing.",
+                [signals.EDIT_REVERT],
+            )
+        reverts = untested
         if len(blind) + len(reverts) >= MIN_EVENTS and not stuck:
             thrash = blind
             parts = [
@@ -745,6 +775,31 @@ class _Rules:
         )
 
     # ---- command rules ---------------------------------------------------------------
+
+    def no_such_target(self, key: str, invocation: list[Finding]) -> bool:
+        """Most of these failures say the make target or package script is not defined."""
+        absent = [f for f in invocation if f.detail.get("no_target")]
+        if len(absent) * 2 <= len(invocation):
+            return False
+        holder = absent[0].detail.get("no_target_in", "")
+        thing = "target" if holder == signals.TARGETS_IN_MAKEFILE else "script"
+        name = ""
+        if self.quote is not None:
+            name = " " + code(self.quote(absent[0].detail["no_target"], QUOTE_CHARS))
+        exists = ""
+        if self.known_targets and self.quote is not None:
+            listed = ", ".join(code(self.quote(t, QUOTE_CHARS)) for t in self.known_targets)
+            exists = f" What it does define: {listed}."
+        self.add(
+            "name-the-missing-target",
+            f"{_located(key)} does not exist: say what to run instead",
+            f"{_located(key)} failed {_in_sessions(absent)} because the {holder} has no "
+            f"{thing}{name}.{exists} Agents ask for it out of habit, so documenting how to "
+            f"run it would not help: either add the {thing} (as an alias for whatever does "
+            "that job here), or say in AGENTS.md which command to use instead.",
+            [signals.COMMAND_FAILURE],
+        )
+        return True
 
     def environment(self, key: str, failures: list[Finding]) -> None:
         """The command is fine; what it needs around it was not there."""
@@ -954,6 +1009,8 @@ class _Rules:
             )
         elif len(environment) >= MIN_EVENTS:
             self.environment(key, environment)
+        elif len(invocation) >= MIN_EVENTS and self.no_such_target(key, invocation):
+            pass
         elif len(invocation) >= MIN_EVENTS:
             detail = (
                 f"{_located(key)} failed {_in_sessions(invocation)} with setup or invocation "
@@ -1205,6 +1262,7 @@ def recommend(
     quote: Quoter | None = None,
     shares: Mapping[int, float] | None = None,
     guidance: Guidance | None = None,
+    known_targets: Sequence[str] = (),
 ) -> list[dict[str, object]]:
     """Recommendations for one hotspot.
 
@@ -1224,7 +1282,7 @@ def recommend(
         located = _IN_DIRECTORY_RE.match(key)
         base = located.group(1) if located else key
         subjects, near, name = [base], (located.group(2) if located else ""), code(base)
-    rules = _Rules(findings, quote, shares or {}, guidance, subjects, near, name)
+    rules = _Rules(findings, quote, shares or {}, guidance, subjects, near, name, known_targets)
     if kind == model.FILE:
         rules.file(facts)
     elif kind == model.COMMAND:

@@ -26,6 +26,7 @@ All thresholds are named constants in `src/agent_friction/signals.py`.
 | `file-too-large` | 1.0 | transcript |
 | `path-miss` | 1.0 | transcript |
 | `search-miss` | 1.0 | transcript |
+| `tool-failure` | 0.5 | transcript |
 | `read-loop` | 0.5 | transcript |
 
 ### At a glance
@@ -53,6 +54,7 @@ summary).
 | [file-too-large](#file-too-large--file-too-large-to-read) | a read is refused because the file is too big | the file | 1.0 · one round trip |
 | [path-miss](#path-miss--path-miss) | a read, edit, test command or `cd` is pointed at a path that does not exist | the missing path | 1.0 · one round trip (a routine probe: weak, none) |
 | [search-miss](#search-miss--search-miss) | a Grep or Glob search returns nothing | the directory searched | 1.0 (weak) · none |
+| [tool-failure](#tool-failure--tool-failure) | a tool other than the file tools, search and the shell (an MCP tool, a web fetch, a sub-agent) returns an error, and that tool does so 2+ times in the scan | nothing (unattributed; counted per tool name) | 0.5 (weak) · none |
 | [read-loop](#read-loop--read-loop) | the same range of a file is read 3+ times in a turn with no edit in between | the file | 0.5 (weak) · none |
 
 Time is the agent's only: the time a person spent at a permission prompt or
@@ -62,7 +64,7 @@ Severities are ordered by one principle: a human having to step in costs more
 than the agent wasting its own round trips, and a failure that provably
 repeats costs more than one that might be routine.
 
-**Weak signals.** `edit-thrash`, `read-loop`, `search-miss`,
+**Weak signals.** `edit-thrash`, `read-loop`, `search-miss`, `tool-failure`,
 `probable-correction` and *ordinary* command failures (a command that ran and
 exited non-zero, as opposed to a setup/invocation error) also show up in
 perfectly productive sessions. A file, command or directory whose *only*
@@ -788,7 +790,11 @@ edited the file and before the miss. Only then does advice speak of something
 rewriting the file.
 
 **Base rate:** edit misses (and stale edits) happen everywhere at a low
-rate. On a file that shows no more of them than the rest of the repository
+rate. Where the sessions edited too little else to give a rate (all edits
+went to this file, or the other files add up to fewer than 20 visits), the
+file is judged against the fixed floor and its advice says so instead of
+claiming "more often than in the rest of this repository" (`no_comparison`
+on the event). On a file that shows no more of them than the rest of the repository
 they are weak evidence (`within_baseline`): counted, capped, and never the
 basis of advice for that file; the rate itself is reported once for the
 repository. See "The repository's base rate" in the methodology.
@@ -822,6 +828,23 @@ that", "put the old name back", "restore ..."), edits in that turn that undo
 earlier ones are the agent doing as told. The human's message is the event
 (a `user-correction`, if it is one); it is not counted a second time as an
 `edit-revert`, and it does not feed "edits did not converge".
+
+*Taking a change back after a correction is not a revert either:* the wording
+does not have to say "revert". When the prompt that started the turn was read
+as a `user-correction` or a `probable-correction` and is attributed to this
+file ("you used legacy_charge again in service.py. PaymentClient only"), an
+edit in that turn that undoes an earlier one is the agent's answer to the
+human. The correction is the event; the undo is not counted next to it. A
+revert of *another* file in the same turn is still counted.
+
+*Was it checked?* If a test, lint, type-check, build or aggregate command
+ran (red or green) between the edit and its undoing, the event carries
+`checked`, and its summary ends with "after a check had run on it". Such a
+revert was not made blind: edit, `make test` red, revert, `make test` green
+is an attempt that the check rejected. It counts the same, but the advice
+differs: not "give agents a fast check" (`add-a-fast-check`), which they
+evidently have, but "say what must not change in this file"
+(`state-the-constraint`).
 
 **Why:** work on this file went in a circle.
 
@@ -1097,8 +1120,11 @@ command's" below.
   124 (the time ran out) after printing that it was up (`ready in 300 ms`,
   `Local: http://...`, `listening on`, `compiled successfully`, `Application
   startup complete`, ...; `READY_BANNER_RE`) did what the agent wanted: it
-  started. Nothing is recorded. Without such a banner, with another exit
-  status, or without `timeout` in front, it is judged like any other run.
+  started. Nothing is recorded. The same holds when the time box ran out
+  and the command had printed nothing at all (`timeout 5 nc -l 8080`): the
+  agent set the limit itself, and the command was cut off, it did not fail.
+  With output that is not such a banner, with another exit status, or
+  without `timeout` in front, it is judged like any other run.
 - *A `cd` that failed:* in `cd missing-dir && npm test`, when the shell
   reports that it could not change directory (bash: `cd: missing-dir: No such
   file or directory`; zsh: `cd:1: no such file or directory: missing-dir`,
@@ -1609,6 +1635,53 @@ tests (`.only`, `fit(`, `fdescribe(`) — is meant to find nothing
 (`HYGIENE_PATTERN_RE`). Such misses are still listed as weak events, but
 they never lift a hotspot out of the weak class and are left out of the
 "point agents to what they are searching for" advice.
+
+## `tool-failure` — Tool failure
+
+> **In short:** A tool that is neither a file tool, a search nor the shell (an
+> MCP tool, a web fetch, a sub-agent) returned an error, and that tool failed
+> 2 or more times in the scanned sessions. A call the harness never started,
+> a declined call and a denied call are not counted here.
+
+**What:** the result of a tool call whose operation is `other` (everything
+that is not read, edit, write, shell or search: `mcp__postgres__query`,
+`WebFetch`, `Task`, ...) is marked as an error. One failure of a tool in the
+whole scan is an accident and is dropped; from the second on
+(`TOOL_FAILURE_MIN_EVENTS`, counted over all scanned sessions, by tool name)
+every failure of that tool is an event.
+
+Not counted: a call the harness never started (invalid arguments, an unknown
+tool, a cancelled parallel batch), a call a human declined (`tool-rejected`),
+a call that permission settings refused (`permission-denied`), an interrupted
+call, and a "no" to a plan or question.
+
+**Why:** a tool the agent relies on keeps failing: an MCP server that is not
+running, credentials that are missing, a site that refuses the request. Each
+failure is a round trip, and the agent usually falls back to something
+slower.
+
+**Attribution:** none. The tool is not a file, command or directory of the
+repository, so the events are *unattributed*: they are in
+`totals.friction_events`, `totals.unattributed_events` and
+`totals.tool_failures`, their evidence is in the top-level `unattributed`
+list, and the top-level `tool_failures` list gives events and sessions per
+tool name. They are in no hotspot and get no recommendation.
+
+**Weak:** the signal counts 0.5, claims no time and is never a "strong"
+event (`totals.strong_events`). A web page that answers 403 twice says
+little about the repository.
+
+**Privacy:** the tool's name is the only thing taken from the call; its
+arguments are never read. The error text is the excerpt, redacted and
+truncated like any other. Without excerpts the name of a tool that is not
+built in is replaced by a placeholder (`<tool:1a2b3c>`), as for declined
+tools; the names of the harness's own tools stay.
+
+**False positives (known):** a tool that reports "nothing found" or "not
+allowed for this URL" as an error is counted although nothing is broken.
+
+**False negatives:** a tool that fails without marking its result as an
+error; a tool that failed once.
 
 ## `read-loop` — Read loop
 

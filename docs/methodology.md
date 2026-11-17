@@ -302,6 +302,39 @@ dropped and counted in `totals.third_party_events`; an event that also has
 a first-party file or a command keeps those. Commands are never set aside:
 `node_modules/.bin/jest` failing is a failure of `jest`.
 
+### Calls that acted outside the repository
+
+A session often works on more than this repository: `cd ../other && make`,
+a script under `/tmp`, a file in the home directory. A call that was
+declined, denied or failed while acting outside (the step ran in a directory
+outside, a housekeeping command only named paths outside, a script that lives
+outside, a file tool pointed at a path outside) says nothing about this
+repository and produces no event. It is counted, so that the headline can
+be checked against the transcript: `totals.events_outside_repo` is the
+number of such calls (each call once; read-only inspection commands,
+interrupted calls and calls the harness never started are not in it). On a
+machine where most permission denials are for commands run elsewhere, this
+is where they went.
+
+### Tools that are not files or commands
+
+A failing MCP tool, web fetch or sub-agent call belongs to no file, command
+or directory. From the second failure of the same tool in the scan these are
+`tool-failure` events: weak, unattributed, claiming no time, counted in
+`totals.tool_failures` and listed per tool in the top-level `tool_failures`
+(see the [catalog](signals.md)).
+
+### One command, several directories
+
+A check command is keyed by where it runs (`pytest`, `pytest (src/)`,
+`pytest (tests/)`), because where it runs is part of how it is run, and each
+key is scored and advised on its own. So that one habit spread over three
+directories is not read as three small problems, every command row whose
+command also appears under another directory carries `family`: the bare
+command, the rows that belong together, and the distinct events and sessions
+of all of them. Nothing is merged, and no score or recommendation is
+computed for the family.
+
 ## Exposure
 
 Friction only means something relative to how often the agent goes somewhere.
@@ -347,7 +380,7 @@ score       = 100 x severity x recurrence x consistency
   that passed only after a setup step counts 1, like setup/invocation and
   environment failures).
 - **Weak evidence is capped.** If every event on a target is of a weak kind
-  (`edit-thrash`, `read-loop`, `search-miss`, `probable-correction`, or an
+  (`edit-thrash`, `read-loop`, `search-miss`, `tool-failure`, `probable-correction`, or an
   *ordinary* `command-failure`; see the [catalog](signals.md); also a `path-miss` on a routinely probed optional file, and `no-convergence` events that all come from one session), the score is capped at **19**, below the band where
   a single real incident lands, `score_detail.capped` is true, and no
   recommendation is made. Such a target can be a lead; it cannot be an alarm
@@ -421,7 +454,10 @@ more than the rest (`scoring.baseline`):
   with the signal / visits, and events / visits. Neither is taken below
   **5%** (`BASELINE_FLOOR`), and the floor alone is used when the other files
   add up to fewer than 20 visits (`BASELINE_MIN_VISITS`): a small or quiet
-  repository is judged against one visit in twenty.
+  repository is judged against one visit in twenty. Advice for a file that
+  was singled out this way says that there was nothing to compare it with
+  (`Baseline.sparse`, `no_comparison` on its events), not that it misses
+  "more often than the rest of this repository".
 - Two tails are computed: binomial, for this many visits with the signal
   among the file's visits, and Poisson, for this many events (forty misses
   in one session are one visit, and not background). The smaller, doubled, is
@@ -470,7 +506,7 @@ nanoseconds according to their size.
 | `path-miss`, `file-too-large`, `permission-denied` | one round trip (a `path-miss` that is a routine probe for an optional file: none) |
 | any interval that starts at a call | starts later where a person had to approve the call: see "A person's time at a permission prompt" below |
 | `tool-rejected` | from the human's answer to the next event in the transcript; the time the permission prompt was open (call to result) is a human's time and is never counted |
-| `search-miss`, `probable-correction` | none: weak signals never claim time |
+| `search-miss`, `probable-correction`, `tool-failure` | none: weak signals never claim time |
 | `edit-revert` | from the original edit to the revert if both are in the same turn; otherwise one round trip |
 | `user-correction` | the rework only: from the agent's first tool call after the correction to its last change to the files the correction was about, in that turn; one round trip (that first call) if it does not return to those files; nothing if the session ends there. A `probable-correction` claims nothing |
 | `user-interrupt` | the call that was cut short: from its start to the interrupt |
@@ -482,6 +518,13 @@ tool call or its next message). If the next thing in the transcript is a
 human message, the agent's turn was over: only the call itself (call to
 result) is claimed, never the time until the human replied. A failure that
 the agent reports and then waits an hour on costs seconds, not an hour.
+
+**An idle gap is not a round trip.** Where the agent's next activity comes
+more than 5 minutes after the call's result (`IDLE_GAP_SECONDS`), nobody was
+working in between: a closed laptop, a session resumed the next morning. Only
+the call itself is claimed then. This matters most for transcripts without
+agent messages (the generic format may hold tool calls only), where the next
+activity is the next tool call, however much later it came.
 
 **As soon as anything succeeds, the clock stops.** A failed edit followed by
 eight green test cycles on another file and, much later, an unrelated edit of
@@ -540,7 +583,7 @@ when `max_evidence` hides some events).
 
 | Level | Rule |
 | --- | --- |
-| `high` | 3 or more distinct sessions **and** 2 or more distinct signal types. The weak kinds (`read-loop`, `edit-thrash`, `search-miss`, `probable-correction`) are never one of the two: they do not corroborate anything. A hotspot whose only evidence is weak (those, or ordinary command failures) is "low" |
+| `high` | 3 or more distinct sessions **and** 2 or more distinct signal types. The weak kinds (`read-loop`, `edit-thrash`, `search-miss`, `probable-correction`, `tool-failure`) are never one of the two: they do not corroborate anything. A hotspot whose only evidence is weak (those, or ordinary command failures) is "low" |
 | `medium` | 2 or more distinct sessions |
 | `low` | a single session, **or** a target whose score is capped because all its evidence is weak (see Score), in however many sessions |
 
@@ -586,7 +629,8 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `state-the-boundary` | 2+ `tool-rejected`, or 1 with a stated reason |
 | `allow-or-document-the-boundary` | 2+ `permission-denied` |
 | `clarify-before-acting` | 2+ `user-interrupt`. On a command (one that humans stopped in 3+ sessions, see the signal) the advice is to say when it should be run and what to run instead |
-| `add-a-fast-check` | 2+ `edit-revert` events or `edit-thrash` events of turns that did not end on a successful command and ran no test, lint or type check (thrash next to a check was not for want of one). Not when the file has 2+ `no-convergence` events: a check that will not pass needs `explain-the-failing-check`, not another check. The text names only what was seen ("2 reverted edits in 2 sessions") |
+| `add-a-fast-check` | 2+ `edit-revert` events with no check run between the edit and its undoing (see `state-the-constraint`), or `edit-thrash` events of turns that did not end on a successful command and ran no test, lint or type check (thrash next to a check was not for want of one). Not when the file has 2+ `no-convergence` events: a check that will not pass needs `explain-the-failing-check`, not another check. The text names only what was seen ("2 reverted edits in 2 sessions") |
+| `state-the-constraint` | 2+ `edit-revert` where `add-a-fast-check` does not apply because a test, lint, type-check or build command ran between an edit and its undoing (`checked` on the event): the agents had a check and used it, and backed the change out. The advice is to write down what the file does not allow. Not when the file has 2+ `no-convergence` events |
 | `learn-from-rework` | 2+ `human-rework` |
 | `add-a-pointer` | 2+ `search-miss` in the file or directory, not counting searches for leftovers (`TODO`, `console.log`, conflict markers, ...), with other evidence or the same pattern missed in 2+ sessions by agents that went on looking for it (see the signal); lists the patterns |
 | `summarize-this-file` | 2+ `read-loop`, next to other evidence |
@@ -594,6 +638,7 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `document-the-setup-step` | 2+ failures of a command that then passed after the same setup step with no file edited in between (`pip install`, `npm ci`, `docker compose up`, `cp .env.example .env`, or any other command that did so in 2+ sessions), or that then passed on a line that first activated an environment (`source .venv/bin/activate && pytest`, `poetry shell`, `conda activate <env>`): "run X before Y". Each failure is bound to the steps run between it and the next run of the same command; every step that helped 2+ times is listed, in order, with its own count ("run `pip install`, then `docker compose up -d` before `pytest`"), and named so that it can be run as written (`npx playwright install`, `go mod download`) |
 | `document-the-environment` | 2+ *environment* failures of a command (and none of the above): a service that was not reachable ("say how to start PostgreSQL before `pytest`"; the service is named when the output identifies it), missing, expired or refused credentials (also a database, registry or cloud API that turns them down), an unset environment variable (named only with excerpts), a port that was already in use, a full disk, or a host name that could not be resolved (no network, or a host that is not allowed: "say what `curl` can reach from where agents work") |
 | `document-the-command` | 2+ setup/invocation failures of a command (and none of the above). If the same command then worked in a subdirectory, the advice names it ("run `npm test` from `web/`"). A command that is keyed by where it ran (`pytest (src/)`) is titled "Document how to run `pytest` in `src/`" |
+| `name-the-missing-target` | 2+ setup/invocation failures of a command, most of which say that the make target or package script does not exist (`make: *** No rule to make target 'lint'.  Stop.`, npm's `Missing script`, `ERR_PNPM_NO_SCRIPT`, yarn's `Command "lint" not found`; a missing *prerequisite*, "needed by", is not this). Replaces `document-the-command`: there is nothing to document about running something that is not there. The text lists up to 12 targets or scripts the Makefile or `package.json` (in the directory the command ran in) does define, and asks for an alias or a line saying what to run instead. Without excerpts neither the missing name nor the list is shown |
 | `make-the-failure-actionable` | 1+ `retry-loop` on a command |
 | `run-it-in-the-background` | 2+ harness timeouts of a command that is a server or watcher (`npm run dev`, `uvicorn`, ...); replaces `document-the-command` for those |
 | `give-it-more-time` | 2+ harness timeouts of any other command (`npm run build` cut off after 2 minutes): say how long it takes, raise the timeout or run it in the background, or name a narrower command; replaces `document-the-command` for those |

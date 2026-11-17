@@ -49,7 +49,14 @@ aside { overflow-wrap: anywhere; background: var(--panel); border: 1px solid var
   align-self: start; }
 @media (min-width: 901px) {
   /* The detail panel stays beside the map while its evidence scrolls inside it. */
-  aside { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; }
+  aside { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto;
+    /* Scroll shadows: a soft edge shows when more text is above or below. */
+    background:
+      linear-gradient(var(--panel) 30%, transparent) center top / 100% 40px no-repeat local,
+      linear-gradient(transparent, var(--panel) 70%) center bottom / 100% 40px no-repeat local,
+      radial-gradient(farthest-side at 50% 0, rgba(0,0,0,.22), transparent) center top / 100% 12px no-repeat scroll,
+      radial-gradient(farthest-side at 50% 100%, rgba(0,0,0,.22), transparent) center bottom / 100% 12px no-repeat scroll,
+      var(--panel); }
 }
 .sortbtn { font: inherit; font-weight: 600; color: inherit; background: none; border: 0; padding: 4px 0; min-height: 24px; cursor: pointer; text-align: inherit; }
 .sortbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -188,10 +195,17 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     var box = el("div", { class: "rec sub" }); box.appendChild(el("b", null, r.title)); box.appendChild(el("span", null, r.detail));
     document.getElementById("stats").insertAdjacentElement("afterend", box);
   });
+  var notCounted = [];
   if (Number(t.dropped_red_runs) > 0) {
-    document.getElementById("stats").insertAdjacentElement("afterend", el("p", { class: "sub" },
-      "Not counted: " + plural(t.dropped_red_runs, "failed run") + " of normal work (the agent fixed the failure, or was only waiting and polled until it passed; ~" +
-      mins(t.dropped_minutes) + " of run time)."));
+    notCounted.push("Not counted: " + plural(t.dropped_red_runs, "failed run") + " of normal work (the agent fixed the failure, or was only waiting and polled until it passed; ~" +
+      mins(t.dropped_minutes) + " of run time).");
+  }
+  if (Number(t.events_outside_repo) > 0) {
+    notCounted.push((notCounted.length ? "Also not" : "Not") + " counted: " +
+      plural(t.events_outside_repo, "declined, denied, or failed call") + " that acted outside this repository.");
+  }
+  if (notCounted.length) {
+    document.getElementById("stats").insertAdjacentElement("afterend", el("p", { class: "sub" }, notCounted.join(" ")));
   }
   if (t.tool_calls_in_repo !== undefined) t.tool_calls = t.tool_calls_in_repo;
   [["sessions", "agent session", "agent sessions"], ["tool_calls", "tool call", "tool calls"],

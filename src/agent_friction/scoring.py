@@ -23,6 +23,7 @@ from agent_friction.signals import (
     SEARCH_MISS,
     SEVERITY,
     STALE_EDIT,
+    TOOL_FAILURE,
 )
 
 #: Mean session points at which the severity factor reaches 1 - 1/e (about 0.63).
@@ -42,7 +43,9 @@ HIGH_MIN_SIGNALS = 2
 #: a file, a search that finds nothing, a follow-up that merely sounds like a correction).
 #: A target with nothing but these is a lead at most: its score is capped, it gets no
 #: recommendation, and it cannot fail a build on its own.
-WEAK_ALONE_SIGNALS = frozenset({READ_LOOP, EDIT_THRASH, SEARCH_MISS, PROBABLE_CORRECTION})
+WEAK_ALONE_SIGNALS = frozenset(
+    {READ_LOOP, EDIT_THRASH, SEARCH_MISS, PROBABLE_CORRECTION, TOOL_FAILURE}
+)
 WEAK_ONLY_SCORE_CAP = 19.0
 #: The same signals are too weak to justify "high" confidence on their own.
 WEAK_SIGNALS = WEAK_ALONE_SIGNALS
@@ -61,6 +64,8 @@ BASELINE_MIN_VISITS = 20
 BASELINE_ALPHA = 0.05
 #: Marks a finding that is no more than the background rate (``Finding.detail``).
 WITHIN_BASELINE = "within_baseline"
+#: Finding detail: the file stands out, but only against the fixed floor (`Baseline.sparse`).
+NO_COMPARISON = "no_comparison"
 #: Session ids with this prefix are agent commits (git), not transcript sessions.
 GIT_SESSION_PREFIX = "git:"
 
@@ -174,6 +179,9 @@ class Baseline:
     events: int
     files: int  # files with at least one such event
     above: tuple[str, ...]  # files clearly above the rate, most significant first
+    #: Files judged against ``BASELINE_FLOOR`` alone: the other files had too few visits
+    #: to give a rate, so "more than the rest of the repository" cannot be said of them.
+    sparse: tuple[str, ...] = ()
 
     @property
     def rate(self) -> float:
@@ -200,6 +208,7 @@ def baseline(counts: Mapping[str, tuple[int, int, int]]) -> Baseline:
     hits = sum(h for _, h, _ in counts.values())
     events = sum(e for _, _, e in counts.values())
     tested: list[tuple[float, str]] = []
+    sparse: list[str] = []
     for name, (own_visits, own_hits, own_events) in counts.items():
         if not own_events:
             continue
@@ -208,6 +217,8 @@ def baseline(counts: Mapping[str, tuple[int, int, int]]) -> Baseline:
         if others >= BASELINE_MIN_VISITS:
             hit_rate = max(BASELINE_FLOOR, (hits - own_hits) / others)
             event_rate = max(BASELINE_FLOOR, (events - own_events) / others)
+        else:
+            sparse.append(name)
         n = max(own_visits, own_hits)
         by_visits = binomial_tail(own_hits, n, min(hit_rate, 1.0))
         by_events = poisson_tail(own_events, n * event_rate)
@@ -223,6 +234,7 @@ def baseline(counts: Mapping[str, tuple[int, int, int]]) -> Baseline:
         events=events,
         files=len(tested),
         above=tuple(name for _, name in tested[:passed]),
+        sparse=tuple(sorted(sparse)),
     )
 
 
@@ -309,6 +321,7 @@ SIGNAL_NOUNS: dict[str, tuple[str, str]] = {
         "edit-and-run stretch that never went green",
         "edit-and-run stretches that never went green",
     ),
+    "tool-failure": ("tool failure", "tool failures"),
 }
 
 

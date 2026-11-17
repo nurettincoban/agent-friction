@@ -77,6 +77,10 @@ HUMAN_REWORK = "human-rework"
 PROBABLE_CORRECTION = "probable-correction"
 FILE_TOO_LARGE = "file-too-large"
 NO_CONVERGENCE = "no-convergence"
+TOOL_FAILURE = "tool-failure"
+#: A tool that failed once in the whole scan is an accident; the engine keeps the events
+#: of a tool only from this many failures on.
+TOOL_FAILURE_MIN_EVENTS = 2
 
 # ---- thresholds (see docs/signals.md) -------------------------------------------------
 #: Successful edits to one file within one user turn that count as thrashing.
@@ -92,6 +96,7 @@ ORDINARY_FAILURE_WEIGHT = 0.3
 RECOVERY_LOOKAHEAD = 5
 #: Per-event cap for the time-lost estimate, in seconds.
 TIME_CAP_SECONDS = 300.0
+_EXIT_LINE_RE = re.compile(r"(?mi)^\s*(?:Error: )?Exit code \d+\s*$")
 #: Where a transcript does not say whether a person had to approve a call, the time from
 #: call to result counts at most this long (or the command's usual run time, if longer).
 UNATTENDED_RUN_SECONDS = 30.0
@@ -338,6 +343,18 @@ CATALOG: tuple[SignalDef, ...] = (
         "point at vocabulary the codebase does not use.",
         "The file or directory that was searched.",
         1.0,
+    ),
+    SignalDef(
+        TOOL_FAILURE,
+        "Tool failure",
+        "A tool that is neither a file tool, a search nor the shell (an MCP tool, a web "
+        "fetch, a sub-agent) returned an error, and that tool failed "
+        f"{TOOL_FAILURE_MIN_EVENTS} or more times in the scanned sessions. A call the "
+        "harness never started, a declined call and a denied call are not counted here.",
+        "A tool the agent relies on keeps failing: a server that is not running, "
+        "credentials that are missing, a site that refuses the request.",
+        "No file or command: the event is unattributed, and counted per tool name.",
+        0.5,
     ),
     SignalDef(
         READ_LOOP,
@@ -1003,6 +1020,36 @@ def _search_words(text: str) -> set[str]:
     """The words of a search pattern or path (``RefundPolicy`` -> refund, policy)."""
     return {w.casefold() for w in _SEARCH_WORD_RE.findall(text) if len(w) >= 4}
 
+
+#: Where a build target or script the agent asked for turned out not to exist.
+TARGETS_IN_MAKEFILE = "Makefile"
+TARGETS_IN_PACKAGE = "package.json"
+# "needed by" is a missing prerequisite of a target that does exist: not this.
+_NO_MAKE_TARGET_RE = re.compile(
+    r"(?m)^[\w.-]*make[\w.-]*(?:\[\d+\])?: \*\*\* No rule to make target "
+    r"[`'\"]([^`'\"\n]+)['\"]\.\s+Stop\."
+)
+_NO_SCRIPT_RE = re.compile(
+    r"(?m)^(?:npm (?:ERR!|error) Missing script:? "
+    r"|\s*(?:ERROR\s+)?ERR_PNPM_NO_SCRIPT\s+Missing script: "
+    r"|error Command )[\"']?([\w:.@/-]+)"
+)
+
+
+def missing_target(output: str) -> tuple[str, str] | None:
+    """``("Makefile", "lint")`` when ``output`` says that this target or script is not defined."""
+    found = _NO_MAKE_TARGET_RE.search(output)
+    if found is not None:
+        return TARGETS_IN_MAKEFILE, found.group(1)
+    found = _NO_SCRIPT_RE.search(output)
+    if found is not None:
+        return TARGETS_IN_PACKAGE, found.group(1)
+    return None
+
+
+#: A silence this long after a call's result is nobody working (a closed laptop, an agent
+#: waiting to be resumed), whatever follows it: it is never part of a round trip.
+IDLE_GAP_SECONDS = TIME_CAP_SECONDS
 
 #: What `timeout N cmd` exits with when the time ran out.
 TIMEOUT_EXIT_CODE = 124
@@ -1777,11 +1824,25 @@ def _text_matches(pattern: str, text: str) -> bool:
         return False
 
 
+def _said_anything(output: str) -> bool:
+    """Is there anything in ``output`` beyond the harness's own "Exit code N" line?"""
+    return bool(_EXIT_LINE_RE.sub("", output).strip())
+
+
 def _capped(start: float | None, end: float | None) -> tuple[float, float] | None:
     """Interval [start, end] limited to TIME_CAP_SECONDS from its start."""
     if start is None or end is None or end <= start:
         return None
     return (start, min(end, start + TIME_CAP_SECONDS))
+
+
+def _resumed(action: _Action) -> float | None:
+    """When the agent next did something after ``action``; ``None`` after an idle gap."""
+    done = _epoch(action.result) if action.result is not None else None
+    after = action.next_any
+    if after is not None and done is not None and after - done > IDLE_GAP_SECONDS:
+        return None
+    return after
 
 
 def _capped_back(start: float | None, end: float | None) -> tuple[float, float] | None:
@@ -1861,10 +1922,12 @@ class _State:
     seen_rewrites: dict[str, int] = field(default_factory=dict)
     read_findings: dict[tuple[str, str], Finding] = field(default_factory=dict)
     # (old, new) of each successful edit -> (when, successful commands so far, only added?)
-    edit_history: dict[str, dict[tuple[str, str], tuple[float | None, int, bool]]] = field(
+    edit_history: dict[str, dict[tuple[str, str], tuple[float | None, int, bool, int]]] = field(
         default_factory=dict
     )
     ok_commands: int = 0
+    checks_run: int = 0  # test, lint, build or aggregate commands that ran, red or green
+    write_checks: dict[tuple[str, str], int] = field(default_factory=dict)
     write_history: dict[str, list[str]] = field(default_factory=dict)
     write_times: dict[tuple[str, str], float | None] = field(default_factory=dict)
     # consecutive failures of one exact command line: (key, normalized argv) -> count
@@ -1924,6 +1987,8 @@ class _State:
     turn_shell_ok: bool | None = None
     turn_check_ok: bool | None = None  # ... and its last test/lint/build/aggregate command
     undo_asked: bool = False  # the prompt of this turn asks for an undo
+    # files the prompt of this turn was read as a correction, or a probable one, about
+    corrected: frozenset[str] = frozenset()
     added: list[str] = field(default_factory=list)  # text of the latest successful edits
     turn_misses: list[tuple[Finding, str]] = field(default_factory=list)
 
@@ -1958,6 +2023,9 @@ class _Detector:
         self.exposed: set[tuple[str, str]] = set()  # every target the agent went near
         self.exposed_in: set[tuple[str, str, str]] = set()  # ... and in which episode
         self.skipped_events = 0  # events a detector could not handle (never fatal)
+        # Transcript lines of calls that were refused or failed while acting outside the
+        # repository: seen, and deliberately not counted as this repository's friction.
+        self.outside: list[int] = []
         self._durations: dict[str, list[tuple[_Action, float]]] = {}
         #: Red runs taken off the record: (transcript line, seconds the run took, reason)
         self.dropped: list[tuple[int, float, str]] = []
@@ -2066,8 +2134,8 @@ class _Detector:
 
     def _round_trip(self, action: _Action) -> tuple[float, float] | None:
         """From a call until the next transcript event: the cost of one wasted round trip."""
-        end = action.next_any if action.next_any is not None else _epoch(action.result)
-        return _capped(self._started(action), end)
+        end = _resumed(action)
+        return _capped(self._started(action), end if end is not None else _epoch(action.result))
 
     def _recover(self, finding: Finding, action: _Action) -> None:
         """Extend a failure's interval up to the successful ``action`` that resolved it."""
@@ -2381,6 +2449,8 @@ class _Detector:
         if result is None:
             return
         op = action.call.op
+        if self._acted_outside(action, result):
+            self.outside.append(result.line)
         if result.error == model.ERR_REJECTED:
             self._on_rejected(action, result)
         elif result.error == model.ERR_DENIED:
@@ -2395,6 +2465,38 @@ class _Detector:
             self._on_search(action, result)
         elif op == model.OP_SHELL:
             self._on_shell(action, result)
+        elif op == model.OP_OTHER and not result.ok:
+            self._on_tool_failure(action, result)
+
+    def _acted_outside(self, action: _Action, result: Event) -> bool:
+        """Did a call that went wrong act on something outside the repository?"""
+        call = action.call
+        if result.ok or result.error in (model.ERR_INTERRUPTED, model.ERR_NOT_RUN):
+            return False
+        if call.op in (model.OP_READ, model.OP_EDIT, model.OP_WRITE):
+            return bool(call.path) and action.file is None
+        if call.op == model.OP_SHELL and call.command and action.cmd is None:
+            try:
+                parsed = parse_command(call.command, is_windows_path(call.cwd) or None)
+            except Exception:  # already counted as skipped when the call was classified
+                return False
+            return bool(parsed.key) and not parsed.inspection
+        return False
+
+    def _on_tool_failure(self, action: _Action, result: Event) -> None:
+        """An MCP tool, a web fetch or a sub-agent returned an error."""
+        call = action.call
+        if not call.tool or QUESTION_TOOL_RE.search(call.tool):
+            return
+        tool = self._tool(call)
+        self._emit(
+            TOOL_FAILURE,
+            result,
+            f"{tool} returned an error",
+            [],
+            excerpt=result.output,
+            detail={"tool": tool},
+        )
 
     # ---- file tools ------------------------------------------------------------------
 
@@ -2520,41 +2622,56 @@ class _Detector:
         # edit-revert
         reverted_at: float | None = None
         reverted = False
+        checked = False  # a check ran between the change and its undoing
         history = state.edit_history.setdefault(path, {})
         for old, new in call.edits:
             if old == new:
                 continue
             if (new, old) in history:
-                made_at, commands_then, inserted = history.pop((new, old))
+                made_at, commands_then, inserted, checks_then = history.pop((new, old))
                 if inserted and state.ok_commands > commands_then:
                     # Lines were only added, a command ran successfully with them in place,
                     # and now they are gone again: a temporary debug print, not a retreat.
                     continue
                 reverted = True
+                checked = checked or state.checks_run > checks_then
                 # Only within one turn is the time in between the detour itself; an undo
                 # of work from an earlier turn costs the undoing call and nothing more.
                 same_turn = state.edit_turns.pop((path, new, old), -1) == state.turns
                 reverted_at = made_at if same_turn else None
             else:
-                history[(old, new)] = (now, state.ok_commands, (old, new) in call.insertions)
+                history[(old, new)] = (
+                    now,
+                    state.ok_commands,
+                    (old, new) in call.insertions,
+                    state.checks_run,
+                )
                 state.edit_turns[(path, old, new)] = state.turns
         if call.op == model.OP_WRITE and call.content_digest:
             versions = state.write_history.setdefault(path, [])
             if versions and versions[-1] != call.content_digest and call.content_digest in versions:
                 reverted = True
                 written = state.write_times.get((path, versions[-1]))
+                since = state.write_checks.get((path, versions[-1]), state.checks_run)
+                checked = checked or state.checks_run > since
                 same_turn = state.write_turns.get((path, versions[-1]), -1) == state.turns
                 reverted_at = written if same_turn else None
             versions.append(call.content_digest)
             state.write_times[(path, call.content_digest)] = now
+            state.write_checks[(path, call.content_digest)] = state.checks_run
             state.write_turns[(path, call.content_digest)] = state.turns
-        if reverted and not state.undo_asked:
+        # Taking a change back in answer to the human is not a second event: either they
+        # asked for the undo in so many words, or the turn opened with a correction about
+        # this very file. The correction is the event.
+        if reverted and not state.undo_asked and path not in state.corrected:
             self._emit(
                 EDIT_REVERT,
                 result,
-                f"{self._tool(call)} on {path} undid an earlier edit from the same session",
+                f"{self._tool(call)} on {path} undid an earlier edit from the same session"
+                + (", after a check had run on it" if checked else ""),
                 targets,
                 interval=_capped_back(reverted_at, now) or self._round_trip(action),
+                detail={"checked": "1"} if checked else None,
             )
 
     def _on_change(
@@ -2944,6 +3061,7 @@ class _Detector:
             state.turn_shell_ok = ok
             if command_role(key) is not None or is_aggregate_check(key):
                 state.turn_check_ok = ok
+                state.checks_run += 1
                 if ok:
                     # Reading a file again between green runs of a check is following
                     # along while things work, not going round in circles.
@@ -3115,11 +3233,13 @@ class _Detector:
         if (
             result.exit_code == TIMEOUT_EXIT_CODE
             and _TIMEOUT_WRAPPER_RE.search(action.call.command or "")
-            and READY_BANNER_RE.search(result.output)
+            and (READY_BANNER_RE.search(result.output) or not _said_anything(result.output))
             and not INVOCATION_ERROR_RE.search(result.output)
         ):
             # `timeout 10 npm run dev` that came up and was then stopped by its own time
-            # box: the agent only wanted to see it start.
+            # box: the agent only wanted to see it start. And a time box the agent set
+            # itself that ran out without a word (`timeout 5 nc -l 8080`) did what it was
+            # asked to: the command was cut off, it did not fail.
             return
         code = None if hidden else result.exit_code
         if hidden and not several:
@@ -3144,6 +3264,7 @@ class _Detector:
             step, certain = red_step, True
             invocation = bool(setup_error)
         if self._elsewhere(step, call.cwd):
+            self.outside.append(result.line)
             return  # the step that failed ran, or only touched things, outside the repo
         if step is not None and step.key:
             key = step.key
@@ -3208,6 +3329,9 @@ class _Detector:
             "variant": "invocation" if invocation else "ordinary",
             "command": call.command or "",
         }
+        absent = missing_target(result.output) if invocation else None
+        if absent is not None:
+            detail["no_target_in"], detail["no_target"] = absent
         if (
             not invocation
             and not inline
@@ -3631,11 +3755,13 @@ class _Detector:
             # Name the step the human objected to (`rm`, `git push`), not the last one.
             step = objectionable_step(action.cmd, result.reason)
             if self._elsewhere(step, call.cwd):
+                self.outside.append(result.line)
                 return
             if step is not None and step.key:
                 targets = [Target(model.COMMAND, self._label(step.key, step, call.cwd))]
             written = self._written(step, call.cwd)
             if written is None:
+                self.outside.append(result.line)
                 return
             targets = [Target(model.FILE, written)] if written else targets
         tool = self._tool(call)
@@ -3655,7 +3781,7 @@ class _Detector:
             excerpt="\n".join(excerpt_parts),
             # From the call to its result a human was reading a prompt, which is not the
             # agent's time. Only what the agent then needs to get going again is claimed.
-            interval=_capped(_epoch(result), action.next_any),
+            interval=_capped(_epoch(result), _resumed(action)),
             detail={"reason": result.reason, "command": call.command or ""},
         )
 
@@ -3673,11 +3799,13 @@ class _Detector:
             said = result.output.replace(call.command or "\0", " ")
             step = denied_step(action.cmd, said)
             if self._elsewhere(step, call.cwd):
+                self.outside.append(result.line)
                 return
             if step is not None and step.key:
                 targets = [Target(model.COMMAND, self._label(step.key, step, call.cwd))]
             written = self._written(step, call.cwd)
             if written is None:
+                self.outside.append(result.line)
                 return  # `cat > /tmp/notes <<EOF`: a write to a file outside the repo
             targets = [Target(model.FILE, written)] if written else targets
         by = {
@@ -3756,6 +3884,7 @@ class _Detector:
         self.state.undo_asked = (
             _UNDO_ASKED_RE.search(event.text[:CORRECTION_HEAD_CHARS]) is not None
         )
+        self.state.corrected = frozenset()
         _, finished = self._turn_bounds()
         if self.state.agent_seen is not None:
             finished = max(finished or 0.0, self.state.agent_seen)
@@ -3855,6 +3984,7 @@ class _Detector:
             excerpt=event.text if certain else "",
             detail={"confidence": f"{confidence:g}", **({"quote": event.text} if certain else {})},
         )
+        self.state.corrected = frozenset(t.key for t in targets)
         if corroborated:
             finding.detail["corroborated"] = corroborated
             self.state.rework = _Rework(finding, frozenset(named_changed))
@@ -3893,6 +4023,8 @@ class Detection:
     dropped: list[tuple[int, float, str]] = field(default_factory=list)
     #: ``exposed`` with the episode of work each target was touched in.
     exposed_in: set[tuple[str, str, str]] = field(default_factory=set)
+    #: Lines of calls that were refused or failed while acting outside the repository.
+    outside: list[int] = field(default_factory=list)
 
 
 def detect_stream(stream: Stream, ctx: DetectContext) -> Detection:
@@ -3905,6 +4037,7 @@ def detect_stream(stream: Stream, ctx: DetectContext) -> Detection:
         detector.skipped_events,
         detector.dropped,
         detector.exposed_in,
+        sorted(set(detector.outside)),
     )
 
 

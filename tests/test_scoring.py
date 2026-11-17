@@ -311,3 +311,12 @@ def test_a_finding_within_the_baseline_is_weak() -> None:
     correction = finding(signals.USER_CORRECTION)
     correction.detail[scoring.WITHIN_BASELINE] = "1"  # not a mechanical signal: no effect
     assert not scoring.is_weak(correction)
+
+
+def test_baseline_says_which_files_had_nothing_to_be_compared_with() -> None:
+    # one file, every visit a miss: judged against the floor alone
+    alone = scoring.baseline({"only.py": (3, 3, 6)})
+    assert alone.above == ("only.py",) and alone.sparse == ("only.py",)
+    # the same file next to 30 quiet visits elsewhere has a rest to stand out from
+    busy = scoring.baseline({"only.py": (3, 3, 6), **{f"f{i}.py": (3, 0, 0) for i in range(10)}})
+    assert busy.above == ("only.py",) and busy.sparse == ()

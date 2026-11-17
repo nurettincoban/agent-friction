@@ -20,12 +20,12 @@ with the evidence quoted so you can check it yourself.
 ```console
 $ agent-friction scan
 agent-friction · shopfront
-6 sessions · 74 tool calls · 34 friction events (11 weak) · ~9m lost · 4 human corrections
+6 sessions · 74 tool calls · 33 friction events (11 weak) · ~9m lost · 4 human corrections
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals
   █████▋      56.8 src/shopfront/api/schema_gen.py           4     12      4m  ● edit-miss×6, user-correction×2
-  ████▍       43.4 src/shopfront/checkout/service.py         3      6      2m  ● edit-revert×2, user-correction×2
+  ████▎       42.4 src/shopfront/checkout/service.py         3      5      2m  ● user-correction×2, edit-revert×1
 
 Commands that keep failing
   ████▉       48.6 pytest                                    4      7      3m  ◐ command-failure×7
@@ -172,7 +172,7 @@ double-counted that way; each minute is claimed once.
 | `user-interrupt` | The human stopped the agent mid-action |
 | `human-rework` | A human rewrote lines an agent commit had just written, or committed a fix/revert of it (git) |
 | `edit-miss` | An edit could not find its target text, or found it more than once |
-| `edit-revert` | An edit undid an earlier edit in the same session |
+| `edit-revert` | An edit undid an earlier edit in the same session (not one a human's correction asked for) |
 | `command-failure` | A command failed because of setup, invocation, or the environment (a service down, credentials, an unset variable); a red test the agent then fixes is not counted, one that passed only after a setup step is |
 | `no-convergence` | The agent kept editing and re-running the same check, and it never went green |
 | `edit-thrash` | One file edited 6 or more times in one turn while something kept failing |
@@ -181,6 +181,7 @@ double-counted that way; each minute is claimed once.
 | `search-miss` | A search in a file or directory came back empty |
 | `file-too-large` | The agent could not read a file because it is too large for its context |
 | `read-loop` | The same part of a file read 3 or more times without being edited |
+| `tool-failure` | Another tool (an MCP server, `WebFetch`, a subagent launch) returned an error, and the same tool failed again elsewhere in the scan |
 
 ### Reading the report
 
@@ -265,6 +266,12 @@ in any release; from 0.1.0 on, each one is listed in the CHANGELOG.
   never quoted, and excluded from the headline count. It is English-only and still a heuristic,
   so treat the count as a floor.
 - Time lost is a floor, not a measurement of human time.
+- Failures of tools that are neither file, search nor shell tools (MCP servers, `WebFetch`, a
+  subagent launch) have no file or command to pin to. They are counted as weak `tool-failure`
+  events, listed under "Not tied to a file or command" and in `tool_failures` in the JSON, and
+  only once the same tool has failed at least twice in the scan.
+- Calls that acted outside the repository (a command that `cd`s elsewhere) are left out; the
+  report says how many declined, denied or failed ones there were.
 - One session is a lead, not a pattern: a row seen in a single session gets advice only when it
   scores 20 or more on its own (one long struggle) or a human said the rule in their own words.
 - When a command's exit status is hidden (`pytest | tail`, `cmd; echo done`), the verdict comes

@@ -146,13 +146,21 @@ def dropped_note(result: dict[str, Any]) -> str | None:
     """One line on red runs left out as normal work, so the headline floor is auditable."""
     totals = result.get("totals", {})
     runs = int(totals.get("dropped_red_runs", 0) or 0)
-    if runs <= 0:
-        return None
-    minutes = float(totals.get("dropped_minutes", 0) or 0)
-    return (
-        f"Not counted: {plural(runs, 'failed run')} of normal work (the agent fixed the failure, "
-        f"or was only waiting and polled until it passed; ~{fmt_minutes(minutes)} of run time)."
-    )
+    outside = int(totals.get("events_outside_repo", 0) or 0)
+    parts: list[str] = []
+    if runs > 0:
+        minutes = float(totals.get("dropped_minutes", 0) or 0)
+        parts.append(
+            f"Not counted: {plural(runs, 'failed run')} of normal work (the agent fixed the "
+            "failure, or was only waiting and polled until it passed; "
+            f"~{fmt_minutes(minutes)} of run time)."
+        )
+    if outside > 0:
+        calls = plural(outside, "declined, denied, or failed call")
+        parts.append(
+            f"{'Also not' if parts else 'Not'} counted: {calls} that acted outside this repository."
+        )
+    return " ".join(parts) or None
 
 
 def unattributed_heading(result: dict[str, Any]) -> str | None:

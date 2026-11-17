@@ -1,10 +1,10 @@
 agent-friction · shopfront
-6 sessions · 74 tool calls · 34 friction events (11 weak) · ~9m lost · 4 human corrections · 2026-10-26 → 2026-11-12
+6 sessions · 74 tool calls · 33 friction events (11 weak) · ~9m lost · 4 human corrections · 2026-10-26 → 2026-11-12
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals
   █████▋      56.8 src/shopfront/api/schema_gen.py           4     12      4m  ● edit-miss×6, user-correction×2
-  ████▍       43.4 src/shopfront/checkout/service.py         3      6      2m  ● edit-revert×2, user-correction×2
+  ████▎       42.4 src/shopfront/checkout/service.py         3      5      2m  ● user-correction×2, edit-revert×1
   █▏          11.4 src/shopfront/payments/refunds.py         1      1     18s  ○ path-miss×1
   █            9.7 api/openapi.yaml                          1      1     n/a  ○ search-miss×1
   ▉            8.5 tests/test_refunds.py                     1      1     n/a  ○ command-failure×1

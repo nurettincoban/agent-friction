@@ -11,7 +11,7 @@ All notable changes to this project are documented here. The format follows
 - `agent-friction scan`: friction map of a repository from Claude Code transcripts (including
   subagents and sessions started in a parent directory), the generic JSONL format, and git
   history. Output as terminal, Markdown, JSON, or a self-contained interactive HTML treemap.
-- 17 deterministic signals, from failed edits and commands to human corrections, declined
+- 18 deterministic signals, from failed edits and commands to human corrections, declined
   calls, retry loops, no-convergence, flaky tests and git rework, each documented with its
   rule, attribution and known false positives in `docs/signals.md`.
 - Scores from severity, recurrence across episodes of work, and consistency in the sessions

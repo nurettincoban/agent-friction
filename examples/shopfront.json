@@ -60,6 +60,7 @@
       ],
       "exposure_episodes": 4,
       "exposure_sessions": 4,
+      "family": null,
       "friction_rate": 1.0,
       "kind": "command",
       "path": "pytest",
@@ -136,6 +137,7 @@
       ],
       "exposure_episodes": 1,
       "exposure_sessions": 1,
+      "family": null,
       "friction_rate": 1.0,
       "kind": "command",
       "path": "rm",
@@ -193,6 +195,7 @@
       ],
       "exposure_episodes": 1,
       "exposure_sessions": 1,
+      "family": null,
       "friction_rate": 1.0,
       "kind": "command",
       "path": "curl",
@@ -240,6 +243,7 @@
       ],
       "exposure_episodes": 1,
       "exposure_sessions": 1,
+      "family": null,
       "friction_rate": 1.0,
       "kind": "command",
       "path": "python -m pytest",
@@ -547,8 +551,8 @@
       "agent_commits": 0,
       "confidence": "high",
       "episodes": 3,
-      "est_minutes_lost": 1.9,
-      "events": 6,
+      "est_minutes_lost": 1.6,
+      "events": 5,
       "evidence": [
         {
           "est_seconds_lost": 0,
@@ -571,6 +575,16 @@
           "timestamp": "2026-10-29T14:11:05Z"
         },
         {
+          "est_seconds_lost": 68.0,
+          "excerpt": null,
+          "line": 17,
+          "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
+          "signal": "edit-revert",
+          "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
+          "summary": "Edit on src/shopfront/checkout/service.py undid an earlier edit from the same session, after a check had run on it",
+          "timestamp": "2026-11-09T15:02:42Z"
+        },
+        {
           "est_seconds_lost": 0,
           "excerpt": null,
           "line": 21,
@@ -589,16 +603,6 @@
           "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
           "summary": "The user corrected the agent (confidence 1; matched \"still failing\", \"I told you\"; the user names src/shopfront/checkout/service.py, which it had changed); names src/shopfront/checkout/service.py",
           "timestamp": "2026-11-09T15:14:23Z"
-        },
-        {
-          "est_seconds_lost": 16.0,
-          "excerpt": null,
-          "line": 31,
-          "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
-          "signal": "edit-revert",
-          "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
-          "summary": "Edit on src/shopfront/checkout/service.py undid an earlier edit from the same session",
-          "timestamp": "2026-11-09T15:15:05Z"
         }
       ],
       "exposure_episodes": 3,
@@ -620,30 +624,21 @@
             "user-correction"
           ],
           "title": "Write down the rule the human keeps repeating"
-        },
-        {
-          "detail": "Edits here did not converge: 2 reverted edits in 1 session. Document the quickest command that validates this file (a single test, a type check) so agents can verify instead of iterating blind.",
-          "documented_in": [],
-          "id": "add-a-fast-check",
-          "signals": [
-            "edit-revert"
-          ],
-          "title": "Give agents a fast way to check changes to this file"
         }
       ],
-      "score": 43.4,
+      "score": 42.4,
       "score_detail": {
         "capped": false,
         "consistency": 0.85,
-        "intensity": 6.522,
-        "mean_session_points": 2.174,
+        "intensity": 6.217,
+        "mean_session_points": 2.072,
         "recurrence": 0.667,
         "sessions": [
           {
             "episode": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
-            "points": 3.392,
+            "points": 3.087,
             "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
-            "weighted_events": 9.5
+            "weighted_events": 7.5
           },
           {
             "episode": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
@@ -658,16 +653,16 @@
             "weighted_events": 0.75
           }
         ],
-        "severity": 0.765
+        "severity": 0.749
       },
       "sessions": 3,
       "signals": {
-        "edit-revert": 2,
+        "edit-revert": 1,
         "edit-thrash": 1,
         "probable-correction": 1,
         "user-correction": 2
       },
-      "why": "6 friction events in all 3 sessions that touched it (2 reverted edits, 2 user corrections, 1 edit thrash episode, 1 more signal type); high confidence because it recurs across sessions with several kinds of evidence."
+      "why": "5 friction events in all 3 sessions that touched it (2 user corrections, 1 reverted edit, 1 edit thrash episode, 1 more signal type); high confidence because it recurs across sessions with several kinds of evidence."
     },
     {
       "agent_commits": 0,
@@ -894,7 +889,7 @@
     },
     {
       "attribution": "The file being edited.",
-      "count": 2,
+      "count": 1,
       "description": "An edit exactly undid an earlier successful edit to the same file in the same session, or a write restored an earlier version of the file. Taking out lines that were only added and then run successfully (a debug print) is not counted.",
       "id": "edit-revert",
       "severity": 2.0,
@@ -983,6 +978,15 @@
       "why": "The agent looked for a name that is not there; repeated misses in one place point at vocabulary the codebase does not use."
     },
     {
+      "attribution": "No file or command: the event is unattributed, and counted per tool name.",
+      "count": 0,
+      "description": "A tool that is neither a file tool, a search nor the shell (an MCP tool, a web fetch, a sub-agent) returned an error, and that tool failed 2 or more times in the scanned sessions. A call the harness never started, a declined call and a denied call are not counted here.",
+      "id": "tool-failure",
+      "severity": 0.5,
+      "title": "Tool failure",
+      "why": "A tool the agent relies on keeps failing: a server that is not running, credentials that are missing, a site that refuses the request."
+    },
+    {
       "attribution": "The file being read.",
       "count": 1,
       "description": "The same range of a file was read 3 or more times in one session with no successful edit to it in between.",
@@ -1020,6 +1024,7 @@
     "name": "agent-friction",
     "version": "0.1.0"
   },
+  "tool_failures": [],
   "totals": {
     "commands_affected": 4,
     "corrections": 4,
@@ -1027,16 +1032,18 @@
     "dropped_minutes": 0.1,
     "dropped_red_runs": 1,
     "episodes": 6,
-    "est_minutes_lost": 9.0,
+    "est_minutes_lost": 8.8,
+    "events_outside_repo": 0,
     "files_affected": 5,
-    "friction_events": 34,
+    "friction_events": 33,
     "probable_corrections": 1,
     "sessions": 6,
     "sessions_outside_repo": 0,
-    "strong_events": 23,
+    "strong_events": 22,
     "third_party_events": 0,
     "tool_calls": 74,
     "tool_calls_in_repo": 74,
+    "tool_failures": 0,
     "unattributed_events": 0
   },
   "tree": {
@@ -1074,25 +1081,25 @@
                 "children": [
                   {
                     "children": [],
-                    "est_minutes_lost": 1.9,
-                    "events": 6,
+                    "est_minutes_lost": 1.6,
+                    "events": 5,
                     "exposure_sessions": 3,
                     "friction_rate": 1.0,
                     "kind": "file",
                     "name": "service.py",
                     "path": "src/shopfront/checkout/service.py",
-                    "score": 43.4,
+                    "score": 42.4,
                     "sessions": 3
                   }
                 ],
-                "est_minutes_lost": 1.9,
-                "events": 6,
+                "est_minutes_lost": 1.6,
+                "events": 5,
                 "exposure_sessions": 3,
                 "friction_rate": 1.0,
                 "kind": "dir",
                 "name": "checkout",
                 "path": "src/shopfront/checkout",
-                "score": 43.4,
+                "score": 42.4,
                 "sessions": 3
               },
               {
@@ -1121,25 +1128,25 @@
                 "sessions": 1
               }
             ],
-            "est_minutes_lost": 5.8,
-            "events": 23,
+            "est_minutes_lost": 5.6,
+            "events": 22,
             "exposure_sessions": 6,
             "friction_rate": 1.0,
             "kind": "dir",
             "name": "shopfront",
             "path": "src/shopfront",
-            "score": 73.6,
+            "score": 73.3,
             "sessions": 6
           }
         ],
-        "est_minutes_lost": 5.8,
-        "events": 23,
+        "est_minutes_lost": 5.6,
+        "events": 22,
         "exposure_sessions": 6,
         "friction_rate": 1.0,
         "kind": "dir",
         "name": "src",
         "path": "src",
-        "score": 73.6,
+        "score": 73.3,
         "sessions": 6
       },
       {
@@ -1193,14 +1200,14 @@
         "sessions": 1
       }
     ],
-    "est_minutes_lost": 5.8,
-    "events": 25,
+    "est_minutes_lost": 5.6,
+    "events": 24,
     "exposure_sessions": 6,
     "friction_rate": 1.0,
     "kind": "dir",
     "name": "shopfront",
     "path": "",
-    "score": 74.2,
+    "score": 73.9,
     "sessions": 6
   },
   "unattributed": [],

@@ -823,3 +823,89 @@ def test_a_classifier_refusal_is_not_answered_with_an_allow_rule() -> None:
     assert rec["title"] == "Tell agents this is refused, and what to do instead"
     (rec,) = recommend.recommend(model.COMMAND, "rm", denied("permission"))
     assert rec["title"] == "Allow it, or tell agents it is off limits"
+
+
+# ---- round 27 ------------------------------------------------------------------------------
+
+
+def _file_finding(signal: str, session: str, fid: int, **detail: str) -> Finding:
+    made = finding(signal, session, fid, **detail)
+    made.targets = [Target(model.FILE, "a.py")]
+    return made
+
+
+def test_a_revert_after_a_check_asks_for_the_constraint_not_for_a_check() -> None:
+    def reverts(*checked: bool) -> list[Finding]:
+        return [
+            _file_finding(signals.EDIT_REVERT, f"s{i}", i, **({"checked": "1"} if yes else {}))
+            for i, yes in enumerate(checked)
+        ]
+
+    blind = recommend.recommend(model.FILE, "a.py", reverts(False, False))
+    assert ids(blind) == ["add-a-fast-check"]
+    assert "2 reverted edits in 2 sessions" in str(blind[0]["detail"])
+    (tested,) = recommend.recommend(model.FILE, "a.py", reverts(True, True, True))
+    assert tested["id"] == "state-the-constraint" and tested["signals"] == ["edit-revert"]
+    assert tested["title"] == "Say what must not change in this file"
+    assert "backed it out 3 times in 3 sessions, 3 of them after a test" in str(tested["detail"])
+    assert "iterating blind" in str(tested["detail"]) and "fast" not in str(tested["title"])
+    # one of each: no check is missing, and something was tried and taken back twice
+    assert ids(recommend.recommend(model.FILE, "a.py", reverts(True, False))) == [
+        "state-the-constraint"
+    ]
+    # two blind ones next to a checked one: the blind ones still want a check
+    mixed = recommend.recommend(model.FILE, "a.py", reverts(False, False, True))
+    assert ids(mixed) == ["add-a-fast-check"]
+    assert "2 reverted edits" in str(mixed[0]["detail"])
+    # a single revert is advice for nobody
+    assert recommend.recommend(model.FILE, "a.py", reverts(True)) == []
+
+
+def test_edit_miss_advice_does_not_compare_with_a_rest_that_is_not_there() -> None:
+    def misses(**detail: str) -> list[Finding]:
+        return [_file_finding(signals.EDIT_MISS, f"s{i}", i, **detail) for i in range(3)]
+
+    (compared,) = recommend.recommend(model.FILE, "a.py", misses())
+    assert "clearly more often than in the rest of this repository" in str(compared["detail"])
+    (alone,) = recommend.recommend(model.FILE, "a.py", misses(no_comparison="1"))
+    text = str(alone["detail"])
+    assert alone["id"] == "make-edits-land" and "rest of this repository" not in text
+    assert "edited too little else in this repository to say how unusual that is" in text
+    assert "well above 5% of the sessions that touched the file" in text
+    assert "Nothing in the transcripts shows the file being rewritten" in text
+
+
+def test_a_target_that_does_not_exist_is_not_something_to_document() -> None:
+    def absent(count: int = 2, **detail: str) -> list[Finding]:
+        detail = detail or {"no_target": "lint", "no_target_in": "Makefile"}
+        detail = {"key": "make lint", "variant": "invocation", **detail}
+        return [finding(signals.COMMAND_FAILURE, f"s{i}", i, **detail) for i in range(count)]
+
+    (rec,) = recommend.recommend(
+        model.COMMAND, "make lint", absent(), None, quote, None, None, ["test", "check", "fmt"]
+    )
+    assert rec["id"] == "name-the-missing-target"
+    assert rec["title"] == "`make lint` does not exist: say what to run instead"
+    text = str(rec["detail"])
+    assert "because the Makefile has no target `lint`." in text
+    assert "What it does define: `test`, `check`, `fmt`." in text
+    assert "Document how to run" not in text and "say in AGENTS.md which command" in text
+    # the targets are not known: nothing is listed, and nothing is invented
+    (rec,) = recommend.recommend(model.COMMAND, "make lint", absent(), None, quote)
+    assert "What it does define" not in str(rec["detail"])
+    # package scripts, keyed by directory
+    scripts = absent(no_target="lint", no_target_in="package.json")
+    (rec,) = recommend.recommend(model.COMMAND, "npm run lint (web/)", scripts, None, quote)
+    assert rec["title"] == "`npm run lint` in `web/` does not exist: say what to run instead"
+    assert "the package.json has no script `lint`" in str(rec["detail"])
+    # without excerpts no name from the project is spelled out
+    (rec,) = recommend.recommend(
+        model.COMMAND, "make <target:abc123>", absent(), None, None, None, None, ["test"]
+    )
+    assert "lint" not in str(rec["detail"]) and "`test`" not in str(rec["detail"])
+    assert "the Makefile has no target." in str(rec["detail"])
+    # any other invocation error is still a matter of how to run it
+    other = absent(excerpt="make: cc: command not found")
+    assert ids(recommend.recommend(model.COMMAND, "make lint", other, None, quote)) == [
+        "document-the-command"
+    ]

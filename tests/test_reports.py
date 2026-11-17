@@ -254,3 +254,23 @@ def test_repository_wide_advice_is_shown_once() -> None:
     assert "R.recommendations" in render_html(r)
     r["hotspots"], r["commands"] = [], []
     assert "Edit misses run at 8%" in render_terminal(r)
+
+
+def test_not_counted_note_reports_calls_outside_the_repository() -> None:
+    from agent_friction.report._common import dropped_note
+
+    assert dropped_note({"totals": {}}) is None
+    only = dropped_note({"totals": {"events_outside_repo": 1}})
+    assert only == (
+        "Not counted: 1 declined, denied, or failed call that acted outside this repository."
+    )
+    both = dropped_note(
+        {"totals": {"dropped_red_runs": 2, "dropped_minutes": 1.0, "events_outside_repo": 3}}
+    )
+    assert both is not None and both.startswith("Not counted: 2 failed runs")
+    assert "Also not counted: 3 declined, denied, or failed calls" in both
+    result = sample_result()
+    result["totals"]["events_outside_repo"] = 4
+    for text in (render_terminal(result), render_markdown(result)):
+        assert "4 declined, denied, or failed calls that acted outside" in text
+    assert "events_outside_repo" in render_html(result)

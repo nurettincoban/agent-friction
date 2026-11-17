@@ -15,7 +15,8 @@ import json
 import os
 import posixpath
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -305,6 +306,10 @@ SINGLE_SESSION_ADVICE_MIN_SCORE = 20.0
 HUMAN_STATED_RULES = frozenset({"write-down-the-rule", "state-the-boundary"})
 #: Evidence items listed for events that belong to no hotspot (``unattributed``).
 MAX_UNATTRIBUTED_EVIDENCE = 20
+#: Existing make targets or package scripts listed next to "this target does not exist".
+MAX_KNOWN_TARGETS = 12
+MAX_TARGETS_FILE_BYTES = 512_000
+_MAKE_TARGET_RE = re.compile(r"(?m)^([A-Za-z0-9_][\w-]*)[ \t]*:(?![=:])")
 
 #: Sessions in which the same command must stay red for its failures to count in full,
 #: and how often it must have failed in each. One red run when a session ends is routine.
@@ -772,6 +777,7 @@ class _Analysis:
         self.unit_session: dict[str, str] = {}
         self.git_used = False
         self.dropped: list[tuple[int, float, str]] = []
+        self.events_outside_repo = 0
         self.unreadable: list[tuple[Path, str]] = []
         self.third_party_events = 0
         self._ignored: set[str] | None = None
@@ -1084,7 +1090,9 @@ class _Analysis:
                     findings=[f for f in full.findings if f.line in inside],
                     skipped_events=full.skipped_events,
                     dropped=[d for d in full.dropped if d[0] in inside],
+                    outside=[line for line in full.outside if line in inside],
                 )
+            self.events_outside_repo += len(detection.outside)
             findings.extend(detection.findings)
             dropped.extend(detection.dropped)
             source_key = str(stream.source)
@@ -1164,6 +1172,7 @@ class _Analysis:
         for finding in findings:
             finding.episode = self.unit(finding.session_id, finding.ts)
         findings = self._drop_third_party(findings, exposure)
+        findings = _recurring_tool_failures(findings)
         if not options.include_excerpts:
             self._hide_guessed_paths(findings, exposure)
         _attribute_interrupted_commands(findings)
@@ -1214,6 +1223,9 @@ class _Analysis:
             base = scoring.baseline(counts)
             above = set(base.above)
             for key, found in mine.items():
+                if key in above and key in base.sparse:
+                    for finding in found:
+                        finding.detail[scoring.NO_COMPARISON] = "1"
                 if key in above or self.facts(key).generated:
                     continue
                 for finding in found:
@@ -1362,6 +1374,7 @@ class _Analysis:
         }
         for (kind, key), items in groups.items():
             by_kind[kind].append(self._entry(kind, key, items))
+        self._families(by_kind[model.COMMAND], groups)
         for entries in by_kind.values():
             entries.sort(key=lambda e: (-e["score"], -e["events"], e["path"]))
         limit = None if options.max_hotspots is None else max(options.max_hotspots, 0)
@@ -1435,6 +1448,12 @@ class _Analysis:
                 "directories_affected": len(by_kind[model.DIR]),
                 "unattributed_events": sum(1 for f in findings if not f.targets),
                 "third_party_events": self.third_party_events,
+                # Failures of tools that are neither file tools nor the shell (MCP tools,
+                # web fetches, sub-agents), listed per tool under ``tool_failures``.
+                "tool_failures": counts.get(signals.TOOL_FAILURE, 0),
+                # Calls that were refused or failed while acting outside the repository
+                # (`cd ../other && ...`, a file under /tmp): seen, and not counted.
+                "events_outside_repo": self.events_outside_repo,
             },
             "signals": [
                 {
@@ -1466,6 +1485,7 @@ class _Analysis:
             # Advice about the repository as a whole: a mechanical signal spread evenly
             # over many files is one fact, not a pattern in each of them.
             "recommendations": self.repo_advice,
+            "tool_failures": _tool_failures(findings),
             "tree": self._tree(groups),
             # Events that count in the totals but belong to no file, command or
             # directory (an interrupt with no tool call to pin it on, a declined tool
@@ -1539,6 +1559,55 @@ class _Analysis:
             },
         }
 
+    def _families(
+        self, entries: Sequence[dict[str, Any]], groups: Mapping[tuple[str, str], Sequence[Item]]
+    ) -> None:
+        """Tie together one command that is listed once per directory it was run in.
+
+        ``pytest``, ``pytest (src/)`` and ``pytest (tests/)`` stay three rows (where a
+        command runs is part of how it is run), and each row says what the three add
+        up to: distinct events and distinct sessions.
+        """
+        members: dict[str, list[dict[str, Any]]] = {}
+        for entry in entries:
+            located = _LOCATED_KEY_RE.match(entry["path"])
+            members.setdefault(located.group(1) if located else entry["path"], []).append(entry)
+        for base, same in members.items():
+            found = {f.fid: f for entry in same for f, _ in groups[(model.COMMAND, entry["path"])]}
+            family = {
+                "command": base,
+                "members": sorted(entry["path"] for entry in same),
+                "events": len(found),
+                "sessions": len(self.sessions_of(f.unit for f in found.values())),
+            }
+            for entry in same:
+                entry["family"] = family if len(same) > 1 else None
+
+    def _known_targets(self, key: str, found: Sequence[Finding]) -> tuple[str, ...]:
+        """The make targets or package scripts that exist where a missing one was asked for."""
+        holder = next((f.detail["no_target_in"] for f in found if "no_target_in" in f.detail), "")
+        if not holder:
+            return ()
+        located = re.search(r" \((.+)/\)$", key)
+        base = self.repo / located.group(1) if located else self.repo
+        names: list[str] = []
+        try:
+            if holder == signals.TARGETS_IN_MAKEFILE:
+                for name in ("GNUmakefile", "makefile", "Makefile"):
+                    path = base / name
+                    if path.is_file() and path.stat().st_size <= MAX_TARGETS_FILE_BYTES:
+                        text = path.read_text(encoding="utf-8", errors="replace")
+                        names = _MAKE_TARGET_RE.findall(text)
+                        break
+            else:
+                path = base / "package.json"
+                if path.is_file() and path.stat().st_size <= MAX_TARGETS_FILE_BYTES:
+                    scripts = json.loads(path.read_text(encoding="utf-8")).get("scripts")
+                    names = [str(name) for name in scripts] if isinstance(scripts, dict) else []
+        except (OSError, ValueError, AttributeError):
+            return ()
+        return tuple(dict.fromkeys(names))[:MAX_KNOWN_TARGETS]
+
     def _decorate(self, entry: dict[str, Any], items: Sequence[Item]) -> None:
         """Add recommendations, evidence and file facts to a hotspot that will be shown."""
         options = self.options
@@ -1548,7 +1617,14 @@ class _Analysis:
         quote = self.quote if options.include_excerpts else None
         shares = {f.fid: share for f, share in items}
         entry["recommendations"] = recommend.recommend(
-            kind, key, found, facts, quote, shares, self.guidance
+            kind,
+            key,
+            found,
+            facts,
+            quote,
+            shares,
+            self.guidance,
+            self._known_targets(key, found) if kind == model.COMMAND and quote else (),
         )
         entry["evidence"] = [self._evidence(f) for f in _pick_evidence(found, options.max_evidence)]
         transcript_sessions = entry["episodes"] - entry["agent_commits"]
@@ -1659,6 +1735,30 @@ class _Analysis:
 def _finding_order(finding: Finding) -> tuple[float, str, int, str]:
     stamp = finding.ts.timestamp() if finding.ts is not None else float("-inf")
     return (stamp, finding.source, finding.line, finding.signal)
+
+
+def _recurring_tool_failures(findings: list[Finding]) -> list[Finding]:
+    """Keep the failures of a tool only if it failed more than once in the scan."""
+    seen = Counter(f.detail.get("tool", "") for f in findings if f.signal == signals.TOOL_FAILURE)
+    return [
+        f
+        for f in findings
+        if f.signal != signals.TOOL_FAILURE
+        or seen[f.detail.get("tool", "")] >= signals.TOOL_FAILURE_MIN_EVENTS
+    ]
+
+
+def _tool_failures(findings: Sequence[Finding]) -> list[dict[str, object]]:
+    """Per tool: how often it returned an error, and in how many sessions."""
+    by_tool: dict[str, list[Finding]] = {}
+    for finding in findings:
+        if finding.signal == signals.TOOL_FAILURE:
+            by_tool.setdefault(finding.detail.get("tool", ""), []).append(finding)
+    rows = [
+        {"tool": tool, "events": len(found), "sessions": len({f.session_id for f in found})}
+        for tool, found in by_tool.items()
+    ]
+    return sorted(rows, key=lambda row: (-int(str(row["events"])), str(row["tool"])))
 
 
 def _pick_evidence(findings: Sequence[Finding], limit: int) -> list[Finding]:

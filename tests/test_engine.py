@@ -144,7 +144,9 @@ def test_story_deprecated_api_corrections_land_on_the_service(result: dict[str, 
     assert service["sessions"] == 3 and service["confidence"] == "high"
     assert service["signals"] == {
         "user-correction": 2,
-        "edit-revert": 2,
+        # the second revert answers "you used legacy_charge again": the correction is the
+        # event, and taking the change back is not counted next to it
+        "edit-revert": 1,
         "edit-thrash": 1,
         "probable-correction": 1,
     }
@@ -420,7 +422,7 @@ def test_window_filters_events() -> None:
     early = story(until=datetime(2026, 10, 31))  # naive datetimes are read as UTC
     assert early["totals"]["sessions"] == 2 and early["window"]["until"] == "2026-10-31T00:00:00Z"
     total = story()["totals"]["friction_events"]
-    assert late["totals"]["friction_events"] + early["totals"]["friction_events"] == total == 34
+    assert late["totals"]["friction_events"] + early["totals"]["friction_events"] == total == 33
     nothing = story(since=datetime(2027, 1, 1))
     assert nothing["totals"]["sessions"] == 0 and nothing["hotspots"] == []
     assert nothing["window"]["first_event"] is None and nothing["tree"]["children"] == []
@@ -1768,7 +1770,7 @@ def test_one_session_and_a_low_score_is_a_lead_not_advice(tmp_path: Path) -> Non
     (row,) = scan(tmp_path, invocation(1))["commands"]
     assert row["score"] < 20 and row["sessions"] == 1 and row["recommendations"] == []
     (row,) = scan(tmp_path, invocation(2))["commands"]
-    assert [r["id"] for r in row["recommendations"]] == ["document-the-command"]
+    assert [r["id"] for r in row["recommendations"]] == ["name-the-missing-target"]
     # what a human said in so many words is still passed on from a single session
     s = Session("one").user("go")
     s.reject("Bash", {"command": "rm -rf migrations"}, "never delete migrations")
@@ -2720,6 +2722,10 @@ def test_a_file_clearly_above_the_noise_still_gets_its_advice(tmp_path: Path) ->
     assert top["path"] == "src/hot.py" and top["confidence"] == "medium"
     assert [r["id"] for r in top["recommendations"]] == ["make-edits-land"]
     assert top["recommendations"][0]["title"] == "Edits to this file keep missing their target"
+    assert (
+        "clearly more often than in the rest of this repository"
+        in (top["recommendations"][0]["detail"])
+    )
     assert all(row["recommendations"] == [] for row in out["hotspots"][1:])
     (item,) = out["recommendations"]
     assert item["above"] == ["src/hot.py"]
@@ -2799,3 +2805,151 @@ def test_a_command_through_a_launcher_is_the_working_command(tmp_path: Path) -> 
     assert advice["id"] == "use-the-working-command"
     assert advice["title"] == "Tell agents to use `uv run python scripts/gen.py`"
     assert advice["replacement"] == "uv run python scripts/gen.py"
+
+
+# ---- round 27 ------------------------------------------------------------------------------
+
+
+def test_story_the_undo_that_answers_a_correction_is_not_counted_again(
+    result: dict[str, Any],
+) -> None:
+    service = entry(result["hotspots"], SERVICE)
+    corrected = next(
+        e
+        for e in service["evidence"]
+        if e["signal"] == "user-correction" and "legacy_charge again" in (e["excerpt"] or "")
+    )
+    reverts = [e for e in service["evidence"] if e["signal"] == "edit-revert"]
+    # the one revert left is the agent's own, made before anybody said anything
+    assert len(reverts) == 1 and reverts[0]["line"] < corrected["line"]
+    assert reverts[0]["summary"].endswith("after a check had run on it")
+    assert "add-a-fast-check" not in [r["id"] for r in service["recommendations"]]
+
+
+def test_with_nothing_else_edited_the_advice_does_not_speak_of_the_rest(tmp_path: Path) -> None:
+    sessions = []
+    for i in range(3):
+        s = Session(f"s{i}").user("go")
+        s.edit("/repo/src/only.py", error=builders.EDIT_NOT_FOUND)
+        s.edit("/repo/src/only.py", error=builders.EDIT_NOT_FOUND)
+        sessions.append(s)
+    (row,) = scan(tmp_path, sessions)["hotspots"]
+    (rec,) = row["recommendations"]
+    assert rec["id"] == "make-edits-land" and "rest of this repository" not in rec["detail"]
+    assert "edited too little else in this repository" in rec["detail"]
+
+
+def _failing_tools(count: int, tool: str = "mcp__postgres__query") -> list[Session]:
+    sessions = []
+    for i in range(count):
+        s = Session(f"s{i}").user("look it up")
+        s.tool(tool, {"sql": "select 1"}, "connection to db.internal refused", is_error=True)
+        sessions.append(s)
+    return sessions
+
+
+def test_recurring_failures_of_other_tools_are_weak_unattributed_events(tmp_path: Path) -> None:
+    sessions = _failing_tools(3)
+    sessions[0].tool("WebFetch", {"url": "https://example.com"}, "403 Forbidden", is_error=True)
+    sessions[1].tool("WebFetch", {"url": "https://example.com"}, "403 Forbidden", is_error=True)
+    sessions[1].tool("Task", {"prompt": "x"}, "API Error: overloaded", is_error=True)  # once
+    out = scan(tmp_path, sessions)
+    totals = out["totals"]
+    assert totals["tool_failures"] == 5 == totals["unattributed_events"]
+    assert totals["friction_events"] == 5 and totals["strong_events"] == 0
+    assert totals["est_minutes_lost"] == 0
+    assert out["tool_failures"] == [
+        {"tool": "mcp__postgres__query", "events": 3, "sessions": 3},
+        {"tool": "WebFetch", "events": 2, "sessions": 2},
+    ]
+    assert out["hotspots"] == out["commands"] == out["directories"] == []
+    assert [e["signal"] for e in out["unattributed"]] == ["tool-failure"] * 5
+    first = out["unattributed"][0]
+    assert first["summary"] == "mcp__postgres__query returned an error"
+    assert first["excerpt"] == "connection to [REDACTED:internal-host] refused"
+    counted = {s["id"]: s["count"] for s in out["signals"]}
+    assert counted["tool-failure"] == 5
+    # a tool that failed once in the whole scan is an accident
+    out = scan(tmp_path / "once", _failing_tools(1))
+    assert out["totals"]["tool_failures"] == 0 == out["totals"]["friction_events"]
+    assert out["tool_failures"] == [] and out["unattributed"] == []
+
+
+def test_without_excerpts_a_failing_tool_is_named_by_a_placeholder(tmp_path: Path) -> None:
+    out = scan(tmp_path, _failing_tools(2), include_excerpts=False)
+    hidden = public_tool("mcp__postgres__query")
+    assert "<tool:" in hidden and out["tool_failures"][0]["tool"] == hidden
+    assert "postgres" not in json.dumps(out) and "db.internal" not in json.dumps(out)
+    assert out["unattributed"][0]["summary"] == f"{hidden} returned an error"
+    assert out["unattributed"][0]["excerpt"] is None
+    # the harness's own tools keep their names
+    out = scan(tmp_path / "own", _failing_tools(2, "WebFetch"), include_excerpts=False)
+    assert out["tool_failures"] == [{"tool": "WebFetch", "events": 2, "sessions": 2}]
+
+
+def test_events_outside_the_repository_are_counted_in_the_totals(tmp_path: Path) -> None:
+    denied = "Permission to use Bash with command rm has been denied."
+    s = Session("s0").user("go")
+    for _ in range(3):
+        s.tool("Bash", {"command": "cd /srv/other && rm -rf build"}, denied, is_error=True)
+    s.tool("Bash", {"command": "rm -rf build"}, denied, is_error=True)
+    s.bash("cd /srv/other && make test", "boom", exit_code=2)
+    out = scan(tmp_path, [s])
+    assert out["totals"]["events_outside_repo"] == 4
+    assert out["totals"]["friction_events"] == 1
+    assert [c["path"] for c in out["commands"]] == ["rm"]
+    quiet = scan(tmp_path / "q", [Session("s1").user("go").bash("make test", "ok")])
+    assert quiet["totals"]["events_outside_repo"] == 0
+
+
+def test_one_command_run_from_several_directories_is_tied_together(tmp_path: Path) -> None:
+    missing = "ModuleNotFoundError: No module named 'app'"
+    sessions = []
+    for i, where in enumerate(["/repo", "/repo/src", "/repo/tests", "/repo/src"]):
+        s = Session(f"s{i}", cwd=where).user("go")
+        s.bash("pytest", missing, exit_code=2)
+        s.bash("ruff check .", "ruff: command not found", exit_code=127)
+        sessions.append(s)
+    out = scan(tmp_path, sessions)
+    rows = {c["path"]: c for c in out["commands"]}
+    family = {
+        "command": "pytest",
+        "members": ["pytest", "pytest (src/)", "pytest (tests/)"],
+        "events": 4,
+        "sessions": 4,
+    }
+    for path in family["members"]:  # type: ignore[union-attr]
+        assert rows[path]["family"] == family
+    assert rows["pytest (src/)"]["events"] == 2  # each row keeps its own numbers
+    # the family is not cut by max_hotspots, and a command run in one place has none
+    cut = scan(tmp_path / "cut", sessions, max_hotspots=1)
+    assert len(cut["commands"]) == 1 and cut["commands"][0]["family"]["events"] in (4,)
+    alone = scan(tmp_path / "alone", sessions[:1])
+    assert [c["family"] for c in alone["commands"]] == [None] * len(alone["commands"])
+    assert "family" not in (out["hotspots"] or [{}])[0]
+
+
+def test_a_missing_make_target_is_answered_with_the_targets_that_exist(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "Makefile").write_text(
+        ".PHONY: test check\nPY := python\ntest:\n\tpytest\ncheck: test\n\truff check .\n"
+        "fmt:\n\truff format .\n"
+    )
+    sessions = []
+    for i in range(2):
+        s = Session(f"s{i}", cwd=str(repo)).user("go")
+        s.bash("make lint", "make: *** No rule to make target 'lint'.  Stop.", exit_code=2)
+        sessions.append(s)
+    (row,) = scan(tmp_path, sessions, repo)["commands"]
+    (rec,) = row["recommendations"]
+    assert rec["id"] == "name-the-missing-target"
+    assert rec["title"] == "`make lint` does not exist: say what to run instead"
+    assert "What it does define: `test`, `check`, `fmt`." in rec["detail"]
+    assert "Document how to run" not in rec["title"]
+    # without excerpts neither the missing name nor the Makefile's targets are shown
+    (row,) = scan(tmp_path / "bare", sessions, repo, include_excerpts=False)["commands"]
+    (rec,) = row["recommendations"]
+    assert rec["id"] == "name-the-missing-target"
+    assert "the Makefile has no target." in rec["detail"]
+    assert "What it does define" not in rec["detail"] and "fmt" not in json.dumps(row)

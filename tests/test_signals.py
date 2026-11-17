@@ -21,7 +21,7 @@ def keys(finding: object) -> list[tuple[str, str]]:
 
 def test_catalog_is_consistent() -> None:
     ids = [s.id for s in signals.CATALOG]
-    assert len(ids) == len(set(ids)) == 17
+    assert len(ids) == len(set(ids)) == 18
     for definition in signals.CATALOG:
         assert definition.title and definition.description and definition.why
         assert definition.attribution and definition.severity > 0
@@ -4385,3 +4385,214 @@ def test_who_refused_is_said_when_the_transcript_says_it(
     (found,) = detect(s, tmp_path)
     assert found.signal == signals.PERMISSION_DENIED and found.detail["variant"] == variant
     assert found.summary == f"Bash on `rm` was denied by {by}; it did not run"
+
+
+# ---- round 27: reverts after a correction, checked reverts, other tools ---------------------
+
+
+def test_taking_a_change_back_after_a_correction_is_not_a_second_event(tmp_path: Path) -> None:
+    def session(said: str, back: str = A) -> Session:
+        s = Session().user("charge the card").edit(A, "PaymentClient", "legacy_charge")
+        s.edit(B, "x", "y")
+        s.user(said)
+        return s.edit(back, *(("legacy_charge", "PaymentClient") if back == A else ("y", "x")))
+
+    # no "revert", "undo" or "restore" anywhere: the correction names the file
+    said = "you used legacy_charge again in src/a.py. I told you: PaymentClient only"
+    (found,) = detect(session(said), tmp_path)
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", "src/a.py")]
+    # ... while undoing another file in that turn is still the agent going in a circle
+    kinds = [f.signal for f in detect(session(said, back=B), tmp_path)]
+    assert kinds == [signals.USER_CORRECTION, signals.EDIT_REVERT]
+    # a probable correction about the file does the same
+    probable = detect(session("actually, not allowed, use the client instead"), tmp_path)
+    assert [f.signal for f in probable] == [signals.PROBABLE_CORRECTION]
+    assert ("file", "src/a.py") in keys(probable[0])
+    # and a prompt that corrects nothing leaves the revert standing
+    plain = detect(session("now add a docstring"), tmp_path)
+    assert [f.signal for f in plain] == [signals.EDIT_REVERT]
+
+
+def test_a_revert_says_whether_a_check_ran_in_between(tmp_path: Path) -> None:
+    def session(*between: tuple[str, str, int]) -> Session:
+        s = Session().user("speed it up").edit(A, "a", "b")
+        for command, output, code in between:
+            s.bash(command, output, exit_code=code)
+        return s.edit(A, "b", "a")
+
+    (blind,) = detect(session(), tmp_path)
+    assert blind.signal == signals.EDIT_REVERT and "checked" not in blind.detail
+    assert blind.summary == "Edit on src/a.py undid an earlier edit from the same session"
+    red = ("make test", "FAILED tests/test_a.py::test_a\n1 failed", 2)
+    checked = by_signal(detect(session(red), tmp_path), signals.EDIT_REVERT)[0]
+    assert checked.detail["checked"] == "1"
+    assert checked.summary.endswith("after a check had run on it")
+    green = by_signal(detect(session(("pytest -q", "3 passed", 0)), tmp_path), signals.EDIT_REVERT)
+    assert green[0].detail["checked"] == "1"
+    # a command that checks nothing is not a check
+    (other,) = detect(session(("git status", "clean", 0), ("echo hi", "hi", 0)), tmp_path)
+    assert "checked" not in other.detail
+    # a write that restores an earlier version, with a check in between
+    s = Session().user("go").write(A, "one\n").write(A, "two\n")
+    s.bash("ruff check .", "All checks passed!").write(A, "one\n")
+    assert by_signal(detect(s, tmp_path), signals.EDIT_REVERT)[0].detail["checked"] == "1"
+    s = Session().user("go").write(A, "one\n").write(A, "two\n").write(A, "one\n")
+    assert "checked" not in by_signal(detect(s, tmp_path), signals.EDIT_REVERT)[0].detail
+
+
+def test_a_failing_tool_that_is_no_file_tool_or_shell_is_a_tool_failure(tmp_path: Path) -> None:
+    s = Session().user("look it up")
+    s.tool("mcp__postgres__query", {"sql": "select 1"}, "connection refused", is_error=True)
+    s.tool("WebFetch", {"url": "https://example.com"}, "Request failed: 403", is_error=True)
+    s.tool("mcp__postgres__query", {"sql": "select 2"}, "ok")
+    found = detect(s, tmp_path)
+    assert [f.signal for f in found] == [signals.TOOL_FAILURE, signals.TOOL_FAILURE]
+    first, second = found
+    assert first.targets == [] and first.detail == {"tool": "mcp__postgres__query"}
+    assert first.summary == "mcp__postgres__query returned an error"
+    assert first.excerpt == "connection refused" and first.interval is None
+    assert second.detail["tool"] == "WebFetch"
+    assert scoring.is_weak(first)
+    # never started, declined, a "no" to a question: none of these is the tool failing
+    s = Session().user("go")
+    s.tool("mcp__x__y", {}, "InputValidationError: bad arguments", is_error=True)
+    s.reject("mcp__x__y", {"q": "1"}, "not now")
+    s.tool("AskUserQuestion", {"questions": []}, "The user did not answer", is_error=True)
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.TOOL_REJECTED]
+    # and the file tools, search and the shell keep their own signals
+    s = Session().user("go").bash("make build", "boom", exit_code=2)
+    assert signals.TOOL_FAILURE not in [f.signal for f in detect(s, tmp_path)]
+
+
+def _stream(session: Session, tmp_path: Path) -> signals.Detection:
+    from agent_friction.adapters import parse_transcript
+    from agent_friction.attribution import PathResolver
+
+    ctx = signals.DetectContext(PathResolver(Path("/repo")), lambda rel: True, lambda rel: True)
+    (stream,) = parse_transcript(session.save(tmp_path)).streams
+    return signals.detect_stream(stream, ctx)
+
+
+def test_calls_that_went_wrong_outside_the_repository_are_counted_not_reported(
+    tmp_path: Path,
+) -> None:
+    s = Session().user("go")
+    s.tool("Bash", {"command": "cd /srv/other && rm -rf build"}, DENIED, is_error=True)
+    s.tool("Bash", {"command": "rm -rf /var/tmp/cache"}, DENIED, is_error=True)
+    s.bash("cd /srv/other && make test", "boom", exit_code=2)
+    s.reject("Bash", {"command": "cd /srv/other && git push"})
+    s.edit("/srv/other/a.py", error=builders.EDIT_NOT_FOUND)
+    found = _stream(s, tmp_path)
+    assert found.findings == [] and len(found.outside) == 5
+    # inside the repository the same calls are events, and nothing is counted as outside
+    s = Session().user("go")
+    s.tool("Bash", {"command": "rm -rf build"}, DENIED, is_error=True)
+    s.bash("make test", "boom", exit_code=2)
+    s.edit(A, error=builders.EDIT_NOT_FOUND)
+    found = _stream(s, tmp_path)
+    assert len(found.findings) == 3 and found.outside == []
+    # what went well outside, or only looked around there, is not counted either
+    s = Session().user("go").bash("cd /srv/other && make test", "ok")
+    s.bash("ls /srv/other/missing", "ls: cannot access", exit_code=2)
+    assert _stream(s, tmp_path).outside == []
+
+
+DENIED = "Permission to use Bash with command rm has been denied."
+
+
+def test_a_time_box_that_ran_out_in_silence_is_not_a_failure(tmp_path: Path) -> None:
+    quiet = Session().user("go").bash("timeout 5 nc -l 8080", "", exit_code=124)
+    assert detect(quiet, tmp_path) == []
+    # with something to say, without the wrapper, or with another status, it is judged
+    said = Session().user("go").bash("timeout 5 make serve", "Traceback: boom", exit_code=124)
+    assert [f.signal for f in detect(said, tmp_path)] == [signals.COMMAND_FAILURE]
+    bare = Session().user("go").bash("make serve", "", exit_code=124)
+    assert [f.signal for f in detect(bare, tmp_path)] == [signals.COMMAND_FAILURE]
+    other = Session().user("go").bash("timeout 5 make serve", "", exit_code=2)
+    assert [f.signal for f in detect(other, tmp_path)] == [signals.COMMAND_FAILURE]
+
+
+def _generic(tmp_path: Path, gap: int, message: bool = False) -> Finding:
+    base = {"session": "g1", "cwd": "/repo"}
+    events: list[dict[str, object]] = [
+        {**base, "ts": 1_800_000_000, "kind": "user_message", "text": "build it"},
+        {
+            **base,
+            "ts": 1_800_000_010,
+            "kind": "tool_call",
+            "id": 1,
+            "op": "shell",
+            "command": "make build",
+        },
+        {
+            **base,
+            "ts": 1_800_000_020,
+            "kind": "tool_result",
+            "id": 1,
+            "ok": False,
+            "exit_code": 127,
+            "output": "make: cc: command not found",
+        },
+    ]
+    if message:
+        events.append(
+            {**base, "ts": 1_800_000_025, "kind": "assistant_message", "text": "No compiler."}
+        )
+    events += [
+        {
+            **base,
+            "ts": 1_800_000_020 + gap,
+            "kind": "tool_call",
+            "id": 2,
+            "op": "read",
+            "path": "/repo/Makefile",
+        },
+        {**base, "ts": 1_800_000_022 + gap, "kind": "tool_result", "id": 2, "ok": True},
+    ]
+    path = tmp_path / f"g{gap}{message}.jsonl"
+    path.write_text("".join(json.dumps(e) + "\n" for e in events))
+    (found,) = detect(path, tmp_path)
+    return found
+
+
+def test_an_idle_gap_after_a_failure_is_not_claimed(tmp_path: Path) -> None:
+    def seconds(finding: Finding) -> float:
+        assert finding.interval is not None
+        return finding.interval[1] - finding.interval[0]
+
+    # tool calls only: the next call three hours later is not the end of a round trip
+    assert seconds(_generic(tmp_path, 3 * 3600)) == 10
+    # ... while one that follows shortly is, and so is a long one within the limit
+    assert seconds(_generic(tmp_path, 30)) == 40
+    assert seconds(_generic(tmp_path, int(signals.IDLE_GAP_SECONDS) - 10)) == 300
+    # an agent message right after the failure ends the round trip, as ever
+    assert seconds(_generic(tmp_path, 3 * 3600, message=True)) == 15
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("make: *** No rule to make target 'lint'.  Stop.", ("Makefile", "lint")),
+        ("gmake[1]: *** No rule to make target `fmt'.  Stop.", ("Makefile", "fmt")),
+        ('npm error Missing script: "lint"', ("package.json", "lint")),
+        ("npm ERR! Missing script: test:unit", ("package.json", "test:unit")),
+        (" ERR_PNPM_NO_SCRIPT  Missing script: typecheck", ("package.json", "typecheck")),
+        ('error Command "lint" not found.', ("package.json", "lint")),
+        # a prerequisite that is missing is a broken target, not a missing one
+        ("make: *** No rule to make target 'gen.c', needed by 'all'.  Stop.", None),
+        ("the docs say: make: *** No rule to make target 'lint'.  Stop.", None),
+        ("ruff: command not found", None),
+    ],
+)
+def test_missing_target(output: str, expected: tuple[str, str] | None) -> None:
+    assert signals.missing_target(output) == expected
+
+
+def test_a_missing_target_is_noted_on_the_failure(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.bash("make lint", "make: *** No rule to make target 'lint'.  Stop.", exit_code=2)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["variant"] == "invocation"
+    assert (found.detail["no_target_in"], found.detail["no_target"]) == ("Makefile", "lint")
+    s = Session().user("go").bash("make lint", "ruff: command not found", exit_code=127)
+    assert "no_target" not in detect(s, tmp_path)[0].detail

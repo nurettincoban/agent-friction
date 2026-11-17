@@ -1,6 +1,6 @@
 # Agent friction map: shopfront
 
-6 agent sessions analysed · 34 friction events (11 weak) · ~9m lost · 4 human corrections · 5 files affected
+6 agent sessions analysed · 33 friction events (11 weak) · ~9m lost · 4 human corrections · 5 files affected
 
 _Not counted: 1 failed run of normal work (the agent fixed the failure, or was only waiting and polled until it passed; ~6s of run time)._
 
@@ -17,7 +17,7 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 | # | File | Score | Sessions | Events | Est. time lost | Top signals | Confidence |
 |---:|---|---:|---:|---:|---:|---|---|
 | 1 | `src/shopfront/api/schema_gen.py` | 56.8 | 4 | 12 | 4m | `edit-miss`×6, `user-correction`×2, `probable-correction`×1 | high |
-| 2 | `src/shopfront/checkout/service.py` | 43.4 | 3 | 6 | 2m | `edit-revert`×2, `user-correction`×2, `edit-thrash`×1 | high |
+| 2 | `src/shopfront/checkout/service.py` | 42.4 | 3 | 5 | 2m | `user-correction`×2, `edit-revert`×1, `edit-thrash`×1 | high |
 | 3 | `src/shopfront/payments/refunds.py` | 11.4 | 1 | 1 | 18s | `path-miss`×1 | low |
 | 4 | `api/openapi.yaml` | 9.7 | 1 | 1 | n/a | `search-miss`×1 | low |
 | 5 | `tests/test_refunds.py` | 8.5 | 1 | 1 | n/a | `command-failure`×1 | low |
@@ -66,24 +66,23 @@ Only friction in the directory itself (searches that found nothing there); `agen
 </details>
 
 <details>
-<summary><code>src/shopfront/checkout/service.py</code> · score 43.4 · 3 sessions</summary>
+<summary><code>src/shopfront/checkout/service.py</code> · score 42.4 · 3 sessions</summary>
 
-6 friction events in all 3 sessions that touched it (2 reverted edits, 2 user corrections, 1 edit thrash episode, 1 more signal type); high confidence because it recurs across sessions with several kinds of evidence.
+5 friction events in all 3 sessions that touched it (2 user corrections, 1 reverted edit, 1 edit thrash episode, 1 more signal type); high confidence because it recurs across sessions with several kinds of evidence.
 
 **Recommendations**
 
 - **Write down the rule the human keeps repeating** A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint."
-- **Give agents a fast way to check changes to this file** Edits here did not converge: 2 reverted edits in 1 session. Document the quickest command that validates this file (a single test, a type check) so agents can verify instead of iterating blind.
 
 **Evidence**
 
 - `2026-10-26 10:08 UTC` session `e65615b3` · Probable correction: Wording that could be a correction (confidence 0.4; matched "actually", "instead", "not allowed"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py
 - `2026-10-29 14:11 UTC` session `9f6ff626` · User correction: The user corrected the agent (confidence 1; matched "no, …", "I told you"; the agent then changed src/shopfront/checkout/service.py again); attributed to src/shopfront/checkout/service.py
   > No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.
+- `2026-11-09 15:02 UTC` session `8d986baa` · Edit reverted: Edit on src/shopfront/checkout/service.py undid an earlier edit from the same session, after a check had run on it
 - `2026-11-09 15:03 UTC` session `8d986baa` · Edit thrash: 7 successful edits to src/shopfront/checkout/service.py within one user turn
 - `2026-11-09 15:14 UTC` session `8d986baa` · User correction: The user corrected the agent (confidence 1; matched "still failing", "I told you"; the user names src/shopfront/checkout/service.py, which it had changed); names src/shopfront/checkout/service.py
   > It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only.
-- `2026-11-09 15:15 UTC` session `8d986baa` · Edit reverted: Edit on src/shopfront/checkout/service.py undid an earlier edit from the same session
 
 </details>
 
@@ -219,7 +218,7 @@ Only friction in the directory itself (searches that found nothing there); `agen
 | `tool-rejected` Tool call declined | 1 | The human declined a tool call the agent proposed. Declining a plan or a question is not counted. |
 | `user-interrupt` User interrupt | 1 | The human interrupted the agent after it had made at least one tool call in the turn. The interrupt that accompanies a declined tool call is not counted again. |
 | `edit-miss` Edit miss | 6 | An edit failed because the text to replace was not found in the file, or matched several places. |
-| `edit-revert` Edit reverted | 2 | An edit exactly undid an earlier successful edit to the same file in the same session, or a write restored an earlier version of the file. Taking out lines that were only added and then run successfully (a debug print) is not counted. |
+| `edit-revert` Edit reverted | 1 | An edit exactly undid an earlier successful edit to the same file in the same session, or a write restored an earlier version of the file. Taking out lines that were only added and then run successfully (a debug print) is not counted. |
 | `command-failure` Command failure | 9 | A shell command failed: it exited non-zero or, where the exit status belongs to a pipe or a later step, its own output says so. Setup and invocation errors (command not found, missing module, bad arguments, …) and environment failures (a service that is not running, missing credentials, an unset variable) count fully; ordinary failures, such as a test that fails, count at 0.3. A red run followed by an edit and a green run of the same job is dropped; one that passed only after a setup step, with no file edited, is kept in full. Read-only inspection commands (ls, grep, …) are ignored. |
 | `edit-thrash` Edit thrash | 1 | One file received 6 or more successful edits within a single turn in which something also went wrong: an edit miss, a stale edit or a reverted edit on that file, or a failed command or retry loop in the turn. Not recorded next to a no-convergence event of the same turn that names the file. |
 | `stale-edit` Stale edit | 1 | An edit or write was refused because the file had not been read first, or changed on disk after it was read. |
