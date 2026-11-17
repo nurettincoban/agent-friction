@@ -26,6 +26,12 @@ def fmt_lost(minutes: float) -> str:
     return fmt_minutes(minutes) if minutes > 0 else "n/a"
 
 
+def headline_lost(totals: dict[str, Any]) -> str:
+    """The headline's time lost: "no time estimate" when no evidence carried any time."""
+    minutes = float(totals.get("est_minutes_lost", 0) or 0)
+    return f"~{fmt_minutes(minutes)} lost" if minutes > 0 else "no time estimate"
+
+
 def fmt_minutes(minutes: float) -> str:
     """Render a duration in minutes compactly: ``42s``, ``7m``, ``2h 05m``."""
     # Round half up (not Python's half-to-even) so this matches the HTML report.
@@ -159,6 +165,12 @@ def dropped_note(result: dict[str, Any]) -> str | None:
         calls = plural(outside, "declined, denied, or failed call")
         parts.append(
             f"{'Also not' if parts else 'Not'} counted: {calls} that acted outside this repository."
+        )
+    untimed = int(totals.get("untimed_sessions_excluded", 0) or 0)
+    if untimed > 0:
+        parts.append(
+            f"{'Also not' if parts else 'Not'} counted: {plural(untimed, 'session')} with no "
+            "timestamps, which cannot be placed in this time window."
         )
     return " ".join(parts) or None
 

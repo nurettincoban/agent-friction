@@ -10,7 +10,7 @@ from agent_friction.report._common import (
     dropped_note,
     events_phrase,
     fmt_lost,
-    fmt_minutes,
+    headline_lost,
     plural,
     repo_recommendations,
     signal_titles,
@@ -154,7 +154,7 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
         "",
         f"{plural(int(totals.get('sessions', 0)), 'agent session')} analysed · "
         f"{events_phrase(totals)} · "
-        f"~{fmt_minutes(float(totals.get('est_minutes_lost', 0)))} lost · "
+        f"{headline_lost(totals)} · "
         f"{plural(int(totals.get('corrections', 0)), 'human correction')} · "
         f"{plural(int(totals.get('files_affected', 0)), 'file')} affected",
         "",

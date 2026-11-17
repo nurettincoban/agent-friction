@@ -2953,3 +2953,100 @@ def test_a_missing_make_target_is_answered_with_the_targets_that_exist(tmp_path:
     assert rec["id"] == "name-the-missing-target"
     assert "the Makefile has no target." in rec["detail"]
     assert "What it does define" not in rec["detail"] and "fmt" not in json.dumps(row)
+
+
+# ---- round 28 ------------------------------------------------------------------------------
+
+
+def _untimed(tmp_path: Path, name: str, timed: bool) -> Path:
+    base: dict[str, object] = {"session": name, "cwd": "/repo"}
+    events: list[dict[str, object]] = [
+        {**base, "kind": "user_message", "text": "build it"},
+        {**base, "kind": "tool_call", "id": 1, "op": "shell", "command": "make build"},
+        {
+            **base,
+            "kind": "tool_result",
+            "id": 1,
+            "ok": False,
+            "exit_code": 127,
+            "output": "make: cc: command not found",
+        },
+    ]
+    if timed:
+        for index, event in enumerate(events):
+            event["ts"] = f"2026-11-05T10:00:{index:02d}Z"
+    path = tmp_path / f"{name}.jsonl"
+    path.write_text("".join(json.dumps(e) + "\n" for e in events))
+    return path
+
+
+def test_sessions_without_timestamps_are_in_no_window(tmp_path: Path) -> None:
+    files = [_untimed(tmp_path, "bare", False), _untimed(tmp_path, "dated", True)]
+    moment = datetime(2026, 11, 6, tzinfo=timezone.utc)
+
+    def totals(**window: datetime) -> dict[str, Any]:
+        options = AnalyzeOptions(
+            repo=Path("/repo"), transcripts=files, include_git=False, now=NOW, **window
+        )
+        out: dict[str, Any] = analyze(options)["totals"]
+        return out
+
+    # no window: the untimed session is analysed like any other
+    full = totals()
+    assert (full["sessions"], full["friction_events"]) == (2, 2)
+    assert full["untimed_sessions_excluded"] == 0
+    # either bound alone leaves it out, and says so
+    before, after = totals(until=moment), totals(since=moment)
+    assert (before["sessions"], before["friction_events"]) == (1, 1)
+    assert (after["sessions"], after["friction_events"]) == (0, 0)
+    assert before["untimed_sessions_excluded"] == after["untimed_sessions_excluded"] == 1
+    # so a before/after pair no longer counts it twice
+    assert before["friction_events"] + after["friction_events"] == 1
+    both = totals(since=datetime(2026, 11, 1, tzinfo=timezone.utc), until=moment)
+    assert both["untimed_sessions_excluded"] == 1 and both["sessions"] == 1
+
+
+def test_an_untimed_session_of_another_repository_is_not_counted_as_excluded(
+    tmp_path: Path,
+) -> None:
+    path = _untimed(tmp_path, "bare", False)
+    out = analyze(
+        AnalyzeOptions(
+            repo=Path("/elsewhere"),
+            transcripts=[path],
+            include_git=False,
+            now=NOW,
+            since=datetime(2026, 11, 1, tzinfo=timezone.utc),
+            allow_no_transcripts=True,
+        )
+    )
+    assert out["totals"]["untimed_sessions_excluded"] == 0
+
+
+def test_story_has_no_untimed_sessions(result: dict[str, Any]) -> None:
+    assert result["totals"]["untimed_sessions_excluded"] == 0
+    assert story(since=datetime(2026, 11, 1))["totals"]["untimed_sessions_excluded"] == 0
+
+
+def test_a_workspace_selector_puts_the_command_in_its_directory(tmp_path: Path) -> None:
+    missing = "ERR_PNPM_NO_SCRIPT  Missing script: test"
+    lines = [
+        "pnpm --filter web test",
+        "pnpm --filter=web test",
+        "pnpm -F web test",
+        "cd web && pnpm test",
+    ]
+    sessions = []
+    for i, line in enumerate(lines):
+        s = Session(f"s{i}").user("go").bash(line, missing, exit_code=1)
+        s.bash("yarn workspace web test", 'error Command "test" not found.', exit_code=1)
+        s.bash("npm --prefix web test", 'npm error Missing script: "test"', exit_code=1)
+        s.bash("pnpm --filter @acme/web test", missing, exit_code=1)
+        s.bash("pip3 install nope", "ERROR: No matching distribution found", exit_code=1)
+        s.bash("pip install nope", "ERROR: No matching distribution found", exit_code=1)
+        sessions.append(s)
+    rows = {c["path"]: c["events"] for c in scan(tmp_path, sessions)["commands"]}
+    assert rows["pnpm test (web/)"] == 4 and rows["yarn test (web/)"] == 4
+    assert rows["npm test (web/)"] == 4
+    assert rows["pnpm test"] == 4  # the scoped name says nothing about a directory
+    assert not [key for key in rows if "pip3" in key or "workspace" in key or "filter" in key]

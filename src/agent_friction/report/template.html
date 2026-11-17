@@ -204,6 +204,10 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     notCounted.push((notCounted.length ? "Also not" : "Not") + " counted: " +
       plural(t.events_outside_repo, "declined, denied, or failed call") + " that acted outside this repository.");
   }
+  if (Number(t.untimed_sessions_excluded) > 0) {
+    notCounted.push((notCounted.length ? "Also not" : "Not") + " counted: " +
+      plural(t.untimed_sessions_excluded, "session") + " with no timestamps, which cannot be placed in this time window.");
+  }
   if (notCounted.length) {
     document.getElementById("stats").insertAdjacentElement("afterend", el("p", { class: "sub" }, notCounted.join(" ")));
   }
@@ -213,7 +217,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
    ["corrections", "human correction", "human corrections"], ["files_affected", "file affected", "files affected"]]
     .forEach(function (p) {
       var box = el("div", { class: "stat" });
-      box.appendChild(el("b", null, p[0] === "est_minutes_lost" ? mins(t[p[0]]) : (t[p[0]] || 0)));
+      box.appendChild(el("b", null, p[0] === "est_minutes_lost" ? (Number(t[p[0]]) > 0 ? mins(t[p[0]]) : "n/a") : (t[p[0]] || 0)));
       box.appendChild(el("span", null, Number(t[p[0]]) === 1 ? p[1] : p[2]));
       document.getElementById("stats").appendChild(box);
     });

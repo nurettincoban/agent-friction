@@ -274,3 +274,30 @@ def test_not_counted_note_reports_calls_outside_the_repository() -> None:
     for text in (render_terminal(result), render_markdown(result)):
         assert "4 declined, denied, or failed calls that acted outside" in text
     assert "events_outside_repo" in render_html(result)
+
+
+def test_headline_says_no_time_estimate_when_nothing_was_timed() -> None:
+    result = sample_result()
+    result["totals"]["est_minutes_lost"] = 0
+    assert "no time estimate" in render_terminal(result)
+    assert "no time estimate" in render_markdown(result)
+    assert "~0s lost" not in render_terminal(result) + render_markdown(result)
+
+
+def test_long_paths_are_elided_in_the_middle() -> None:
+    from agent_friction.report.terminal import _truncate
+
+    a = _truncate("src/pkg/very_long_module_name_for_layout_testing_1.py", 30)
+    b = _truncate("lib/pkg/very_long_module_name_for_layout_testing_2.py", 30)
+    assert len(a) == 30 and "…" in a and a.endswith("_1.py") and a.startswith("src/")
+    assert a != b
+    assert _truncate("short.py", 30) == "short.py"
+
+
+def test_not_counted_note_reports_untimed_sessions() -> None:
+    from agent_friction.report._common import dropped_note
+
+    note = dropped_note({"totals": {"untimed_sessions_excluded": 2}})
+    assert note == (
+        "Not counted: 2 sessions with no timestamps, which cannot be placed in this time window."
+    )

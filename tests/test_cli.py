@@ -630,3 +630,10 @@ def test_removed_worktree_sessions_are_pointed_out(monkeypatch: pytest.MonkeyPat
     cli._note_removed_worktrees(Path(), err)
     assert "2 sessions ran in /w/shop-wt2" in err.getvalue()
     assert "--repo-alias /w/shop-wt2" in err.getvalue()
+
+
+def test_compare_rejects_deeply_nested_json_cleanly(tmp_path: Path) -> None:
+    deep = tmp_path / "deep.json"
+    deep.write_text('{"a":' + "[" * 100000 + "]" * 100000 + "}", encoding="utf-8")
+    code, _, err = run("compare", "--allow-overlap", str(deep), str(deep))
+    assert code == 1 and "nested too deeply" in err

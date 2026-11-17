@@ -778,6 +778,8 @@ def _raw_key(words: Sequence[str]) -> str:
     program = _program_name(words[0])
     if _PYTHON_RE.match(program):
         program = "python"  # python3, python3.12, pypy3 ... are one command
+    elif _PIP_RE.match(program):
+        program = "pip"  # pip3, pip3.12
     rest = list(words[1:])
     base = program.rsplit("/", 1)[-1]
     launched = _launched(base, rest) if "/" not in program else None
@@ -810,7 +812,11 @@ def _raw_key(words: Sequence[str]) -> str:
     elif rest and _SUBCOMMAND_RE.match(rest[0]):
         parts.append(rest[0])
         if base == "yarn" and rest[0] == "workspace" and len(rest) > 2:
-            # ``yarn workspace <name> <script>``: which package, and what is run in it
+            if _workspace_directory(rest[1]) is not None:
+                # ``yarn workspace web test`` is ``yarn test`` run in ``web/``, as
+                # ``npm --prefix web test`` is: the package is where, not what
+                return _raw_key([words[0], *rest[2:]])
+            # ``yarn workspace @acme/web <script>``: which package, and what is run in it
             parts.append(rest[1])
             if _SUBCOMMAND_RE.match(rest[2]):
                 parts.append(rest[2])
@@ -839,12 +845,31 @@ def _is_inspection(words: Sequence[str], key: str) -> bool:
     )
 
 
+_PIP_RE = re.compile(r"^pip3(?:\.\d+)?$")
+#: ``pnpm --filter web test``: the package the command is run in.
+_WORKSPACE_OPTIONS = frozenset({"--filter", "-F"})
+_WORKSPACE_NAME_RE = re.compile(r"^(?:\./)?([A-Za-z0-9_][\w.-]*(?:/[A-Za-z0-9_][\w.-]*)*)/?$")
+
+
+def _workspace_directory(name: str) -> str | None:
+    """The directory a workspace selector stands for, if it reads as one.
+
+    ``web``, ``./web`` and ``packages/web`` do. A scoped package name
+    (``@acme/web``), a pattern (``web...``, ``!web``, ``{packages/*}``) and a
+    git range (``[main]``) do not: where they run cannot be read off the word.
+    """
+    found = _WORKSPACE_NAME_RE.match(name)
+    if found is None or name.endswith("..."):
+        return None
+    return found.group(1)
+
+
 #: Options with which a tool is told to work in another directory.
 _DIR_OPTIONS: dict[str, frozenset[str]] = {
     "git": frozenset({"-C"}),
     "make": frozenset({"-C", "--directory"}),
     "npm": frozenset({"--prefix", "-C"}),
-    "pnpm": frozenset({"--dir", "-C", "--prefix"}),
+    "pnpm": frozenset({"--dir", "-C", "--prefix", *_WORKSPACE_OPTIONS}),
     "yarn": frozenset({"--cwd"}),
     "bun": frozenset({"--cwd"}),
     "uv": frozenset({"--directory", "--project"}),
@@ -865,15 +890,22 @@ def _own_directory(program: str, args: Sequence[str]) -> list[str]:
     options = _DIR_OPTIONS.get(program)
     if not options:
         return []
+    if program == "yarn" and len(args) > 2 and args[0] == "workspace":
+        there = _workspace_directory(args[1])
+        return [there] if there is not None else []
     for index, word in enumerate(args):
         if not word.startswith("-"):
             break  # options of the tool itself come before its subcommand
         name, eq, value = word.partition("=")
         if name in options:
-            if eq:
-                return [value]
-            if index + 1 < len(args):
-                return [args[index + 1]]
+            if not eq:
+                if index + 1 >= len(args):
+                    return []
+                value = args[index + 1]
+            if name in _WORKSPACE_OPTIONS:
+                there = _workspace_directory(value)
+                return [there] if there is not None else []
+            return [value]
     return []
 
 

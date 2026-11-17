@@ -145,6 +145,7 @@ def _load(
     since: datetime | None,
     until: datetime | None,
     unreadable: list[tuple[Path, str]] | None = None,
+    untimed: list[Stream] | None = None,
 ) -> tuple[list[ParsedFile], dict[str, tuple[list[model.Event], list[model.Event]]]]:
     """Parsed files cut to the window, and each stream's events outside it (by key).
 
@@ -160,7 +161,15 @@ def _load(
             if unreadable is not None:
                 unreadable.append((path, read_error(exc)))
             continue
+        bounded = since is not None or until is not None
         for stream in item.streams:
+            if bounded and stream.events and all(e.ts is None for e in stream.events):
+                # Nobody can say when this session happened. Inside a window it would be
+                # inside every window, and a before/after pair would count it twice.
+                if untimed is not None:
+                    untimed.append(dataclasses.replace(stream))
+                stream.events = []
+                continue
             before, after = _apply_window(stream, since, until)
             if (before or after) and stream.events:
                 context[stream.key] = (before, after)
@@ -778,6 +787,7 @@ class _Analysis:
         self.git_used = False
         self.dropped: list[tuple[int, float, str]] = []
         self.events_outside_repo = 0
+        self.untimed_sessions_excluded = 0
         self.unreadable: list[tuple[Path, str]] = []
         self.third_party_events = 0
         self._ignored: set[str] | None = None
@@ -1032,7 +1042,9 @@ class _Analysis:
             if not options.allow_no_transcripts:
                 raise
             missing, files = exc, []
-        parsed, context = _load(files, self.since, self.until, self.unreadable)
+        untimed: list[Stream] = []
+        parsed, context = _load(files, self.since, self.until, self.unreadable, untimed)
+        self.untimed_sessions_excluded = len({s.session_id for s in untimed if self._in_repo(s)})
         for item in parsed:
             # Sessions that never worked in this repo are not this repo's sessions.
             relevant = [s for s in item.streams if self._in_repo(s)]
@@ -1431,6 +1443,9 @@ class _Analysis:
                 # Sessions read and set aside because nothing in them touched this
                 # repository (the sum of the sources' counts).
                 "sessions_outside_repo": sum(s.get("sessions_outside_repo", 0) for s in sources),
+                # Sessions without a single timestamp, left out because `since` or `until`
+                # was given: they cannot be placed inside a window (0 without a window).
+                "untimed_sessions_excluded": self.untimed_sessions_excluded,
                 "friction_events": len(findings),
                 # ... of which those that are friction on their own: not the kinds that
                 # also accompany productive work (see ``scoring.is_weak``).

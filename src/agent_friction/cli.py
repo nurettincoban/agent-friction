@@ -509,6 +509,8 @@ def _load_json(path: Path) -> dict[str, Any]:
         ) from None
     except json.JSONDecodeError as exc:
         raise AgentFrictionError(f"{path}: not valid JSON ({exc})") from None
+    except RecursionError:
+        raise AgentFrictionError(f"{path}: not valid JSON (nested too deeply)") from None
     if not isinstance(data, dict) or "schema_version" not in data:
         raise AgentFrictionError(
             f"{path}: not an agent-friction result (make one with `scan -f json`)"

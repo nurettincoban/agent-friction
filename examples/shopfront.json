@@ -1044,7 +1044,8 @@
     "tool_calls": 74,
     "tool_calls_in_repo": 74,
     "tool_failures": 0,
-    "unattributed_events": 0
+    "unattributed_events": 0,
+    "untimed_sessions_excluded": 0
   },
   "tree": {
     "children": [

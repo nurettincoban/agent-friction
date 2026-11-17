@@ -225,7 +225,8 @@ Transcripts contain your code and sometimes your secrets, so:
   `make <target:37bd73>`: stable, so grouping still works, but a pseudonym rather than
   anonymous, since someone who guesses the name can confirm it.
 - Even with `--no-excerpts`, reports always show your repository's file paths, its directory
-  name, and when sessions happened. Those are the map itself. A path the agent guessed that
+  name, and when sessions happened; the JSON also records the repository's absolute path
+  (`repo.root`, with your home directory masked as `~`). Those are the map itself. A path the agent guessed that
   never existed becomes a hash too (`src/<path:3f9a1c>`), since it may name something private.
 - Session ids are taken from the transcript file name (a UUID for Claude Code), and are shown
   even with `--no-excerpts`. If you pool transcripts under descriptive file names, rename them

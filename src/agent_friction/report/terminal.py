@@ -12,6 +12,7 @@ from agent_friction.report._common import (
     events_phrase,
     fmt_lost,
     fmt_minutes,
+    headline_lost,
     plural,
     repo_recommendations,
     signal_titles,
@@ -82,7 +83,11 @@ def bar(score: float, width: int = 10) -> str:
 
 
 def _truncate(text: str, width: int) -> str:
-    return text if len(text) <= width else "…" + text[-(width - 1) :]
+    """Elide the middle, so long sibling paths keep both their top directory and file name."""
+    if len(text) <= width:
+        return text
+    head = (width - 1) // 3
+    return text[:head] + "…" + text[-(width - 1 - head) :]
 
 
 def _unattributed_rows(result: dict[str, Any], st: Style, width: int, limit: int = 5) -> list[str]:
@@ -176,7 +181,7 @@ def render_terminal(
             f"{who}"
             f" · {plural(_in_repo_calls(totals), 'tool call')}"
             f" · {events_phrase(totals)}"
-            f" · ~{fmt_minutes(float(totals.get('est_minutes_lost', 0)))} lost"
+            f" · {headline_lost(totals)}"
             f" · {plural(int(totals.get('corrections', 0)), 'human correction')}{span}"
         )
     )

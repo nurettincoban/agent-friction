@@ -194,9 +194,17 @@ together, and so that the key can be shown even when excerpts are off:
      (`is_replacement`);
    - one further word is kept only after a script runner or command group of
      that tool (`CONTINUING_SUBCOMMANDS`: `npm run build`, `bun run build`,
-     `docker compose up`, `gh pr create`), and `yarn workspace <name> <script>` keeps both
-     (the workspace name is project-specific and becomes a placeholder
-     without excerpts);
+     `docker compose up`, `gh pr create`). A workspace selector that reads
+     as a directory is where the command runs, not part of its name: `pnpm
+     --filter web test`, `pnpm --filter=web test`, `pnpm -F web test` and
+     `yarn workspace web test` are `pnpm test` / `yarn test` run in `web/`,
+     keyed `pnpm test (web/)` exactly as `npm --prefix web test` is `npm test
+     (web/)`. A scoped package name (`@acme/web`), a pattern (`web...`,
+     `!web`) or a git range (`[main]`) does not say where: `--filter` is then
+     dropped like any option, and `yarn workspace @acme/web <script>` keeps
+     both words (the workspace name is project-specific and becomes a
+     placeholder without excerpts). `pip3` and `pip3.12` are `pip`, as
+     `python3` is `python`;
    - **every other program is its executable name alone**: `./run s3cret` is
      `run`, `mytool acme-codename --x` is `mytool`, `ssh host cmd` is `ssh`,
      `docker run <image>` is `docker run`;
