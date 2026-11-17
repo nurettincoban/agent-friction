@@ -7,6 +7,7 @@ and agent-friction analyses them with the same detectors as Claude Code.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,18 @@ ASSISTANT_MESSAGE = "assistant_message"
 KINDS = (model.TOOL_CALL, model.TOOL_RESULT, model.USER_MESSAGE, model.INTERRUPT)
 
 
+_INTEGER_RE = re.compile(r"\s*-?\d{1,9}\s*")
+
+
+def _exit_code(value: object) -> int | None:
+    """An exit status as a number; ``"1"`` (a number written as a string) is 1."""
+    if isinstance(value, str) and _INTEGER_RE.fullmatch(value):
+        return int(value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
 def _str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
@@ -30,6 +43,19 @@ def _event(obj: dict[str, Any], line: int) -> Event | None:
     if kind not in KINDS:
         return None
     event = Event(kind=kind, line=line, ts=common.parse_ts(obj.get("ts")), cwd=_str(obj.get("cwd")))
+    of = obj.get("of")
+    if kind == model.TOOL_RESULT and isinstance(of, (str, int)) and not isinstance(of, bool):
+        # how the command that call `of` launched in the background ended
+        event.kind, event.task_id = model.BACKGROUND_OUTCOME, str(of)
+        code = _exit_code(obj.get("exit_code"))
+        if code is not None:
+            event.exit_code = code
+        event.ok = obj.get("ok") is not False
+        status = _str(obj.get("status"))
+        event.task_status = status or ("failed" if not event.ok or event.exit_code else "completed")
+        output = obj.get("output")
+        event.output = common.clip_output(output if isinstance(output, str) else "")
+        return event
     if kind in (model.TOOL_CALL, model.TOOL_RESULT):
         call_id = obj.get("id")
         if not isinstance(call_id, (str, int)) or isinstance(call_id, bool) or call_id == "":
@@ -43,6 +69,7 @@ def _event(obj: dict[str, Any], line: int) -> Event | None:
         event.command = _str(obj.get("command"))
         event.pattern = _str(obj.get("pattern"))
         event.read_range = str(obj.get("range", ""))
+        event.background = obj.get("background") is True and event.op == model.OP_SHELL
         old, new = obj.get("old"), obj.get("new")
         if isinstance(old, str) and isinstance(new, str):
             event.edits, event.insertions = common.edit_pairs([(old, new)])
@@ -54,9 +81,11 @@ def _event(obj: dict[str, Any], line: int) -> Event | None:
     elif kind == model.TOOL_RESULT:
         output = obj.get("output")
         text = output if isinstance(output, str) else ""
-        code = obj.get("exit_code")
-        if isinstance(code, int) and not isinstance(code, bool):
+        code = _exit_code(obj.get("exit_code"))
+        if code is not None:
             event.exit_code = code
+        if isinstance(obj.get("prompted"), bool):
+            event.prompted = obj["prompted"]
         declared = obj.get("error")
         ok = obj.get("ok")
         failed = ok is False or (ok is None and (bool(declared) or bool(event.exit_code)))
@@ -103,13 +132,13 @@ def parse_file(path: Path, seen: dict[str, str] | None = None) -> ParsedFile:
     streams: dict[tuple[str, bool], Stream] = {}
     parsed = ParsedFile(path=path, kind=KIND, streams=[])
     asking: dict[tuple[str, bool], bool] = {}
-    with path.open(encoding="utf-8", errors="replace") as handle:
+    with model.open_transcript(path) as handle:
         for number, raw in enumerate(handle, 1):
             raw = raw.strip()
             if not raw:
                 continue
             try:
-                obj = json.loads(raw)
+                obj = model.load_json_line(raw)
             except (ValueError, RecursionError):
                 parsed.skipped_lines += 1
                 continue
@@ -123,6 +152,7 @@ def parse_file(path: Path, seen: dict[str, str] | None = None) -> ParsedFile:
                 continue
             fingerprint = "generic:" + common.digest(canonical)
             if earlier.get(fingerprint, str(path)) != str(path):
+                parsed.duplicate_lines += 1
                 continue  # the same event, already read from another file
             mine.add(fingerprint)
             session = obj.get("session")
@@ -155,5 +185,7 @@ def parse_file(path: Path, seen: dict[str, str] | None = None) -> ParsedFile:
             streams[key].events.append(event)
     for fingerprint in mine:
         earlier.setdefault(fingerprint, str(path))
+    for stream in streams.values():
+        stream.events = common.pair_background(stream.events)
     parsed.streams = list(streams.values())
     return parsed

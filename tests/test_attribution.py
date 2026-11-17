@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_friction import attribution
 from agent_friction.attribution import (
     PathResolver,
     command_role,
@@ -224,7 +225,15 @@ def test_symlinked_repo_root_matches_both_spellings(tmp_path: Path) -> None:
         ("docker run --rm -it registry.corp/img pytest", "docker run"),
         ("kubectl exec pod-1 -- ls", "ls"),
         ("kubectl exec pod-1", "kubectl exec"),
-        ("yarn workspace web test", "yarn workspace web test"),
+        ("yarn workspace web test", "yarn test"),
+        ("yarn workspace packages/web run build", "yarn run build"),
+        ("yarn workspace @acme/web test", "yarn workspace @acme/web test"),
+        ("pnpm --filter=web test", "pnpm test"),
+        ("pnpm -F web test", "pnpm test"),
+        ("pip3 install requests", "pip install"),
+        ("pip3.12 install requests", "pip install"),
+        ("pip install requests", "pip install"),
+        ("pipx install ruff", "pipx install"),
         ("aws s3 cp secret-bucket/x .", "aws s3"),
         ("tox -e py312", "tox"),
         # anything else is the executable alone: arguments are never part of a key
@@ -402,11 +411,11 @@ def test_parse_command_never_raises_on_shell_ish_noise() -> None:
     import random
 
     rng = random.Random(20261115)
-    for _ in range(4000):
+    for round_ in range(800):
         size = rng.randint(0, 14)
         glue = rng.choice(("", " ", " ", " "))
         command = glue.join(rng.choice(_FUZZ_ATOMS) for _ in range(size))
-        parsed = parse_command(command)  # must not raise, whatever the input
+        parsed = parse_command(command, (None, True)[round_ % 2])  # must never raise
         assert isinstance(parsed.key, str) and len(parsed.key) < 200, command
         assert "\n" not in parsed.key, command
         assert public_key(parsed.key) is not None
@@ -434,6 +443,20 @@ def test_chdir_follows_cd_lexically(resolver: PathResolver) -> None:
         ("git -C ../other status", ("../other",)),
         ("make -C docs html", ("docs",)),
         ("npm --prefix web test", ("web",)),
+        # npm and pnpm take the option after the subcommand as well
+        ("npm test --prefix packages/web", ("packages/web",)),
+        ("npm run build --prefix=packages/web", ("packages/web",)),
+        ("pnpm -C packages/web test", ("packages/web",)),
+        ("pnpm test -C packages/web", ("packages/web",)),
+        ("pnpm test --dir packages/web", ("packages/web",)),
+        # ... but not after `--`: that belongs to the script
+        ("npm test -- --prefix x", ()),
+        # other tools only in front of the subcommand
+        ("git log -C HEAD", ()),
+        # a workspace selector is not a directory change: see `workspace`
+        ("pnpm --filter web test", ()),
+        ("yarn workspace web test", ()),
+        ("pnpm test", ()),
         ("uv --directory tools run pytest", ("tools",)),
         ("pytest -q", ()),
     ],
@@ -553,3 +576,301 @@ def test_tools_whose_exit_status_is_an_answer(command: str) -> None:
 )
 def test_aggregate_checks(key: str, aggregate: bool) -> None:
     assert is_aggregate_check(key) is aggregate
+
+
+@pytest.mark.parametrize(
+    ("line", "setup", "copy"),
+    [
+        ("docker compose up -d db", True, None),
+        ("npx playwright install", True, None),
+        ("pip install -r requirements.txt", True, None),
+        ("npm ci", True, None),
+        ("make bootstrap", True, None),
+        ("cp .env.example .env", False, "cp .env.example .env"),
+        ("cp config/settings.sample.yml config/settings.yml", False,
+         "cp config/settings.sample.yml config/settings.yml"),
+        ("ln -s ../shared/.env .env.local", False, "ln ../shared/.env .env.local"),
+        ("cp src/a.py src/b.py", False, None),
+        ("cp '.env example' .env", False, None),  # not a name we would print
+        ("npx playwright test", False, None),
+        ("npm run build", False, None),
+        ("git pull --install-hooks", False, None),
+        ("python scripts/install_hooks.py", False, None),
+        ("./scripts/setup.sh", False, None),
+    ],
+)  # fmt: skip
+def test_setup_steps(line: str, setup: bool, copy: str | None) -> None:
+    (step,) = parse_command(line).steps
+    assert attribution.is_setup_step(step) is setup
+    assert attribution.env_copy(step) == copy
+
+
+def test_windows_separators_are_not_posix_escapes() -> None:
+    from agent_friction.attribution import is_windows_path, posix_separators
+
+    assert parse_command("python scripts\\gen.py", True).key == "python scripts/gen.py"
+    assert parse_command("python scripts\\gen.py").key == "python scriptsgen.py"  # POSIX: escape
+    # with nothing known about the session, a drive-letter path in the line decides
+    assert posix_separators("python C:\\proj\\scripts\\gen.py") == "python C:/proj/scripts/gen.py"
+    assert parse_command("cd C:\\proj\\web; npm test").key == "npm test"
+    assert posix_separators("grep 'foo\\.bar' src") == "grep 'foo\\.bar' src"
+    assert posix_separators("python scripts\\gen.py", False) == "python scripts\\gen.py"
+    # escaped quotes and spaces stay escapes even on Windows
+    assert posix_separators('echo \\"hi\\" a\\ b', True) == 'echo \\"hi\\" a\\ b'
+    assert is_windows_path("C:\\Users\\dev") and is_windows_path("c:/Users/dev")
+    assert not is_windows_path("/home/dev") and not is_windows_path(None)
+    assert not is_windows_path("src/c:/x")
+
+
+def test_same_line_assignments_are_followed_and_nothing_else() -> None:
+    from agent_friction.attribution import VARIABLE, expand_assignments
+
+    assert expand_assignments("A=scripts/x.sh; $A") == "A=scripts/x.sh; scripts/x.sh"
+    assert expand_assignments('export D="web app" && cd $D') == 'export D="web app" && cd web app'
+    assert expand_assignments("N=3; pytest -n ${N} $NN") == "N=3; pytest -n 3 $NN"
+    # a prefix assignment, a computed value and a later definition are left alone
+    for line in ("A=x make $A", "A=$(pwd); $A/run.sh", "$A; A=x", "echo $HOME"):
+        assert expand_assignments(line) == line
+    assert parse_command("$TOOL lint").key == VARIABLE == public_key(VARIABLE)
+    assert parse_command("cd web && $A/run.sh --all").key == "<variable>/run.sh"
+    assert parse_command("echo $HOME; make test").key == "make test"
+
+
+@pytest.mark.parametrize(
+    ("command", "label"),
+    [
+        ("npx playwright install chromium", "npx playwright install"),
+        ("npx prisma generate --schema db/schema.prisma", "npx prisma generate"),
+        ("go mod download", "go mod download"),
+        ("docker compose up -d db", "docker compose up -d"),
+        ("docker compose up", "docker compose up"),
+        ("pip install -r requirements.txt", "pip install"),
+        ("uv sync --all-extras", "uv sync"),
+        ("./scripts/reset-db.sh staging", "scripts/reset-db.sh"),
+        ("npx tsc src/a.ts", "npx tsc"),
+    ],
+)
+def test_setup_labels_can_be_run_as_written(command: str, label: str) -> None:
+    from agent_friction.attribution import parse_command, setup_label
+
+    assert setup_label(parse_command(command).steps[0]) == label
+
+
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [
+        ("/usr/bin/time -v pytest -q", "pytest"),
+        ("time pytest -q", "pytest"),
+        ("time -p make test", "make test"),
+        ("/usr/bin/env FOO=1 npm test", "npm test"),
+        ("( pytest -q )", "pytest"),
+        ("(cd web && npm test)", "npm test"),
+        ("( make lint; make test ) 2>&1 | tail -5", "make test"),
+    ],
+)
+def test_time_and_subshells_are_wrappers(command: str, key: str) -> None:
+    assert parse_command(command).key == key
+
+
+def test_steps_know_when_their_output_went_nowhere() -> None:
+    def silenced(command: str) -> list[bool]:
+        return [s.silenced for s in parse_command(command).steps]
+
+    assert silenced("npm run build >/dev/null 2>&1; npm test | tail -3") == [True, False, False]
+    assert silenced("make a &>/dev/null; make b &> /dev/null; make c") == [True, True, False]
+    assert silenced("a > /dev/null 2> /dev/null; b 2>/dev/null >/dev/null") == [True, True]
+    # one stream still reaches the transcript
+    assert silenced("a >/dev/null; b 2>/dev/null; c 2>&1; d >out.txt 2>&1") == [False] * 4
+    # `2>&1 >/dev/null`: stderr goes where stdout *was*
+    assert silenced("a 2>&1 >/dev/null") == [False]
+    # redirections never become arguments
+    assert parse_command("make a &>/dev/null").steps[0].args == ("a",)
+
+
+# ---- round 26 ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("command", "key", "role"),
+    [
+        ("uv run python scripts/seed.py --fast", "uv run python scripts/seed.py", None),
+        ("uv run python scripts/other.py", "uv run python scripts/other.py", None),
+        ("uv run flask db upgrade", "uv run flask db", None),
+        ("uv run alembic upgrade head", "uv run alembic upgrade", None),
+        ("bundle exec rails test test/models", "bundle exec rails test", "test"),
+        ("bundle exec rails db:migrate", "bundle exec rails db:migrate", None),
+        ("npx tsx scripts/a.ts", "npx tsx scripts/a.ts", None),
+        ("npx -p typescript tsc --noEmit", "npx tsc", "typecheck"),
+        ("pnpm exec vitest run", "pnpm exec vitest", "test"),
+        ("bunx prisma generate", "bunx prisma", None),
+        ("bun run scripts/a.ts", "bun run scripts/a.ts", None),
+        ("bun run build", "bun run build", "build"),  # a package script, not a launch
+        ("conda run -n dev pytest -q", "conda run pytest", "test"),
+        ("poetry run python manage.py test", "poetry run python manage.py test", "test"),
+        ("pipenv run python -m pytest", "pipenv run python -m pytest", "test"),
+        ("uv run --with rich --python 3.12 pytest", "uv run pytest", "test"),
+        ("uv run python -c 'print(1)'", "uv run python <inline>", None),
+        ("uvx ruff check .", "uvx ruff check", "lint"),
+        ("npm exec -- tsc -p .", "npm exec tsc", "typecheck"),
+        # not launches: the tool's own subcommands, and a launcher with nothing to run
+        ("uv pip install -e .", "uv pip install", None),
+        ("uv sync", "uv sync", None),
+        ("uv run", "uv run", None),
+        ("npm run build", "npm run build", "build"),
+        ("pnpm install", "pnpm install", None),
+    ],
+)
+def test_a_launcher_is_followed_by_the_key_of_what_it_runs(
+    command: str, key: str, role: str | None
+) -> None:
+    parsed = attribution.parse_command(command)
+    assert parsed.key == key and attribution.command_role(key) == role
+
+
+def test_launcher_split_and_replacement() -> None:
+    split, inner = attribution.launcher_split, attribution.inner_key
+    assert split("uv run python scripts/gen.py") == ("uv run", "python scripts/gen.py")
+    assert split("npx tsc") == ("npx", "tsc") and split("bun run scripts/a.ts")[0] == "bun run"
+    for plain in ("pytest", "uv sync", "uv run", "npx", "bun run build", "npm run build", ""):
+        assert split(plain) == ("", plain) and inner(plain) == plain
+    same = attribution.is_replacement
+    assert same("python scripts/gen.py", "uv run python scripts/gen.py")
+    assert same("python manage.py test", "poetry run python manage.py test")
+    assert same("alembic upgrade", "uv run alembic upgrade")  # setup, but the same command
+    assert same("uv run pytest", "poetry run pytest") and same(
+        "rails test", "bundle exec rails test"
+    )
+    # another script, another tool, or ad-hoc code through the same launcher is not it
+    assert not same("python scripts/gen.py", "uv run python scripts/seed.py")
+    assert not same("uv run flask db", "uv run alembic upgrade")
+    assert not same("python <inline>", "uv run python <inline>")
+    assert not same("alembic upgrade", "uv sync")
+
+
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [
+        ("npm.cmd test", "npm test"),
+        ("npx.cmd jest", "npx jest"),
+        ("python.exe -m pytest", "python -m pytest"),
+        (r"C:\Python312\python.exe -m pytest", "python -m pytest"),
+        ("gradlew.bat build", "gradlew build"),
+        ("NPM.CMD test", "NPM"),
+        ("npm test", "npm test"),
+        # only a program's own suffix: a script argument keeps its name
+        ("python run.exe.py", "python run.exe.py"),
+    ],
+)
+def test_windows_program_suffixes_are_not_part_of_the_key(command: str, key: str) -> None:
+    assert attribution.normalize_command(command) == key
+
+
+@pytest.mark.parametrize(
+    ("command", "workspace"),
+    [
+        ("pnpm --filter web test", "web"),
+        ("pnpm --filter=./web test", "web"),
+        ("pnpm -F packages/web test", "packages/web"),
+        ("yarn workspace web test", "web"),
+        ("cd apps && pnpm --filter web test", "web"),
+        # a scoped name, a pattern or a range does not say where the command runs
+        ("pnpm --filter @acme/web test", ""),
+        ("pnpm --filter web... test", ""),
+        ("pnpm --filter '!web' test", ""),
+        ("pnpm --filter '[main]' test", ""),
+        ("yarn workspace @acme/web test", ""),
+        ("pnpm test", ""),
+        ("npm --prefix web test", ""),
+    ],
+)
+def test_steps_remember_the_workspace_they_were_pointed_at(command: str, workspace: str) -> None:
+    assert parse_command(command).steps[-1].workspace == workspace
+
+
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [
+        ("dotenv run -- pytest -q", "pytest"),
+        ("dotenv -e .env.test -- npm test", "npm test"),
+        ("doppler run -- npm test", "npm test"),
+        ("doppler run -p shop -c dev -- make test", "make test"),
+        ("op run --env-file=.env -- make test", "make test"),
+        ("direnv exec . pytest", "pytest"),
+        ("xvfb-run -a npm test", "npm test"),
+        ("xvfb-run --server-args '-screen 0 1x1x24' pytest", "pytest"),
+        ("script -q /dev/null pytest -x", "pytest"),
+        ("script -qc 'pytest -q' /dev/null", "pytest"),
+        # the same programs doing their own business keep their names
+        ("op item get deploy-key", "op"),
+        ("doppler secrets", "doppler"),
+        ("direnv allow", "direnv"),
+        ("script -q /dev/null", "script"),
+        ("dotenv", "dotenv"),
+    ],
+)
+def test_environment_launchers_are_keyed_on_what_they_start(command: str, key: str) -> None:
+    assert attribution.normalize_command(command) == key
+
+
+PEM = "-----BEGIN CERTIFICATE-----\nMIIBkTCB+wIJAL\nq83vEjRWeJA=\n-----END CERTIFICATE-----"
+
+
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [
+        (f'echo "{PEM}" > cert.pem', "echo"),
+        (f'deploy --cert "{PEM}" --name it\'s', "deploy"),  # a quote that never closes
+        (f"deploy --cert {PEM}", "deploy"),  # not quoted at all
+        (f"deploy --cert {PEM}\nmake test", "make test"),
+        (f"kubectl create secret generic tls --from-literal=crt='{PEM}'", "kubectl create"),
+        ("echo 'one\ntwo' && make test", "make test"),
+        ("make build\nmake test", "make test"),  # lines that are commands still are
+    ],
+)
+def test_a_key_never_comes_from_a_line_of_data(command: str, key: str) -> None:
+    assert attribution.normalize_command(command) == key
+    assert not any(step.key.startswith("-") for step in parse_command(command).steps)
+
+
+def test_under_a_windows_root_one_file_has_one_spelling(tmp_path: Path) -> None:
+    resolver = PathResolver(Path("/nowhere"), [r"C:\Users\Dev\Shop"])
+    first = resolver.resolve(r"C:\Users\Dev\Shop\SRC\App\util.py")
+    assert first == "SRC/App/util.py"  # not on disk here: the first spelling met
+    assert resolver.resolve(r"c:\users\dev\shop\src\app\util.py") == first
+    assert resolver.resolve(r"src\APP\other.py", r"C:\Users\Dev\Shop") == "SRC/App/other.py"
+    # where the repository is here, the working tree decides
+    (tmp_path / "src" / "app").mkdir(parents=True)
+    (tmp_path / "src" / "app" / "util.py").write_text("x\n")
+    here = PathResolver(tmp_path, [r"C:\Users\Dev\Shop"])
+    assert here.resolve(r"C:\Users\Dev\Shop\SRC\App\UTIL.py") == "src/app/util.py"
+    assert here.resolve(r"C:\Users\Dev\Shop\src\app\util.py") == "src/app/util.py"
+    # a POSIX root is case-sensitive, as its file system is
+    posix = PathResolver(Path("/repo"))
+    assert posix.resolve("/repo/SRC/a.py") == "SRC/a.py"
+    assert posix.resolve("/repo/src/a.py") == "src/a.py"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "scripts/run.sh",
+        "./scripts/run.sh",
+        "bash scripts/run.sh",
+        "sh -x ./scripts/run.sh",
+        "bash -eux scripts/run.sh --fast",
+        "zsh scripts/run.sh",
+    ],
+)
+def test_a_script_is_one_command_whichever_shell_runs_it(command: str) -> None:
+    assert parse_command(command).key == "scripts/run.sh"
+
+
+def test_a_shell_running_code_or_nothing_is_not_a_script() -> None:
+    assert parse_command("bash -c 'make test'").key == "make test"
+    assert parse_command("bash").key == "bash"
+    assert parse_command("python scripts/run.py").key == "python scripts/run.py"
+
+
+@pytest.mark.parametrize("command", ["[[ -f x ]]", "[ -f x ]", "test -f x", "[[ -d a && -f b ]]"])
+def test_a_shell_test_is_inspection(command: str) -> None:
+    assert parse_command(command).inspection

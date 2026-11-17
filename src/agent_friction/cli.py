@@ -26,7 +26,13 @@ from agent_friction.report import (
     render_markdown,
     render_terminal,
 )
-from agent_friction.report._common import all_items, find_dir, find_target, plural
+from agent_friction.report._common import (
+    all_items,
+    command_candidates,
+    find_dir,
+    find_target,
+    plural,
+)
 from agent_friction.report.terminal import render_detail, render_dir_detail
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_GATE = 0, 1, 2, 3
@@ -37,6 +43,14 @@ class UsageError(AgentFrictionError):
 
 
 _REL = re.compile(r"^(\d+)\s*([hdwm])$")
+_FORMAT_ALIASES = {"md": "markdown", "txt": "terminal", "text": "terminal", "htm": "html"}
+
+
+def _format_name(value: str) -> str:
+    """Accept the file-extension spellings too: `-f md` is `-f markdown`."""
+    return _FORMAT_ALIASES.get(value.lower(), value.lower())
+
+
 _EXT_FORMAT = {
     ".html": "html",
     ".htm": "html",
@@ -77,7 +91,15 @@ def _resolve_repo(args: argparse.Namespace, err: TextIO) -> None:
     cwd = Path.cwd()
     root = _find_repo_root(cwd)
     if root is not None and root != cwd:
-        err.write(f"agent-friction: using the repository root {root}\n")
+        err.write(
+            f"agent-friction: using the repository root {root} "
+            "(pass . to map only this directory)\n"
+        )
+    elif root is None and getattr(args, "from_json", None) is None:
+        err.write(
+            f"agent-friction: note: {cwd} is not inside a git repository; mapping it as the "
+            "repository (pass the repo path to choose another)\n"
+        )
     args.repo = Path() if root is None or root == cwd else root
 
 
@@ -152,9 +174,12 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
         "--since",
         type=parse_when,
         metavar="WHEN",
-        help="only events after WHEN (30d, 2026-01-31); a session that straddles it is cut",
+        help="only events from WHEN on (30d, 2w, 12h, 3m = three months, or 2026-01-31; "
+        "dates and times without a zone are UTC); a session that straddles it is cut",
     )
-    g.add_argument("--until", type=parse_when, metavar="WHEN", help="only events before WHEN")
+    g.add_argument(
+        "--until", type=parse_when, metavar="WHEN", help="only events before WHEN (same forms, UTC)"
+    )
     g.add_argument("--no-git", action="store_true", help="skip git history (human-rework signal)")
     g.add_argument(
         "--repo-alias",
@@ -204,7 +229,7 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
     g.add_argument(
         "--max-evidence",
         type=_positive_int,
-        default=5,
+        default=None,
         metavar="N",
         help="evidence items kept per hotspot (default 5; 20 for show)",
     )
@@ -213,6 +238,7 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-friction",
+        allow_abbrev=False,
         description="Map where coding agents lose time, make mistakes, and need human "
         "correction in your codebase, with the evidence to decide what to fix.",
         epilog="Examples:\n"
@@ -226,13 +252,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
-    scan = sub.add_parser("scan", help="analyse agent sessions and print the friction map")
+    scan = sub.add_parser(
+        "scan", allow_abbrev=False, help="analyse agent sessions and print the friction map"
+    )
     scan.add_argument("repo", nargs="?", type=Path, help=_REPO_HELP)
     _add_input_options(scan)
     out = scan.add_argument_group("output")
     out.add_argument(
         "-f",
         "--format",
+        type=_format_name,
         choices=FORMATS,
         help="output format (default: terminal, or inferred from --output extension)",
     )
@@ -255,7 +284,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="exit 3 if any hotspot scores at least SCORE (for CI gates)",
     )
 
-    show = sub.add_parser("show", help="show the evidence behind one file, directory, or command")
+    show = sub.add_parser(
+        "show", allow_abbrev=False, help="show the evidence behind one file, directory, or command"
+    )
     show.add_argument("target", help="repo-relative file or directory, or a normalized command")
     show.add_argument("repo_pos", nargs="?", type=Path, metavar="repo", help=_REPO_HELP)
     show.add_argument("--repo", type=Path, help=argparse.SUPPRESS)
@@ -267,14 +298,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="read a saved `scan -f json` result instead of scanning",
     )
     show.add_argument("--color", choices=("auto", "always", "never"), default="auto")
+    show.add_argument(
+        "-f",
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="text (default), or json: the matching hotspot and directory entries",
+    )
+    show.add_argument("-o", "--output", type=Path, help="write to FILE instead of stdout")
     _add_input_options(show)
 
-    cmp_ = sub.add_parser("compare", help="compare two saved scans: did friction go down?")
+    cmp_ = sub.add_parser(
+        "compare", allow_abbrev=False, help="compare two saved scans: did friction go down?"
+    )
     cmp_.add_argument("before", type=Path, help="earlier `scan -f json` result")
     cmp_.add_argument("after", type=Path, help="later `scan -f json` result")
     cmp_.add_argument(
-        "-f", "--format", choices=("terminal", "markdown", "json"), default="terminal"
+        "-f",
+        "--format",
+        type=_format_name,
+        choices=("terminal", "markdown", "json"),
+        help="output format (default: terminal, or inferred from --output extension)",
     )
+    cmp_.add_argument("-o", "--output", type=Path, metavar="FILE", help="write to FILE")
     cmp_.add_argument(
         "--threshold",
         type=float,
@@ -303,11 +349,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="compare scans whose repository names differ (e.g. after a rename)",
     )
+    cmp_.add_argument("--color", choices=("auto", "always", "never"), default="auto")
+    cmp_.add_argument(
+        "--allow-overlap",
+        action="store_true",
+        help="compare scans whose time windows overlap (the same sessions on both sides "
+        "dilute or hide any change)",
+    )
     cmp_.add_argument(
         "--fail-on-regression", action="store_true", help="exit 3 if anything regressed or is new"
     )
 
-    src = sub.add_parser("sources", help="list the transcripts that would be analysed")
+    src = sub.add_parser(
+        "sources", allow_abbrev=False, help="list the transcripts that would be analysed"
+    )
     src.add_argument("repo", nargs="?", type=Path, help=_REPO_HELP)
     src.add_argument(
         "-t",
@@ -329,39 +384,122 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _analyze(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
-    from agent_friction.engine import AnalyzeOptions, analyze
+def _note_removed_worktrees(repo: Path, err: TextIO) -> None:
+    """Sessions recorded in a vanished sibling (a removed worktree?) are not read: say so."""
+    from agent_friction.discovery import removed_sibling_sessions
+
+    try:
+        found = removed_sibling_sessions(repo.absolute())
+    except OSError:
+        return
+    for directory, count in found[:3]:
+        err.write(
+            f"agent-friction: note: {plural(count, 'session')} ran in {directory}, which no "
+            f"longer exists (a removed worktree?); pass --repo-alias {directory} to include them\n"
+        )
+
+
+def _analyze(args: argparse.Namespace, repo: Path, err: TextIO | None = None) -> dict[str, Any]:
+    from agent_friction.engine import AnalyzeOptions, NoTranscriptsError, analyze
     from agent_friction.gitsignals import DEFAULT_AGENT_PATTERNS
 
     if not repo.is_dir():
         raise AgentFrictionError(f"{repo}: not a directory (pass the repository root)")
-    result = analyze(
-        AnalyzeOptions(
-            repo=repo,
-            transcripts=args.transcripts,
-            since=args.since,
-            until=args.until,
-            include_git=not args.no_git,
-            include_excerpts=not args.no_excerpts,
-            max_evidence=args.max_evidence,
-            repo_aliases=tuple(args.repo_alias),
-            rework_window_days=args.rework_days,
-            agent_commit_patterns=(
-                [*DEFAULT_AGENT_PATTERNS, *args.agent_commit] if args.agent_commit else None
-            ),
-            bot_commit_patterns=[f"^author: .*(?:{p})" for p in args.bot_author],
-            allow_no_transcripts=args.allow_empty,
-        )
+    for given in args.transcripts or []:
+        # Checked even with --allow-empty: a mistyped path in CI would otherwise pass every
+        # gate with a git-only report.
+        if not given.expanduser().exists():
+            raise AgentFrictionError(f"transcript path does not exist: {given}")
+    options = AnalyzeOptions(
+        repo=repo,
+        transcripts=args.transcripts,
+        since=args.since,
+        until=args.until,
+        include_git=not args.no_git,
+        include_excerpts=not args.no_excerpts,
+        max_evidence=args.max_evidence if args.max_evidence is not None else 5,
+        repo_aliases=tuple(args.repo_alias),
+        rework_window_days=args.rework_days,
+        agent_commit_patterns=(
+            [*DEFAULT_AGENT_PATTERNS, *args.agent_commit] if args.agent_commit else None
+        ),
+        bot_commit_patterns=[f"^author: .*(?:{p})" for p in args.bot_author],
+        allow_no_transcripts=args.allow_empty,
+        # Every hotspot goes into the result: JSON, HTML, compare and show need the whole
+        # list; --top only trims the terminal and Markdown views.
+        max_hotspots=None,
     )
+    try:
+        result = analyze(options)
+    except NoTranscriptsError as exc:
+        if args.no_git:
+            raise
+        raise NoTranscriptsError(
+            f"{exc} For a map from the git history alone, run again with --allow-empty."
+        ) from None
+    if err is not None and args.transcripts is None and not args.repo_alias:
+        _note_removed_worktrees(repo, err)
     if int(result.get("totals", {}).get("sessions", 0)) == 0 and not args.allow_empty:
+        from agent_friction.engine import session_directories
+
         window = " in the selected time window" if (args.since or args.until) else ""
+        where = ""
+        try:
+            seen = session_directories(options, limit=3, mask_home=False)
+        except AgentFrictionError:
+            seen = []
+        if seen:
+            listed = ", ".join(f"{d} ({plural(n, 'session')})" for d, n in seen)
+            where = (
+                f" The sessions in these transcripts ran in {listed}; if one of those is this "
+                f"repository on another machine, pass --repo-alias {seen[0][0]}."
+            )
         raise AgentFrictionError(
             f"found transcripts, but no agent session touched {repo.resolve()}{window}, "
             "so there is nothing to analyse. Check the repo path, --since/--until, or "
-            "--repo-alias (if sessions were recorded at another path). "
+            "--repo-alias (if sessions were recorded at another path)." + where + " "
             "Pass --allow-empty to produce an empty report anyway."
         )
     return result
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _row_problem(data: dict[str, Any]) -> str | None:
+    """The first field compare and show rely on that is missing or has the wrong type."""
+    for key in ("hotspots", "commands", "directories"):
+        rows = data.get(key)
+        if rows is None and key == "directories":
+            continue
+        if not isinstance(rows, list):
+            return f"{key} is not a list"
+        for i, row in enumerate(rows):
+            where = f"{key}[{i}]"
+            if not isinstance(row, dict):
+                return f"{where} is not an object"
+            if not isinstance(row.get("path"), str):
+                return f"{where}.path is missing or not a string"
+            if not _is_int(row.get("events")):
+                return f"{where}.events is missing or not an integer"
+            for field in ("sessions", "exposure_sessions", "episodes"):
+                if field in row and not _is_int(row[field]):
+                    return f"{where}.{field} is not an integer"
+            for field in ("score", "est_minutes_lost"):
+                value = row.get(field, 0)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return f"{where}.{field} is not a number"
+            if not isinstance(row.get("recommendations", []), list):
+                return f"{where}.recommendations is not a list"
+    exposure = data.get("exposure")
+    if exposure is not None:
+        if not isinstance(exposure, dict):
+            return "exposure is not an object"
+        for kind, table in exposure.items():
+            if not isinstance(table, dict) or not all(_is_int(v) for v in table.values()):
+                return f"exposure.{kind} is not a map of integers"
+    return None
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -387,18 +525,24 @@ def _load_json(path: Path) -> dict[str, Any]:
         ) from None
     except json.JSONDecodeError as exc:
         raise AgentFrictionError(f"{path}: not valid JSON ({exc})") from None
+    except RecursionError:
+        raise AgentFrictionError(f"{path}: not valid JSON (nested too deeply)") from None
     if not isinstance(data, dict) or "schema_version" not in data:
         raise AgentFrictionError(
             f"{path}: not an agent-friction result (make one with `scan -f json`)"
         )
     if data["schema_version"] == 1 and not (
         isinstance(data.get("totals"), dict)
-        and isinstance(data["totals"].get("sessions"), int)
+        and _is_int(data["totals"].get("sessions"))
         and all(isinstance(data.get(k), list) for k in ("hotspots", "commands"))
     ):
         raise AgentFrictionError(
             f"{path}: not an agent-friction result (make one with `scan -f json`)"
         )
+    if data["schema_version"] == 1:
+        problem = _row_problem(data)
+        if problem:
+            raise AgentFrictionError(f"{path}: not a valid scan: {problem}")
     if data["schema_version"] != 1:
         raise AgentFrictionError(
             f"{path}: schema_version {data['schema_version']} is not supported by "
@@ -409,11 +553,21 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _write(text: str, output: Path | None, stdout: TextIO) -> None:
     if output is None:
-        stdout.write(text)
+        try:
+            stdout.write(text)
+            stdout.flush()
+        except BrokenPipeError:
+            raise
+        except OSError as exc:  # e.g. a full disk behind a redirect
+            raise AgentFrictionError(f"cannot write the report: {exc.strerror or exc}") from None
         return
     if not output.parent.is_dir():
-        raise UsageError(f"{output.parent}: directory does not exist")
-    output.write_text(text, encoding="utf-8")
+        # Exit 1 like any other file that cannot be written (read-only, full disk).
+        raise AgentFrictionError(f"cannot write {output}: {output.parent} does not exist")
+    try:
+        output.write_text(text, encoding="utf-8", errors="replace")
+    except OSError as exc:  # read-only dir, full disk, file locked by another program
+        raise AgentFrictionError(f"cannot write {output}: {exc.strerror or exc}") from None
 
 
 def _utf8_safe(stream: TextIO) -> TextIO:
@@ -437,6 +591,13 @@ def _utf8_safe(stream: TextIO) -> TextIO:
     return stream
 
 
+def _warn_unreadable(result: dict[str, Any], stderr: TextIO) -> None:
+    for src in result.get("sources", []):
+        if src.get("kind") == "unreadable":
+            why = src.get("error", "unreadable")
+            stderr.write(f"agent-friction: skipped {src.get('path', '?')}: {why}\n")
+
+
 def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     if args.output is not None and str(args.output) == "-":
         args.output = None  # `-o -` means standard output, as usual
@@ -453,7 +614,8 @@ def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
             )
             return EXIT_USAGE
     fmt = fmt or "terminal"
-    result = _analyze(args, args.repo)
+    result = _analyze(args, args.repo, stderr)
+    _warn_unreadable(result, stderr)
     if fmt == "json":
         text = render_json(result)
     elif fmt == "markdown":
@@ -478,35 +640,143 @@ def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     return EXIT_OK
 
 
+def _target_in_repo(target: str, repo: Path | None) -> str:
+    """Turn an absolute or cwd-relative path inside the repo into a repo-relative one."""
+    if repo is None:
+        return target
+    candidate = Path(target).expanduser()
+    if not candidate.is_absolute():
+        if not candidate.exists():
+            return target  # a repo-relative path, a suffix, or a command
+        candidate = Path.cwd() / candidate
+    try:
+        rel = candidate.resolve().relative_to(repo.resolve())
+    except (OSError, ValueError):
+        return target
+    return rel.as_posix() if rel.parts else target
+
+
+# Flags that choose what a scan reads; a saved scan (--from) was already made without them.
+_SCAN_ONLY = (
+    ("transcripts", "-t/--transcripts"),
+    ("since", "--since"),
+    ("until", "--until"),
+    ("no_git", "--no-git"),
+    ("repo_alias", "--repo-alias"),
+    ("agent_commit", "--agent-commit"),
+    ("bot_author", "--bot-author"),
+    ("allow_empty", "--allow-empty"),
+)
+
+
+def _check_from_json_flags(args: argparse.Namespace) -> None:
+    given = [flag for dest, flag in _SCAN_ONLY if getattr(args, dest, None)]
+    if getattr(args, "rework_days", 14) != 14:
+        given.append("--rework-days")
+    if given:
+        raise UsageError(
+            f"{', '.join(given)} {'is' if len(given) == 1 else 'are'} not valid with --from: "
+            "the saved scan was already made; pass them to `scan` instead"
+        )
+
+
 def _cmd_show(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    if not args.target.strip():
+        raise UsageError("show needs a target: a file, a directory, or a command")
     if args.from_json is not None:
+        _check_from_json_flags(args)
         result = _load_json(args.from_json)
+        if args.no_excerpts and (result.get("settings") or {}).get("excerpts", True):
+            raise UsageError(
+                f"{args.from_json} was scanned with transcript text; --no-excerpts cannot remove "
+                "it afterwards. Make the saved scan with `scan --no-excerpts -f json`"
+            )
+        if args.max_evidence is not None:
+            for h in all_items(result):
+                h["evidence"] = list(h.get("evidence") or [])[: args.max_evidence]
     else:
-        args.max_evidence = max(args.max_evidence, 20)
-        result = _analyze(args, args.repo)
-    color = _use_color(args.color, stdout)
-    item = find_target(result, args.target)
-    node = find_dir(result, args.target)
-    if item is not None and item.get("kind") != "dir":
-        stdout.write(render_detail(result, item, color=color))
+        if args.max_evidence is None:
+            args.max_evidence = 20
+        result = _analyze(args, args.repo, stderr)
+    output = None if args.output is None or str(args.output) == "-" else args.output
+    color = output is None and args.format == "text" and _use_color(args.color, stdout)
+    target = _target_in_repo(args.target, getattr(args, "repo", None))
+    item = find_target(result, target)
+    node = find_dir(result, target)
+    if item is None and node is None:
+        several = command_candidates(result, target)
+        if several:
+            listed = ", ".join(repr(str(h.get("path"))) for h in several[:8])
+            stderr.write(
+                f"agent-friction: {args.target!r} ran in several directories; name one: {listed}\n"
+            )
+            return EXIT_USAGE
+        stderr.write(
+            f"agent-friction: no friction recorded for {args.target!r}. "
+            "Run `agent-friction scan` to list hotspots.\n"
+        )
+        return EXIT_ERROR
+    if args.format == "json":
+        doc = {
+            "schema_version": result.get("schema_version", 1),
+            "target": target,
+            "hotspot": item,
+            "directory": node,
+        }
+        _write(json.dumps(doc, indent=2, sort_keys=True) + "\n", output, stdout)
         return EXIT_OK
-    if node is not None or item is not None:
+    if item is not None and item.get("kind") != "dir":
+        text = render_detail(result, item, color=color)
+    else:
         # A directory: its rolled-up subtree first, then friction attributed to the
         # directory itself (for example searches that came back empty there).
-        if node is not None:
-            stdout.write(render_dir_detail(result, node, color=color))
+        text = render_dir_detail(result, node, color=color) if node is not None else ""
         if item is not None:
-            stdout.write(
+            text += (
                 "\nFriction attributed to the directory itself "
                 "(for example searches in it that found nothing):\n\n"
-            )
-            stdout.write(render_detail(result, item, color=color))
-        return EXIT_OK
-    stderr.write(
-        f"agent-friction: no friction recorded for {args.target!r}. "
-        "Run `agent-friction scan` to list hotspots.\n"
-    )
-    return EXIT_ERROR
+            ) + render_detail(result, item, color=color)
+    _write(text, output, stdout)
+    return EXIT_OK
+
+
+def _event_span(result: dict[str, Any]) -> tuple[datetime | None, datetime | None]:
+    """The first and last event a scan saw, from its ``window``."""
+    window = result.get("window") or {}
+
+    def when(*keys: str) -> datetime | None:
+        for key in keys:
+            value = window.get(key)
+            if isinstance(value, str):
+                try:
+                    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        return None
+
+    return when("first_event", "start"), when("last_event", "end")
+
+
+def _check_windows(before: dict[str, Any], after: dict[str, Any]) -> None:
+    """Refuse scans whose windows overlap or are swapped: the verdicts would be wrong."""
+    (b_first, b_last), (a_first, a_last) = _event_span(before), _event_span(after)
+    if None in (b_first, b_last, a_first, a_last):
+        return
+    assert b_first and b_last and a_first and a_last
+    if a_last < b_first:
+        raise AgentFrictionError(
+            "the 'after' scan ends before the 'before' scan starts: the arguments look "
+            "swapped. Pass the older scan first: compare BEFORE.json AFTER.json"
+        )
+    if a_first <= b_last:
+        cut = (b_last + timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        raise AgentFrictionError(
+            f"the scans overlap: 'after' starts at {a_first:%Y-%m-%d %H:%M} UTC, before "
+            f"'before' ends at {b_last:%Y-%m-%d %H:%M} UTC, so the same sessions are on "
+            f"both sides. Re-run the later scan with --since {cut} (or both with a shared "
+            "--until/--since date), or pass --allow-overlap."
+        )
 
 
 def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
@@ -527,6 +797,14 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
             f"these scans are of different repositories ({names[0]!r} vs {names[1]!r}). "
             "Pass --allow-repo-mismatch if the repository was renamed."
         )
+    if not args.allow_overlap:
+        _check_windows(before, after)
+    roots = (before.get("repo", {}).get("root"), after.get("repo", {}).get("root"))
+    if roots[0] != roots[1] and None not in roots:
+        stderr.write(
+            f"agent-friction: note: the scans were made from different checkouts "
+            f"({roots[0]} vs {roots[1]}); paths are compared relative to each root\n"
+        )
     changes = compare(
         before,
         after,
@@ -543,26 +821,52 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
             + (", so the regression gate is not applied" if args.fail_on_regression else "")
             + "\n"
         )
-    if args.format == "json":
+    output = None if args.output is None or str(args.output) == "-" else args.output
+    fmt = args.format
+    if fmt is None and output is not None:
+        fmt = {".md": "markdown", ".json": "json"}.get(output.suffix.lower())
+    if fmt == "json":
         payload = [c.to_dict() for c in changes]
-        stdout.write(json.dumps({"changes": payload}, indent=2, sort_keys=True) + "\n")
+        doc = {
+            "schema_version": 1,
+            "tool": {"name": "agent-friction", "version": __version__},
+            "before": {
+                "repo": before.get("repo"),
+                "window": before.get("window"),
+                "sessions": sessions[0],
+            },
+            "after": {
+                "repo": after.get("repo"),
+                "window": after.get("window"),
+                "sessions": sessions[1],
+            },
+            "low_sample": low_sample,
+            "changes": payload,
+        }
+        text = json.dumps(doc, indent=2, sort_keys=True) + "\n"
     else:
-        stdout.write(render_compare(before, after, changes, markdown=args.format == "markdown"))
-    if (
-        args.fail_on_regression
-        and not low_sample
-        and any(c.status in ("regressed", "new") for c in changes)
-    ):
+        color = output is None and fmt in (None, "terminal") and _use_color(args.color, stdout)
+        text = render_compare(before, after, changes, markdown=fmt == "markdown", color=color)
+    _write(text, output, stdout)
+    tripped = [c for c in changes if c.status in ("regressed", "new")]
+    if args.fail_on_regression and not low_sample and tripped:
+        listed = ", ".join(f"{c.path} ({c.status})" for c in tripped[:5])
+        more = f" and {len(tripped) - 5} more" if len(tripped) > 5 else ""
+        print(
+            f"agent-friction: --fail-on-regression: {len(tripped)} "
+            f"target{'s' if len(tripped) != 1 else ''} regressed or new: {listed}{more}",
+            file=stderr,
+        )
         return EXIT_GATE
     return EXIT_OK
 
 
 def _cmd_sources(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
-    from agent_friction.engine import AnalyzeOptions, inspect_transcripts
+    from agent_friction.engine import AnalyzeOptions, inspect_sources
 
     if not args.repo.is_dir():
         raise AgentFrictionError(f"{args.repo}: not a directory (pass the repository root)")
-    report = inspect_transcripts(
+    report = inspect_sources(
         AnalyzeOptions(
             repo=args.repo,
             transcripts=args.transcripts,
@@ -571,14 +875,28 @@ def _cmd_sources(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         )
     )
     unreadable = 0
-    for path, events, skipped in report:
-        if events == 0:
+    for entry in report:
+        path = entry["path"]
+        events = int(entry.get("events", 0))
+        skipped = int(entry.get("skipped_lines", 0))
+        dupes = int(entry.get("duplicate_lines", 0))
+        encoding = str(entry.get("encoding") or "")
+        extra = [] if encoding in ("", "utf-8") else [f"read as {encoding}"]
+        if entry.get("error") or (Path(path).is_file() and not os.access(path, os.R_OK)):
+            unreadable += 1
+            note = f"  (unreadable: {entry.get('error') or 'permission denied'})"
+        elif events == 0 and dupes:
+            note = f"  (nothing new: all {plural(dupes, 'line')} repeat an earlier file)"
+        elif events == 0:
             unreadable += 1
             note = "  (no events: empty, binary, or not a transcript)"
-        elif skipped:
-            note = f"  ({events} events, {plural(skipped, 'line')} skipped)"
         else:
-            note = f"  ({events} events)"
+            parts = [plural(events, "event")]
+            if skipped:
+                parts.append(f"{plural(skipped, 'line')} skipped")
+            if dupes:
+                parts.append(f"{plural(dupes, 'line')} already read from an earlier file")
+            note = f"  ({', '.join(parts + extra)})"
         stdout.write(f"{path}{note}\n")
     if unreadable:
         stderr.write(f"agent-friction: {plural(unreadable, 'file')} contained nothing to analyse\n")

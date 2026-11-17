@@ -293,3 +293,255 @@ def test_a_repo_wide_reformat_is_not_rework(repo: Repo) -> None:
     repo.commit(6, "fix: broken imports everywhere", {n: lines(BASE, l3="fixed") for n in names})
     history = gitsignals.read_history(repo.path)
     assert not gitsignals.is_sweep(history.commits[-1])
+
+
+def test_a_commit_that_announces_new_work_is_rework_only_right_away(repo: Repo) -> None:
+    by_agent = lines(BASE, l3="agent 3")
+    repo.commit(1, "init", {"a.py": BASE, "b.py": BASE, "c.py": BASE})
+    repo.commit(
+        2, f"agent work\n\n{CLAUDE}", {"a.py": by_agent, "b.py": by_agent, "c.py": by_agent}
+    )
+    repo.commit(3, "feat: add sorting", {"a.py": lines(by_agent, l3="human 3")})  # next day
+    repo.commit(9, "feat: add pagination", {"b.py": lines(by_agent, l3="human 3")})  # a week on
+    repo.commit(9, "fix pagination of agent output", {"c.py": lines(by_agent, l3="human 3")})
+    history = gitsignals.read_history(repo.path)
+    found = gitsignals.find_rework(history.commits, hunks=gitsignals.HunkReader(repo.path))
+    assert sorted(f.targets[0].key for f in found) == ["a.py", "c.py"]
+    for subject in ("feat(api): x", "Add pagination", "implements paging", "new endpoint"):
+        assert gitsignals.FEATURE_SUBJECT_RE.search(subject), subject
+    for subject in ("more human work", "address review", "tidy the adapter"):
+        assert not gitsignals.FEATURE_SUBJECT_RE.search(subject), subject
+
+
+def test_a_formatter_commit_is_not_rework_at_any_size(repo: Repo) -> None:
+    by_agent = lines(BASE, l3="agent 3")
+    names = [f"f{n}.py" for n in range(5)]
+    repo.commit(1, "init", dict.fromkeys(names, BASE))
+    repo.commit(2, f"agent work\n\n{CLAUDE}", dict.fromkeys(names, by_agent))
+    repo.commit(3, "style: run black", {n: lines(by_agent, l3="agent  3") for n in names})
+    history = gitsignals.read_history(repo.path)
+    assert gitsignals.is_sweep(history.commits[-1])
+    assert gitsignals.find_rework(history.commits, hunks=gitsignals.HunkReader(repo.path)) == []
+    for subject in ("format: prettier", "Run prettier", "reformat the adapters", "lint(api): x"):
+        assert gitsignals.MECHANICAL_SUBJECT_RE.search(subject), subject
+    for subject in ("restyle the login page", "fix the linter config", "black background"):
+        assert not gitsignals.MECHANICAL_SUBJECT_RE.search(subject), subject
+
+
+def test_a_version_bump_is_not_rework(repo: Repo) -> None:
+    package = '{\n  "name": "shop",\n  "version": "1.4.0",\n  "private": true\n}\n'
+    project = '[project]\nname = "shop"\nversion = "1.4.0"\n'
+    init = '"""Shop."""\n\n__version__ = "1.4.0"\n'
+    files = {"package.json": package, "pyproject.toml": project, "shop/__init__.py": init}
+    repo.commit(1, "init", {name: text.replace("1.4.0", "1.3.0") for name, text in files.items()})
+    repo.commit(2, f"release prep\n\n{CLAUDE}", files)
+    repo.commit(3, "v1.4.1", {name: text.replace("1.4.0", "1.4.1") for name, text in files.items()})
+    history = gitsignals.read_history(repo.path)
+    reader = gitsignals.HunkReader(repo.path)
+    assert gitsignals.find_rework(history.commits, hunks=reader) == []
+    assert reader.version_only(history.commits[-1].sha) == frozenset(files)
+    # the version and something else: a human changing what the agent wrote
+    repo.commit(4, f"more\n\n{CLAUDE}", {"package.json": package.replace("true", "false")})
+    human = repo.commit(
+        5, "tidy", {"package.json": package.replace("true", "null").replace("1.4.0", "2.0.0")}
+    )
+    history = gitsignals.read_history(repo.path)
+    found = gitsignals.find_rework(history.commits, hunks=gitsignals.HunkReader(repo.path))
+    assert [f.detail["human_commit"] for f in found] == [human[:8]]
+
+
+@pytest.mark.parametrize(
+    ("line", "is_version"),
+    [
+        ('  "version": "1.4.0",', True),
+        ('version = "1.4.0"', True),
+        ('__version__ = "1.4.0"', True),
+        ('export const VERSION = "2.0.0-rc.1";', True),
+        ("version: 1.2.3", True),
+        ('  "version": getVersion(),', False),
+        ("retries = 3", False),
+        ('  "conversion": "1.4.0",', False),
+    ],
+)
+def test_version_lines(line: str, is_version: bool) -> None:
+    assert bool(gitsignals.VERSION_LINE_RE.match(line)) is is_version
+
+
+# ---- round 24 ------------------------------------------------------------------------
+
+
+def test_untracked_is_said_only_of_what_git_knows_not_to_track(repo: Repo, tmp_path: Path) -> None:
+    repo.commit(1, "init", {"build/package/Dockerfile": "FROM x\n", ".gitignore": "dist/\n"})
+    (repo.path / "dist").mkdir()
+    (repo.path / "dist" / "app.js").write_text("x\n")
+    (repo.path / "gen").mkdir()
+    (repo.path / "gen" / "new.go").write_text("package gen\n")
+    assert not gitsignals.is_untracked(repo.path, "build/package/Dockerfile")
+    assert gitsignals.is_untracked(repo.path, "dist/app.js")  # ignored
+    assert gitsignals.is_untracked(repo.path, "gen/new.go")  # never added
+    assert gitsignals.is_untracked(repo.path, "out/nothing-there.txt")
+    # where git cannot say, nothing is claimed
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert not gitsignals.is_untracked(plain, "dist/app.js")
+
+
+# ---- round 26 ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("subject", "routine"),
+    [
+        ("Bump 0.15.2", True),
+        ("Bump ecosystem-analyzer pin", True),
+        ("Update conformance suite commit hash", True),
+        ("[ty] Update typeshed reference", True),
+        ("chore(deps): bump serde from 1.0.1 to 1.0.2", True),
+        ("Release 1.4.0", True),
+        ("chore(release): 2.0.0", True),
+        ("v2.1.0", True),
+        ("Pin actions to full SHAs", True),
+        ("Vendor latest typeshed", True),
+        ("Upgrade the pinned Rust version", True),
+        ("Sync vendored typeshed stubs", True),
+        ("Prepare release notes for 0.9", True),
+        ("Update the parser to handle walrus targets", False),
+        ("Bump serde to fix the build the last bump broke", False),  # says it repairs
+        ("Fix the release workflow", False),
+        ("Rework pin handling in the resolver", False),
+        ("Add version check", False),
+    ],
+)
+def test_routine_subjects(subject: str, routine: bool) -> None:
+    from datetime import datetime, timezone
+
+    commit = gitsignals.Commit("a" * 40, datetime.now(timezone.utc), "D <d@x.test>", subject, False)
+    assert gitsignals.is_routine(commit) is routine
+
+
+def test_pin_only_hunks() -> None:
+    patch = (
+        "diff --git a/.github/workflows/ci.yaml b/.github/workflows/ci.yaml\n"
+        "--- a/.github/workflows/ci.yaml\n+++ b/.github/workflows/ci.yaml\n"
+        "@@ -10 +10 @@\n-          rev: 9f3c2ab41d\n+          rev: 51d07e1c22\n"
+        "@@ -20,2 +20,2 @@\n-  ruff==0.15.1\n-  uv: v0.9.0\n+  ruff==0.15.2\n+  uv: v0.9.1\n"
+        "@@ -30 +30 @@\n-  run: cargo test\n+  run: cargo nextest run\n"
+        "@@ -40 +40,2 @@\n-  rev: 1111111a\n+  rev: 2222222b\n+  extra: line\n"
+        "@@ -50 +50 @@\n-  timeout: 10\n+  timeout: 20\n"
+    )
+    assert gitsignals.pin_only_hunks(patch) == {
+        ".github/workflows/ci.yaml": ([(10, 11), (20, 22)], [(10, 11), (20, 22)])
+    }
+    assert gitsignals.pin_only_hunks("") == {}
+    # the next bump of a pin the agent had bumped is left out; anything else stays
+    assert gitsignals.without_pin_bumps([(10, 11)], [(10, 11)], [(10, 11)], [(10, 11)]) == []
+    assert gitsignals.without_pin_bumps([(10, 11)], [(10, 11)], [], [(10, 11)]) == [(10, 11)]
+    assert gitsignals.without_pin_bumps([(10, 11)], [(10, 11)], [(10, 11)], []) == [(10, 11)]
+    assert gitsignals.without_pin_bumps([(5, 6)], [(10, 11)], [(5, 6)], [(10, 11)]) == [(10, 11)]
+
+
+WORKFLOW = "name: ci\njobs:\n  eco:\n    env:\n      PIN: {pin}\n    steps:\n      - run: {run}\n"
+
+
+def test_a_ruff_like_history_of_pin_bumps_and_releases_is_not_rework(repo: Repo) -> None:
+    path = ".github/workflows/ecosystem.yaml"
+    files = {
+        path: WORKFLOW.format(pin="9f3c2ab41d07", run="cargo test"),
+        "Cargo.toml": 'version = "0.15.0"\n',
+    }
+    repo.commit(1, "initial", files)
+    agent = f"\n\n{CLAUDE}"
+    repo.commit(
+        2,
+        "Bump ecosystem-analyzer pin" + agent,
+        {path: WORKFLOW.format(pin="51d07e1c2280", run="cargo test")},
+    )
+    # the next bump, with a subject that says so
+    repo.commit(
+        3,
+        "Bump ecosystem-analyzer pin",
+        {path: WORKFLOW.format(pin="aa07e1c22811", run="cargo test")},
+    )
+    repo.commit(
+        4,
+        "Update conformance suite commit hash" + agent,
+        {path: WORKFLOW.format(pin="bb07e1c22822", run="cargo test")},
+    )
+    # ... and one whose subject says nothing: the hunk itself is only a hash
+    repo.commit(
+        5,
+        "ecosystem: newer analyzer",
+        {path: WORKFLOW.format(pin="cc07e1c22833", run="cargo test")},
+    )
+    repo.commit(6, "Set the version" + agent, {"Cargo.toml": 'version = "0.15.1"\n'})
+    repo.commit(7, "Bump 0.15.2", {"Cargo.toml": 'version = "0.15.2"\n'})
+    history = gitsignals.read_history(repo.path)
+    reader = gitsignals.HunkReader(repo.path)
+    assert gitsignals.find_rework(history.commits, hunks=reader) == []
+    # a human changing what the agent's pin bump did *not* only bump is still rework
+    repo.commit(
+        8,
+        "Rework the job" + agent,
+        {path: WORKFLOW.format(pin="dd07e1c22844", run="cargo nextest run")},
+    )
+    human = repo.commit(
+        9,
+        "ecosystem: plain cargo test again",
+        {path: WORKFLOW.format(pin="dd07e1c22844", run="cargo test")},
+    )
+    history = gitsignals.read_history(repo.path)
+    (found,) = gitsignals.find_rework(history.commits, hunks=gitsignals.HunkReader(repo.path))
+    assert found.detail["human_commit"] == human[:8] and found.targets[0].key == path
+
+
+def test_after_a_formatter_commit_line_overlap_no_longer_counts(repo: Repo) -> None:
+    repo.commit(1, "initial", {"a.py": BASE, "b.py": BASE})
+    by_agent = lines(BASE, l3="agent 3", l4="agent 4")
+    repo.commit(2, f"feat: agent work\n\n{CLAUDE}", {"a.py": by_agent, "b.py": by_agent})
+    formatted = lines(by_agent, l3="agent  3")
+    repo.commit(3, "style: run black", {"a.py": formatted})
+    # a human feature edit of the same line, after the formatter rewrote the file
+    repo.commit(4, "use the new client", {"a.py": lines(formatted, l3="human 3")})
+    # the file the formatter did not touch is compared as before
+    repo.commit(4, "use the new client there too", {"b.py": lines(by_agent, l3="human 3")})
+    history = gitsignals.read_history(repo.path)
+    found = gitsignals.find_rework(history.commits, hunks=gitsignals.HunkReader(repo.path))
+    assert [f.targets[0].key for f in found] == ["b.py"]
+    # ... but a commit that says it fixes the agent's work still counts
+    repo.commit(5, f"more\n\n{CLAUDE}", {"a.py": lines(formatted, l5="agent 5")})
+    repo.commit(6, "style: run black", {"a.py": lines(formatted, l5="agent  5")})
+    repo.commit(7, "fix: the agent's handler", {"a.py": lines(formatted, l5="human 5")})
+    history = gitsignals.read_history(repo.path)
+    found = gitsignals.find_rework(history.commits, hunks=gitsignals.HunkReader(repo.path))
+    assert [(f.targets[0].key, f.detail["variant"]) for f in found] == [
+        ("b.py", "overlap"),
+        ("a.py", "subject"),
+    ]
+
+
+# ---- round 30: files that left the tree -----------------------------------------------------
+
+
+def test_removal_says_when_a_file_left_the_tree_and_what_it_became(repo: Repo) -> None:
+    body = "".join(f"export const v{i} = {i};\n" for i in range(30))
+    repo.commit(1, "add", {"src/api.ts": body, "src/old.ts": "x\n", "src/keep.ts": "y\n"})
+    repo.git("mv", "src/api.ts", "src/client.ts")
+    repo.git("rm", "-q", "src/old.ts")
+    repo.git("commit", "-q", "-m", "rename the client", date="2026-10-05T12:00:00+00:00")
+    assert gitsignals.removal(repo.path, "src/api.ts") == (
+        "2026-10-05T12:00:00+00:00",
+        "src/client.ts",
+    )
+    assert gitsignals.removal(repo.path, "src/old.ts") == ("2026-10-05T12:00:00+00:00", None)
+    # a file that is there, one git never knew, one only missing from the working tree
+    assert gitsignals.removal(repo.path, "src/keep.ts") == (None, None)
+    assert gitsignals.removal(repo.path, "src/never.ts") == (None, None)
+    (repo.path / "src" / "keep.ts").unlink()
+    assert gitsignals.removal(repo.path, "src/keep.ts") == (None, None)
+    # relative to a scanned subdirectory
+    assert gitsignals.removal(repo.path / "src", "api.ts")[1] == "client.ts"
+
+
+def test_removal_without_git_knows_nothing(tmp_path: Path) -> None:
+    assert gitsignals.removal(tmp_path, "a.py") == (None, None)
+    assert gitsignals.removal(tmp_path / "missing", "a.py") == (None, None)

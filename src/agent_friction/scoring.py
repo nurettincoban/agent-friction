@@ -6,13 +6,13 @@ so a score means the same thing in every run.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from agent_friction.model import Finding
 from agent_friction.signals import (
-    BY_ID,
     COMMAND_FAILURE,
+    EDIT_MISS,
     EDIT_THRASH,
     HUMAN_REWORK,
     NO_CONVERGENCE,
@@ -22,6 +22,8 @@ from agent_friction.signals import (
     RETRY_LOOP,
     SEARCH_MISS,
     SEVERITY,
+    STALE_EDIT,
+    TOOL_FAILURE,
 )
 
 #: Mean session points at which the severity factor reaches 1 - 1/e (about 0.63).
@@ -41,13 +43,29 @@ HIGH_MIN_SIGNALS = 2
 #: a file, a search that finds nothing, a follow-up that merely sounds like a correction).
 #: A target with nothing but these is a lead at most: its score is capped, it gets no
 #: recommendation, and it cannot fail a build on its own.
-WEAK_ALONE_SIGNALS = frozenset({READ_LOOP, EDIT_THRASH, SEARCH_MISS, PROBABLE_CORRECTION})
+WEAK_ALONE_SIGNALS = frozenset(
+    {READ_LOOP, EDIT_THRASH, SEARCH_MISS, PROBABLE_CORRECTION, TOOL_FAILURE}
+)
 WEAK_ONLY_SCORE_CAP = 19.0
 #: The same signals are too weak to justify "high" confidence on their own.
 WEAK_SIGNALS = WEAK_ALONE_SIGNALS
 #: Signals computed from other findings. Next to their source they are the same evidence
 #: counted again, so they do not add a distinct signal type for confidence.
 DERIVED_SIGNALS = {RETRY_LOOP: COMMAND_FAILURE, NO_CONVERGENCE: COMMAND_FAILURE}
+#: Mechanical signals that happen at some rate wherever agents edit files. A file is
+#: singled out for one of them only if it shows clearly more than the repository's rate.
+BASELINE_SIGNALS = frozenset({EDIT_MISS, STALE_EDIT})
+#: The rate assumed where the repository's own data shows less (or too little to say):
+#: one visit in twenty. A *visit* is one session (episode) touching one file.
+BASELINE_FLOOR = 0.05
+#: Visits to other files needed before the repository's own rate is used instead.
+BASELINE_MIN_VISITS = 20
+#: False discovery rate accepted among the files called "above the baseline".
+BASELINE_ALPHA = 0.05
+#: Marks a finding that is no more than the background rate (``Finding.detail``).
+WITHIN_BASELINE = "within_baseline"
+#: Finding detail: the file stands out, but only against the fixed floor (`Baseline.sparse`).
+NO_COMPARISON = "no_comparison"
 #: Session ids with this prefix are agent commits (git), not transcript sessions.
 GIT_SESSION_PREFIX = "git:"
 
@@ -101,7 +119,7 @@ def score_items(items: Iterable[Item], exposure_sessions: int | None = None) -> 
     per_session: dict[str, float] = {}
     for finding, share in items:
         contribution = SEVERITY[finding.signal] * finding.weight * share
-        per_session[finding.session_id] = per_session.get(finding.session_id, 0.0) + contribution
+        per_session[finding.unit] = per_session.get(finding.unit, 0.0) + contribution
     sessions = tuple(
         SessionPoints(sid, round(raw, 3), round(session_points(raw), 3))
         for sid, raw in sorted(per_session.items())
@@ -129,8 +147,99 @@ def score_items(items: Iterable[Item], exposure_sessions: int | None = None) -> 
     )
 
 
+def binomial_tail(k: int, n: int, p: float) -> float:
+    """P(X >= k) for X ~ Binomial(n, p)."""
+    if k <= 0:
+        return 1.0
+    if k > n or p <= 0.0:
+        return 0.0
+    below = sum(math.comb(n, i) * p**i * (1.0 - p) ** (n - i) for i in range(k))
+    return max(0.0, 1.0 - below)
+
+
+def poisson_tail(k: int, mean: float) -> float:
+    """P(X >= k) for X ~ Poisson(mean)."""
+    if k <= 0:
+        return 1.0
+    if mean <= 0.0:
+        return 0.0
+    term = below = math.exp(-mean)
+    for i in range(1, k):
+        term *= mean / i
+        below += term
+    return max(0.0, 1.0 - below)
+
+
+@dataclass(frozen=True)
+class Baseline:
+    """How often one mechanical signal happens across the repository's files."""
+
+    visits: int  # sessions x files touched, summed over files
+    hit_visits: int  # ... of which those with at least one such event
+    events: int
+    files: int  # files with at least one such event
+    above: tuple[str, ...]  # files clearly above the rate, most significant first
+    #: Files judged against ``BASELINE_FLOOR`` alone: the other files had too few visits
+    #: to give a rate, so "more than the rest of the repository" cannot be said of them.
+    sparse: tuple[str, ...] = ()
+
+    @property
+    def rate(self) -> float:
+        return round(self.hit_visits / self.visits, 3) if self.visits else 0.0
+
+
+def baseline(counts: Mapping[str, tuple[int, int, int]]) -> Baseline:
+    """Which files show clearly more of a mechanical signal than the rest.
+
+    ``counts`` maps a file to ``(visits, visits with the signal, events)``; files
+    without the signal belong in it too (they are most of the denominator).
+
+    For each file with events, the rate of the *other* files is the null
+    hypothesis (never less than ``BASELINE_FLOOR``; the floor alone when the
+    others add up to fewer than ``BASELINE_MIN_VISITS`` visits). Two tails are
+    computed under it: binomial, for this many visits with the signal among the
+    file's visits, and Poisson, for this many events (a burst of forty misses in
+    one session is one visit). The smaller, doubled for having had two tries, is
+    the file's p-value. Files are then selected by the Benjamini-Hochberg
+    procedure at ``BASELINE_ALPHA``, so that looking at many files does not by
+    itself produce outliers.
+    """
+    visits = sum(v for v, _, _ in counts.values())
+    hits = sum(h for _, h, _ in counts.values())
+    events = sum(e for _, _, e in counts.values())
+    tested: list[tuple[float, str]] = []
+    sparse: list[str] = []
+    for name, (own_visits, own_hits, own_events) in counts.items():
+        if not own_events:
+            continue
+        others = visits - own_visits
+        hit_rate = event_rate = BASELINE_FLOOR
+        if others >= BASELINE_MIN_VISITS:
+            hit_rate = max(BASELINE_FLOOR, (hits - own_hits) / others)
+            event_rate = max(BASELINE_FLOOR, (events - own_events) / others)
+        else:
+            sparse.append(name)
+        n = max(own_visits, own_hits)
+        by_visits = binomial_tail(own_hits, n, min(hit_rate, 1.0))
+        by_events = poisson_tail(own_events, n * event_rate)
+        tested.append((min(1.0, 2.0 * min(by_visits, by_events)), name))
+    tested.sort()
+    passed = 0
+    for rank, (p_value, _) in enumerate(tested, 1):
+        if p_value <= BASELINE_ALPHA * rank / len(tested):
+            passed = rank
+    return Baseline(
+        visits=visits,
+        hit_visits=hits,
+        events=events,
+        files=len(tested),
+        above=tuple(name for _, name in tested[:passed]),
+        sparse=tuple(sorted(sparse)),
+    )
+
+
 def confidence(session_ids: Iterable[str], signal_ids: Iterable[str]) -> str:
-    """``high``: 3+ transcript sessions and 2+ signal types (not only weak ones).
+    """``high``: 3+ transcript sessions and 2+ signal types, weak ones not counted.
     ``medium``: 2+ transcript sessions. ``low``: otherwise.
 
     Git evidence never raises confidence: agent commits are not counted as
@@ -141,11 +250,9 @@ def confidence(session_ids: Iterable[str], signal_ids: Iterable[str]) -> str:
     for derived, source in DERIVED_SIGNALS.items():
         if source in kinds:
             kinds.discard(derived)  # one phenomenon, not two kinds of evidence
-    if (
-        sessions >= HIGH_MIN_SESSIONS
-        and len(kinds) >= HIGH_MIN_SIGNALS
-        and not kinds <= WEAK_SIGNALS
-    ):
+    # Weak kinds never corroborate: many edits next to a check that will not pass are
+    # one stall seen twice, not two kinds of evidence.
+    if sessions >= HIGH_MIN_SESSIONS and len(kinds - WEAK_SIGNALS) >= HIGH_MIN_SIGNALS:
         return "high"
     if sessions >= MEDIUM_MIN_SESSIONS and kinds:
         return "medium"
@@ -188,26 +295,40 @@ def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}es" if noun.endswith(("s", "sh", "ch", "x")) else f"{count} {noun}s"
 
 
-#: How each signal is counted in a sentence ("6 edit misses", "1 retry loop").
-SIGNAL_NOUNS: dict[str, str] = {
-    "user-correction": "user correction",
-    "retry-loop": "retry loop",
-    "tool-rejected": "declined tool call",
-    "user-interrupt": "user interrupt",
-    "edit-miss": "edit miss",
-    "edit-revert": "reverted edit",
-    "command-failure": "command failure",
-    "human-rework": "human rework commit",
-    "edit-thrash": "edit thrash episode",
-    "permission-denied": "permission denial",
-    "stale-edit": "stale edit",
-    "path-miss": "path miss",
-    "search-miss": "search miss",
-    "read-loop": "read loop",
-    "probable-correction": "probable correction",
-    "file-too-large": "refused read of a too-large file",
-    "no-convergence": "edit-and-run stretch that never went green",
+#: How each signal is counted in a sentence: (one, several). Written out, because a
+#: phrase cannot be pluralized by rule ("stretches that never went green").
+SIGNAL_NOUNS: dict[str, tuple[str, str]] = {
+    "user-correction": ("user correction", "user corrections"),
+    "retry-loop": ("retry loop", "retry loops"),
+    "tool-rejected": ("declined tool call", "declined tool calls"),
+    "user-interrupt": ("user interrupt", "user interrupts"),
+    "edit-miss": ("edit miss", "edit misses"),
+    "edit-revert": ("reverted edit", "reverted edits"),
+    "command-failure": ("command failure", "command failures"),
+    "human-rework": ("human rework commit", "human rework commits"),
+    "edit-thrash": ("edit thrash episode", "edit thrash episodes"),
+    "permission-denied": ("permission denial", "permission denials"),
+    "stale-edit": ("stale edit", "stale edits"),
+    "path-miss": ("path miss", "path misses"),
+    "search-miss": ("search miss", "search misses"),
+    "read-loop": ("read loop", "read loops"),
+    "probable-correction": ("probable correction", "probable corrections"),
+    "file-too-large": (
+        "refused read of a too-large file",
+        "refused reads of a too-large file",
+    ),
+    "no-convergence": (
+        "edit-and-run stretch that never went green",
+        "edit-and-run stretches that never went green",
+    ),
+    "tool-failure": ("tool failure", "tool failures"),
 }
+
+
+def count_signal(signal_id: str, count: int) -> str:
+    """``"3 edit misses"``: a signal counted in words."""
+    one, several = SIGNAL_NOUNS[signal_id]
+    return f"{count} {one if count == 1 else several}"
 
 
 def explain(
@@ -217,6 +338,7 @@ def explain(
     level: str,
     agent_commits: int = 0,
     capped: bool = False,
+    episodes: int = 0,
 ) -> str:
     """One-sentence reason for a hotspot's score and confidence.
 
@@ -224,10 +346,7 @@ def explain(
     are git commits with rework that no transcript session accounts for.
     """
     events = sum(count for _, count in signal_counts)
-    top = ", ".join(
-        _plural(count, SIGNAL_NOUNS.get(sid, BY_ID[sid].title.lower()))
-        for sid, count in signal_counts[:3]
-    )
+    top = ", ".join(count_signal(sid, count) for sid, count in signal_counts[:3])
     more = len(signal_counts) - 3
     if more > 0:
         top += f", {more} more signal type{'s' if more > 1 else ''}"
@@ -245,6 +364,10 @@ def explain(
         where = f"all {exposure} sessions that touched it"
     else:
         where = f"{sessions} of the {exposure} sessions that touched it"
+    if episodes > max(sessions, 1) and where:
+        # one long-running session id that was picked up again and again
+        where += f" (in {episodes} separate episodes of work)"
+        reason = reason.replace("across sessions", "across episodes of work")
     if agent_commits:
         commits = _plural(agent_commits, "agent commit")
         where = f"{where} and {commits}" if where else commits
@@ -268,24 +391,42 @@ def is_weak(finding: Finding) -> bool:
     invocation errors, retry loops and human reactions make a command a hotspot.
     """
     if finding.signal == COMMAND_FAILURE:
+        detail = finding.detail
+        if "fixed_by_setup" in detail or "recurring_red" in detail or "standing_test" in detail:
+            # it took a setup step to pass, or it stays red session after session
+            return False
+        if detail.get("push_rejected") == "recurring":
+            return False  # pushing without fetching first, session after session
         # an ordinary failure, or a mistyped name that the agent then spelled correctly
-        return finding.detail.get("variant") == "ordinary" or "typo_of" in finding.detail
+        return detail.get("variant") == "ordinary" or "typo_of" in detail
     if finding.signal == NO_CONVERGENCE:
         return finding.detail.get("uncertain") == "1"  # its end was not seen
+    if finding.signal in BASELINE_SIGNALS and finding.detail.get(WITHIN_BASELINE) == "1":
+        return True  # no more of it than anywhere else in this repository
+    if finding.signal == STALE_EDIT:
+        # a new file's write refused by the harness's read-first rule
+        return finding.detail.get("variant") == "unread-write"
     if finding.signal == PATH_MISS:
         return finding.detail.get("probe") == "1"  # looking for an optional README, .env, ...
     return finding.signal in WEAK_ALONE_SIGNALS
+
+
+def wanted_hit(finding: Finding) -> bool:
+    """Did the agent behind this search miss go on looking, and not for leftovers?"""
+    return "wanted" in finding.detail and "hygiene" not in finding.detail
 
 
 def weak_only(findings: Iterable[Finding]) -> bool:
     """True if there is evidence and all of it is of the weak-alone kind.
 
     One thing lifts a search miss out of that class: the *same* pattern missed
-    in two or more sessions. A name that agents keep looking for is not a
-    one-off probe before creating something new.
+    in two or more sessions, each time by an agent that then went on looking
+    (``wanted``). A name that agents keep looking for is not a one-off probe
+    before creating something new, and not a check that no debug statement is
+    left.
     """
     found = list(findings)
-    stuck = {f.session_id for f in found if f.signal == NO_CONVERGENCE and not is_weak(f)}
+    stuck = {f.unit for f in found if f.signal == NO_CONVERGENCE and not is_weak(f)}
     if not found or not all(is_weak(f) or f.signal == NO_CONVERGENCE for f in found):
         return False
     if len(stuck) >= MEDIUM_MIN_SESSIONS:
@@ -293,6 +434,6 @@ def weak_only(findings: Iterable[Finding]) -> bool:
     sessions_by_pattern: dict[str, set[str]] = {}
     for finding in found:
         pattern = finding.detail.get("pattern", "").casefold()
-        if finding.signal == SEARCH_MISS and pattern:
-            sessions_by_pattern.setdefault(pattern, set()).add(finding.session_id)
+        if finding.signal == SEARCH_MISS and pattern and wanted_hit(finding):
+            sessions_by_pattern.setdefault(pattern, set()).add(finding.unit)
     return not any(len(s) >= MEDIUM_MIN_SESSIONS for s in sessions_by_pattern.values())

@@ -16,12 +16,23 @@ noise out of the verdict.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
 from agent_friction.report._common import all_items, fmt_minutes, plural
 
-STATUSES = ("regressed", "new", "improved", "resolved", "inactive", "too-little-data", "unchanged")
+STATUSES = (
+    "regressed",
+    "new",
+    "improved",
+    "resolved",
+    "replaced",
+    "inactive",
+    "too-little-data",
+    "unchanged",
+)
+_USE_TITLE = re.compile(r"use `([^`]+)`")
 
 
 @dataclass(frozen=True)
@@ -35,6 +46,9 @@ class Change:
     after_exposure: int
     before_score: float
     after_score: float
+    replaced_by: str | None = None  # the working command agents ran instead (status "replaced")
+    replacement_sessions: int = 0
+    replacement_events: int = 0
 
     @property
     def before_rate(self) -> float | None:
@@ -64,6 +78,9 @@ class Change:
             "after_events_per_10_sessions": self.after_rate,
             "before_score": self.before_score,
             "after_score": self.after_score,
+            "replaced_by": self.replaced_by,
+            "replacement_sessions": self.replacement_sessions,
+            "replacement_events": self.replacement_events,
         }
 
 
@@ -87,6 +104,21 @@ def _exposure(result: dict[str, Any], kind: str, path: str, item: dict[str, Any]
         table = exposure.get(kind)
         return int(table.get(path, 0)) if isinstance(table, dict) else 0
     return int(result.get("totals", {}).get("sessions", 0))
+
+
+def _replacement(item: dict[str, Any] | None) -> str | None:
+    """The command the "before" scan told agents to use instead of this one, if any."""
+    if item is None or item.get("kind") != "command":
+        return None
+    for rec in item.get("recommendations") or []:
+        if not isinstance(rec, dict) or rec.get("id") != "use-the-working-command":
+            continue
+        if isinstance(rec.get("replacement"), str) and rec["replacement"]:
+            return str(rec["replacement"])
+        found = _USE_TITLE.search(str(rec.get("title", "")))  # scans made before the field
+        if found:
+            return found.group(1)
+    return None
 
 
 def compare(
@@ -141,6 +173,23 @@ def compare(
             needed = (a_exp,) if status == "new" else (b_exp, a_exp)
             if min(needed) < min_exposure:
                 status = "too-little-data"
+        replaced_by, r_sessions, r_events = None, 0, 0
+        substitute = _replacement(b) if status == "inactive" else None
+        if substitute is not None:
+            r_item = ai.get(("command", substitute))
+            r_sessions = _exposure(after, "command", substitute, r_item)
+            if r_item is not None:
+                r_sessions = max(r_sessions, int(r_item.get("sessions", 0)))
+                r_events = int(r_item.get("events", 0))
+            # The fix worked if agents now run the replacement, in enough sessions, and it
+            # does not fail more often than the old command did.
+            r_rate = _rate(r_events, r_sessions)
+            if (
+                r_sessions >= max(min_exposure, 1)
+                and r_rate is not None
+                and (br is None or r_rate < br)
+            ):
+                status, replaced_by = "replaced", substitute
         changes.append(
             Change(
                 kind=kind,
@@ -152,6 +201,9 @@ def compare(
                 after_exposure=a_exp,
                 before_score=float(b.get("score", 0)) if b else 0.0,
                 after_score=float(a.get("score", 0)) if a else 0.0,
+                replaced_by=replaced_by,
+                replacement_sessions=r_sessions if replaced_by else 0,
+                replacement_events=r_events if replaced_by else 0,
             )
         )
     order = {s: i for i, s in enumerate(STATUSES)}
@@ -175,26 +227,49 @@ def _fmt_rate(rate: float | None) -> str:
 
 
 def render_compare(
-    before: dict[str, Any], after: dict[str, Any], changes: list[Change], *, markdown: bool = False
+    before: dict[str, Any],
+    after: dict[str, Any],
+    changes: list[Change],
+    *,
+    markdown: bool = False,
+    color: bool = False,
 ) -> str:
-    """Human-readable comparison, as plain text or Markdown."""
+    """Human-readable comparison, as plain text or Markdown (optionally with ANSI color)."""
+    from agent_friction.report.terminal import Style
+
+    st = Style(color and not markdown)
+    tint = {
+        "regressed": st.red,
+        "new": st.red,
+        "improved": st.green,
+        "resolved": st.green,
+        "replaced": st.green,
+    }
     groups = [
         ("regressed", "Regressed"),
         ("new", "New friction"),
         ("improved", "Improved"),
         ("resolved", "Resolved (touched afterwards, no friction)"),
-        ("inactive", "No activity afterwards (no evidence either way)"),
+        ("replaced", "Replaced (agents ran the recommended command instead)"),
+        ("inactive", "Not touched afterwards (no evidence either way)"),
         ("too-little-data", "Too few sessions touched these to tell"),
     ]
     out: list[str] = ["# Friction comparison" if markdown else "agent-friction compare", ""]
-    out += [summary_line(before, after), ""]
+    out += [
+        summary_line(before, after),
+        "Rates are friction events per 10 sessions that touched the target; "
+        "(8/2 → 4/2) means 8 events in 2 such sessions before, 4 in 2 after.",
+        "",
+    ]
     any_change = False
     for status, label in groups:
         rows = [c for c in changes if c.status == status]
         if not rows:
             continue
         any_change = True
-        out.append(f"## {label} ({len(rows)})" if markdown else f"{label} ({len(rows)})")
+        count = plural(len(rows), "target")
+        heading = f"{label} ({count})"
+        out.append(f"## {heading}" if markdown else st.bold(tint.get(status, str)(heading)))
         for c in rows:
             suffix = "/" if c.kind == "dir" else ""
             name = f"$ {c.path}" if c.kind == "command" else c.path + suffix
@@ -206,10 +281,24 @@ def render_compare(
                 f" {c.after_events}/{c.after_exposure}), score {c.before_score:.1f} →"
                 f" {c.after_score:.1f}"
             )
+            if c.replaced_by:
+                body = (
+                    f"not run afterwards; `{c.replaced_by}` ran in"
+                    f" {plural(c.replacement_sessions, 'session')} with"
+                    f" {plural(c.replacement_events, 'friction event')}"
+                    f" (before: {c.before_events}/{c.before_exposure}, score {c.before_score:.1f})"
+                )
             out.append(f"- `{name}`: {body}" if markdown else f"  {name}: {body}")
         out.append("")
     if not any_change:
         out += ["No meaningful change.", ""]
+    if any(c.status == "inactive" for c in changes):
+        out += [
+            "A target nobody touched afterwards proves nothing either way. That is the expected "
+            "result of a fix that steers agents away from it (a denied edit, a stated boundary): "
+            "confirm it with the sessions that did the same job instead.",
+            "",
+        ]
     if any(
         (c.status == "regressed" and c.after_score < c.before_score)
         or (c.status == "improved" and c.after_score > c.before_score)

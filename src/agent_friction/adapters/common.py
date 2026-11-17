@@ -7,6 +7,7 @@ import re
 from datetime import datetime, timezone
 
 from agent_friction import model
+from agent_friction.model import Event
 
 #: Stored tool output is clipped to this many characters (head and tail are kept).
 MAX_OUTPUT_CHARS = 4000
@@ -23,19 +24,35 @@ EARLIEST_YEAR = 2000
 def parse_ts(value: object) -> datetime | None:
     """Parse an ISO-8601 timestamp (or epoch seconds). Naive values are taken as UTC.
 
-    Anything unparsable, or earlier than ``EARLIEST_YEAR``, counts as missing.
+    Epoch numbers may be seconds, milliseconds, microseconds or nanoseconds (told
+    apart by their size), given as a number or as a string of digits. Anything
+    unparsable, earlier than ``EARLIEST_YEAR`` or more than a year ahead of today
+    counts as missing: such a value is a placeholder or a unit mix-up, and one of
+    them would stretch a session over decades.
     """
     parsed = _parse_ts(value)
-    return parsed if parsed is not None and parsed.year >= EARLIEST_YEAR else None
+    if parsed is None or parsed.year < EARLIEST_YEAR:
+        return None
+    return parsed if parsed.year <= datetime.now(timezone.utc).year + 1 else None
+
+
+_EPOCH_RE = re.compile(r"^\d{9,19}(?:\.\d+)?$")
 
 
 def _parse_ts(value: object) -> datetime | None:
     if isinstance(value, bool):
         return None
+    if isinstance(value, str) and _EPOCH_RE.match(value.strip()):
+        value = float(value)
     if isinstance(value, (int, float)):
         try:
-            # Heuristic: values this large are epoch milliseconds.
-            seconds = value / 1000 if value > 1e11 else value
+            # Heuristic: 1e11 seconds is the year 5138. Larger values count in
+            # milliseconds, microseconds or nanoseconds.
+            seconds = float(value)
+            for limit, unit in ((1e17, 1e9), (1e14, 1e6), (1e11, 1e3)):
+                if seconds > limit:
+                    seconds /= unit
+                    break
             return datetime.fromtimestamp(seconds, tz=timezone.utc)
         except (OverflowError, OSError, ValueError):
             return None
@@ -72,14 +89,44 @@ QUESTION_TOOL_RE = re.compile(
 )
 
 
+#: A closing courtesy, not a question that a "no" could answer: "Anything else?",
+#: "Let me know if you'd like changes?", "How does that look?".
+_CLOSER_RE = re.compile(
+    r"\b(?:anything (?:else|more|further)|let me know|what(?:'s| is| would you like)? next"
+    r"|what else|what would you like|what do you think|how (?:does|do|did) (?:that|this|it|they)"
+    r"|how(?:'s| is) that|any (?:questions|thoughts|feedback|concerns|other|further|more)"
+    r"|(?:does|do|did) (?:that|this|it|these|they) (?:look|work|help|make sense|seem|feel)"
+    r"|make sense|sound good|look good|looks? (?:right|ok|okay)|happy with|feel free)\b",
+    re.I,
+)
+#: An offer to do something or a request to choose, which a "no" answers: "Should I
+#: also rename it?", "Do you want tests?", "Which module?", "A or B?".
+_OFFER_RE = re.compile(
+    r"\b(?:should (?:i|we)|shall (?:i|we)|(?:do|did) you (?:want|need|prefer|mean)"
+    r"|would you (?:like|prefer|rather)|want me to|like me to|(?:can|may|could|might) i\b"
+    r"|is it (?:ok|okay|fine|alright)|(?:ok|okay|fine|alright) (?:if|to|with)"
+    r"|(?:go ahead|proceed|continue)\b|which\b|or\b|(?:are|were) you\b"
+    r"|is (?:that|this|it) (?:the|what)"
+    r"|ready (?:to|for)|permission|confirm)",
+    re.I,
+)
+
+
 def asks_question(text: str) -> bool:
-    """Does agent prose put a question to the human in its final paragraph?
+    """Does agent prose end by offering something or asking the human to choose?
 
     "Want me to refactor util.py? It would take a few minutes." asks, although
-    it does not end in a question mark. Only this one bit is kept of the text.
+    it does not end in a question mark; a "No, leave it" after it is an answer.
+    "Done. Anything else?" and "Let me know if that works?" are closing
+    courtesies: what the human says next is about the work, not about them.
+    Only this one bit is kept of the text.
     """
     paragraphs = [p for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
-    return bool(paragraphs) and "?" in paragraphs[-1]
+    if not paragraphs:
+        return False
+    sentences = re.split(r"(?<=[.!?])\s+|\n", paragraphs[-1])
+    questions = [s for s in sentences if s.rstrip(" *_)\"'").endswith("?")]
+    return any(_OFFER_RE.search(q) is not None and _CLOSER_RE.search(q) is None for q in questions)
 
 
 def edit_pairs(
@@ -90,9 +137,23 @@ def edit_pairs(
     added = frozenset(
         (digest(old), digest(new))
         for old, new in pairs
-        if old.strip() and old != new and old in new
+        if (old.strip() and old != new and old in new) or is_toggle(old, new)
     )
     return hashed, added
+
+
+_SWITCH_VALUE_RE = re.compile(
+    r"\b(?:true|false|on|off|yes|no|0|1|debug|info|warn|warning|error|verbose|quiet|none|null)\b",
+    re.I,
+)
+
+
+def is_toggle(old: str, new: str) -> bool:
+    """Do ``old`` and ``new`` differ only in a switch's value (``DEBUG = True`` / ``False``)?"""
+    old, new = old.strip(), new.strip()
+    if "\n" in old or "\n" in new or old == new or not _SWITCH_VALUE_RE.search(old):
+        return False
+    return _SWITCH_VALUE_RE.sub("@", old) == _SWITCH_VALUE_RE.sub("@", new)
 
 
 def digest(text: str) -> str:
@@ -105,6 +166,90 @@ def clip_output(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
         return text
     head = limit // 4
     return text[:head] + "\n…\n" + text[-(limit - head) :]
+
+
+#: Statuses of a background command that say how it ended (not "running", not "killed":
+#: stopping a server the agent started is not a failure of the server).
+_FINISHED = frozenset({"completed", "failed", "error", "exited", "done", "success"})
+_FAILED = frozenset({"failed", "error"})
+OUTCOME_SUFFIX = "#outcome"
+
+
+def pair_background(events: list[Event]) -> list[Event]:
+    """Give commands launched in the background the outcome that was reported later.
+
+    The acknowledgement of a launch says nothing about how the command ended, so it
+    is marked ``background`` (outcome unknown). When the outcome arrives
+    (``BACKGROUND_OUTCOME``: a poll of the task, a notification), it becomes a
+    call and a result of the launched command at that point of the transcript, to be
+    judged like a foreground run. Outcomes of tasks that no shell call launched, and
+    of tasks that were killed or are still running, are dropped.
+    """
+    calls: dict[str, Event] = {}
+    launched: dict[str, Event] = {}
+    reported: dict[str, Event] = {}
+    out: list[Event] = []
+    for event in events:
+        if event.kind == model.TOOL_CALL:
+            calls[event.call_id] = event
+            if event.background and event.op == model.OP_SHELL:
+                launched[event.call_id] = event
+        elif event.kind == model.TOOL_RESULT:
+            call = calls.get(event.call_id)
+            launch = call is not None and call.op == model.OP_SHELL
+            if launch and call is not None and (call.background or event.background):
+                event.background = call.background = True
+                launched[event.call_id] = call
+                if event.task_id:
+                    launched[event.task_id] = call
+            else:
+                event.background = False
+        elif event.kind == model.BACKGROUND_OUTCOME:
+            poll = calls.get(event.call_id)
+            task = event.task_id or (poll.task_id if poll is not None else "")
+            started = launched.get(task)
+            status = event.task_status.lower()
+            if started is None or (status not in _FINISHED and event.exit_code is None):
+                continue
+            if status in ("killed", "stopped", "running", "cancelled", "canceled"):
+                continue
+            earlier = reported.get(started.call_id)
+            if earlier is not None:
+                if not earlier.output and event.output:
+                    earlier.output = event.output  # the notification came before the log
+                continue
+            code = event.exit_code
+            failed = bool(code) or (status in _FAILED and code is None) or not event.ok
+            call_id = started.call_id + OUTCOME_SUFFIX
+            out.append(
+                Event(
+                    kind=model.TOOL_CALL,
+                    line=event.line,
+                    ts=event.ts,
+                    cwd=started.cwd,
+                    call_id=call_id,
+                    op=model.OP_SHELL,
+                    tool=started.tool,
+                    command=started.command,
+                    derived=True,
+                )
+            )
+            result = Event(
+                kind=model.TOOL_RESULT,
+                line=event.line,
+                ts=event.ts,
+                cwd=started.cwd,
+                call_id=call_id,
+                ok=not failed,
+                error=model.ERR_EXIT if failed else "",
+                exit_code=code if code is not None else (1 if failed else 0),
+                output=event.output,
+            )
+            reported[started.call_id] = result
+            out.append(result)
+            continue
+        out.append(event)
+    return out
 
 
 _AMBIGUOUS_RE = re.compile(r"Found (\d+) matches of the string to replace", re.I)
@@ -166,6 +311,7 @@ def classify_error(text: str) -> tuple[str, int | None]:
         "file does not exist" in lowered
         or "no such file or directory" in lowered
         or "enoent" in lowered
+        or lowered.lstrip().startswith("path does not exist")
     ):
         return model.ERR_MISSING, None
     return model.ERR_OTHER, None
@@ -189,12 +335,15 @@ _DENIED_RE = re.compile(
     r"|Permission for this (?:command|tool|action|tool use) (?:was|has been) denied"
     r"|\S* ?(?:PreToolUse|PermissionRequest):\S* hook (?:error|blocking error|denied)"
     r"|[^\n]{0,80}\bhook (?:blocking error|returned blocking error|blocked this)"
+    r"|\S+ operation blocked by hook\b"
     r"|This command requires approval"
     r"|(?:The )?(?:command|tool use|action) was blocked (?:by|for)\b"
     r")",
     re.I,
 )
 _HOOK_RE = re.compile(r"\bhook\b", re.I)
+_CLASSIFIER_RE = re.compile(r"\bdenied by the (?:Claude Code )?auto[- ]mode classifier\b", re.I)
+_SAFETY_CHECK_RE = re.compile(r"\bdenied by a built-in (?:Claude Code )?safety check\b", re.I)
 
 
 def denial(text: str) -> str | None:
@@ -205,7 +354,16 @@ def denial(text: str) -> str | None:
     match = _DENIED_RE.match(stripped)
     if match is None:
         return None
-    return "hook" if _HOOK_RE.search(match.group(0)) else "permission"
+    if _HOOK_RE.search(match.group(0)):
+        return "hook"
+    # Who refused, where the harness says so in the sentence that refuses: the auto-mode
+    # classifier and the built-in safety check are not something a permission rule changes.
+    said = stripped[: match.end() + 120].split("\n", 1)[0]
+    if _CLASSIFIER_RE.search(said):
+        return "classifier"
+    if _SAFETY_CHECK_RE.search(said):
+        return "safety"
+    return "permission"
 
 
 def exit_code(text: str) -> int | None:

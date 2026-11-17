@@ -13,17 +13,21 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
 import posixpath
 import re
 import shlex
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from agent_friction.redact import redact
 
 _DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _MAX_PATH_CHARS = 1024
+#: A Windows drive as Git Bash (``/c/Users``), WSL (``/mnt/c/Users``) and Cygwin
+#: (``/cygdrive/c/Users``) spell it.
+_UNIX_DRIVE_RE = re.compile(r"^/(?:mnt/|cygdrive/)?([A-Za-z])(?=/|$)")
 
 
 def to_posix(path: str) -> str:
@@ -37,6 +41,11 @@ def to_posix(path: str) -> str:
 
 def _is_abs(path: str) -> bool:
     return path.startswith("/") or bool(_DRIVE_RE.match(path))
+
+
+#: Where agents keep worktrees inside a repository: Claude Code's
+#: ``.claude/worktrees/<name>/`` and the common ``.worktrees/<name>/``.
+_NESTED_WORKTREE_RE = re.compile(r"^(?:\.claude/worktrees|\.worktrees)/[^/]+(?:/|$)")
 
 
 class PathResolver:
@@ -70,6 +79,9 @@ class PathResolver:
         if not roots:  # pragma: no cover - absolute() always yields an absolute path
             roots.append("/")
         self.primary = roots[0]
+        self._not_ours: set[str] = set()  # directories `adopt` has looked at and turned down
+        self._spellings: dict[str, str] = {}  # under a Windows root: one spelling per name
+        self.drives = any(_DRIVE_RE.match(root) for root in roots)
         # Longest first so a worktree nested inside the repo wins over the repo.
         self.roots: tuple[str, ...] = tuple(sorted(roots, key=lambda r: (-len(r), r)))
 
@@ -89,11 +101,16 @@ class PathResolver:
         path = to_posix(path)
         if path == "~" or path.startswith("~/"):
             path = self.home + path[1:]
+        base = to_posix(cwd) if cwd else self.primary
         if not _is_abs(path):
-            base = to_posix(cwd) if cwd else self.primary
             if not _is_abs(base):
                 return None
             path = posixpath.join(base, path)
+        elif self.drives or _DRIVE_RE.match(base):
+            # A Unix-style shell on Windows: `cd /c/Users/me/repo` is `C:/Users/me/repo`.
+            drive = _UNIX_DRIVE_RE.match(path)
+            if drive is not None:
+                path = f"{drive.group(1).upper()}:/{path[drive.end() :].lstrip('/')}"
         return posixpath.normpath(path)
 
     def _relative(self, absolute: str) -> str | None:
@@ -106,8 +123,37 @@ class PathResolver:
                 return ""
             prefix = there.rstrip("/") + "/"
             if here.startswith(prefix):
-                return absolute[len(prefix) :]
+                # A worktree kept inside the repository is the repository, also after
+                # it was merged and removed: `git worktree list` no longer knows it.
+                rel = _NESTED_WORKTREE_RE.sub("", absolute[len(prefix) :], count=1)
+                return self._one_spelling(rel) if fold else rel
         return None
+
+    def _one_spelling(self, rel: str) -> str:
+        """``rel`` as it is spelled on disk, or as it was first seen.
+
+        Under a Windows root ``SRC\\App\\util.py`` and ``src\\app\\util.py`` are one
+        file. Each name is given one spelling, directory by directory: the one the
+        working tree has, if the repository is here, and otherwise the first one met.
+        """
+        parts: list[str] = []
+        for part in rel.split("/"):
+            key = "/".join(parts).casefold() + "/" + part.casefold()
+            if key not in self._spellings:
+                self._spellings[key] = self._disk_name(parts, part) or part
+            parts.append(self._spellings[key])
+        return "/".join(parts)
+
+    def _disk_name(self, parents: Sequence[str], name: str) -> str | None:
+        try:
+            directory = self.repo.joinpath(*parents)
+            if (directory / name).exists():
+                return name
+            names = [entry.name for entry in directory.iterdir()]
+            same = [e for e in names if e.casefold() == name.casefold()]
+        except OSError:
+            return None
+        return same[0] if len(same) == 1 else None
 
     def chdir(self, cwd: str | None, moves: Iterable[str]) -> str | None:
         """Absolute directory after applying ``cd``-style ``moves`` to ``cwd``.
@@ -145,6 +191,42 @@ class PathResolver:
         if rel is None or rel == ".git" or rel.startswith(".git/"):
             return None
         return rel
+
+    def adopt(self, cwd: str | None) -> bool:
+        """Take a directory that *is* the repo under another name as one more root.
+
+        A session started through a symbolic link (``~/proj`` for ``/data/proj``)
+        records the link's spelling. If ``cwd`` exists here and its real path is
+        the repository's, or lies inside it, the spelling that stands for the
+        repo root becomes a root. Returns True if ``cwd`` is inside the repo then.
+        """
+        absolute = self._absolute(cwd, None) if cwd else None
+        if absolute is None or self._relative(absolute) is not None:
+            return absolute is not None
+        if absolute in self._not_ours:
+            return False
+        self._not_ours.add(absolute)
+        try:
+            if not Path(absolute).is_dir():
+                return False
+            real = os.path.realpath(absolute)
+            root = os.path.realpath(self.primary)
+        except (OSError, ValueError):
+            return False
+        alias = absolute
+        if real != root:
+            below = real[len(root) :] if real.startswith(root.rstrip("/") + "/") else ""
+            below = "/" + below.lstrip("/") if below else ""
+            if not below or not absolute.endswith(below):
+                return False
+            alias = absolute[: -len(below)]
+            try:
+                if os.path.realpath(alias) != root:
+                    return False
+            except (OSError, ValueError):
+                return False
+        self.roots = tuple(sorted({*self.roots, alias}, key=lambda r: (-len(r), r)))
+        return True
 
     def contains(self, cwd: str | None) -> bool:
         """True when ``cwd`` is inside the repo (unknown cwd counts as inside)."""
@@ -276,7 +358,7 @@ VALUE_OPTIONS: dict[str, frozenset[str]] = {
 #: Read-only inspection commands. Their failures are routine probing, not friction.
 INSPECTION_PROGRAMS = frozenset(
     {"ls", "cat", "head", "tail", "wc", "stat", "file", "find", "cd", "pwd", "echo", "which"}
-    | {"type", "grep", "egrep", "fgrep", "rg", "test", "[", "diff", "cmp", "true", "false"}
+    | {"type", "grep", "egrep", "fgrep", "rg", "test", "[", "[[", "diff", "cmp", "true", "false"}
     | {"command", "du", "df", "ps", "tree", "sleep", "kill", "pkill", "lsof", "awk", "jq"}
     | {"sed", "sort", "uniq", "cut", "tr", "less", "more", "printf", "date", "env", "printenv"}
     | {"hash", "pgrep", "pidof", "nc", "ss", "netstat", "whoami", "id", "uname", "hostname"}
@@ -301,7 +383,7 @@ INSPECTION_KEYS = frozenset(
 _NOT_INSPECTION_FLAGS = ("-i", "--in-place")
 _IN_PLACE_EDITORS = frozenset({"sed", "awk", "sort"})
 #: Filters whose exit status 1 means "nothing matched / differs", not "failed".
-MATCH_FILTERS = frozenset({"grep", "egrep", "fgrep", "rg", "diff", "cmp", "test", "["})
+MATCH_FILTERS = frozenset({"grep", "egrep", "fgrep", "rg", "diff", "cmp", "test", "[", "[["})
 #: Programs that only trim or count another command's output at the end of a pipeline.
 OUTPUT_TRIMMERS = frozenset(
     {"head", "tail", "wc", "sort", "uniq", "less", "more", "cut", "tr", "column", "nl"}
@@ -329,7 +411,8 @@ _SUBCOMMAND_RE = re.compile(r"^[a-z][a-z0-9:_-]*$")
 TARGET_TOOLS = frozenset({"make", "gmake", "just", "task", "rake", "nox", "tox", "invoke"})
 _TARGET_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9:_.-]*$")
 _NUMERIC_RE = re.compile(r"^[-+]?[\d.,:]+[a-z%]{0,2}$", re.I)
-_PYTHON_RE = re.compile(r"^(python|pypy)[\d.]*$")
+# ``py`` is the Windows launcher: `py -m pytest` is `python -m pytest`
+_PYTHON_RE = re.compile(r"^(?:(?:python|pypy)[\d.]*|py)$")
 _SEPARATORS = frozenset({";", "&&", "||", "&", "|", "|&", "(", ")", ";;"})
 _VENDOR_DIRS = frozenset({"bin", "node_modules", "venv", ".venv", "Scripts", ".bin"})
 _SCRIPT_RE = re.compile(r"\.[A-Za-z0-9]{1,5}$")
@@ -350,6 +433,31 @@ class Step:
     #: Directory changes in effect when the step runs, in order: earlier ``cd`` commands
     #: of the line, then its own ``-C`` / ``--prefix`` / ``--directory`` option.
     moves: tuple[str, ...] = ()
+    #: Its output never reaches the transcript: ``>/dev/null 2>&1``, ``&>/dev/null``.
+    #: Nothing in the line's output can then be this step's verdict.
+    silenced: bool = False
+    #: The file its standard output is redirected into (``cat > notes.md <<EOF``), if any.
+    into: str = ""
+    #: Wrappers stripped in front of the program, by base name (``time``, ``sudo``).
+    wrappers: tuple[str, ...] = ()
+    #: The workspace package it was told to run in (``pnpm --filter web``, ``yarn
+    #: workspace web``), if the selector reads as a directory. Where that is on disk
+    #: (``web/``, ``packages/web/``) only the repository can say.
+    workspace: str = ""
+
+
+#: Programs that, with their output redirected into a file (or, for ``tee``, given one),
+#: are a way of writing that file and nothing else.
+FILE_WRITERS = frozenset({"cat", "tee", "echo", "printf"})
+
+
+def written_file(step: Step) -> str:
+    """The file ``step`` writes if it is a plain write: ``cat > f <<EOF``, ``tee f``."""
+    if step.program not in FILE_WRITERS:
+        return ""
+    if step.program == "tee":
+        return next((a for a in step.args if not a.startswith("-")), "")
+    return step.into
 
 
 @dataclass(frozen=True)
@@ -386,40 +494,75 @@ def _strip_heredocs(command: str) -> str:
     return "\n".join(out)
 
 
+#: An armored block (a certificate, a key) passed as an argument: data, never commands.
+_ARMOR_RE = re.compile(r"-----BEGIN [^-\n]*-----.*?(?:-----END [^-\n]*-----|\Z)", re.S)
+
+
 def _tokenize(command: str) -> list[str]:
-    text = _strip_heredocs(command).replace("\\\n", " ").replace("\n", " ; ")
-    lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
+    text = _ARMOR_RE.sub("ARMORED-DATA", _strip_heredocs(command))
+    lines = text.replace("\\\n", " ")
+    lexer = shlex.shlex(lines.replace("\n", " ; "), posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     lexer.commenters = ""
     try:
         return list(lexer)
     except ValueError:  # unbalanced quotes
-        return text.split()
+        # Where a quote opens and never closes, the lines after the first are most
+        # likely the rest of a multi-line argument: the command is on the first line.
+        return lines.split("\n", 1)[0].split()
 
 
-def _segments(tokens: Sequence[str]) -> list[list[str]]:
+class _Segment(list[str]):
+    """The words of one simple command, and where its output went."""
+
+    out_null = False
+    err_null = False
+    into = ""
+
+    def redirect(self, fd: str, operator: str, target: str) -> None:
+        null = target == "/dev/null"
+        if "<" in operator:
+            return
+        if operator.startswith("&>") or (operator == ">&" and not target.isdigit()):
+            self.out_null = self.err_null = null
+        elif operator == ">&":  # `2>&1`: one stream follows the other
+            if fd == "2" and target == "1":
+                self.err_null = self.out_null
+            elif fd in ("", "1") and target == "2":
+                self.out_null = self.err_null
+        elif fd == "2":
+            self.err_null = null
+        elif fd in ("", "1"):
+            self.out_null = null
+            self.into = "" if null else target
+
+
+def _segments(tokens: Sequence[str]) -> list[_Segment]:
     """Split tokens into simple commands, dropping redirections and comments."""
-    segments: list[list[str]] = []
-    current: list[str] = []
-    skip_next = False
+    segments: list[_Segment] = []
+    current = _Segment()
+    pending: tuple[str, str] | None = None  # a redirection waiting for its target
     comment = False
     for token in tokens:
         if token in _SEPARATORS:
             if current:
                 segments.append(current)
-            current = []
+            current = _Segment()
             comment = comment and token not in (";", ";;")
-            skip_next = False
+            pending = None
             continue
         if comment:
             continue
-        if skip_next:
-            skip_next = False
+        if pending is not None:
+            current.redirect(*pending, token)
+            pending = None
             continue
-        if token[:1] in ("<", ">"):  # redirection: drop it, its target and a leading fd number
-            skip_next = token.strip("<>&") == ""
-            if current and current[-1].isdigit():
-                current.pop()
+        if token[:1] in ("<", ">") or token[:2] == "&>":
+            # redirection: drop it, its target and a leading fd number
+            fd = current.pop() if current and current[-1].isdigit() else ""
+            operator = token.rstrip("&") if token[:2] == "&>" else token
+            if token.strip("<>&|") == "":
+                pending = (fd, operator)
             continue
         if token.startswith("#") and not current:
             comment = True
@@ -441,8 +584,13 @@ def _strip_prefixes(words: Sequence[str]) -> list[str]:
             out.pop(0)
         elif head == "command" and len(out) > 1 and out[1] in ("-v", "-V"):
             return ["command"]  # `command -v docker` asks whether docker exists
-        elif head in WRAPPER_PROGRAMS:
-            out = _strip_wrapper(head, out[1:])
+        elif _unwrapped(head.rsplit("/", 1)[-1], out[1:]) is not None:
+            # `dotenv run -- pytest`, `xvfb-run npm test`: about the command they start
+            out = _unwrapped(head.rsplit("/", 1)[-1], out[1:]) or []
+        elif head in WRAPPER_PROGRAMS or (
+            _is_abs(head) and head.rsplit("/", 1)[-1] in WRAPPER_PROGRAMS
+        ):
+            out = _strip_wrapper(head.rsplit("/", 1)[-1], out[1:])  # `/usr/bin/time -v`
         else:
             inner = _container_command(out)
             if not inner:
@@ -500,6 +648,62 @@ def _container_command(words: Sequence[str]) -> list[str]:
     return []
 
 
+#: Programs that start another command with something added to its environment (secrets,
+#: a virtual display, a pseudo-terminal): subcommand that does so (``""``: none needed),
+#: and the options of theirs that take a separate value.
+ENV_LAUNCHERS: dict[str, tuple[str, frozenset[str]]] = {
+    "dotenv": ("", frozenset({"-e", "-f", "--file", "-c", "-v", "-o"})),
+    "doppler": ("run", frozenset({"-p", "--project", "-c", "--config", "-t", "--token"})),
+    "op": ("run", frozenset({"--env-file", "--account", "--session"})),
+    "direnv": ("exec", frozenset()),
+    "xvfb-run": (
+        "",
+        frozenset({"-n", "-s", "-e", "-f", "-p", "-w", "--server-num", "--server-args"})
+        | {"--error-file", "--auth-file", "--wait"},
+    ),
+}
+
+
+def _unwrapped(program: str, rest: Sequence[str]) -> list[str] | None:
+    """The words of the command ``program rest`` starts, or ``None`` if it starts none."""
+    out = list(rest)
+    if program == "script":
+        # util-linux: `script -q -c 'pytest -q' /dev/null`; BSD: `script -q /dev/null pytest`
+        while out and out[0].startswith("-") and out[0] != "--":
+            option = out.pop(0)
+            if option.startswith("-") and not option.startswith("--") and "c" in option[1:]:
+                return _tokenize(out[0]) if out else None
+            if option == "--command":
+                return _tokenize(out[0]) if out else None
+        return out[1:] if len(out) > 1 else None
+    spec = ENV_LAUNCHERS.get(program)
+    if spec is None:
+        return None
+    subcommand, takes_value = spec
+
+    def options() -> None:
+        while out and out[0].startswith("-") and out[0] != "--":
+            option = out.pop(0)
+            if option in takes_value and out:
+                out.pop(0)
+
+    options()
+    if subcommand:
+        if not out or out[0] != subcommand:
+            return None  # `op item get`, `doppler secrets`: their own business
+        out.pop(0)
+        if program == "direnv":
+            if not out:
+                return None
+            out.pop(0)  # the directory whose environment is loaded
+    elif program == "dotenv" and out and out[0] == "run":
+        out.pop(0)
+    options()
+    if out and out[0] == "--":
+        out.pop(0)
+    return out or None
+
+
 def _strip_wrapper(wrapper: str, rest: list[str]) -> list[str]:
     """Drop a wrapper's own options (with their values) and positional arguments."""
     takes_value = WRAPPER_VALUE_OPTIONS.get(wrapper, frozenset())
@@ -518,9 +722,13 @@ def _strip_wrapper(wrapper: str, rest: list[str]) -> list[str]:
     return out
 
 
+#: What Windows appends to a program's name: ``npm.cmd``, ``python.exe``, ``gradlew.bat``.
+_WINDOWS_SUFFIX_RE = re.compile(r"(?<=[^/.])\.(?:cmd|exe|bat)$", re.I)
+
+
 def _program_name(word: str) -> str:
     """Basename for absolute/vendored executables, cleaned relative path for repo scripts."""
-    word = to_posix(word)
+    word = _WINDOWS_SUFFIX_RE.sub("", to_posix(word))
     if "/" not in word:
         return word
     parts = [p for p in word.split("/") if p not in ("", ".")]
@@ -588,14 +796,109 @@ def _sanitize(key: str) -> str:
     return " ".join(kept)
 
 
+#: Launchers: programs that run another command inside an environment. The key is the
+#: launcher followed by the key of what it runs, by the ordinary rules: ``uv run python
+#: scripts/seed.py``, ``bundle exec rails test``, ``npx tsx scripts/a.ts``. The value
+#: is the subcommand that launches (none for ``npx``, ``bunx``, ``uvx``).
+LAUNCHERS: dict[str, frozenset[str]] = {
+    "uv": frozenset({"run"}),
+    "poetry": frozenset({"run"}),
+    "pipenv": frozenset({"run"}),
+    "hatch": frozenset({"run"}),
+    "pdm": frozenset({"run"}),
+    "rye": frozenset({"run"}),
+    "conda": frozenset({"run"}),
+    "mamba": frozenset({"run"}),
+    "micromamba": frozenset({"run"}),
+    "bundle": frozenset({"exec"}),
+    "pnpm": frozenset({"exec", "dlx"}),
+    "yarn": frozenset({"exec", "dlx"}),
+    "npm": frozenset({"exec"}),
+    "bun": frozenset({"x", "run"}),
+    "npx": frozenset(),
+    "bunx": frozenset(),
+    "uvx": frozenset(),
+}
+#: Options of a launching subcommand that take a value (``uv run --with rich``).
+_LAUNCH_VALUE_OPTIONS = frozenset(
+    {"--with", "--with-editable", "--with-requirements", "--python", "-p", "--group"}
+    | {"--extra", "--only-group", "--no-group", "--package", "--env-file", "--index"}
+    | {"--default-index", "--index-url", "--extra-index-url", "--project", "--directory"}
+    | {"-n", "--name", "--prefix", "--cwd", "-C", "--filter", "-F", "--from", "--script"}
+    | {"-c", "--call", "-w", "--workspace"}
+)
+
+
+def _launched(base: str, rest: Sequence[str]) -> tuple[str, list[str]] | None:
+    """``(launcher, words of the command it runs)`` if ``base rest`` launches one."""
+    launching = LAUNCHERS.get(base)
+    if launching is None:
+        return None
+    rest = _skip_options(base, rest)
+    launcher = base
+    if launching:
+        if not rest or rest[0] not in launching:
+            return None
+        launcher, rest = f"{base} {rest[0]}", list(rest[1:])
+    inner = list(rest)
+    while inner and inner[0].startswith("-"):
+        option = inner.pop(0)
+        if option == "--":
+            break
+        if option in ("-c", "--call") and base in ("npx", "npm", "pnpm"):
+            return launcher, []  # `npx -c '<shell>'`: a script, not a command name
+        if option in _LAUNCH_VALUE_OPTIONS and inner and not inner[0].startswith("-"):
+            inner.pop(0)
+    if base == "bun" and launcher == "bun run" and not (inner and _looks_like_script(inner[0])):
+        return None  # `bun run build`: a package script, named as such
+    return launcher, inner
+
+
+def launcher_split(key: str) -> tuple[str, str]:
+    """``("uv run", "python scripts/seed.py")`` for a launched key; ``("", key)`` otherwise."""
+    words = key.split()
+    if not words or words[0] not in LAUNCHERS:
+        return "", key
+    launching = LAUNCHERS[words[0]]
+    if not launching:
+        return (words[0], " ".join(words[1:])) if len(words) > 1 else ("", key)
+    if len(words) > 2 and words[1] in launching:
+        if words[0] == "bun" and words[1] == "run" and not _looks_like_script(words[2]):
+            return "", key
+        return " ".join(words[:2]), " ".join(words[2:])
+    return "", key
+
+
+def inner_key(key: str) -> str:
+    """The command a launched key runs (``pytest`` for ``uv run pytest``), or ``key``."""
+    return launcher_split(key)[1]
+
+
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+#: Switches of a shell that take no value (`-x`, `-eux`, `-e`); never `-c`, `-s`, `-o`.
+_SHELL_SWITCH_RE = re.compile(r"^-[abefhkmnptuvxBCEHPT]+$")
+
+
 def _raw_key(words: Sequence[str]) -> str:
     if not words:
         return ""
     program = _program_name(words[0])
     if _PYTHON_RE.match(program):
         program = "python"  # python3, python3.12, pypy3 ... are one command
+    elif _PIP_RE.match(program):
+        program = "pip"  # pip3, pip3.12
     rest = list(words[1:])
     base = program.rsplit("/", 1)[-1]
+    launched = _launched(base, rest) if "/" not in program else None
+    if launched is not None:
+        launcher, inner = launched
+        return f"{launcher} {_raw_key(inner)}".strip()
+    if base in _SHELLS and "/" not in program:
+        # `bash scripts/run.sh`, `sh -x ./scripts/run.sh` and `scripts/run.sh` are one
+        # command: the script. Which shell ran it, and how loudly, is not what it is.
+        script = next((w for w in rest if not _SHELL_SWITCH_RE.match(w)), "")
+        if script and _looks_like_script(script):
+            return _program_name(script)
     if base in INTERPRETERS:
         if rest and rest[0] == "-m" and len(rest) > 1:
             return f"{program} -m {rest[1]}"
@@ -622,7 +925,11 @@ def _raw_key(words: Sequence[str]) -> str:
     elif rest and _SUBCOMMAND_RE.match(rest[0]):
         parts.append(rest[0])
         if base == "yarn" and rest[0] == "workspace" and len(rest) > 2:
-            # ``yarn workspace <name> <script>``: which package, and what is run in it
+            if _workspace_directory(rest[1]) is not None:
+                # ``yarn workspace web test`` is ``yarn test`` run in ``web/``, as
+                # ``npm --prefix web test`` is: the package is where, not what
+                return _raw_key([words[0], *rest[2:]])
+            # ``yarn workspace @acme/web <script>``: which package, and what is run in it
             parts.append(rest[1])
             if _SUBCOMMAND_RE.match(rest[2]):
                 parts.append(rest[2])
@@ -651,6 +958,25 @@ def _is_inspection(words: Sequence[str], key: str) -> bool:
     )
 
 
+_PIP_RE = re.compile(r"^pip3(?:\.\d+)?$")
+#: ``pnpm --filter web test``: the package the command is run in.
+_WORKSPACE_OPTIONS = frozenset({"--filter", "-F"})
+_WORKSPACE_NAME_RE = re.compile(r"^(?:\./)?([A-Za-z0-9_][\w.-]*(?:/[A-Za-z0-9_][\w.-]*)*)/?$")
+
+
+def _workspace_directory(name: str) -> str | None:
+    """The directory a workspace selector stands for, if it reads as one.
+
+    ``web``, ``./web`` and ``packages/web`` do. A scoped package name
+    (``@acme/web``), a pattern (``web...``, ``!web``, ``{packages/*}``) and a
+    git range (``[main]``) do not: where they run cannot be read off the word.
+    """
+    found = _WORKSPACE_NAME_RE.match(name)
+    if found is None or name.endswith("..."):
+        return None
+    return found.group(1)
+
+
 #: Options with which a tool is told to work in another directory.
 _DIR_OPTIONS: dict[str, frozenset[str]] = {
     "git": frozenset({"-C"}),
@@ -672,29 +998,57 @@ _DIR_OPTIONS: dict[str, frozenset[str]] = {
 }
 
 
+#: Tools that take that option after the subcommand as well (`npm test --prefix web`).
+_DIR_ANYWHERE = frozenset({"npm", "pnpm"})
+
+
 def _own_directory(program: str, args: Sequence[str]) -> list[str]:
     """The directory a tool was pointed at with ``-C dir`` / ``--prefix=dir``, if any."""
     options = _DIR_OPTIONS.get(program)
     if not options:
         return []
     for index, word in enumerate(args):
-        if not word.startswith("-"):
+        if word == "--" or (not word.startswith("-") and program not in _DIR_ANYWHERE):
             break  # options of the tool itself come before its subcommand
         name, eq, value = word.partition("=")
         if name in options:
-            if eq:
-                return [value]
-            if index + 1 < len(args):
-                return [args[index + 1]]
+            if not eq:
+                if index + 1 >= len(args):
+                    return []
+                value = args[index + 1]
+            return [value]
     return []
+
+
+def _workspace(program: str, args: Sequence[str]) -> str:
+    """The package a step is run in: ``pnpm --filter web``, ``yarn workspace web``."""
+    if program == "yarn" and len(args) > 2 and args[0] == "workspace":
+        return _workspace_directory(args[1]) or ""
+    if program != "pnpm":
+        return ""
+    for index, word in enumerate(args):
+        if not word.startswith("-"):
+            break
+        name, eq, value = word.partition("=")
+        if name in _WORKSPACE_OPTIONS:
+            if not eq:
+                if index + 1 >= len(args):
+                    return ""
+                value = args[index + 1]
+            return _workspace_directory(value) or ""
+    return ""
+
+
+#: What no command word begins with.
+_NOT_A_COMMAND = frozenset("-=+,;:%^*?#@)]}")
 
 
 def _steps(command: str, depth: int = 0, moves: tuple[str, ...] = ()) -> list[Step]:
     steps: list[Step] = []
     for segment in _segments(_tokenize(command)):
         words = _strip_prefixes(segment)
-        if not words:
-            continue
+        if not words or words[0][:1] in _NOT_A_COMMAND:
+            continue  # `-----END`, `=value`: a line of data, not a command word
         program = _program_name(words[0]).rsplit("/", 1)[-1]
         if program in ("cd", "pushd"):
             target = next((w for w in words[1:] if not w.startswith("-") or w == "-"), "~")
@@ -715,7 +1069,26 @@ def _steps(command: str, depth: int = 0, moves: tuple[str, ...] = ()) -> list[St
             inspection or program in SETUP_PROGRAMS or program in HOUSEKEEPING_PROGRAMS
         )
         where = (*moves, *_own_directory(program, words[1:]))
-        steps.append(Step(key, program, tuple(words[1:]), inspection, significant, where))
+        silenced = segment.out_null and segment.err_null
+        args = tuple(words[1:])
+        stripped = segment[: max(len(segment) - len(words), 0)]
+        wrappers = tuple(
+            name for name in (w.rsplit("/", 1)[-1] for w in stripped) if name in WRAPPER_PROGRAMS
+        )
+        steps.append(
+            Step(
+                key,
+                program,
+                args,
+                inspection,
+                significant,
+                where,
+                silenced,
+                segment.into,
+                wrappers,
+                _workspace(program, words[1:]),
+            )
+        )
     return steps
 
 
@@ -729,17 +1102,11 @@ def _masked(command: str, program: str) -> bool:
 _MASKING = frozenset({"|", "|&", "||", "&"})
 
 
-def _status_masked(command: str, program: str, depth: int = 0) -> bool:
-    """Is the exit status of the last ``program`` step hidden by what follows it?
-
-    ``pytest | tail -5``, ``pytest; echo done`` and ``pytest || true`` report the
-    status of ``tail``, ``echo`` and (at worst) ``true``. ``pytest && echo ok``
-    does not hide a failure, and ``set -o pipefail`` restores a pipeline's.
-    """
-    tokens = _tokenize(command)
-    pieces: list[tuple[list[str], str]] = []  # (words of a simple command, operator after it)
+def _pieces(command: str) -> list[tuple[list[str], str]]:
+    """The simple commands of a line: (words, operator after it)."""
+    pieces: list[tuple[list[str], str]] = []
     current: list[str] = []
-    for token in tokens:
+    for token in _tokenize(command):
         if token in _SEPARATORS:
             if current and token not in ("(", ")"):
                 pieces.append((current, token))
@@ -750,6 +1117,83 @@ def _status_masked(command: str, program: str, depth: int = 0) -> bool:
         current.append(token)
     if current:
         pieces.append((current, ""))
+    return pieces
+
+
+def in_sequence(command: str) -> bool:
+    """Does ``command`` run commands one after another (``a; b``, ``a && b``)?
+
+    A pipeline alone (``a | tail``) does not: its output is one command's.
+    """
+    try:
+        pieces = _pieces(command)
+    except ValueError:
+        return False
+    return any(operator not in ("", "|", "|&") for _, operator in pieces[:-1])
+
+
+#: Programs that print a file given as an argument (``sed -n``, ``grep pattern file``).
+FILE_READERS = frozenset(
+    {"cat", "head", "tail", "less", "more", "nl", "bat", "grep", "egrep", "fgrep", "rg", "sed"}
+    | {"awk"}
+)
+_PATTERN_FIRST = frozenset({"grep", "egrep", "fgrep", "rg", "sed", "awk"})
+
+
+def _program_of(words: list[str]) -> tuple[str, list[str]]:
+    segments = _segments(words)
+    stripped = _strip_prefixes(segments[0]) if segments else []
+    if not stripped:
+        return "", []
+    return _program_name(stripped[0]).rsplit("/", 1)[-1], stripped[1:]
+
+
+def status_is_last_steps(command: str) -> bool:
+    """Does the line end in ``; step``, so that its exit status is that step's alone?"""
+    try:
+        pieces = [p for p in _pieces(command) if _program_of(p[0])[0]]
+    except (IndexError, ValueError, RecursionError):
+        return False
+    return len(pieces) > 1 and pieces[-2][1] == ";"
+
+
+def prints_another_file(command: str) -> bool:
+    """Does a later step of the line print a file that nothing earlier on the line names?
+
+    ``make build; cat docs/troubleshooting.md`` prints the document after the build's
+    own output, and the two cannot be told apart. ``pytest > out.log 2>&1; tail out.log``
+    prints what the test run wrote: that is the run's own output.
+    """
+    try:
+        pieces = _pieces(command)
+    except (IndexError, ValueError, RecursionError):
+        return False
+    seen: list[str] = []
+    for position, (words, _) in enumerate(pieces):
+        program, args = _program_of(words)
+        piped = position > 0 and pieces[position - 1][1] in ("|", "|&")
+        if position > 0 and seen and not piped and program in FILE_READERS:
+            files = [a for a in args if not a.startswith("-") and a not in ("<", ">", ">>")]
+            if program in _PATTERN_FIRST:
+                files = files[1:]
+            if program in ("head", "tail"):
+                files = [f for f in files if not f.isdigit()]
+            earlier = " ".join(seen)
+            if any(f.rsplit("/", 1)[-1] not in earlier for f in files):
+                return True
+        if program:
+            seen.extend(words)
+    return False
+
+
+def _status_masked(command: str, program: str, depth: int = 0) -> bool:
+    """Is the exit status of the last ``program`` step hidden by what follows it?
+
+    ``pytest | tail -5``, ``pytest; echo done`` and ``pytest || true`` report the
+    status of ``tail``, ``echo`` and (at worst) ``true``. ``pytest && echo ok``
+    does not hide a failure, and ``set -o pipefail`` restores a pipeline's.
+    """
+    pieces = _pieces(command)
     index = -1
     for position, (words, _) in enumerate(pieces):
         stripped = _strip_prefixes(_segments(words)[0] if _segments(words) else [])
@@ -778,7 +1222,66 @@ def _status_masked(command: str, program: str, depth: int = 0) -> bool:
     return after[0] in _MASKING or any(op in (";", "||") for op in after[:-1])
 
 
-def parse_command(command: str) -> ParsedCommand:
+_DRIVE_PATH_RE = re.compile(r"(?:^|[\s\"'=(])[A-Za-z]:\\")
+_WINDOWS_SEPARATOR_RE = re.compile(r"\\(?=[^\s\"'\\])")
+
+
+def is_windows_path(path: str | None) -> bool:
+    """``C:\\Users\\dev\\proj`` or ``C:/Users/dev/proj``: a path with a drive letter."""
+    return bool(path) and re.match(r"^[A-Za-z]:[\\/]", path or "") is not None
+
+
+def posix_separators(command: str, windows: bool | None = None) -> str:
+    """``python scripts\\gen.py`` as a POSIX shell would need it: ``python scripts/gen.py``.
+
+    In PowerShell and cmd a backslash separates path components; read as POSIX it
+    escapes the next character and the path collapses to ``scriptsgen.py``. Applied
+    when the session runs on Windows (``windows``), or, if that is unknown, when the
+    line itself contains a drive-letter path.
+    """
+    if windows is None:
+        windows = _DRIVE_PATH_RE.search(command) is not None
+    return _WINDOWS_SEPARATOR_RE.sub("/", command) if windows else command
+
+
+#: `NAME=value` standing alone on the line (not `NAME=value command`), with a plain value.
+_ASSIGNMENT_RE = re.compile(
+    r"(?:^|[;&\n])\s*(?:export\s+)?([A-Za-z_]\w*)="
+    r"(\"[\w./:@%+,~ -]*\"|'[\w./:@%+,~ -]*'|[\w./:@%+,~-]+)(?=\s*(?:;|&&|\n|$))"
+)
+_VARIABLE_RE = re.compile(r"\$(?:\{[A-Za-z_]\w*\}|[A-Za-z_]\w*)")
+#: What a shell variable that the line does not define is called in a command key.
+VARIABLE = "<variable>"
+
+
+def expand_assignments(command: str) -> str:
+    """``A=scripts/x.sh; $A`` with the variable filled in: ``A=scripts/x.sh; scripts/x.sh``.
+
+    Only assignments of a plain value made on the same line are followed; nothing
+    is evaluated.
+    """
+    if "$" not in command or "=" not in command:
+        return command
+    for match in reversed(list(_ASSIGNMENT_RE.finditer(command))):
+        name, value = match.group(1), match.group(2).strip("\"'")
+        head, tail = command[: match.end()], command[match.end() :]
+        tail = re.sub(r"\$(?:\{" + name + r"\}|" + name + r"\b)", value.replace("\\", "\\\\"), tail)
+        command = head + tail
+    return command
+
+
+def _name_variables(step: Step) -> Step:
+    """A step run through a variable nobody defined on the line: ``<variable> test``."""
+    if "$" not in step.key and "$" not in step.program:
+        return step
+    return replace(
+        step,
+        key=_VARIABLE_RE.sub(VARIABLE, step.key),
+        program=_VARIABLE_RE.sub(VARIABLE, step.program),
+    )
+
+
+def parse_command(command: str, windows: bool | None = None) -> ParsedCommand:
     """Normalize a shell command line. Rules are documented in docs/methodology.md.
 
     The line is split into simple commands (across ``;``, ``&&``, ``||``, pipes,
@@ -788,8 +1291,9 @@ def parse_command(command: str) -> ParsedCommand:
     and read-only inspection (``cat``, ``tail``, ``grep``) are passed over, so
     ``mkdir -p out && pytest | tail -5`` is ``pytest``.
     """
+    command = expand_assignments(posix_separators(command, windows))
     try:
-        steps = _steps(command)
+        steps = [_name_variables(step) for step in _steps(command)]
     except (IndexError, ValueError, RecursionError):  # never let one odd line stop a scan
         steps = []
     if not steps:
@@ -820,6 +1324,20 @@ def parse_command(command: str) -> ParsedCommand:
     )
 
 
+#: Destructive, but local and easily undone: next to a push or a delete, not the problem.
+_RECOVERABLE_KEYS = frozenset({"git commit", "git stash", "git branch", "git tag"})
+_FORCE_FLAGS = frozenset({"-f", "--force", "--force-with-lease", "--hard", "-rf", "-fr"})
+
+
+def _worst(steps: Sequence[Step]) -> Step | None:
+    """The first destructive step; one that is forced or cannot be undone locally first."""
+    risky = [s for s in steps if s.program in DESTRUCTIVE_PROGRAMS or s.key in DESTRUCTIVE_KEYS]
+    for step in risky:
+        if step.key not in _RECOVERABLE_KEYS or _FORCE_FLAGS & set(step.args):
+            return step
+    return risky[0] if risky else None
+
+
 def objectionable_step(parsed: ParsedCommand, reason: str = "") -> Step | None:
     """The step of a declined command line the human most plausibly objected to.
 
@@ -831,18 +1349,50 @@ def objectionable_step(parsed: ParsedCommand, reason: str = "") -> Step | None:
     if not parsed.steps:
         return None
     words = set(re.findall(r"[\w.+-]+", reason.lower()))
-    for step in parsed.steps:
-        named = step.program.lower() in words and step.program not in SETUP_PROGRAMS
-        # Looking is never what was objected to while the line also changes something.
-        if named and not step.inspection:
-            return step
-    for step in parsed.steps:
-        if step.program in DESTRUCTIVE_PROGRAMS or step.key in DESTRUCTIVE_KEYS:
-            return step
+    # Looking is never what was objected to while the line also changes something.
+    named = [
+        step
+        for step in parsed.steps
+        if step.program.lower() in words
+        and step.program not in SETUP_PROGRAMS
+        and not step.inspection
+    ]
+    if named:
+        # "git" names `git commit` and `git push -f` alike: then the destructive one.
+        return _worst(named) or named[0]
+    worst = _worst(parsed.steps)
+    if worst is not None:
+        return worst
     for step in parsed.steps:
         if not step.inspection and step.program not in SETUP_PROGRAMS:
             return step
     return next((s for s in parsed.steps if s.key == parsed.key), parsed.steps[-1])
+
+
+def denied_step(parsed: ParsedCommand, said: str = "") -> Step | None:
+    """The step of a command line that a permission rule or hook most plausibly refused.
+
+    In order: a step the refusal names; the **first** step if it writes a file by
+    redirection (`cat >> tests/test_a.py <<EOF ... && git push`: a write through the
+    shell is what such rules are there to stop, and the line never got past it); a
+    destructive step, as for a human's objection; otherwise the first step:
+    permission rules match a command line from its start, so `cat notes.md && uv
+    run ruff check` was refused at `cat`, not at the check the line ends with.
+    """
+    if not parsed.steps:
+        return None
+    words = set(re.findall(r"[\w.+-]+", said.lower()))
+    named = any(s.program.lower() in words and not s.inspection for s in parsed.steps)
+    waits = ("cd", "sleep", "true", ":")
+    first = next((s for s in parsed.steps if s.key and s.program not in waits), None)
+    if named:
+        return objectionable_step(parsed, said)
+    if first is not None and written_file(first):
+        return first
+    if _worst(parsed.steps) is not None:
+        return objectionable_step(parsed, said)
+    quiet = (*waits, "echo")
+    return next((s for s in parsed.steps if s.key and s.program not in quiet), parsed.steps[0])
 
 
 def normalize_command(command: str) -> str:
@@ -900,8 +1450,12 @@ def _key_words(key: str) -> list[str]:
 
 
 def command_role(key: str) -> str | None:
-    """``test``, ``build``, ``lint``, ``typecheck`` or ``format``; ``None`` if unknown."""
-    for word in reversed(_key_words(key)):
+    """``test``, ``build``, ``lint``, ``typecheck`` or ``format``; ``None`` if unknown.
+
+    A launched command has the role of what it runs: ``bundle exec rails test`` is a
+    test, whatever ``bundle`` or ``rails`` are.
+    """
+    for word in reversed(_key_words(inner_key(key))):
         stem = word.rsplit(".", 1)[0] if _SCRIPT_RE.search(word) else word
         for role, names in ROLE_WORDS.items():
             if stem in names:
@@ -949,13 +1503,23 @@ def is_replacement(failed: str, other: str) -> bool:
     (``uv run pytest`` for ``pytest``). Never for setup, version-control,
     housekeeping or inspection commands.
     """
-    if not failed or not other or failed == other or is_setup_command(other):
+    if not failed or not other or failed == other:
+        return False
+    # the same command through a launcher: `uv run python scripts/gen.py` for
+    # `python scripts/gen.py`, `poetry run alembic upgrade` for `alembic upgrade`
+    if inner_key(failed) == inner_key(other) and INLINE not in other and STDIN not in other:
+        return True
+    if is_setup_command(other):
         return False
     program = other.split()[0]
     if program in ("git", "gh", "glab") or program in HOUSEKEEPING_PROGRAMS | SETUP_PROGRAMS:
         return False
     role = command_role(failed)
     if role is not None and role == command_role(other):
+        return True
+    # the same program by another path: `./bin/zebractl` for `zebractl`
+    was, now = failed.split(), other.split()
+    if was[1:] == now[1:] and "/" in now[0] and now[0].rsplit("/", 1)[-1] == was[0]:
         return True
     return failed.split()[-1] == other.split()[-1] and failed.split()[-1] not in (
         "run",
@@ -1048,20 +1612,115 @@ def _placeholder(word: str, position: int, previous: str) -> str:
     return f"<{kind}:{hashlib.sha256(word.encode()).hexdigest()[:PUBLIC_HASH_DIGITS]}>"
 
 
-def public_key(key: str) -> str:
+#: Tool names that say nothing about a project: the built-in tools of the agents whose
+#: transcripts are read, and the generic format's operation words.
+PUBLIC_TOOLS = frozenset(
+    [
+        "read",
+        "edit",
+        "write",
+        "multiedit",
+        "notebookedit",
+        "notebookread",
+        "bash",
+        "bashoutput",
+        "killshell",
+        "killbash",
+        "taskoutput",
+        "taskstop",
+        "grep",
+        "glob",
+        "ls",
+        "webfetch",
+        "websearch",
+        "task",
+        "agent",
+        "todowrite",
+        "todoread",
+        "exitplanmode",
+        "enterplanmode",
+        "askuserquestion",
+        "skill",
+        "slashcommand",
+        "toolsearch",
+        "powershell",
+        "listmcpresourcestool",
+        "readmcpresourcetool",
+        "search",
+        "shell",
+        "other",
+        "view",
+        "create",
+        "str_replace",
+        "str_replace_editor",
+        "str_replace_based_edit_tool",
+        "insert",
+        "undo_edit",
+        "apply_patch",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "list_dir",
+        "list_directory",
+        "run_terminal_cmd",
+        "run_command",
+        "execute_command",
+        "run_shell_command",
+        "shell_command",
+        "file_search",
+        "grep_search",
+        "codebase_search",
+        "search_files",
+        "search_file_content",
+        "list_files",
+        "replace",
+        "replace_in_file",
+        "write_to_file",
+        "delete_file",
+        "web_search",
+        "web_fetch",
+        "update_plan",
+    ]
+)
+
+
+def _tool_hash(kind: str, name: str) -> str:
+    return f"<{kind}:{hashlib.sha256(name.encode()).hexdigest()[:PUBLIC_HASH_DIGITS]}>"
+
+
+def public_tool(name: str) -> str:
+    """A tool name as it may be shown without excerpts.
+
+    Built-in tool names are kept. Any other name was chosen by a project or by
+    one of its plugins and becomes ``<tool:hash>``; an MCP tool
+    ``mcp__<server>__<tool>`` becomes ``mcp__<server:hash>__<tool:hash>``, so
+    that tools of one server can still be told to belong together.
+    """
+    if name.lower() in PUBLIC_TOOLS:
+        return name
+    if name.startswith("mcp__") and "__" in name[5:]:
+        server, _, tool = name[5:].partition("__")
+        return f"mcp__{_tool_hash('server', server)}__{_tool_hash('tool', tool)}"
+    return _tool_hash("tool", name)
+
+
+def public_key(key: str, keep: Callable[[str], bool] | None = None) -> str:
     """``key`` with every project-specific name replaced by a short stable hash.
 
     Words from a fixed public vocabulary (well-known programs, subcommands and
     target names such as ``test`` or ``build``) are kept; any other word (a
     script path, a make target, an npm script, an unknown executable) becomes
     ``<kind:hash>``. The same name always gives the same placeholder, so
-    grouping across sessions and reports still works.
+    grouping across sessions and reports still works. ``keep`` may vouch for a
+    word that is shown anyway (a script path inside the repository).
     """
     out: list[str] = []
     previous = ""
     for position, word in enumerate(key.split()):
         parts = [p for p in word.split(":") if p]
-        if position == 0:
+        if (keep is not None and keep(word)) or word == VARIABLE:
+            known = True
+        elif position == 0:
             known = word in PUBLIC_PROGRAMS
         else:
             known = word in PUBLIC_VOCABULARY or (
@@ -1164,6 +1823,84 @@ def is_shell_edit(parsed: ParsedCommand, command: str) -> bool:
 _SCRATCH_RE = re.compile(r"\.(?:log|out|txt|tmp|pid|err)$|^&|^/dev/|^/tmp/|^/var/|^\$TMP", re.I)
 
 
+#: Words that make a command a setup step wherever they stand (`npx playwright install`).
+_SETUP_ARGS = frozenset(
+    {"install", "ci", "bootstrap", "setup", "migrate", "up", "login", "sync", "download"}
+)
+#: Words at which the name of a preparing step is complete (`npx prisma generate`).
+_STEP_WORDS = _SETUP_ARGS | frozenset(
+    {"generate", "upgrade", "restore", "pull", "tidy", "vendor", "seed", "reset", "prepare"}
+    | {"build", "start", "init", "fetch", "deploy", "create", "db:setup", "db:migrate"}
+)
+_SUBCOMMAND_WORD_RE = re.compile(r"^[a-z][a-z0-9:_-]*$")
+
+
+def setup_label(step: Step) -> str:
+    """How a preparing step is named in advice: enough of it to be run as written.
+
+    The key of ``npx playwright install chromium`` is ``npx playwright``, which
+    installs nothing. The label goes on through the subcommand words up to and
+    including the one that says what the step does (``npx playwright install``,
+    ``npx prisma generate``, ``go mod download``); file arguments and other
+    options are left out. ``docker compose up`` keeps ``-d``: without it the
+    command stays in the foreground.
+    """
+    key = step.key
+    known = key.split()
+    if not known or is_inline_code(key):
+        return key
+    words = [arg for arg in step.args if arg[:1] != "-"]
+    # the subcommand words the key already covers
+    rest = list(words)
+    for word in known[1:]:
+        if word in rest:
+            rest = rest[rest.index(word) + 1 :]
+    label = key
+    if not _STEP_WORDS & set(known):
+        more: list[str] = []
+        for word in rest[:3]:
+            if not _SUBCOMMAND_WORD_RE.match(word):
+                break
+            more.append(word)
+            if word in _STEP_WORDS:
+                label = " ".join([key, *more])
+                break
+    if label.split()[-1] == "up" and {"-d", "--detach"} & set(step.args):
+        label += " -d"
+    return label
+
+
+_ENV_FILE_RE = re.compile(r"^\.env(?:\..+)?$|\.local(?:\.\w+)?$")
+_TEMPLATE_FILE_RE = re.compile(r"[._-](?:example|sample|template|dist|defaults?)(?:\.\w+)?$", re.I)
+
+
+def is_setup_step(step: Step) -> bool:
+    """Does ``step`` prepare the environment: install, start a service, migrate, log in?"""
+    if is_setup_command(step.key):
+        return True
+    if step.program in ("git", "gh", "glab") or "/" in step.program:
+        return False
+    words = [a for a in step.args if a[:1] != "-"][:3]
+    return step.program in SUBCOMMAND_TOOLS and any(w in _SETUP_ARGS for w in words)
+
+
+def env_copy(step: Step) -> str | None:
+    """``cp .env.example .env``: creating local configuration from a template.
+
+    Returns the command as it can be shown (program and file names), or ``None``.
+    That is a setup step, not a change to the code, although it writes a file.
+    """
+    if step.program not in ("cp", "ln", "mv", "install"):
+        return None
+    names = [a for a in step.args if a[:1] != "-"]
+    if len(names) != 2 or not all(re.fullmatch(r"[\w./-]+", n) for n in names):
+        return None
+    source, target = (n.rsplit("/", 1)[-1] for n in names)
+    if _ENV_FILE_RE.search(target) or _TEMPLATE_FILE_RE.search(source):
+        return f"{step.program} {names[0]} {names[1]}"
+    return None
+
+
 #: Commands that only show or send something; nothing local is different afterwards.
 REPORT_ONLY_KEYS = frozenset(
     {"docker logs", "docker compose logs", "kubectl logs", "git fetch", "git push"}
@@ -1190,10 +1927,15 @@ def _is_source_target(target: str) -> bool:
 _ENV_PREFIX_RE = re.compile(r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|\"[^\"]*\"|\S*)\s+)+")
 
 
+_SLEEP_PREFIX_RE = re.compile(r"^(?:sleep \d+(?:\.\d+)?[smh]? ?(?:&&|;) ?)+")
+
+
 def normalize_argv(command: str) -> str:
-    """A command line with whitespace collapsed and leading ``VAR=value`` dropped.
+    """A command line with whitespace collapsed and leading ``VAR=value`` and waits dropped.
 
     Two runs are "the same command again" only if this text is identical.
     """
     text = re.sub(r"\s+", " ", command).strip()
+    # `sleep 3 && curl ...` is `curl ...` again, a little later
+    text = _SLEEP_PREFIX_RE.sub("", text)
     return _ENV_PREFIX_RE.sub("", text)

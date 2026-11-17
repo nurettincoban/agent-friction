@@ -7,10 +7,17 @@ from typing import Any
 
 from agent_friction.report._common import (
     collect_recommendations,
-    fmt_minutes,
+    dropped_note,
+    events_phrase,
+    fmt_lost,
+    gone_note,
+    grouped_unattributed,
+    headline_lost,
     plural,
+    repo_recommendations,
     signal_titles,
     top_signals,
+    unattributed_heading,
 )
 
 
@@ -36,9 +43,10 @@ def _table(items: list[dict[str, Any]], label: str) -> list[str]:
     for i, h in enumerate(items, 1):
         sig = ", ".join(f"{_code(sid)}×{n}" for sid, n in top_signals(h, 3))
         lines.append(
-            f"| {i} | {_cell(_code(h.get('path', '')))} | {float(h.get('score', 0)):.1f}"
+            f"| {i} | {_cell(_code(h.get('path', '')))}{gone_note(h)}"
+            f" | {float(h.get('score', 0)):.1f}"
             f" | {h.get('sessions', 0)} | {h.get('events', 0)}"
-            f" | {fmt_minutes(float(h.get('est_minutes_lost', 0)))} | {_cell(sig)}"
+            f" | {fmt_lost(float(h.get('est_minutes_lost', 0)))} | {_cell(sig)}"
             f" | {h.get('confidence', 'low')} |"
         )
     return lines
@@ -72,10 +80,12 @@ def _details(h: dict[str, Any], titles: dict[str, str]) -> list[str]:
         out.append("")
         for e in ev:
             ts = str(e.get("timestamp", ""))[:16].replace("T", " ")
+            ts = f"{ts} UTC" if ts else ts
             sid = str(e.get("signal", ""))
             out.append(
                 f"- `{ts}` session `{str(e.get('session_id', ''))[:8]}` · "
                 f"{titles.get(sid, sid)}: {_html_escape(str(e.get('summary', '')))}"
+                + (" (unresolved at end of session)" if e.get("trailing") else "")
             )
             if e.get("excerpt"):
                 quoted = _html_escape(str(e["excerpt"]).replace("\n", " "))
@@ -83,6 +93,36 @@ def _details(h: dict[str, Any], titles: dict[str, str]) -> list[str]:
         out.append("")
     out += ["</details>", ""]
     return out
+
+
+def _repo_section(result: dict[str, Any]) -> list[str]:
+    repo_recs = repo_recommendations(result)
+    if not repo_recs:
+        return []
+    lines = ["## Across the repository", ""]
+    for rec in repo_recs:
+        title = _html_escape(str(rec.get("title", "")))
+        lines.append(f"- **{title}** {_html_escape(str(rec.get('detail', '')))}")
+    return [*lines, ""]
+
+
+def _unattributed(result: dict[str, Any]) -> list[str]:
+    heading = unattributed_heading(result)
+    if heading is None:
+        return []
+    lines = [f"## {heading}", ""]
+    for ev, n in grouped_unattributed(result):
+        when = str(ev.get("timestamp") or "")[:16].replace("T", " ")
+        when = f"{when} UTC" if when else when
+        where = ""
+        if ev.get("source"):
+            where = " · " + _code(f"{ev['source']}:{ev.get('line', '?')}")
+        lines.append(
+            f"- `{when}` {_code(ev.get('signal', '?'))}: "
+            f"{_html_escape(str(ev.get('summary', '')))}{where}" + (f" (×{n})" if n > 1 else "")
+        )
+    lines.append("")
+    return lines
 
 
 def _html_escape(s: str) -> str:
@@ -101,7 +141,11 @@ _CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.S)
 
 
 def _escape_prose(s: str) -> str:
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Quoted transcript text must not render images or links, or notify people, when the
+    # report is pasted into an issue or PR: escape link brackets and break @mentions.
+    s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    s = s.replace("[", "\\[").replace("]", "\\]")
+    return re.sub(r"@(?=[A-Za-z0-9])", "@\u200b", s)
 
 
 def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
@@ -112,8 +156,8 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
         f"# Agent friction map: {repo.get('name', '?')}",
         "",
         f"{plural(int(totals.get('sessions', 0)), 'agent session')} analysed · "
-        f"{plural(int(totals.get('friction_events', 0)), 'friction event')} · "
-        f"~{fmt_minutes(float(totals.get('est_minutes_lost', 0)))} lost · "
+        f"{events_phrase(totals)} · "
+        f"{headline_lost(totals)} · "
         f"{plural(int(totals.get('corrections', 0)), 'human correction')} · "
         f"{plural(int(totals.get('files_affected', 0)), 'file')} affected",
         "",
@@ -121,8 +165,19 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
     hotspots = list(result.get("hotspots", []))[:top]
     commands = list(result.get("commands", []))[:top]
     if not hotspots and not commands and not result.get("directories"):
-        out += ["No recurring friction found.", ""]
+        if int(totals.get("friction_events", 0)):
+            out += ["No hotspot: no file, directory, or command collected friction.", ""]
+        else:
+            out += ["No recurring friction found.", ""]
+        out += _unattributed(result)
+        out += _repo_section(result)
+        note = dropped_note(result)
+        if note:
+            out += [f"_{note}_", ""]
         return "\n".join(out)
+    note = dropped_note(result)
+    if note:
+        out += [f"_{note}_", ""]
 
     recs = collect_recommendations(result, limit=5)
     if recs:
@@ -132,6 +187,7 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
             detail = _html_escape(str(rec.get("detail", "")))
             out.append(f"{i}. {_code(h.get('path'))}: **{title}** {detail}")
         out.append("")
+    out += _repo_section(result)
 
     if hotspots:
         out += ["## Files where agents struggle", "", *_table(hotspots, "File"), ""]
@@ -142,6 +198,9 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
         out += [
             "## Directories where agents search in vain",
             "",
+            "Only friction in the directory itself (searches that found nothing there); "
+            "`agent-friction show <dir>` rolls up everything inside it.",
+            "",
             *_table(directories, "Directory"),
             "",
         ]
@@ -149,6 +208,7 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
     out += ["## Evidence", ""]
     for h in [*hotspots, *commands, *directories]:
         out += _details(h, titles)
+    out += _unattributed(result)
 
     used = [s for s in result.get("signals", []) if s.get("count")]
     if used:

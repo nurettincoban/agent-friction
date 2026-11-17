@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
-from agent_friction import model, recommend, redact, signals
+from agent_friction import model, recommend, redact, scoring, signals
+from agent_friction.guidance import Guidance, Mention, path_terms
 from agent_friction.model import Finding, Target
 from agent_friction.recommend import FileFacts, file_facts
+
+needs_symlinks = pytest.mark.skipif(sys.platform == "win32", reason="needs symlink privileges")
 
 
 def finding(signal: str, session: str = "s1", fid: int = 0, **detail: str) -> Finding:
@@ -39,7 +43,7 @@ def test_file_facts(tmp_path: Path) -> None:
     (tmp_path / "pkg" / "api_pb2.py").write_text("x\n")
     generated = file_facts(tmp_path, "gen.py")
     assert (generated.exists, generated.lines, generated.generated) == (True, 10, True)
-    assert "marker" in generated.generated_reason
+    assert "header" in generated.generated_reason and generated.generated_by == "header"
     assert file_facts(tmp_path, "plain.py") == FileFacts(True, 3, False, "")
     assert file_facts(tmp_path, "pkg/api_pb2.py").generated
     assert file_facts(tmp_path, "pkg").exists is False
@@ -48,7 +52,13 @@ def test_file_facts(tmp_path: Path) -> None:
     for lock in ("package-lock.json", "sub/yarn.lock", "poetry.lock", "go.sum"):
         assert file_facts(tmp_path, lock).generated
     assert not file_facts(tmp_path, "src/locksmith.py").generated
-    assert generated.as_dict() == {"exists": True, "lines": 10, "generated": True}
+    assert generated.as_dict() == {
+        "exists": True,
+        "lines": 10,
+        "generated": True,
+        "removed_at": None,
+        "renamed_to": None,
+    }
 
 
 def test_generated_file_rule_wins_over_generic_edit_advice() -> None:
@@ -68,7 +78,24 @@ def test_edit_miss_rules_for_ordinary_files() -> None:
     assert rec["id"] == "make-edits-land" and "repeated blocks" in str(rec["detail"])
     not_found = [finding(signals.EDIT_MISS, variant="not-found") for _ in range(2)]
     (rec,) = recommend.recommend(model.FILE, "a.py", not_found, small)
-    assert "formatter" in str(rec["detail"])
+    # nothing shows the file being rewritten: no cause is asserted
+    assert rec["title"] == "Edits to this file keep missing their target"
+    assert "formatter" not in str(rec["detail"]) and "hook" not in str(rec["detail"])
+    assert "Nothing in the transcripts shows the file being rewritten" in str(rec["detail"])
+    seen = [finding(signals.EDIT_MISS, variant="not-found", rewritten="1"), not_found[0]]
+    (rec,) = recommend.recommend(model.FILE, "a.py", seen, small)
+    assert rec["title"] == "Agents misremember this file: check what rewrites it"
+    assert "Before 1 of them a command that rewrites files (a formatter" in str(rec["detail"])
+    stale = [finding(signals.STALE_EDIT, variant="modified"), *not_found]
+    (rec,) = recommend.recommend(model.FILE, "a.py", stale, small)
+    assert rec["title"] == "Agents misremember this file: check what rewrites it"
+    assert "Writes to it were also refused because it had changed on disk" in str(rec["detail"])
+    # misses that are no more than the repository's background rate ask for nothing
+    usual = [
+        finding(signals.EDIT_MISS, f"s{i}", variant="not-found", within_baseline="1")
+        for i in range(3)
+    ]
+    assert recommend.recommend(model.FILE, "a.py", usual, small) == []
     assert recommend.recommend(model.FILE, "a.py", not_found[:1], small) == []  # one-off
 
 
@@ -155,8 +182,8 @@ def test_command_rules() -> None:
 
 def test_directory_search_rule_lists_patterns() -> None:
     found = [
-        finding(signals.SEARCH_MISS, "s1", pattern="RefundPolicy"),
-        finding(signals.SEARCH_MISS, "s2", pattern="RefundPolicy"),
+        finding(signals.SEARCH_MISS, "s1", pattern="RefundPolicy", wanted="1"),
+        finding(signals.SEARCH_MISS, "s2", pattern="RefundPolicy", wanted="1"),
         finding(signals.SEARCH_MISS, "s2", pattern="refund_policy"),
     ]
     (rec,) = recommend.recommend(model.DIR, "src/shop", found, None, quote)
@@ -210,8 +237,22 @@ def test_probable_corrections_and_other_weak_signals_get_no_advice() -> None:
 
 
 def test_a_search_for_the_same_name_in_two_sessions_still_gets_a_pointer() -> None:
-    found = [finding(signals.SEARCH_MISS, f"s{i}", pattern="RefundPolicy") for i in range(2)]
+    def misses(**detail: str) -> list[Finding]:
+        return [
+            finding(signals.SEARCH_MISS, f"s{i}", pattern="RefundPolicy", **detail)
+            for i in range(2)
+        ]
+
+    found = misses(wanted="1")
     assert ids(recommend.recommend(model.DIR, "src", found, None, quote)) == ["add-a-pointer"]
+    # ... if the agents went on looking. A search that was content to find nothing, and
+    # one for leftovers, is a check that passed.
+    assert recommend.recommend(model.DIR, "src", misses(), None, quote) == []
+    assert recommend.recommend(model.DIR, "src", misses(wanted="1", hygiene="1"), None) == []
+    real = finding(signals.EDIT_MISS)
+    assert "add-a-pointer" not in ids(
+        recommend.recommend(model.DIR, "src", [*misses(hygiene="1"), real], None, quote)
+    )
     same_session = [finding(signals.SEARCH_MISS, "s1", pattern="RefundPolicy") for _ in range(2)]
     assert recommend.recommend(model.DIR, "src", same_session, None, quote) == []
 
@@ -286,7 +327,7 @@ def test_code_spans_survive_backticks(value: str, span: str) -> None:
 
 def test_a_search_pattern_with_backticks_stays_valid_markdown() -> None:
     def miss(session: str, pattern: str) -> Finding:
-        found = finding(signals.SEARCH_MISS, session, pattern=pattern)
+        found = finding(signals.SEARCH_MISS, session, pattern=pattern, wanted="1")
         found.targets = [Target(model.DIR, "src")]
         return found
 
@@ -301,3 +342,645 @@ def test_a_typo_is_not_a_command_to_document() -> None:
         for i in range(3)
     ]
     assert recommend.recommend(model.COMMAND, "npm run biuld", typos) == []
+
+
+# ---- round 14 -----------------------------------------------------------------------------
+
+
+def test_a_lockfile_bump_is_not_trouble_editing_a_generated_file() -> None:
+    facts = FileFacts(True, 900, True, "its path")
+    rework = [finding(signals.HUMAN_REWORK, f"git:{i}", human_commit=f"abc{i}") for i in range(3)]
+    recs = recommend.recommend(model.FILE, "package-lock.json", rework, facts)
+    assert "edit-the-source-not-the-output" not in ids(recs)
+    for rec in recs:  # git evidence is commits, never sessions or attempts to edit
+        assert "session" not in str(rec["detail"]) and "editing it directly" not in str(rec)
+    thrash = [finding(signals.EDIT_THRASH, f"s{i}") for i in range(3)]
+    assert "edit-the-source-not-the-output" not in ids(
+        recommend.recommend(model.FILE, "package-lock.json", thrash, facts)
+    )
+    for signal in (signals.EDIT_MISS, signals.STALE_EDIT, signals.EDIT_REVERT):
+        (first, *_) = recommend.recommend(model.FILE, "gen.py", [finding(signal)], facts)
+        assert first["id"] == "edit-the-source-not-the-output"
+        assert "once in 1 session" in str(first["detail"])
+
+
+def test_a_fast_check_is_not_what_a_failing_check_needs() -> None:
+    plain = FileFacts(True, 100, False, "")
+    thrash = [finding(signals.EDIT_THRASH, f"s{i}") for i in range(2)]
+    reverts = [finding(signals.EDIT_REVERT, f"s{i}") for i in range(2)]
+    (only,) = recommend.recommend(model.FILE, "a.py", reverts, plain)
+    assert only["id"] == "add-a-fast-check"
+    assert "converge: 2 reverted edits in 2 sessions" in str(only["detail"])
+    assert "0 thrash" not in str(only["detail"])
+    (both,) = recommend.recommend(model.FILE, "a.py", [*thrash, *reverts], plain)
+    assert "2 thrash episodes and 2 reverted edits in 2 sessions" in str(both["detail"])
+    # the turn ran its checks: iterating was not for want of one
+    checked = [finding(signals.EDIT_THRASH, f"s{i}", checked="1") for i in range(2)]
+    assert recommend.recommend(model.FILE, "a.py", [*checked, reverts[0]], plain) == []
+    (mixed,) = recommend.recommend(model.FILE, "a.py", [*checked, *reverts], plain)
+    assert "converge: 2 reverted edits in" in str(mixed["detail"])
+    assert mixed["signals"] == [signals.EDIT_REVERT]
+    # ... and where the check itself would not pass, that is the advice
+    stuck = [finding(signals.NO_CONVERGENCE, f"s{i}", count="5") for i in range(2)]
+    assert ids(recommend.recommend(model.FILE, "a.py", [*thrash, *reverts, *stuck], plain)) == [
+        "explain-the-failing-check"
+    ]
+
+
+def test_a_command_in_a_subdirectory_is_named_as_such() -> None:
+    failures = [
+        finding(signals.COMMAND_FAILURE, f"s{i}", variant="invocation", command="pytest")
+        for i in range(2)
+    ]
+    (rec,) = recommend.recommend(model.COMMAND, "pytest (src/)", failures, None)
+    assert rec["title"] == "Document how to run `pytest` in `src/`"
+    assert str(rec["detail"]).startswith("`pytest` in `src/` failed 2 times in 2 sessions")
+    (root,) = recommend.recommend(model.COMMAND, "pytest", failures, None)
+    assert root["title"] == "Document how to run `pytest`"
+
+
+# ---- round 15: what the instruction files already say ---------------------------------
+
+
+def write(root: Path, files: dict[str, str]) -> Path:
+    for name, text in files.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    return root
+
+
+def cited(found: list[Mention]) -> list[str]:
+    return [str(m) for m in found]
+
+
+def test_instruction_files_are_searched_on_word_boundaries(tmp_path: Path) -> None:
+    repo = write(
+        tmp_path,
+        {
+            "AGENTS.md": "# Rules\nRun pytest-cov via tox.\nSee pytest.ini and data.py.\n"
+            "Use `make test`.\nNever edit src/api/schema_gen.py.\nRun pytest, then stop.\n",
+            "CLAUDE.md": "pytest is fine here\n",
+            ".github/copilot-instructions.md": "prefer make test\n",
+            ".cursorrules": "make test\n",
+            ".cursor/rules/testing.mdc": "always make test\n",
+            "notes.md": "pytest\n",
+        },
+    )
+    guide = Guidance(repo)
+    assert cited(guide.mentions(["pytest"])) == ["AGENTS.md:6", "CLAUDE.md:1"]
+    assert cited(guide.mentions(["a.py"])) == []  # not `data.py`
+    assert cited(guide.mentions(path_terms("src/api/schema_gen.py"))) == ["AGENTS.md:5"]
+    assert cited(guide.mentions(["schema_gen.py"])) == ["AGENTS.md:5"]
+    # at most three places are cited, in a fixed order of files
+    assert cited(guide.mentions(["make test"])) == [
+        "AGENTS.md:4",
+        ".github/copilot-instructions.md:1",
+        ".cursorrules:1",
+    ]
+    # a bare launcher, a short word or a placeholder is not looked for
+    assert guide.mentions(["make"]) == guide.mentions(["tox"]) == []
+    assert guide.mentions(["make <target:37bd73>"]) == []
+    assert Guidance(None).mentions(["pytest"]) == Guidance(tmp_path / "nope").mentions(["x"]) == []
+    assert path_terms("src/app/__init__.py") == ["src/app/__init__.py"]
+    assert path_terms("Makefile") == ["Makefile"]
+
+
+def test_nested_files_apply_to_what_lies_beneath_them(tmp_path: Path) -> None:
+    repo = write(
+        tmp_path,
+        {"web/AGENTS.md": "run npm test here\n", "web/src/CLAUDE.md": "\nnpm test\n"},
+    )
+    guide = Guidance(repo)
+    assert cited(guide.mentions(["npm test"])) == []
+    assert cited(guide.mentions(["npm test"], "api")) == []
+    assert cited(guide.mentions(["npm test"], "web")) == ["web/AGENTS.md:1"]
+    assert cited(guide.mentions(["npm test"], "web/src/lib")) == [
+        "web/AGENTS.md:1",
+        "web/src/CLAUDE.md:2",
+    ]
+    assert guide.mentions(["npm test"], "../web") == []
+
+
+@needs_symlinks
+def test_only_small_text_files_inside_the_repo_are_read(tmp_path: Path) -> None:
+    from agent_friction import guidance
+
+    outside = tmp_path / "elsewhere.md"
+    outside.write_text("use make test\n")
+    repo = write(tmp_path / "repo", {"CLAUDE.md": "use make test\n"})
+    (repo / "AGENTS.md").symlink_to(repo / "CLAUDE.md")  # one file, cited once
+    (repo / ".cursorrules").symlink_to(outside)
+    assert cited(Guidance(repo).mentions(["make test"])) == ["CLAUDE.md:1"]
+    (repo / "CLAUDE.md").write_text("x" * guidance.MAX_FILE_BYTES + "\nuse make test\n")
+    assert Guidance(repo).mentions(["make test"]) == []
+    (repo / "CLAUDE.md").write_bytes(b"\x00\x01 make test\n")
+    assert Guidance(repo).mentions(["make test"]) == []
+
+
+def test_permission_deny_rules_count_and_other_settings_do_not(tmp_path: Path) -> None:
+    settings = {
+        "permissions": {
+            "allow": ["Bash(pytest:*)", "Bash(npm run lint)"],
+            "deny": ["Bash(npm run e2e:*)", "Edit(src/api/schema_gen.py)"],
+        },
+        "env": {"NOTE": "npm run e2e"},
+    }
+    import json
+
+    repo = write(tmp_path, {".claude/settings.json": json.dumps(settings, indent=2)})
+    guide = Guidance(repo)
+    assert cited(guide.mentions(["npm run e2e"])) == [".claude/settings.json:8"]
+    assert cited(guide.mentions(["src/api/schema_gen.py"])) == [".claude/settings.json:9"]
+    assert guide.mentions(["pytest"]) == guide.mentions(["npm run lint"]) == []
+    (repo / ".claude/settings.local.json").write_text("{not json")
+    assert cited(Guidance(repo).mentions(["npm run e2e"])) == [".claude/settings.json:8"]
+
+
+def test_documented_advice_changes_form(tmp_path: Path) -> None:
+    repo = write(
+        tmp_path,
+        {
+            "AGENTS.md": "Setup: run `pip install -e .` first.\n",
+            "src/AGENTS.md": "\n\nTests: pytest needs PYTHONPATH.\n",
+        },
+    )
+    guide = Guidance(repo)
+    failures = [
+        finding(signals.COMMAND_FAILURE, f"s{i}", variant="invocation", command="pytest")
+        for i in range(2)
+    ]
+    # the command is keyed by where it ran: that directory's file applies
+    (rec,) = recommend.recommend(model.COMMAND, "pytest (src/)", failures, None, guidance=guide)
+    assert rec["documented_in"] == [{"file": "src/AGENTS.md", "line": 3}]
+    assert rec["title"] == "Document how to run `pytest` in `src/`"
+    assert "(Also mentioned at `src/AGENTS.md:3`: check whether it already says this." in str(
+        rec["detail"]
+    )
+    assert rec["documented_as"] == "mention"
+    (root,) = recommend.recommend(model.COMMAND, "pytest", failures, None, guidance=guide)
+    assert root["documented_in"] == [] and "already" not in str(root["detail"])
+    # a setup step that is written down is not suggested again
+    fixed = [
+        finding(signals.COMMAND_FAILURE, f"s{i}", fixed_by_setup="pip install -e .")
+        for i in range(2)
+    ]
+    (step,) = recommend.recommend(model.COMMAND, "pytest", fixed, None, guidance=guide)
+    assert step["id"] == "document-the-setup-step"
+    assert step["title"] == "`pip install -e .` is documented, yet agents start without it"
+    assert str(step["detail"]).startswith("`AGENTS.md:1` already names `pip install -e .`; ")
+    assert "Say so in AGENTS.md" not in str(step["detail"])
+    (plain,) = recommend.recommend(model.COMMAND, "pytest", fixed, None)
+    assert plain["title"] == "Document the setup `pytest` needs" and plain["documented_in"] == []
+
+
+def test_port_and_disk_failures_get_their_own_words() -> None:
+    for kind, title in (
+        ("port", "Say what to do when the port `npm run dev` needs is taken"),
+        ("disk", "Free disk space where agents run `npm run dev`"),
+        ("auth", "Say how `npm run dev` gets its credentials"),
+    ):
+        found = [
+            finding(signals.COMMAND_FAILURE, f"s{i}", variant="environment", environment=kind)
+            for i in range(2)
+        ]
+        (rec,) = recommend.recommend(model.COMMAND, "npm run dev", found, None)
+        assert (rec["id"], rec["title"]) == ("document-the-environment", title)
+
+
+def test_a_command_humans_keep_stopping_is_about_the_command() -> None:
+    stops = [finding(signals.USER_INTERRUPT, f"s{i}") for i in range(3)]
+    (rec,) = recommend.recommend(model.COMMAND, "npm run e2e", stops, None)
+    assert rec["id"] == "clarify-before-acting"
+    assert rec["title"] == "Say when agents should run `npm run e2e`"
+    assert "Humans stopped `npm run e2e` while it was running 3 times in 3" in str(rec["detail"])
+    (on_file,) = recommend.recommend(model.FILE, "a.py", stops, FileFacts(True, 10))
+    assert on_file["title"] == "Tell agents what to check before acting here"
+
+
+def test_more_instruction_files_and_one_level_of_imports(tmp_path: Path) -> None:
+    repo = write(
+        tmp_path / "repo",
+        {
+            "CLAUDE.md": "# Project\nSee @docs/testing.md and @./docs/style.md for details.\n"
+            "Mail @maintainer or a@b.dev.\n```\n@docs/fenced.md\n```\n@../outside.md\n",
+            "docs/testing.md": "Run make test.\nMore: @docs/deeper.md\n",
+            "docs/style.md": "\nuse make test\n",
+            "docs/deeper.md": "make test\n",
+            "docs/fenced.md": "make test\n",
+            "CLAUDE.local.md": "make test (mine)\n",
+            "GEMINI.md": "make test\n",
+            ".windsurfrules": "make test\n",
+            ".claude/rules/python/tests.md": "always make test\n",
+            ".claude/rules/notes.txt": "make test\n",
+            "AGENTS.md": "See @docs/deeper.md\n",
+        },
+    )
+    write(tmp_path, {"outside.md": "make test\n"})
+    guide = Guidance(repo)
+    assert guide.files()[:5] == [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "docs/testing.md",  # imported by CLAUDE.md; its own imports are not followed
+        "docs/style.md",
+        "CLAUDE.local.md",
+    ]
+    assert not {"docs/deeper.md", "docs/fenced.md", "outside.md"} & set(guide.files())
+    assert ".claude/rules/python/tests.md" in guide.files()
+    assert ".claude/rules/notes.txt" not in guide.files()
+    assert cited(guide.mentions(["make test"])) == [
+        "docs/testing.md:1",
+        "docs/style.md:2",
+        "CLAUDE.local.md:1",
+    ]
+    for name in ("docs/testing.md", "docs/style.md", "CLAUDE.md", "CLAUDE.local.md"):
+        (repo / name).unlink()
+    assert cited(Guidance(repo).mentions(["make test"])) == [
+        "GEMINI.md:1",
+        ".windsurfrules:1",
+        ".claude/rules/python/tests.md:1",
+    ]
+
+
+def test_the_exception_is_quoted_not_the_summary_after_it() -> None:
+    output = (
+        "$ pytest -q\nExit code 2\n==== ERRORS ====\n"
+        "E   RuntimeError: fixture 'db' not found\n1 error in 0.10s"
+    )
+    failures = [
+        finding(signals.COMMAND_FAILURE, f"s{i}", variant="invocation", excerpt=output)
+        for i in range(2)
+    ]
+    (rec,) = recommend.recommend(model.COMMAND, "pytest", failures, None, quote)
+    assert "Typical output: \"RuntimeError: fixture 'db' not found\"." in str(rec["detail"])
+    assert "1 error in" not in str(rec["detail"])
+
+
+def test_a_line_that_rules_a_command_out_does_not_document_it(tmp_path: Path) -> None:
+    repo = write(
+        tmp_path,
+        {
+            "AGENTS.md": "Do not run `make test` locally.\n`make test` was removed in March.\n"
+            "We no longer use make test.\nRun `tox -e py`, never pytest directly.\n"
+            "Use `make check` before every commit.\n",
+        },
+    )
+    guide = Guidance(repo)
+    assert cited(guide.mentions(["make test"])) == ["AGENTS.md:1", "AGENTS.md:2", "AGENTS.md:3"]
+    assert guide.mentions(["make test"], affirmed=True) == []
+    assert guide.mentions(["pytest"], affirmed=True) == []
+    assert cited(guide.mentions(["make check", "tox -e py"], affirmed=True)) == [
+        "AGENTS.md:4",
+        "AGENTS.md:5",
+    ]
+
+
+# ---- round 24 ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("a.go", "// Code generated by protoc-gen-go. DO NOT EDIT.\npackage a\n"),
+        ("a.py", "#!/usr/bin/env python\n# -*- coding: utf-8 -*-\n# @generated by tool\nx = 1\n"),
+        (
+            "a.ts",
+            "/* eslint-disable */\n/**\n * This file was automatically generated by x.\n */\n",
+        ),
+        ("a.sql", "-- AUTO-GENERATED FILE, do not modify\nselect 1;\n"),
+        ("a.py", "# Generated by Django 4.2 on 2024-01-01\n"),
+        ("a.md", "<!-- This file is generated by scripts/docs.py. DO NOT EDIT. -->\n# Title\n"),
+        ("a.ini", "; autogenerated\n[x]\n"),
+    ],
+)
+def test_a_comment_header_marks_a_generated_file(tmp_path: Path, name: str, text: str) -> None:
+    (tmp_path / name).write_text(text)
+    facts = file_facts(tmp_path, name)
+    assert (facts.generated, facts.generated_by) == (True, "header")
+    assert facts.generated_reason == "a generated-file header"
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("scan.py", '"""Scan.\n\nThe summary is generated by the scan and cached.\n"""\n'),
+        ("codegen.py", 'HEADER = "# Code generated by codegen.py. DO NOT EDIT."\n'),
+        ("codegen.py", "def header():\n    return '// @generated'\n"),
+        ("CONTRIBUTING.md", "# Contributing\n\nPlease do not edit CHANGELOG.md by hand.\n"),
+        ("AGENTS.md", "# Generated by hand, with care\n\n* DO NOT EDIT schema_gen.py\n"),
+        ("notes.txt", "-- auto-generated reports go to out/\n"),
+        ("conf.py", "# do not edit this without talking to the platform team\nx = 1\n"),
+        ("late.py", "x = 1\n" * 10 + "# Code generated by tool. DO NOT EDIT.\n"),
+        ("report.py", "# The numbers below are regenerated nightly\nx = 1\n"),
+    ],
+)
+def test_prose_about_generating_is_not_a_header(tmp_path: Path, name: str, text: str) -> None:
+    (tmp_path / name).write_text(text)
+    assert file_facts(tmp_path, name) == FileFacts(True, text.count("\n"), False, "")
+
+
+def test_an_output_directory_name_counts_only_when_git_does_not_track_it(tmp_path: Path) -> None:
+    for rel in ("build/package/Dockerfile", "internal/gen/writer.go", "cmd/out/main.go"):
+        assert recommend.in_output_directory(rel)
+        assert not file_facts(tmp_path, rel).generated
+        ignored = file_facts(tmp_path, rel, untracked=True)
+        assert (ignored.generated, ignored.generated_by) == (True, "directory")
+        assert ignored.generated_reason == "its directory, which git does not track"
+    assert not recommend.in_output_directory("src/builder/out.py")
+    assert not file_facts(tmp_path, "src/builder/out.py", untracked=True).generated
+    # names only tools write need no such evidence
+    assert file_facts(tmp_path, "build/app.min.js").generated_by == "name"
+
+
+def test_generated_advice_hedges_when_only_the_path_says_so() -> None:
+    found = [finding(signals.EDIT_MISS, f"s{i}", variant="not-found") for i in range(3)]
+    sure = FileFacts(True, 50, True, "a generated-file header", "header")
+    (rec,) = recommend.recommend(model.FILE, "api/schema_gen.py", found, sure)
+    assert rec["title"] == "Generated file: point agents at its source"
+    assert str(rec["detail"]).startswith(
+        "This file says it is generated (it starts with a generated-file header), yet agents"
+    )
+    for facts in (
+        FileFacts(True, 50, True, "its name", "name"),
+        FileFacts(True, 50, True, "its directory, which git does not track", "directory"),
+    ):
+        (rec,) = recommend.recommend(model.FILE, "gen/api_pb2.py", found, facts)
+        assert rec["id"] == "edit-the-source-not-the-output"
+        assert rec["title"] == "Possibly a generated file: if so, point agents at its source"
+        assert str(rec["detail"]).startswith(
+            f"This file may be generated (judging only by {facts.generated_reason}; it carries "
+            "no generated-file header, so check), yet agents"
+        )
+        assert "If it is, say in AGENTS.md" in str(rec["detail"])
+
+
+INVOCATION = [
+    finding(
+        signals.COMMAND_FAILURE,
+        f"s{i}",
+        variant="invocation",
+        recovered_by="make test",
+    )
+    for i in range(3)
+]
+
+
+def _working(tmp_path: Path, line: str) -> dict[str, object]:
+    repo = write(tmp_path, {"AGENTS.md": f"# Notes\n\n{line}\n"})
+    recs = recommend.recommend(model.COMMAND, "pytest", INVOCATION, None, guidance=Guidance(repo))
+    (rec,) = (r for r in recs if r["id"] == "use-the-working-command")
+    return rec
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "We make test data with factories.",
+        "Please make test names descriptive.",
+        "The CI runs make test on every PR, but locally it needs Docker.",
+        "`make test` is slow; prefer a single file.",
+    ],
+)
+def test_words_that_only_look_like_the_command_do_not_document_it(
+    tmp_path: Path, line: str
+) -> None:
+    rec = _working(tmp_path, line)
+    assert "is documented" not in str(rec["title"])
+    assert rec["documented_as"] == "mention"
+    assert rec["documented_in"] == [{"file": "AGENTS.md", "line": 3}]
+    assert (
+        "(Also mentioned at `AGENTS.md:3`: check whether it already says this. If it does, "
+        in str(rec["detail"])
+    )
+    assert "another line will not help" not in str(rec["detail"])
+
+
+def test_a_line_that_rules_out_what_worked_is_a_conflict(tmp_path: Path) -> None:
+    rec = _working(tmp_path, "Do not run `make test` locally.")
+    assert rec["documented_as"] == "conflict" and "replacement" not in rec
+    assert rec["title"] == "`make test` is ruled out, yet it is what works"
+    assert str(rec["detail"]).startswith("`AGENTS.md:3` tells agents not to run `make test`, yet ")
+    assert str(rec["detail"]).endswith("work where agents run, or change that line.")
+    assert "Add a line" not in str(rec["detail"])
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Tests: `make test`.",
+        "Run make test before you push.",
+        "Check your work with make test.",
+        "$ make test",
+        "```\nmake test\n```",
+        "Always go via 'make test' here.",
+    ],
+)
+def test_a_command_in_command_context_documents_it(tmp_path: Path, line: str) -> None:
+    rec = _working(tmp_path, line)
+    assert rec["title"] == "`make test` is documented, yet agents run `pytest`"
+    assert rec["documented_as"] == "instruction"
+    assert "Check that the cited line tells agents to use `make test` here. If it does, " in str(
+        rec["detail"]
+    )
+
+
+def test_a_command_nobody_mentions_gets_plain_advice(tmp_path: Path) -> None:
+    rec = _working(tmp_path, "Nothing about tests here.")
+    assert rec["documented_in"] == [] and "documented_as" not in rec
+    assert "mentioned at" not in str(rec["detail"])
+
+
+def test_a_pointer_to_a_file_is_not_an_instruction_about_it(tmp_path: Path) -> None:
+    found = [finding(signals.EDIT_MISS, f"s{i}", variant="not-found") for i in range(3)]
+    facts = FileFacts(True, 50, True, "a generated-file header", "header")
+    rel = "src/schema_gen.py"
+
+    def advice(line: str) -> dict[str, object]:
+        repo = write(tmp_path / str(abs(hash(line))), {"AGENTS.md": line + "\n"})
+        (rec,) = recommend.recommend(model.FILE, rel, found, facts, guidance=Guidance(repo))
+        return rec
+
+    pointer = advice("See src/schema_gen.py for an example of our style.")
+    assert pointer["title"] == "Generated file: point agents at its source"
+    assert pointer["documented_as"] == "mention"
+    assert "(Also mentioned at `AGENTS.md:1`: check whether it already says this." in str(
+        pointer["detail"]
+    )
+    for line in (
+        "Never hand-edit src/schema_gen.py.",
+        "schema_gen.py is generated: change api/openapi.yaml instead.",
+        "Don't touch src/schema_gen.py; run make codegen.",
+    ):
+        told = advice(line)
+        assert told["title"] == "Generated file: telling agents was not enough"
+        assert told["documented_as"] == "instruction"
+        assert "Check that the cited line says not to edit it by hand. If it does, " in str(
+            told["detail"]
+        )
+    guide = Guidance(write(tmp_path / "g", {"AGENTS.md": "See src/schema_gen.py for style.\n"}))
+    assert cited(guide.mentions([rel])) == ["AGENTS.md:1"]
+    assert guide.mentions([rel], context="file") == []
+
+
+# ---- round 26 ------------------------------------------------------------------------
+
+
+def test_a_classifier_refusal_is_not_answered_with_an_allow_rule() -> None:
+    def denied(variant: str) -> list[Finding]:
+        return [finding(signals.PERMISSION_DENIED, f"s{i}", variant=variant) for i in range(3)]
+
+    (rec,) = recommend.recommend(model.COMMAND, "rm", denied("classifier"))
+    assert rec["title"] == "Tell agents this is refused, and what to do instead"
+    assert "A permission rule does not change that." in str(rec["detail"])
+    assert "allow rule" not in str(rec["detail"])
+    (rec,) = recommend.recommend(model.COMMAND, "rm", denied("safety"))
+    assert rec["title"] == "Tell agents this is refused, and what to do instead"
+    (rec,) = recommend.recommend(model.COMMAND, "rm", denied("permission"))
+    assert rec["title"] == "Allow it, or tell agents it is off limits"
+
+
+# ---- round 27 ------------------------------------------------------------------------------
+
+
+def _file_finding(signal: str, session: str, fid: int, **detail: str) -> Finding:
+    made = finding(signal, session, fid, **detail)
+    made.targets = [Target(model.FILE, "a.py")]
+    return made
+
+
+def test_a_revert_after_a_check_asks_for_the_constraint_not_for_a_check() -> None:
+    def reverts(*checked: bool) -> list[Finding]:
+        return [
+            _file_finding(signals.EDIT_REVERT, f"s{i}", i, **({"checked": "1"} if yes else {}))
+            for i, yes in enumerate(checked)
+        ]
+
+    blind = recommend.recommend(model.FILE, "a.py", reverts(False, False))
+    assert ids(blind) == ["add-a-fast-check"]
+    assert "2 reverted edits in 2 sessions" in str(blind[0]["detail"])
+    (tested,) = recommend.recommend(model.FILE, "a.py", reverts(True, True, True))
+    assert tested["id"] == "state-the-constraint" and tested["signals"] == ["edit-revert"]
+    assert tested["title"] == "Say what must not change in this file"
+    assert "backed it out 3 times in 3 sessions, 3 of them after a test" in str(tested["detail"])
+    assert "iterating blind" in str(tested["detail"]) and "fast" not in str(tested["title"])
+    # one of each: no check is missing, and something was tried and taken back twice
+    assert ids(recommend.recommend(model.FILE, "a.py", reverts(True, False))) == [
+        "state-the-constraint"
+    ]
+    # two blind ones next to a checked one: the blind ones still want a check
+    mixed = recommend.recommend(model.FILE, "a.py", reverts(False, False, True))
+    assert ids(mixed) == ["add-a-fast-check"]
+    assert "2 reverted edits" in str(mixed[0]["detail"])
+    # a single revert is advice for nobody
+    assert recommend.recommend(model.FILE, "a.py", reverts(True)) == []
+
+
+def test_edit_miss_advice_does_not_compare_with_a_rest_that_is_not_there() -> None:
+    def misses(**detail: str) -> list[Finding]:
+        return [_file_finding(signals.EDIT_MISS, f"s{i}", i, **detail) for i in range(3)]
+
+    (compared,) = recommend.recommend(model.FILE, "a.py", misses())
+    assert "clearly more often than in the rest of this repository" in str(compared["detail"])
+    (alone,) = recommend.recommend(model.FILE, "a.py", misses(no_comparison="1"))
+    text = str(alone["detail"])
+    assert alone["id"] == "make-edits-land" and "rest of this repository" not in text
+    assert "Too little else was edited here to compare against; it is reported because" in text
+    assert "it is well above the 5% taken as ordinary." in text
+    assert "Nothing in the transcripts shows the file being rewritten" in text
+
+
+def test_a_target_that_does_not_exist_is_not_something_to_document() -> None:
+    def absent(count: int = 2, **detail: str) -> list[Finding]:
+        detail = detail or {"no_target": "lint", "no_target_in": "Makefile"}
+        detail = {"key": "make lint", "variant": "invocation", **detail}
+        return [finding(signals.COMMAND_FAILURE, f"s{i}", i, **detail) for i in range(count)]
+
+    (rec,) = recommend.recommend(
+        model.COMMAND, "make lint", absent(), None, quote, None, None, ["test", "check", "fmt"]
+    )
+    assert rec["id"] == "name-the-missing-target"
+    assert rec["title"] == "`make lint` does not exist: say what to run instead"
+    text = str(rec["detail"])
+    assert "because the Makefile has no target `lint`." in text
+    assert "What it does define: `test`, `check`, `fmt`." in text
+    assert "Document how to run" not in text and "say in AGENTS.md which command" in text
+    # the targets are not known: nothing is listed, and nothing is invented
+    (rec,) = recommend.recommend(model.COMMAND, "make lint", absent(), None, quote)
+    assert "What it does define" not in str(rec["detail"])
+    # package scripts, keyed by directory
+    scripts = absent(no_target="lint", no_target_in="package.json")
+    (rec,) = recommend.recommend(model.COMMAND, "npm run lint (web/)", scripts, None, quote)
+    assert rec["title"] == "`npm run lint` in `web/` does not exist: say what to run instead"
+    assert "the package.json has no script `lint`" in str(rec["detail"])
+    # without excerpts no name from the project is spelled out
+    (rec,) = recommend.recommend(
+        model.COMMAND, "make <target:abc123>", absent(), None, None, None, None, ["test"]
+    )
+    assert "lint" not in str(rec["detail"]) and "`test`" not in str(rec["detail"])
+    assert "the Makefile has no target." in str(rec["detail"])
+    # any other invocation error is still a matter of how to run it
+    other = absent(excerpt="make: cc: command not found")
+    assert ids(recommend.recommend(model.COMMAND, "make lint", other, None, quote)) == [
+        "document-the-command"
+    ]
+
+
+def test_corrections_are_called_different_only_when_they_can_be_told_apart() -> None:
+    def advice(*said: str) -> str:
+        found = [
+            finding(signals.USER_CORRECTION, f"s{i}", fid=i, quote=q) for i, q in enumerate(said)
+        ]
+        (rec,) = recommend.recommend(model.FILE, "a.py", found, None, quote)
+        return str(rec["detail"])
+
+    different = advice("No, use PaymentClient here", "That broke the migration, revert it")
+    assert "2 times in 2 sessions, each time about something else." in different
+    # nothing to tell by, or the same few words again: no claim either way
+    for said in (("No, stop", "No, stop"), ("no", "stop that"), ("No!", "That broke the build")):
+        text = advice(*said)
+        assert "something else" not in text and "2 times in 2 sessions. If what they" in text
+    assert "something else" not in advice("No, use PaymentClient here")
+
+
+def test_the_repo_wide_note_does_not_call_every_file_above_the_rate() -> None:
+    base = scoring.baseline({f"f{i}.py": (2, 2, 4) for i in range(7)})
+    assert len(base.above) == base.files == 7
+    item = recommend.repo_wide(signals.EDIT_MISS, base, 4, 0)
+    assert item is not None
+    text = str(item["detail"])
+    assert "clearly above that rate" not in text
+    assert "All 7 files with such events are far above the 5% taken as ordinary" in text
+    assert "none stands out from the others" in text
+    # some files above, others not: the old sentence still holds
+    counts = {"hot.py": (8, 8, 16), **{f"f{i}.py": (10, 1, 1) for i in range(8)}}
+    mixed = recommend.repo_wide(signals.EDIT_MISS, scoring.baseline(counts), 6, 0)
+    assert mixed is not None
+    assert "1 file is clearly above that rate and has its own entry: `hot.py`." in str(
+        mixed["detail"]
+    )
+
+
+def test_a_small_line_count_is_not_cited_for_a_file_too_large_to_read() -> None:
+    found = [finding(signals.FILE_TOO_LARGE, f"s{i}") for i in range(2)]
+    (rec,) = recommend.recommend(model.FILE, "a.json", found, FileFacts(True, 1))
+    assert rec["id"] == "split-or-anchor-large-file" and "(1 line)" not in str(rec["detail"])
+    assert "Reads of this file were refused as too large" in str(rec["detail"])
+    (rec,) = recommend.recommend(model.FILE, "a.py", found, FileFacts(True, 4200))
+    assert "Reads of this file (4200 lines) were refused" in str(rec["detail"])
+
+
+def test_a_correction_that_names_an_untouched_file_says_so() -> None:
+    found = [
+        finding(
+            signals.USER_CORRECTION, f"s{i}", quote="No, do it like src/b.py", also_named="src/b.py"
+        )
+        for i in range(2)
+    ]
+    (rec,) = recommend.recommend(model.FILE, "src/a.py", found, None, quote)
+    assert "A human corrected the agent while it was working here 2 times" in str(rec["detail"])
+    assert str(rec["detail"]).endswith(
+        "(The human also named `src/b.py`, which the agent had not touched.)"
+    )
+    plain = [finding(signals.USER_CORRECTION, f"s{i}", quote="No, not like that") for i in (1, 2)]
+    (rec,) = recommend.recommend(model.FILE, "src/a.py", plain, None, quote)
+    assert "corrected the agent here" in str(rec["detail"]) and "also named" not in str(rec)

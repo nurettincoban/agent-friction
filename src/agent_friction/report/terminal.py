@@ -8,10 +8,18 @@ from typing import Any
 from agent_friction.report._common import (
     all_items,
     collect_recommendations,
+    dropped_note,
+    events_phrase,
+    fmt_lost,
     fmt_minutes,
+    gone_note,
+    grouped_unattributed,
+    headline_lost,
     plural,
+    repo_recommendations,
     signal_titles,
     top_signals,
+    unattributed_heading,
 )
 
 
@@ -51,6 +59,22 @@ class Style:
         return self.green(text)
 
 
+def _in_repo_calls(totals: dict[str, Any]) -> int:
+    """Tool calls inside the repo; older results only have the all-calls count."""
+    value = totals.get("tool_calls_in_repo", totals.get("tool_calls", 0))
+    return int(value or 0)
+
+
+def _utc_label(timestamp: object) -> str:
+    """Evidence times are UTC; say so, since a reader assumes local time."""
+    text = str(timestamp or "")[:16].replace("T", " ")
+    return f"{text} UTC" if text else ""
+
+
+def _lost_phrase(minutes: float) -> str:
+    return f"~{fmt_minutes(minutes)} lost" if minutes > 0 else "no time estimate"
+
+
 def bar(score: float, width: int = 10) -> str:
     """A fixed-width bar for a 0-100 score, using eighth blocks for resolution."""
     score = max(0.0, min(100.0, score))
@@ -61,7 +85,50 @@ def bar(score: float, width: int = 10) -> str:
 
 
 def _truncate(text: str, width: int) -> str:
-    return text if len(text) <= width else "…" + text[-(width - 1) :]
+    """Elide the middle, so long sibling paths keep both their top directory and file name."""
+    if len(text) <= width:
+        return text
+    head = (width - 1) // 3
+    return text[:head] + "…" + text[-(width - 1 - head) :]
+
+
+def _unattributed_rows(result: dict[str, Any], st: Style, width: int, limit: int = 5) -> list[str]:
+    heading = unattributed_heading(result)
+    if heading is None:
+        return []
+    lines = (
+        ["", st.bold(heading)]
+        if not result.get("hotspots") and not result.get("commands")
+        else [st.bold(heading)]
+    )
+    items = grouped_unattributed(result)
+    for ev, n in items[:limit]:
+        when = _utc_label(ev.get("timestamp"))
+        times = f" (×{n})" if n > 1 else ""
+        text = f"{ev.get('signal', '?')} · {ev.get('summary', '')}{times}"
+        room = max(40, width - 20)
+        text = text if len(text) <= room else text[: room - 1] + "…"
+        lines.append(f"  {st.dim(when)} {text}")
+        if ev.get("source"):
+            lines.append(st.dim(f"      ↳ {ev['source']}:{ev.get('line', '?')}"))
+    if len(items) > limit:
+        rest = sum(n for _, n in items[limit:])
+        lines.append(st.dim(f"  … {rest} more in --format json (unattributed)"))
+    lines.append("")
+    return lines
+
+
+def _repo_rows(result: dict[str, Any], st: Style, width: int) -> list[str]:
+    items = repo_recommendations(result)
+    if not items:
+        return []
+    lines = [st.bold("Across the repository")]
+    for rec in items:
+        lines.append(f"  • {rec.get('title', '')}")
+        for line in textwrap.wrap(str(rec.get("detail", "")), width=max(40, width - 6)):
+            lines.append(st.dim(f"    {line}"))
+    lines.append("")
+    return lines
 
 
 def _hotspot_rows(
@@ -83,9 +150,9 @@ def _hotspot_rows(
         lines.append(
             "  "
             + st.heat(score, f"{bar(score)} {score:>5.1f}")
-            + f" {_truncate(str(h.get('path', '')), path_w):<{path_w}}"
+            + f" {_truncate(str(h.get('path', '')) + gone_note(h), path_w):<{path_w}}"
             + f" {h.get('sessions', 0):>4} {h.get('events', 0):>6}"
-            + f" {fmt_minutes(float(h.get('est_minutes_lost', 0))):>7}  "
+            + f" {fmt_lost(float(h.get('est_minutes_lost', 0))):>7}  "
             + st.dim(f"{conf_mark} ")
             + sig
         )
@@ -108,13 +175,17 @@ def render_terminal(
     if window.get("start") or window.get("end"):
         span = f" · {str(window.get('start') or '…')[:10]} → {str(window.get('end') or '…')[:10]}"
     sessions = int(totals.get("sessions", 0))
-    who = plural(sessions, "session") if sessions else "git history only, no agent sessions"
+    git_on = bool(result.get("settings", {}).get("git", True))
+    if sessions:
+        who = plural(sessions, "session")
+    else:
+        who = "git history only, no agent sessions" if git_on else "no agent sessions"
     out.append(
         st.dim(
             f"{who}"
-            f" · {plural(int(totals.get('tool_calls', 0)), 'tool call')}"
-            f" · {plural(int(totals.get('friction_events', 0)), 'friction event')}"
-            f" · ~{fmt_minutes(float(totals.get('est_minutes_lost', 0)))} lost"
+            f" · {plural(_in_repo_calls(totals), 'tool call')}"
+            f" · {events_phrase(totals)}"
+            f" · {headline_lost(totals)}"
             f" · {plural(int(totals.get('corrections', 0)), 'human correction')}{span}"
         )
     )
@@ -123,11 +194,28 @@ def render_terminal(
     hotspots = list(result.get("hotspots", []))[:top]
     commands = list(result.get("commands", []))[:top]
     if not hotspots and not commands and not result.get("directories"):
-        calls = int(totals.get("tool_calls", 0))
-        out.append(
-            st.green(f"No recurring friction found in {plural(calls, 'tool call')}.")
-            + (st.dim(" That is a small sample; check again later.") if calls < 50 else "")
-        )
+        calls = _in_repo_calls(totals)
+        if int(totals.get("friction_events", 0)):
+            out.append(st.green("No hotspot: no file, directory, or command collected friction."))
+        elif not sessions:
+            out.append(
+                st.green("No recurring friction found in the git history.")
+                if git_on
+                else st.green(
+                    "No recurring friction: no agent session touched this repository "
+                    "in this window."
+                )
+            )
+        else:
+            out.append(
+                st.green(f"No recurring friction found in {plural(calls, 'tool call')}.")
+                + (st.dim(" That is a small sample; check again later.") if calls < 50 else "")
+            )
+        out.extend(_unattributed_rows(result, st, width))
+        out.extend(_repo_rows(result, st, width))
+        note = dropped_note(result)
+        if note:
+            out.append(st.dim(note))
         return "\n".join(out) + "\n"
 
     if hotspots:
@@ -140,9 +228,15 @@ def render_terminal(
         out.append("")
     directories = list(result.get("directories", []))[:top]
     if directories:
-        out.append(st.bold("Directories where agents search in vain"))
+        out.append(
+            st.bold("Directories where agents search in vain")
+            + st.dim(" (the directory itself; show <dir> rolls up everything inside)")
+        )
         out.extend(_hotspot_rows(directories, st, titles, width, "directory"))
         out.append("")
+
+    out.extend(_unattributed_rows(result, st, width))
+    out.extend(_repo_rows(result, st, width))
 
     recs = collect_recommendations(result, limit=5)
     if recs:
@@ -164,9 +258,21 @@ def render_terminal(
     out.append(
         st.dim(
             "Per-row time can overlap (one stall can involve a file and a command); "
+            "n/a means the evidence carries no time estimate; "
             "the total counts each minute once."
         )
     )
+    note = dropped_note(result)
+    if note:
+        out.append(st.dim(note))
+    third = int(totals.get("third_party_events", 0) or 0)
+    if third:
+        out.append(
+            st.dim(
+                f"Also left out: {plural(third, 'event')} in dependencies or build output "
+                "(node_modules, .venv, git-ignored directories)."
+            )
+        )
     if any(int(h.get("agent_commits", 0)) for h in all_items(result)):
         out.append(st.dim("For git evidence, sess counts the agent commits involved."))
     skipped = sum(int(s.get("skipped_lines", 0)) for s in result.get("sources", []))
@@ -174,7 +280,7 @@ def render_terminal(
         out.append(
             st.yellow(
                 f"{plural(skipped, 'transcript line')} could not be parsed and "
-                "were skipped (see sources in --format json)."
+                f"{'was' if skipped == 1 else 'were'} skipped (see sources in --format json)."
             )
         )
     return "\n".join(out) + "\n"
@@ -189,13 +295,13 @@ def render_detail(
     score = float(item.get("score", 0))
     out: list[str] = []
     kind = {"command": "command", "dir": "directory"}.get(str(item.get("kind")), "file")
-    out.append(st.bold(f"{kind}: {item.get('path')}"))
+    out.append(st.bold(f"{kind}: {item.get('path')}{gone_note(item)}"))
     out.append(
         st.heat(score, f"{bar(score)} {score:.1f}/100")
         + st.dim(
             f"  · {plural(int(item.get('sessions', 0)), 'session')}"
             f" · {plural(int(item.get('events', 0)), 'event')}"
-            f" · ~{fmt_minutes(float(item.get('est_minutes_lost', 0)))} lost"
+            f" · {_lost_phrase(float(item.get('est_minutes_lost', 0)))}"
             f" · {item.get('confidence', 'low')} confidence"
         )
     )
@@ -222,11 +328,12 @@ def render_detail(
     if evidence:
         out.append(st.bold("Evidence"))
         for ev in evidence:
-            ts = str(ev.get("timestamp", ""))[:16].replace("T", " ")
+            ts = _utc_label(ev.get("timestamp"))
             sess = str(ev.get("session_id", ""))[:8]
             out.append(
                 f"  {st.cyan(ts)} {st.dim('session ' + sess)}  "
                 f"{titles.get(str(ev.get('signal')), ev.get('signal'))}: {ev.get('summary', '')}"
+                + (st.yellow(" (unresolved at end of session)") if ev.get("trailing") else "")
             )
             excerpt = ev.get("excerpt")
             if excerpt:
@@ -247,10 +354,14 @@ def render_dir_detail(
     score = float(node.get("score", 0))
     out = [
         st.bold(f"directory: {node.get('path') or '.'}/ (everything inside, rolled up)"),
+        st.dim(
+            "The score is computed afresh over all evidence inside, so it can exceed any one "
+            "file's; compare it with other directories, not with files."
+        ),
         st.heat(score, f"{bar(score)} {score:.1f}/100")
         + st.dim(
             f"  · {plural(int(node.get('events', 0)), 'event')}"
-            f" · ~{fmt_minutes(float(node.get('est_minutes_lost', 0)))} lost"
+            f" · {_lost_phrase(float(node.get('est_minutes_lost', 0)))}"
         ),
         "",
     ]

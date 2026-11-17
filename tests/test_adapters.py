@@ -4,8 +4,10 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from agent_friction import model
-from agent_friction.adapters import claude_code, detect_format, generic, parse_transcript
+from agent_friction.adapters import claude_code, common, detect_format, generic, parse_transcript
 from agent_friction.adapters.common import classify_error, parse_ts, rejection_reason
 from tests import builders
 from tests.builders import Session
@@ -162,7 +164,7 @@ def test_claude_binary_garbage_file(tmp_path: Path) -> None:
     path = tmp_path / "garbage.jsonl"
     path.write_bytes(b"\xff\xfe\x00\x01not json\n\x80\x81\n")
     parsed = parse_transcript(path)
-    assert parsed.streams == [] and parsed.skipped_lines == 2
+    assert parsed.streams == [] and parsed.skipped_lines >= 1  # FF FE reads as UTF-16
 
 
 def test_claude_sidechains_and_subagent_files(tmp_path: Path) -> None:
@@ -362,3 +364,326 @@ def test_absurdly_nested_json_is_a_skipped_line(tmp_path: Path) -> None:
     )
     g = generic.parse_file(generic_file)
     assert g.skipped_lines + g.ignored_lines == 1
+
+
+def test_lone_surrogates_are_replaced_at_the_boundary(tmp_path: Path) -> None:
+    assert model.load_json_line('{"a\\ud83d": ["x\\udc00y", {"b": "\\ud83d\\ude00 ok"}]}') == {
+        "a\ufffd": ["x\ufffdy", {"b": "\U0001f600 ok"}]  # a whole pair is a character
+    }
+    assert model.load_json_line('{"path": "C:\\\\users\\\\dev"}') == {"path": "C:\\users\\dev"}
+    for kind, line in (
+        ("claude", '{"type":"user","sessionId":"s","uuid":"u1","cwd":"/repo",'
+                   '"timestamp":"2026-11-05T16:00:00Z",'
+                   '"message":{"role":"user","content":"go \\ud83d"}}'),
+        ("generic", '{"session":"g","ts":"2026-11-05T16:00:00Z","kind":"user_message",'
+                    '"text":"go \\ud83d"}'),
+    ):  # fmt: skip
+        path = tmp_path / f"{kind}.jsonl"
+        path.write_text(line + "\n")
+        (stream,) = parse_transcript(path).streams
+        assert [e.text for e in stream.events] == ["go \ufffd"]
+        stream.events[0].text.encode("utf-8")
+
+
+def test_powershell_is_a_shell(tmp_path: Path) -> None:
+    s = Session(cwd="C:\\Users\\dev\\shop").user("go")
+    s.tool("PowerShell", {"command": "npm run build"}, "Exit code 1\nerror TS2304", is_error=True)
+    s.tool("Bash", {"command": "npm test"}, "ok")
+    s.tool("TodoWrite", {"command": "not a shell"}, "ok")
+    (stream,) = parse_transcript(s.save(tmp_path)).streams
+    calls = [e for e in stream.events if e.kind == model.TOOL_CALL]
+    assert [(e.op, e.command) for e in calls[:2]] == [
+        (model.OP_SHELL, "npm run build"),
+        (model.OP_SHELL, "npm test"),
+    ]
+    assert calls[2].op != model.OP_SHELL and not calls[2].command
+
+
+# ---- round 17: commands launched in the background ------------------------------------
+
+LAUNCHED = "Command running in background with ID: {}"
+POLL_FAILED = "<status>failed</status>\n\n<exit_code>{}</exit_code>\n\n<stderr>\n{}\n</stderr>"
+
+
+def shell_events(s: Session, tmp_path: Path) -> list[tuple[str, object, object, object]]:
+    (stream,) = parse_transcript(s.save(tmp_path)).streams
+    assert not [e for e in stream.events if e.kind == model.BACKGROUND_OUTCOME]
+    calls = {e.call_id: e for e in stream.events if e.kind == model.TOOL_CALL}
+    return [
+        (calls[e.call_id].command or "", e.background, e.ok, e.exit_code)
+        for e in stream.events
+        if e.kind == model.TOOL_RESULT and calls[e.call_id].op == model.OP_SHELL
+    ]
+
+
+def test_a_background_launch_is_not_an_outcome_and_its_end_is_read(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.tool("Bash", {"command": "npm run dev", "run_in_background": True}, LAUNCHED.format("b1"))
+    s.tool("BashOutput", {"bash_id": "b1"}, "<status>running</status>\n<stdout>starting</stdout>")
+    s.tool("BashOutput", {"bash_id": "b1"}, POLL_FAILED.format(1, "Error: listen EADDRINUSE"))
+    s.tool("BashOutput", {"bash_id": "b1"}, POLL_FAILED.format(1, "Error: listen EADDRINUSE"))
+    assert shell_events(s, tmp_path) == [
+        ("npm run dev", True, True, None),  # the launch: outcome unknown
+        ("npm run dev", False, False, 1),  # ... and how it ended, once
+    ]
+    (stream,) = parse_transcript(s.save(tmp_path)).streams
+    ended = [e for e in stream.events if e.derived]
+    assert len(ended) == 1 and ended[0].call_id.endswith(common.OUTCOME_SUFFIX)
+    assert [e.output for e in stream.events if e.call_id == ended[0].call_id][-1] == (
+        "Error: listen EADDRINUSE"
+    )
+
+
+def test_background_outcomes_from_notifications_and_other_tools(tmp_path: Path) -> None:
+    # a notification first (no output), the log later: one outcome, with the log
+    s = Session().user("go")
+    s.tool(
+        "Bash",
+        {"command": "npm run build"},  # sent to the background by the user, not by a flag
+        LAUNCHED.format("b7"),
+        tool_use_result={"stdout": "", "backgroundTaskId": "b7"},
+    )
+    s.user(
+        "<task-notification>\n<task-id>b7</task-id>\n<status>failed</status>\n"
+        "<summary>Background command failed with exit code 127</summary>\n</task-notification>"
+    )
+    s.tool(
+        "TaskOutput",
+        {"task_id": "b7"},
+        "<task_id>b7</task_id>\n<status>failed</status>\n<exit_code>127</exit_code>\n"
+        "<output>\nsh: 1: vite: not found\n</output>",
+    )
+    assert shell_events(s, tmp_path) == [
+        ("npm run build", True, True, None),
+        ("npm run build", False, False, 127),
+    ]
+    (stream,) = parse_transcript(s.save(tmp_path)).streams
+    assert "sh: 1: vite: not found" in [e.output for e in stream.events if e.kind == "tool_result"]
+    assert not [e for e in stream.events if e.kind == model.USER_MESSAGE and "task-id" in e.text]
+    # completed with exit code 0 is a green run; killed or still running is no outcome
+    s = Session().user("go")
+    s.tool("Bash", {"command": "make build", "run_in_background": True}, LAUNCHED.format("a"))
+    s.tool("BashOutput", {"bash_id": "a"}, "<status>completed</status>\n<exit_code>0</exit_code>")
+    s.tool("Bash", {"command": "npm run dev", "run_in_background": True}, LAUNCHED.format("b"))
+    s.tool("KillShell", {"shell_id": "b"}, "Successfully killed shell: b")
+    s.tool("BashOutput", {"bash_id": "b"}, "<status>killed</status>\n<exit_code>137</exit_code>")
+    assert shell_events(s, tmp_path) == [
+        ("make build", True, True, None),
+        ("make build", False, True, 0),
+        ("npm run dev", True, True, None),
+    ]
+    # the same tags in the output of an ordinary command, or about an unknown task, are text
+    s = Session().user("go")
+    s.tool("Bash", {"command": "cat status.xml"}, "<status>failed</status><exit_code>3</exit_code>")
+    s.tool("TaskOutput", {"task_id": "agent-9"}, "<status>failed</status><exit_code>1</exit_code>")
+    assert shell_events(s, tmp_path) == [("cat status.xml", False, True, None)]
+
+
+def test_generic_background_commands(tmp_path: Path) -> None:
+    lines = [
+        {"session": "s", "kind": "user_message", "text": "go"},
+        {"session": "s", "kind": "tool_call", "id": 1, "op": "shell", "command": "npm run dev",
+         "background": True},
+        {"session": "s", "kind": "tool_result", "id": 1, "output": "started"},
+        {"session": "s", "kind": "tool_result", "of": 1, "exit_code": 1, "output": "EADDRINUSE"},
+        {"session": "s", "kind": "tool_call", "id": 2, "op": "shell", "command": "make watch",
+         "background": True},
+        {"session": "s", "kind": "tool_result", "of": 2, "status": "killed"},
+        {"session": "s", "kind": "tool_result", "of": 99, "exit_code": 1},
+        {"session": "s", "kind": "tool_call", "id": 3, "op": "read", "path": "a",
+         "background": True},
+    ]  # fmt: skip
+    path = tmp_path / "g.jsonl"
+    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+    parsed = parse_transcript(path)
+    (stream,) = parsed.streams
+    assert parsed.skipped_lines == 0
+    results = [e for e in stream.events if e.kind == model.TOOL_RESULT]
+    assert [(e.background, e.ok, e.exit_code, e.output) for e in results] == [
+        (True, True, None, "started"),
+        (False, False, 1, "EADDRINUSE"),
+    ]
+    calls = [e for e in stream.events if e.kind == model.TOOL_CALL]
+    assert [(e.command, e.background, e.derived) for e in calls] == [
+        ("npm run dev", True, False),
+        ("npm run dev", False, True),
+        ("make watch", True, False),
+        (None, False, False),
+    ]
+
+
+# ---- round 20: encodings -----------------------------------------------------------------
+
+GENERIC_ROWS = [
+    {
+        "session": "g",
+        "kind": "tool_call",
+        "id": 1,
+        "op": "edit",
+        "path": "src/a.py",
+        "cwd": "/repo",
+    },
+    {"session": "g", "kind": "tool_result", "id": 1, "error": "edit_not_found"},
+    {"session": "g", "kind": "user_message", "text": "naïve café ✓"},
+]
+
+
+@pytest.mark.parametrize(
+    "encoding", ["utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-32"]
+)
+def test_transcripts_are_read_in_any_unicode_encoding(tmp_path: Path, encoding: str) -> None:
+    from agent_friction.model import text_encoding
+
+    text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in GENERIC_ROWS)
+    path = tmp_path / "g.jsonl"
+    path.write_bytes(text.encode(encoding))
+    assert text_encoding(path).replace("-sig", "") in (encoding.replace("-sig", ""), "utf-8")
+    assert detect_format(path) == "generic"
+    parsed = parse_transcript(path)
+    (stream,) = parsed.streams
+    assert parsed.skipped_lines == 0 and [e.line for e in stream.events] == [1, 2, 3]
+    assert stream.events[-1].text == "naïve café ✓"
+
+
+def test_a_claude_code_file_with_a_bom_keeps_its_first_line(tmp_path: Path) -> None:
+    s = Session().user("go").edit("/repo/src/a.py")
+    path = tmp_path / "s1.jsonl"
+    path.write_bytes(b"\xef\xbb\xbf" + s.text().encode())
+    parsed = parse_transcript(path)
+    assert parsed.skipped_lines == 0 and len(parsed.streams[0].events) == 3
+
+
+def test_lines_another_file_already_gave_are_counted(tmp_path: Path) -> None:
+    text = "".join(json.dumps(row) + "\n" for row in GENERIC_ROWS)
+    first, copy = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    first.write_text(text)
+    copy.write_text(text)
+    seen: dict[str, str] = {}
+    assert parse_transcript(first, seen).duplicate_lines == 0
+    again = parse_transcript(copy, seen)
+    assert again.duplicate_lines == 3 and again.streams == []
+    s = Session().user("go").edit("/repo/src/a.py")
+    one, two = s.save(tmp_path / "x"), s.save(tmp_path / "y")
+    seen = {}
+    assert parse_transcript(one, seen).duplicate_lines == 0
+    assert parse_transcript(two, seen).duplicate_lines == 3
+
+
+def test_implausible_timestamps_count_as_missing() -> None:
+    from datetime import datetime, timezone
+
+    expected = datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
+    # epoch seconds, milliseconds, microseconds and nanoseconds, as numbers or digits
+    for value in (1700000000, 1700000000000, 1700000000000000, 1700000000000000000):
+        assert parse_ts(value) == expected, value
+        assert parse_ts(str(value)) == expected, value
+    assert parse_ts(1700000000.5) == expected.replace(microsecond=500000)
+    # placeholders and unit mix-ups: before 2000, or more than a year ahead
+    for value in (0, 1, "1970-01-01T00:00:00Z", "1999-12-31T23:59:59Z"):
+        assert parse_ts(value) is None, value
+    for value in (4102444800, "2099-01-01T00:00:00Z", "9999-12-31T00:00:00Z", 32503680000):
+        assert parse_ts(value) is None, value
+    ahead = datetime.now(timezone.utc).year + 1
+    assert parse_ts(f"{ahead}-06-01T00:00:00Z") is not None  # a clock that runs a little fast
+    assert parse_ts(f"{ahead + 1}-01-01T00:00:00Z") is None
+    assert parse_ts(float("nan")) is None and parse_ts(float("inf")) is None
+
+
+def test_permission_decisions_say_whether_a_person_was_asked(tmp_path: Path) -> None:
+    from tests.builders import Session
+
+    def results(decision: object) -> list[bool | None]:
+        s = Session().user("go")
+        s.decision = decision  # type: ignore[assignment]
+        s.bash("make test", "ok")
+        parsed = parse_transcript(s.save(tmp_path / str(abs(hash(str(decision))))))
+        return [e.prompted for st in parsed.streams for e in st.events if e.kind == "tool_result"]
+
+    assert results({"decision": "accept", "source": "config"}) == [False]
+    assert results({"decision": "accept", "source": "config", "reasonType": "rule"}) == [False]
+    assert results({"decision": "accept", "source": "user"}) == [True]
+    assert results({"decision": "accept", "source": "prompt"}) == [True]
+    assert results(None) == [None] and results({"decision": "accept"}) == [None]
+    assert results("accept") == [None]
+
+
+# ---- round 29 ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Edit operation blocked by hook:\n- [check-paths.sh]: generated file", "hook"),
+        ("Bash operation blocked by hook: no force pushes here", "hook"),
+        ("<tool_use_error>Write operation blocked by hook:\n- [x]: no</tool_use_error>", "hook"),
+        # words about hooks further in are not the harness refusing the call
+        ("error: the deploy operation blocked by hook is documented in HOOKS.md", None),
+        ("1 passed\nBash operation blocked by hook: x", None),
+    ],
+)
+def test_a_call_blocked_by_a_hook_is_a_denial(text: str, expected: str | None) -> None:
+    assert common.denial(text) == expected
+
+
+def test_a_hook_block_becomes_a_permission_denial_with_hook_wording(tmp_path: Path) -> None:
+    from agent_friction import signals
+
+    said = "Edit operation blocked by hook:\n- [check-paths.sh]: do not edit generated files"
+    s = (
+        Session()
+        .user("go")
+        .tool(
+            "Edit",
+            {"file_path": "/repo/src/a.py", "old_string": "a", "new_string": "b"},
+            said,
+            is_error=True,
+        )
+    )
+    (found,) = builders.detect(s, tmp_path)
+    assert found.signal == signals.PERMISSION_DENIED and found.detail["variant"] == "hook"
+    assert found.summary == "Edit on src/a.py was denied by a hook; it did not run"
+    s = (
+        Session()
+        .user("go")
+        .tool(
+            "Bash",
+            {"command": "git push --force"},
+            "Bash operation blocked by hook: no",
+            is_error=True,
+        )
+    )
+    (found,) = builders.detect(s, tmp_path)
+    assert found.summary == "Bash on `git push` was denied by a hook; it did not run"
+
+
+def test_path_does_not_exist_is_a_missing_path() -> None:
+    assert classify_error("Path does not exist: /repo/srcs")[0] == model.ERR_MISSING
+    assert classify_error("the path does not exist anymore, says the log")[0] == model.ERR_OTHER
+
+
+@pytest.mark.parametrize(
+    ("code", "failed", "status"),
+    [
+        ("1", True, 1),
+        (" 2 ", True, 2),
+        ("0", False, 0),
+        (1, True, 1),
+        (0, False, 0),
+        ("one", False, None),
+        (True, False, None),
+        ("1.5", False, None),
+    ],
+)
+def test_generic_exit_code_may_be_a_numeric_string(
+    tmp_path: Path, code: object, failed: bool, status: int | None
+) -> None:
+    base = {"session": "g", "cwd": "/repo"}
+    lines = [
+        {**base, "kind": "tool_call", "id": 1, "op": "shell", "command": "make build"},
+        {**base, "kind": "tool_result", "id": 1, "exit_code": code, "output": "x"},
+    ]
+    path = tmp_path / "g.jsonl"
+    path.write_text("".join(json.dumps(line) + "\n" for line in lines))
+    result = generic.parse_file(path).streams[0].events[1]
+    assert result.ok is not failed and result.exit_code == status
+    assert result.error == (model.ERR_EXIT if failed else "")

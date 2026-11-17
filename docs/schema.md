@@ -2,7 +2,8 @@
 
 1. [Analysis result](#analysis-result) — what `analyze()` returns and
    `--format json` (`-f json`) prints.
-2. [Generic transcript format](#generic-transcript-format) — the JSONL input
+2. [Comparison result](#comparison-result) — what `compare -f json` prints.
+3. [Generic transcript format](#generic-transcript-format) — the JSONL input
    for transcripts from agents other than Claude Code.
 
 ## Analysis result
@@ -32,19 +33,19 @@ promise. Every option has a CLI flag: `transcripts` is `-t`, `since`/`until` are
 | --- | --- | --- |
 | `repo` | required | Repository root. |
 | `transcripts` | `None` | Files or directories (searched recursively for `*.jsonl`). `None` auto-discovers Claude Code transcripts for the repo, its subdirectories, worktrees and parent directories (see methodology, Discovery). The format of each file is detected from its first lines. |
-| `since`, `until` | `None` | Only **events** whose own timestamp lies inside this window, both ends inclusive (naive datetimes are UTC). The filter is per event, not per session or file: a session that straddles a boundary contributes only its events inside it; an event without a timestamp inherits the previous event's. Events of the same session *before* `since` are still read as context (which files the agent had edited when a correction arrives, which run was red before an edit), but nothing that happened there is counted, exposed or listed. Git commits are filtered by author date. |
+| `since`, `until` | `None` | Only **events** whose own timestamp lies inside this window: `since <= ts < until` (naive datetimes are UTC). `until` is exclusive, so a scan `until` a moment and a scan `since` the same moment never share an event. The filter is per event, not per session or file: a session that straddles a boundary contributes only its events inside it; an event without a timestamp inherits the previous event's. A session in which *no* event has a timestamp is left out as soon as either bound is set, and counted in `totals.untimed_sessions_excluded`. Events of the same session *before* `since` are still read as context (which files the agent had edited when a correction arrives, which run was red before an edit), and so are its events at or *after* `until` (whether a red run was then fixed, recovered, only waited on, or put right by a setup step), but nothing that happened outside the window is counted, exposed or listed. A scan `until` a moment plus a scan `since` it therefore add up to the full scan for what one session decides; verdicts that need several sessions (a flaky test, a wrong runner, a standing red test: 3 sessions) are reached within each window on its own. Git commits are filtered by author date. |
 | `include_git` | `True` | Add `human-rework` from `git log`. Silently unavailable outside a git repo. |
-| `include_excerpts` | `True` | `False` removes everything verbatim: excerpts become `null` and recommendations stop quoting prompts, search patterns, error lines and reasons. Repo paths remain; command keys keep only publicly known words, and project-specific names in them become hash placeholders such as `make <target:37bd73>` (methodology, Attribution). |
+| `include_excerpts` | `True` | `False` removes everything verbatim: excerpts become `null` and recommendations stop quoting prompts, search patterns, error lines and reasons. Repo paths remain, but a path the agent only *guessed* is not a repo path: from the first component that neither exists in the repository now nor was ever read, edited or written successfully in the transcripts, each component is shown as `<path:6 hex digits>` (`src/<path:1f0c2a>/<path:9b7e44>`; the same name always gives the same placeholder). The directory in a command key (`npm test (web/)`) is kept: the command ran there, so it existed; command keys keep only publicly known words, and project-specific names in them become hash placeholders such as `make <target:37bd73>` (methodology, Attribution). |
 | `max_evidence` | `5` | Evidence items per hotspot. |
-| `max_hotspots` | `50` | Maximum entries in each of `hotspots`, `commands`, `directories`. |
+| `max_hotspots` | `None` | Maximum entries in each of `hotspots`, `commands`, `directories`; `None` lists every one. Nothing else depends on it: totals, the tree, `exposure` and `unattributed` are never truncated, and scores do not change with it. |
 | `now` | `None` | Fixed `generated_at`, for reproducible output. |
 | `excerpt_chars` | `240` | Maximum excerpt length. |
-| `repo_aliases` | `()` | Other absolute paths that are this repo, e.g. where it lived on the machine that recorded the transcripts. Windows paths (with a drive letter) are compared case-insensitively. |
+| `repo_aliases` | `()` | Other absolute paths that are this repo, e.g. where it lived on the machine that recorded the transcripts. Windows paths (with a drive letter) are compared case-insensitively: `SRC\App\util.py` and `src\app\util.py` are one file, shown under the spelling the working tree has or, where the repository is not on this machine, the first spelling met. And when the repository or the session's working directory is such a path, the spellings Unix-style shells on Windows use for a drive (`/c/Users/...` in Git Bash, `/mnt/c/...` in WSL, `/cygdrive/c/...`) are read as that drive. |
 | `rework_window_days` | `14` | Window for `human-rework`. |
 | `agent_commit_patterns` | `None` | Regexes (case-insensitive, multiline) matched against `author: Name <email>\n<commit message>`; replaces the defaults. |
 | `bot_commit_patterns` | `()` | Extra regexes, matched the same way against `author: Name <email>`, for automation whose commits are never human rework (added to `gitsignals.DEFAULT_BOT_PATTERNS`: `[bot]` authors, dependabot, renovate, pre-commit-ci, github-actions, ...). |
 | `git_max_commits` | `5000` | Newest commits read from the current branch. |
-| `allow_no_transcripts` | `False` | `True`: if no transcript is found but git history is readable (and `include_git` is on), analyse git history alone (`human-rework` only) instead of raising. |
+| `allow_no_transcripts` | `False` | `True`: finding no transcript is not an error. If git history is readable (and `include_git` is on) it is analysed alone (`human-rework` only); if there is none either (not a repository, no commits yet, `include_git=False`), the result is empty but valid: `totals.sessions` 0, empty `hotspots`/`commands`/`directories`/`unattributed`, `settings` as given, `sources` holding at most the git entry with its `note`. Still raised (`BadTranscriptError`, a `NoTranscriptsError`): a transcript path that does not exist, or a file that is not a transcript. |
 
 `analyze` raises `agent_friction.engine.NoTranscriptsError` (a subclass of
 `agent_friction.errors.AgentFrictionError`) when no transcript file is found.
@@ -69,7 +70,7 @@ by repository or time window, so `0` marks an empty, binary or foreign file.
 | `schema_version` | int | `1`. |
 | `tool` | object | `{"name": "agent-friction", "version": str}`. |
 | `generated_at` | str | ISO-8601 UTC (`...Z`). |
-| `repo` | object | `root` (absolute; only the current user's own home directory is shown as `~`) and `name`. |
+| `repo` | object | `root` (absolute; only the current user's own home directory is shown as `~`) and `name` (the directory's name; for a scan from a linked git worktree, the name of the main worktree, so that every scan of one repository names it alike). |
 | `settings` | object | What kind of scan this is: `excerpts` (bool, `include_excerpts`), `git` (bool: git history was read and used), `key_mode` (`"plain"`, or `"pseudonymized"` when command keys carry hash placeholders, i.e. without excerpts). Reports whose `settings` differ should not be compared: their command keys or evidence base differ. *Addition to the base contract.* |
 | `window` | object | See below. |
 | `sources` | list | One entry per input, see below. |
@@ -78,7 +79,10 @@ by repository or time window, so `0` marks an empty, binary or foreign file.
 | `hotspots` | list | File hotspots, sorted by score (desc), events (desc), path. |
 | `commands` | list | Command hotspots, same shape, `kind: "command"`, `path` is the normalized command ([forms](#forms-of-a-command-key)). |
 | `directories` | list | Directories that events were attributed to directly (searches scoped to a directory), same shape, `kind: "dir"`, `path` without trailing slash, `"."` for the repo root. *Addition to the base contract.* |
+| `recommendations` | list | Advice about the repository as a whole; may be empty. Each item: `id` (`note-the-background-rate`), `title`, `detail` (Markdown, as on hotspots), `signals` (one signal id: `edit-miss` or `stale-edit`), `documented_in` (always `[]`), and the numbers the text is built from: `rate` (float, `hit_visits / visits`), `visits` (int: sessions x files touched), `hit_visits` (int: visits with the signal), `events` (int), `files` (int: files with the signal), `sessions` (int), `above` (list of repo-relative paths clearly above the rate, most significant first; these have their own hotspot advice). See methodology, "The repository's base rate". *Addition within schema version 1.* |
 | `tree` | object | Directory roll-up of all file and directory events. |
+| `tool_failures` | list | One item per tool with `tool-failure` events, most events first: `tool` (the tool's name; with `--no-excerpts` a placeholder such as `<tool:1a2b3c>` unless it is one of the harness's built-in tools), `events` (int), `sessions` (int, distinct session ids). Empty when no tool failed twice. The events themselves are in `unattributed`. *Addition within schema version 1.* |
+| `unattributed` | list | Evidence for the events counted in `totals.unattributed_events`: events that are in `friction_events` and the lost time but in no hotspot (an interrupt with no tool call to pin it on, a declined tool without a path, a correction with no file in reach, a recurring `tool-failure`). Items have the [`evidence[]`](#evidence) shape; at most 20 (`engine.MAX_UNATTRIBUTED_EVIDENCE`), chosen like a hotspot's evidence and listed chronologically, so the list can be shorter than the count. Empty when every event has a target. *Addition to the base contract.* |
 | `exposure` | object | How many sessions touched each target, friction or not. See below. *Addition to the base contract.* |
 
 ### `window`
@@ -94,29 +98,42 @@ by repository or time window, so `0` marks an empty, binary or foreign file.
 
 | Field | Meaning |
 | --- | --- |
-| `kind` | `"claude-code"`, `"generic"` or `"git"`. |
+| `kind` | `"claude-code"`, `"generic"`, `"git"`, or `"unreadable"` for a transcript file that could not be read (see `error`). |
 | `path` | `claude-code:<repo name>` for Claude Code transcripts (the project directory encodes an absolute path and is never shown), the file for generic transcripts (home as `~`; only `generic:<file name>` with `--no-excerpts`), or the repo root for git. |
 | `sessions` | Distinct sessions with activity in the repo (for git: agent commits in the window). |
 | `skipped_lines` | Lines that were not valid JSON objects or lacked required structure. |
 | `skipped_events` | Events on which a detector raised an unexpected error. They are skipped; anything above 0 is a bug worth reporting. |
 | `ignored_lines` | Valid lines of a type that is not analysed (attachments, summaries, ...). |
+| `duplicate_lines` | Lines that an earlier file had already contributed (the same line uuid, or for generic files the same session, timestamp, kind and payload) and that were therefore not read again: a copied or re-exported log. Not for git. *Addition within schema version 1.* |
 | `files` | Transcript files read (not for git). |
 | `sessions_outside_repo` | Sessions dropped because they never touched this repo (not for git). |
 | `available`, `note` | git only: whether history could be read, and why not. |
+| `rework_set_aside` | git only, when history was read: `human-rework` events not counted because the file has a name only tools write (a lockfile, `*_pb2.py`, `*.min.js`): a tool being re-run. 0 when none. *Addition within schema version 1.* |
+| `error` | `kind: "unreadable"` only: why the file could not be read, in fixed words: `"permission denied"`, `"file not found"`, `"is a directory"` or `"could not be read"`. One entry per file; `path` is the file name alone (its directory may name a user or a project), `files` is 1 and every count is 0. Nothing from such a file is in the result. *Addition to the base contract.* |
 
 ### `totals`
 
 | Field | Meaning |
 | --- | --- |
 | `sessions` | Distinct transcript sessions analysed (subagents belong to their parent; git commits are not counted). |
+| `episodes` | Episodes of work in those sessions: a session id counts once for every time it was picked up again after 2 hours or more of silence (methodology, Episodes). Equal to `sessions` when no session was. *Addition to the base contract.* |
 | `tool_calls` | Tool calls in those sessions. |
+| `tool_calls_in_repo` | Those of `tool_calls` that acted inside this repository: a file tool on a path in it, a shell command whose judged step runs in it, any other tool called from a working directory in it. Equal to `tool_calls` unless a session was started in a parent directory and also worked on neighbouring projects. This is the number to put next to the friction counts. Reported ends of background commands are in neither count. *Addition to the base contract.* |
 | `friction_events` | All detected events, equal to the sum of `signals[].count`. |
+| `untimed_sessions_excluded` | Sessions of this repository in which no event has a timestamp, left out because `since` or `until` was given: they cannot be placed in a window, and counting them in every window would count them twice in a before/after pair. Always present; 0 when no bound is set (untimed sessions are then analysed like any other) or when there are none. They are not in `sessions`, `sessions_outside_repo` or any other count. *Addition within schema version 1.* |
+| `sessions_outside_repo` | Sessions that were read and set aside because nothing in them touched this repository: the sum of `sources[].sessions_outside_repo`. Sessions in directories that discovery never reads (a removed worktree beside the repository) are not in it. *Addition within schema version 1.* |
+| `strong_events` | Those of `friction_events` that are friction on their own. Not counted: evidence that is routine by itself and only becomes a lead when it piles up (`scoring.is_weak`): ordinary command failures (a red test, a rejected push), mistyped commands, edit misses and stale edits on a file that shows no more of them than the repository's base rate, search misses, probable corrections, read loops, edit thrash, routine probes for optional files, a `no-convergence` stretch whose end was not seen, a first write refused by the read-first rule. Ordinary failures that the engine lifted out of that class (a standing red test, a command that stays red session after session, a push rejected in 3+ sessions) count. `friction_events - strong_events` is how much of the headline is routine. *Addition within schema version 1.* |
 | `est_minutes_lost` | Union of all claimed intervals, in minutes (1 decimal). |
+| `dropped_red_runs` | Failed commands that were seen and deliberately **not** reported as friction: red runs of the development loop (red, edit, green), commands the agent was only waiting on (failed, then passed untouched), and red runs that went green after a one-off command. They are in no hotspot, signal count or `friction_events`; the number says how much was looked at and set aside. Mistyped commands are not in it: they stay events, as weak evidence. *Addition to the base contract.* |
+| `dropped_minutes` | What those runs took, from call to result, in minutes (1 decimal). A sum of run times, not lost time: it is not part of `est_minutes_lost`. *Addition to the base contract.* |
 | `corrections` | `user-correction` events: clear wording **and** corroborated by what the human named or the agent did next. A lower bound. |
 | `probable_corrections` | `probable-correction` events (wording only, or two weak cues): a separate, weak signal. Listed as evidence, never quoted, never the basis of a recommendation. |
 | `files_affected` | File hotspots before `max_hotspots` truncation. |
 | `commands_affected`, `directories_affected` | Likewise. |
-| `unattributed_events` | Events that could not be tied to a path or command. |
+| `third_party_events` | Events set aside because everything they were about lies in third-party or build directories (`node_modules/`, `.venv/`, `vendor/`, git-ignored directories, ...; methodology, Attribution). They are in no hotspot, signal count or `friction_events`. *Addition to the base contract.* |
+| `unattributed_events` | Events that could not be tied to a path or command. Their evidence is the top-level `unattributed` list. |
+| `tool_failures` | `tool-failure` events: errors returned by tools that are neither file tools, search nor the shell (MCP tools, web fetches, sub-agents), for tools that failed 2+ times in the scan. They are part of `friction_events` and `unattributed_events`, never of `strong_events`; the top-level `tool_failures` list breaks the count down by tool. *Addition within schema version 1.* |
+| `events_outside_repo` | Calls that were declined, denied or failed while acting outside the repository (`cd ../other && make`, a script under `/tmp`, a file elsewhere). They are in no event, signal count or `friction_events`; the number is there so that the headline can be checked against the transcripts (methodology, "Calls that acted outside the repository"). *Addition within schema version 1.* |
 
 ### `exposure`
 
@@ -159,15 +176,17 @@ was fixed only if its target still has exposure there.
 | `agent_commits` | int | How many of `sessions` are agent commits from git whose rework no analysed transcript session accounts for (0 without git). `sessions - agent_commits` is the number of transcript sessions. |
 | `exposure_sessions` | int | Distinct sessions in which the agent touched this target at all, plus `agent_commits`; never less than `sessions`. |
 | `friction_rate` | float | `sessions / exposure_sessions`, two decimals, 0-1. |
+| `episodes`, `exposure_episodes` | int | The same two counts over episodes of work instead of session ids (plus `agent_commits`). These, not the session counts, are what `score_detail.recurrence`, `score_detail.consistency` and `confidence` are computed from; they equal `sessions` / `exposure_sessions` unless a long-lived session id was picked up again after a break. *Addition to the base contract.* |
 | `events` | int | Friction events attributed here. |
+| `family` | object or null | Commands only (absent on files and directories). `null` unless the same command is also listed under another directory (`pytest`, `pytest (src/)`, `pytest (tests/)`); then every one of those rows carries the same object: `command` (the key without a directory), `members` (the `path` of each row, sorted, including rows cut off by `max_hotspots`), `events` and `sessions` (distinct events and distinct sessions over all members). No score, confidence or recommendation is computed for a family. *Addition within schema version 1.* |
 | `est_minutes_lost` | float | Union of these events' intervals. |
 | `signals` | object | `{signal_id: count}`, most frequent first. |
 | `confidence` | str | `"low"`, `"medium"` or `"high"`. |
 | `why` | str | One sentence: counts, friction sessions out of exposure sessions, top signals, reason for the confidence. |
-| `recommendations` | list | `{id, title, detail, signals}`; `signals` lists the signal ids the rule is based on. May be empty. `title` and `detail` are Markdown: commands and quoted search patterns are inline code spans, fenced with more backticks than the value contains (a pattern ``a`b`` is written ```` ``a`b`` ````), so they stay valid whatever the transcript held. |
+| `recommendations` | list | `{id, title, detail, signals, documented_in}` plus `documented_as` when `documented_in` is not empty: `"instruction"` (an instruction file tells agents what the rule would have proposed: the command in command context, the file next to an instruction word; `title` and `detail` are then in their "already documented" form) `"mention"` (the words are there, nothing more is known; the normal text with a note to check the cited line), or `"conflict"` (`use-the-working-command` only: an instruction file tells agents to run the command that failed, or rules out the one they fell back to; `title` and `detail` say to make the documented command work or to change that line, and there is no `replacement`). *`documented_as` is an addition within schema version 1; so is its value `"conflict"`.* `signals` lists the signal ids the rule is based on. `documented_in` is a list of `{"file": "AGENTS.md", "line": 12}` (repo-relative path, 1-based line; for a scanned directory inside a git repository also files above it, as `../../AGENTS.md`; at most 3; empty when nothing was found): places where the repository's instruction files already name what the recommendation is about (methodology, "What the repository already says"). The lines themselves are never quoted. *Addition to the base contract.* Two rules also name what they propose as data: a `use-the-working-command` recommendation that proposes another command has `replacement` (that command's normalized key, the same string as its key in `exposure.command`; absent when the advice is another program name or a variable in front of the same command), and `document-the-setup-step` has `setup` (the key of the setup command; several steps are joined with ` && `). Both are subject to `--no-excerpts` pseudonymization like any command key. May be empty. `title` and `detail` are Markdown: commands and quoted search patterns are inline code spans, fenced with more backticks than the value contains (a pattern ``a`b`` is written ```` ``a`b`` ````), so they stay valid whatever the transcript held. |
 | `evidence` | list | Up to `max_evidence` items, chronological. |
-| `score_detail` | object | The score's factors, each 0-1: `severity`, `recurrence`, `consistency` (`score` is 100 x their product, up to rounding); `mean_session_points`; `intensity` (sum of session points); `capped` (true when all evidence is weak and the score was limited to 19); and `sessions`: per session `session_id`, `weighted_events`, `points`. |
-| `file` | object | File hotspots only: `exists`, `lines` (`null` if missing or over 5 MB), `generated`. |
+| `score_detail` | object | The score's factors, each 0-1: `severity`, `recurrence`, `consistency` (`score` is 100 x their product, up to rounding); `mean_session_points`; `intensity` (sum of session points); `capped` (true when all evidence is weak and the score was limited to 19); and `sessions`: one entry per episode of work with `session_id`, `episode` (the session id for a session's first episode, `<session id>#<n>` for its n-th), `weighted_events`, `points`. |
+| `file` | object | File hotspots only: `exists`, `lines` (`null` if missing or over 5 MB), `generated`, and for a file that is gone, from git: `removed_at` (ISO 8601 date of the commit that deleted or renamed it, else `null`) and `renamed_to` (the repo-relative path it was renamed to in that commit, else `null`). Both are `null` when the file exists, when git is not used, and when git never tracked the path; `exists: false` with `removed_at: null` therefore means "not there, reason unknown". *`removed_at` and `renamed_to` are additions within schema version 1.* |
 
 ### `evidence[]`
 
@@ -176,10 +195,11 @@ was fixed only if its target still has exposure there.
 | `signal` | Signal id. |
 | `session_id` | Transcript session, or `git:<sha>` of the agent commit when no analysed session made it. |
 | `timestamp` | ISO-8601 UTC; `null` only for generic events without `ts`. |
-| `summary` | What happened, built from structure only: tool name, repo-relative path, normalized command name, counts, commit hashes. Never contains prompts, search patterns, command arguments or output. |
+| `trailing` | `true` on a `command-failure` that is the last thing that happened in its session (no later tool call, no later human message): the session was still running or was abandoned, and nothing shows whether the failure was resolved. It counts like any other event. The key is absent otherwise. *Addition within schema version 1.* |
+| `summary` | What happened, built from structure only: tool name (without excerpts, a name that is not a built-in tool of a known agent is shown as `<tool:hash>`, an MCP tool as `mcp__<server:hash>__<tool:hash>`), repo-relative path, normalized command name, counts, commit hashes. Never contains prompts, search patterns, command arguments or output. |
 | `excerpt` | Redacted, truncated transcript text (error output, the command, the human's words, the search pattern), or `null`. Always `null` with `--no-excerpts`, and always `null` for `probable-correction` (a guess never quotes the human). May contain newlines. |
-| `source` | Where to look the event up: `claude-code:<repo name>/<session file>.jsonl` (never the project directory), a generic transcript file (home as `~`), or `"git"`. `null` for transcript evidence with `--no-excerpts`. |
-| `line` | 1-based line number in `source`; `0` for git. |
+| `source` | Where to look the event up: `claude-code:<repo name>/<session file>.jsonl` (never the project directory), a generic transcript file as it was passed (home as `~`; a file that could only be named by an absolute path is named relative to the working directory or to the `--transcripts` directory it was found in, `logs/nightly/run.jsonl`, or else by its file name), or `"git"`. `null` for transcript evidence with `--no-excerpts`. |
+| `line` | 1-based line number in `source` (int); `null` when `source` is `null` (`--no-excerpts`: no transcript is named, so there is no line of one). For git evidence, the short hash of the human commit (str, 8 hex digits), so that `git:<line>` is something `git show` accepts. |
 | `est_seconds_lost` | float. Seconds of agent time this event alone claims (the length of its interval, one decimal); `0.0` if it claims none. A hotspot's `est_minutes_lost` is the union of its events' intervals, so it equals the sum of these only when they do not overlap. *Addition within schema version 1.* |
 
 ### `tree`
@@ -194,8 +214,11 @@ anything beneath it. Commands are not in the tree.
 ### Forms of a command key
 
 A key is the program and the words that say what it does, without arguments:
-`pytest`, `npm test`, `make check`, `uv run pytest`, `git push`. Three
-additions:
+`pytest`, `npm test`, `make check`, `git push`. A command run through a
+launcher keeps the launcher in front of its own key: `uv run pytest`, `uv
+run python scripts/seed.py`, `bundle exec rails test`, `npx tsx
+scripts/a.ts`, `poetry run python manage.py test` (methodology, Attribution).
+Three additions:
 
 | Form | Meaning |
 | --- | --- |
@@ -204,14 +227,54 @@ additions:
 | `npm test (web/)` | A tool that works on the directory it is run in, run in a subdirectory of the repo: the repo-relative directory follows in parentheses, with a trailing slash. The suffix combines with the other two forms: `python <stdin> (web/)`, `python <inline> (tools/gen/)`. No suffix means the repo root. |
 
 Without excerpts (`key_mode: "pseudonymized"`), project-specific words of a
-key become hash placeholders (`make <target:37bd73>`); `<inline>`, `<stdin>`
-and the directory suffix, a repo path like any other, are kept as they are.
+key become hash placeholders (`make <target:37bd73>`); `<inline>` and
+`<stdin>` are kept as they are. The directory suffix is a repo path and is
+treated like one: it is shown if the directory exists now or a file under it
+was successfully read or written in the transcripts, and from the first
+component of which neither is true it becomes `<path:hash>` (`make build
+(<path:bcc85c>/)`). A command that was only *pointed at* a directory (`make
+-C`, `npm --prefix`, `cd X;`, `pushd X &&`) proves nothing about it, least of
+all when it failed. The same holds wherever such a key appears: `path`,
+`exposure.command`, summaries, recommendation titles, `replacement` and
+`setup`.
+Tool names in summaries are treated the same way: built-in tools (`Read`,
+`Edit`, `Bash`, `Grep`, `WebFetch`, `Task`, ... and the generic format's
+operation words) keep their names, any other name becomes `<tool:hash>`, and
+an MCP tool `mcp__<server>__<tool>` becomes `mcp__<server:hash>__<tool:hash>`.
+
+## Comparison result
+
+`agent-friction compare before.json after.json -f json` prints one object:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `schema_version` | int | `1`, versioned like the analysis result. |
+| `tool` | object | `name` and `version` of the tool that compared. |
+| `before`, `after` | object | Each scan's `repo`, `window` and `sessions`. |
+| `low_sample` | bool | Either side has fewer sessions than `--min-sessions`; the regression gate is then not applied. |
+| `changes` | array | One entry per file, directory or command found in either scan, ordered by status, then by score. |
+
+Each `changes[]` entry:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `kind`, `path` | string | As in the analysis result. |
+| `status` | string | `regressed`, `new`, `improved`, `resolved` (touched afterwards, no friction), `replaced` (not run afterwards, but the command the "before" scan recommended ran instead and failed less), `inactive` (not touched afterwards: no evidence either way), `too-little-data`, or `unchanged`. |
+| `before_events`, `after_events` | int | Friction events on each side. |
+| `before_exposure_sessions`, `after_exposure_sessions` | int | Sessions that touched the target on each side. |
+| `before_events_per_10_sessions`, `after_events_per_10_sessions` | number or null | The rates the verdict is based on; `null` when nothing touched it. |
+| `before_score`, `after_score` | number | Scores, for reference; verdicts follow the rates. |
+| `replaced_by` | string or null | With `replaced`: the command agents ran instead. |
+| `replacement_sessions`, `replacement_events` | int | With `replaced`: sessions that ran it afterwards, and its friction events there. |
 
 ## Generic transcript format
 
 To analyse sessions from another agent (Codex, Cursor, Aider, your own
 harness), convert its logs to this format: UTF-8 JSONL, one event per line, in
-chronological order. Pass the file with `--transcripts FILE` on the command
+chronological order. A byte-order mark is accepted, and so are UTF-16 and
+UTF-32 (with a mark, or recognisable by their first bytes), because that is
+what PowerShell's `>` and `Out-File` write; the same holds for Claude Code
+files. Anything else is read as UTF-8 with undecodable bytes replaced. Pass the file with `--transcripts FILE` on the command
 line or `transcripts=[...]` in `AnalyzeOptions`; it is recognised by the
 presence of `session` and a string `kind`. One file may hold several
 sessions. There is no dedicated adapter for other agents yet.
@@ -222,7 +285,7 @@ Common fields:
 | --- | --- | --- |
 | `session` | yes | Session id (string or number). |
 | `kind` | yes | `"tool_call"`, `"tool_result"`, `"user_message"`, `"interrupt"` or (optional) `"assistant_message"`. Other kinds are ignored. |
-| `ts` | no | ISO-8601 timestamp or epoch seconds. Without it no time is estimated. A value that cannot be parsed, or that lies before the year 2000 (a zeroed clock, a counter), is treated as missing. |
+| `ts` | no | ISO-8601 timestamp, or an epoch number (as a number or a string of digits): seconds, or milliseconds, microseconds or nanoseconds, told apart by size (above 1e11, 1e14, 1e17). Without it no time is estimated. A value that cannot be parsed, that lies before the year 2000 (a zeroed clock, a counter) or more than a year ahead of today (a unit mix-up) is treated as missing. The same holds for Claude Code's `timestamp`. |
 | `cwd` | no | Working directory; relative paths resolve against it. Unknown means the repo root. |
 | `subagent` | no | `true` for events of a sub-agent: its `user_message`s are not treated as human. |
 
@@ -239,18 +302,21 @@ Common fields:
 | `old`, `new` | Replaced and replacement text (`edit`), used to detect reverts. |
 | `content` | Full content (`write`), used to detect reverts. |
 | `range` | Any string identifying the part of the file read; equal values mean "same range". |
+| `background` | `true` on a `shell` call that only *launches* the command (it keeps running while the agent goes on). Its own `tool_result` (same `id`), if there is one, is then just the acknowledgement of the launch: neither a success nor a failure. Say how the command ended with a later `tool_result` that has `of` instead of `id` (below). |
 
 `tool_result`:
 
 | Field | Meaning |
 | --- | --- |
-| `id` | Required. The call's id. |
+| `id` | Required (unless `of` is given). The call's id. |
+| `of` | Instead of `id`: the `id` of a `background` shell call whose command has now **ended**. `exit_code`, `ok` and `output` then describe that end, and it is judged exactly like a foreground run of the command at this point of the transcript. Optional `status`: `"killed"`, `"stopped"`, `"cancelled"` or `"running"` mean there is no outcome to judge (the line is ignored). Only the first outcome of a launch counts; an `of` that names no background call is ignored. |
 | `ok` | `false` marks a failure. If omitted, the call failed when `error` is set or `exit_code` is non-zero. |
-| `exit_code` | Shell exit status. |
+| `exit_code` | Shell exit status: an integer, or an integer written as a string (`"1"` is read as 1). Anything else is ignored. |
 | `error` | Optional class: `edit_not_found`, `edit_ambiguous`, `not_read`, `stale`, `missing`, `rejected` (a human declined), `denied` (permission settings or a hook refused; `reason` may be `"hook"`), `interrupted`, `exit`, `not_run` (the harness never started the call: ignored), `too_large` (a read refused for size), `error`. If omitted on a failure it is inferred from `output` using Claude Code's error wording. |
 | `output` | Tool output or error text (used for excerpts and to classify command failures). |
 | `matches` | Number of search results; `0` marks a search miss (alternatively `"empty": true`). |
 | `reason` | What the human said when declining (`error: "rejected"`). |
+| `prompted` | Optional boolean: `true` if a person had to approve the call before it ran (the time from call to result then includes theirs and is not counted as lost), `false` if it ran at once. Omitted: unknown, and call to result counts up to a bound (methodology, "Estimated time lost"). |
 
 `user_message` needs `text`. `interrupt` needs nothing else.
 
@@ -263,9 +329,10 @@ are kept.
 of it is stored or emitted. It is used for two things: its `ts` marks that
 the agent was active (a failed call is then timed up to the agent's next
 message instead of only its own duration), and if the agent's last message
-before a `user_message` has a question mark in its final paragraph, a reply
-that opens with "No, ...", "Not quite" or "Stop." is read as an answer rather
-than a correction. A `tool_call` whose `tool` is a question tool (`ask_user`,
+before a `user_message` ends by offering something or asking for a choice
+("Should I ...?", "Do you want ...?", "A or B?"; not a closing "Anything
+else?"), a reply that opens with "No, ...", "Not quite" or "Stop." is read as
+an answer rather than a correction. A `tool_call` whose `tool` is a question tool (`ask_user`,
 `AskUserQuestion`, ...) has the same effect.
 
 ```jsonl

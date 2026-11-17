@@ -149,7 +149,10 @@ def test_score_ignores_input_order() -> None:
         (5, [signals.EDIT_MISS], "medium"),
         (3, [signals.EDIT_MISS, signals.USER_CORRECTION], "high"),
         (9, [signals.READ_LOOP, signals.EDIT_THRASH], "medium"),
-        (3, [signals.READ_LOOP, signals.EDIT_MISS], "high"),
+        # weak kinds never corroborate: one strong kind plus a weak one is still one kind
+        (3, [signals.READ_LOOP, signals.EDIT_MISS], "medium"),
+        (3, [signals.EDIT_THRASH, signals.NO_CONVERGENCE], "medium"),
+        (3, [signals.EDIT_THRASH, signals.EDIT_MISS, signals.EDIT_REVERT], "high"),
         # git evidence corroborates, it never raises confidence on its own
         (3, [signals.EDIT_MISS, signals.HUMAN_REWORK], "medium"),
         (9, [signals.HUMAN_REWORK], "low"),
@@ -211,9 +214,9 @@ def test_a_derived_signal_is_not_a_second_kind_of_evidence() -> None:
 
 
 def test_weak_only_evidence() -> None:
-    def miss(session: str, pattern: str) -> Finding:
+    def miss(session: str, pattern: str, **detail: str) -> Finding:
         found = finding(signals.SEARCH_MISS, session)
-        found.detail["pattern"] = pattern
+        found.detail.update(pattern=pattern, **detail)
         return found
 
     assert not scoring.weak_only([])
@@ -223,7 +226,13 @@ def test_weak_only_evidence() -> None:
     assert scoring.weak_only([miss("s1", "feature_1"), miss("s2", "feature_2")])
     assert scoring.weak_only([miss("s1", "Policy"), miss("s1", "Policy")])
     # the same name missed in two sessions is no longer a one-off probe
-    assert not scoring.weak_only([miss("s1", "Policy"), miss("s2", "policy")])
+    again = [miss("s1", "Policy", wanted="1"), miss("s2", "policy", wanted="1")]
+    assert not scoring.weak_only(again)
+    # ... if both went on looking for it, and it is not a search for leftovers
+    assert scoring.weak_only([miss("s1", "Policy"), miss("s2", "policy", wanted="1")])
+    assert scoring.weak_only(
+        [miss("s1", "TODO", wanted="1", hygiene="1"), miss("s2", "TODO", wanted="1", hygiene="1")]
+    )
     counts = [(signals.READ_LOOP, 5)]
     assert "capped at 19" in scoring.explain(counts, 5, 5, "medium", capped=True)
     assert "capped" not in scoring.explain(counts, 5, 5, "medium")
@@ -239,3 +248,75 @@ def test_ordinary_command_failures_are_weak_on_their_own() -> None:
     assert scoring.weak_only([failure("ordinary", f"s{i}") for i in range(10)])
     assert not scoring.weak_only([failure("ordinary"), failure("invocation")])
     assert not scoring.weak_only([failure("ordinary"), finding(signals.RETRY_LOOP)])
+
+
+@pytest.mark.parametrize("definition", signals.CATALOG, ids=lambda d: d.id)
+def test_every_signal_can_be_counted_in_words(definition: signals.SignalDef) -> None:
+    one, several = scoring.SIGNAL_NOUNS[definition.id]
+    assert scoring.count_signal(definition.id, 1) == f"1 {one}"
+    assert scoring.count_signal(definition.id, 2) == f"2 {several}"
+    # the noun of the phrase carries the plural, not its last word
+    assert not several.endswith(("greens", "files"))
+    why = scoring.explain([(definition.id, 2)], 2, 2, "medium")
+    assert f"(2 {several})" in why
+
+
+def test_set_of_labelled_signals_is_the_catalog() -> None:
+    assert set(scoring.SIGNAL_NOUNS) == {s.id for s in signals.CATALOG}
+    assert scoring.count_signal("no-convergence", 3) == (
+        "3 edit-and-run stretches that never went green"
+    )
+
+
+# ---- round 25 ------------------------------------------------------------------------
+
+
+def test_tails() -> None:
+    assert scoring.binomial_tail(0, 5, 0.1) == 1.0 and scoring.binomial_tail(6, 5, 0.1) == 0.0
+    assert scoring.binomial_tail(1, 1, 0.05) == pytest.approx(0.05)
+    assert scoring.binomial_tail(2, 2, 0.05) == pytest.approx(0.0025)
+    assert scoring.binomial_tail(3, 30, 0.05) == pytest.approx(0.188, abs=0.001)
+    assert scoring.poisson_tail(0, 2.0) == 1.0 and scoring.poisson_tail(1, 0.0) == 0.0
+    assert scoring.poisson_tail(1, 0.05) == pytest.approx(0.0488, abs=0.0001)
+    assert scoring.poisson_tail(3, 1.5) == pytest.approx(0.191, abs=0.001)
+
+
+def test_a_file_is_above_the_baseline_only_when_it_clearly_is() -> None:
+    # (visits, visits with the signal, events)
+    assert scoring.baseline({"a": (30, 3, 3)}).above == ()  # 3 of 30 is the assumed 5%
+    assert scoring.baseline({"a": (4, 2, 2)}).above == ("a",)
+    assert scoring.baseline({"a": (1, 1, 1)}).above == ()  # once, in the one visit
+    assert scoring.baseline({"a": (1, 1, 40)}).above == ("a",)  # a burst is not background
+    # the same 3 of 10 stands out in a quiet repository and not in a noisy one
+    quiet = {f"f{i}": (20, 0, 0) for i in range(10)} | {"a": (10, 3, 3)}
+    noisy = {f"f{i}": (20, 3, 3) for i in range(10)} | {"a": (10, 3, 3)}
+    assert scoring.baseline(quiet).above == ("a",)
+    base = scoring.baseline(noisy)
+    assert base.above == () and (base.visits, base.hit_visits, base.events) == (210, 33, 33)
+    assert base.files == 11 and base.rate == 0.157
+    # ... and a file far above a noisy repository's rate still does
+    noisy["a"] = (10, 9, 14)
+    assert scoring.baseline(noisy).above == ("a",)
+    # many files tested: one modest p-value among them is what chance produces
+    crowd = {f"f{i}": (25, 2, 2) for i in range(30)} | {"a": (8, 3, 3)}
+    assert scoring.baseline(crowd).above == ()
+    assert scoring.baseline({}).above == () and scoring.baseline({}).rate == 0.0
+
+
+def test_a_finding_within_the_baseline_is_weak() -> None:
+    miss = finding(signals.EDIT_MISS)
+    assert not scoring.is_weak(miss)
+    miss.detail[scoring.WITHIN_BASELINE] = "1"
+    assert scoring.is_weak(miss) and scoring.weak_only([miss])
+    correction = finding(signals.USER_CORRECTION)
+    correction.detail[scoring.WITHIN_BASELINE] = "1"  # not a mechanical signal: no effect
+    assert not scoring.is_weak(correction)
+
+
+def test_baseline_says_which_files_had_nothing_to_be_compared_with() -> None:
+    # one file, every visit a miss: judged against the floor alone
+    alone = scoring.baseline({"only.py": (3, 3, 6)})
+    assert alone.above == ("only.py",) and alone.sparse == ("only.py",)
+    # the same file next to 30 quiet visits elsewhere has a rest to stand out from
+    busy = scoring.baseline({"only.py": (3, 3, 6), **{f"f{i}.py": (3, 0, 0) for i in range(10)}})
+    assert busy.above == ("only.py",) and busy.sparse == ()

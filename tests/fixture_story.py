@@ -96,7 +96,7 @@ def gift_message() -> Session:
     s.tick(5).bash("make test", PASSED, took=9)
     s.say("Done: orders accept gift_message and checkout passes it through.")
     s.tick(240).user(
-        "Don't call legacy_charge() here, it's deprecated. Use PaymentClient.charge() instead."
+        "Actually legacy_charge() is deprecated, PaymentClient.charge() is what we use instead."
     )
     s.tick(10).read(CLIENT)
     s.tick(25).edit(SERVICE, "    legacy_charge(total)", "    payments.charge(total)")

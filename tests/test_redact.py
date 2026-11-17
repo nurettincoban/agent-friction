@@ -48,6 +48,9 @@ FAKE = "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
         ("blob " + FAKE + " end", FAKE, "[REDACTED:high-entropy]"),
         ("mysql -uroot -phunter2 shop", "hunter2", "-p[REDACTED]"),
         ("sshpass -p hunter2 ssh host", "hunter2", "[REDACTED]"),
+        ("sqlcmd -S db -U sa -P hunter2 -Q 'select 1'", "hunter2", "-U sa -P [REDACTED] -Q"),
+        ("sqlcmd -S db -U sa -Phunter2", "hunter2", "-P[REDACTED]"),
+        ("bcp t out f -P 'hunter2 x' -U sa -S db", "hunter2", "-P [REDACTED] -U sa"),
         ("curl -H 'Cookie: sessionid=abc123def; csrf=xyz987'", "abc123def", "[REDACTED:cookie]"),
         ("Cookie: a=1; csrf=xyz987", "xyz987", "Cookie: [REDACTED:cookie]"),
         ("< Set-Cookie: sid=s3cr3tvalue; Path=/; HttpOnly", "s3cr3tvalue", "[REDACTED:cookie]"),
@@ -262,3 +265,48 @@ def test_a_secret_value_is_redacted_whole(text: str, secret: str, expected: str)
 def test_an_ampersand_still_ends_a_query_parameter() -> None:
     assert redact.redact("https://x.test/?token=abcd1234&user=bob").endswith("[REDACTED]&user=bob")
     assert redact.redact("auth-flow: we need to rework it") == "auth-flow: we need to rework it"
+
+
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        ("SECRET_KEY_BASE=plainwordsecret bin/rails s", "plainwordsecret"),
+        ("export SIGNING_KEY=hunter2", "hunter2"),
+        ("SIGNING_KEY='hunter two' make sign", "hunter two"),
+        ("MY_TOKEN_V2=abcd1234 ./deploy", "abcd1234"),
+        ("DB_PASSWD_RO=plainword psql", "plainword"),
+        ("vault login s.AbCdEf123456", "s.AbCdEf123456"),
+        ("htpasswd -b /etc/nginx/.htpasswd bob hunter2", "hunter2"),
+        ("htpasswd -cb users bob hunter2", "hunter2"),
+        ("net use Z: \\\\files\\share hunter2 /user:bob", "hunter2"),
+        ("net use \\\\files\\share /user:corp\\bob hunter2", "hunter2"),
+    ],
+)
+def test_env_style_names_and_login_commands(text: str, secret: str) -> None:
+    masked = redact.redact(text)
+    assert secret not in masked and "[REDACTED" in masked, masked
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["PATH=/usr/bin make", "KEYS=1", "NODE_ENV=production npm test", "vault login -method=oidc"],
+)
+def test_env_rules_leave_ordinary_assignments_alone(text: str) -> None:
+    assert redact.redact(text) == text
+
+
+def test_windows_home_with_forward_slashes_leaves_no_drive() -> None:
+    assert redact.redact_home("C:/Users/runneradmin/work/x", home="/nowhere") == "~/work/x"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ls | xargs -P 4 -n 1 echo",
+        "sort -S 1G -u names.txt | xargs -P 8 gzip",
+        "sqlcmd -S db -E -Q 'select 1'",
+        "parallel -P 4 gzip ::: a b",
+    ],
+)
+def test_a_capital_p_without_a_user_is_not_a_password(text: str) -> None:
+    assert redact.redact(text) == text

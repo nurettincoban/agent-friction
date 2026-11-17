@@ -72,6 +72,8 @@ class Session:
         self.branch = branch
         self.salt = "side" if sidechain else "main"  # keeps line uuids unique per file
         self.lines: list[str] = []
+        #: ``permissionDecision`` written on every tool result from now on, if set.
+        self.decision: dict[str, Any] | None = None
         self._count = 0
         self._parent: str | None = None
 
@@ -165,6 +167,8 @@ class Session:
         extra: dict[str, Any] = {}
         if tool_use_result is not None:
             extra["toolUseResult"] = tool_use_result
+        if self.decision is not None:
+            extra["permissionDecision"] = self.decision
         self._line("user", {"role": "user", "content": [block]}, **extra)
         return self
 
@@ -268,11 +272,13 @@ def detect(
     repo: str = "/repo",
     known: tuple[str, ...] = (),
     files: tuple[str, ...] = (),
+    dirs: tuple[str, ...] = (),
 ) -> list[Finding]:
     """Parse a built session and run the detectors against a purely lexical repo.
 
     ``known`` are repo-relative paths treated as existing files; every path the
     session touches with a file tool is known as well, as in the real engine.
+    ``dirs`` are repo-relative directories that exist.
     """
     path = session if isinstance(session, Path) else session.save(tmp_path)
     resolver = PathResolver(Path(repo))
@@ -288,6 +294,7 @@ def detect(
         is_file=lambda rel: rel in touched or "." in rel.rsplit("/", 1)[-1],
         is_known_file=lambda rel: rel in touched,
         first_party=lambda top: any(rel.split("/")[0] in (top, f"{top}.py") for rel in touched),
+        exists=lambda rel: rel in touched or rel in dirs,
     )
     found: list[Finding] = []
     for stream in parsed.streams:

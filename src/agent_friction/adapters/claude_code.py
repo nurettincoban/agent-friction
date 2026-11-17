@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -39,6 +38,13 @@ _HARNESS_TAGS = (
     r"system-reminder|ide_opened_file|ide_selection|ide_diagnostics|ide_[a-z_]+"
     r"|local-command-[a-z]+|user-prompt-submit-hook|command-stdout|command-stderr"
     r"|bash-input|bash-stdout|bash-stderr|task-notification|user-memory-input|post-tool-use-hook"
+    r"|system-note|session-context|tools-used-before-summary"
+)
+#: Envelopes around what *another agent* wrote into a user turn (a teammate in a team, a
+#: coordinating or peer session). It starts a turn like a prompt does, but nobody typed
+#: it: it is never a correction, is never quoted, and the tag is not text.
+_PEER_RE = re.compile(
+    r"<((?:teammate|agent|peer|coordinator)-message)\b[^>]*>.*?(?:</\1>|\Z)", re.S
 )
 _REMINDER_RE = re.compile(rf"<({_HARNESS_TAGS})\b[^>]*>.*?</\1>", re.S)
 
@@ -50,9 +56,21 @@ _TOOL_OPS = {
     "NotebookEdit": model.OP_EDIT,
     "Write": model.OP_WRITE,
     "Bash": model.OP_SHELL,
+    "PowerShell": model.OP_SHELL,  # Claude Code on Windows
+    "Shell": model.OP_SHELL,
     "Grep": model.OP_SEARCH,
     "Glob": model.OP_SEARCH,
 }
+
+
+#: Tools that ask about, or stop, a command running in the background.
+_TASK_TOOLS = frozenset({"BashOutput", "TaskOutput", "KillShell", "KillBash", "TaskStop"})
+_LAUNCHED_RE = re.compile(r"\s*Command (?:is )?running in (?:the )?background with ID: ([\w.-]+)")
+_NOTIFICATION_RE = re.compile(r"<task-notification>(.*?)</task-notification>", re.S)
+_STATUS_RE = re.compile(r"<status>\s*([\w-]+)\s*</status>")
+_EXIT_CODE_RE = re.compile(r"<exit_code>\s*(-?\d+)\s*</exit_code>|\bexit code (\d+)\b")
+_TASK_ID_RE = re.compile(r"<(?:task-id|task_id|tool-use-id)>\s*([^<\s]+)\s*</")
+_OUTPUT_RE = re.compile(r"<(stdout|stderr|output)>(.*?)</\1>", re.S)
 
 
 def _str(value: object) -> str | None:
@@ -134,8 +152,13 @@ def _tool_call(block: dict[str, Any], line: int, base: dict[str, Any]) -> Event 
         if isinstance(content, str):
             event.content_digest = common.digest(content)
             event.new_text = common.new_text(content)
-    elif name == "Bash":
+    elif event.op == model.OP_SHELL:
         event.command = _str(inp.get("command"))
+        event.background = inp.get("run_in_background") is True
+    elif name in _TASK_TOOLS:
+        # BashOutput / TaskOutput / KillShell: which background task this asks about
+        for field in ("bash_id", "task_id", "shell_id"):
+            event.task_id = event.task_id or (_str(inp.get(field)) or "")
     elif event.op == model.OP_SEARCH:
         event.pattern = _str(inp.get("pattern"))
         event.path = _str(inp.get("path"))
@@ -181,13 +204,42 @@ def _tool_result(
             info.get("numFiles") == 0 and not info.get("numMatches")
         )
     event.output = common.clip_output(clean)
+    started = _LAUNCHED_RE.match(clean)
+    task = info.get("backgroundTaskId")
+    if started is not None or (isinstance(task, str) and task):
+        # "Command running in background with ID: ...": the launch, not the outcome
+        event.background = True
+        event.task_id = task if isinstance(task, str) and task else started.group(1)  # type: ignore[union-attr]
+    return event
+
+
+def _outcome(text: str, line: int, base: dict[str, Any], call_id: str = "") -> Event | None:
+    """How a background task ended, from a poll's result or a ``<task-notification>``."""
+    status = _STATUS_RE.search(text)
+    if status is None:
+        return None
+    event = Event(kind=model.BACKGROUND_OUTCOME, line=line, call_id=call_id, **base)
+    event.task_status = status.group(1).lower()
+    code = _EXIT_CODE_RE.search(text)
+    if code is not None:
+        event.exit_code = int(code.group(1) or code.group(2))
+    task = _TASK_ID_RE.search(text)
+    if task is not None:
+        event.task_id = task.group(1).strip()
+    parts = [body.strip() for _, body in _OUTPUT_RE.findall(text) if body.strip()]
+    event.output = common.clip_output("\n".join(parts))
     return event
 
 
 def _user_text(text: str, line: int, base: dict[str, Any]) -> Event | None:
     stripped = _REMINDER_RE.sub("", text).strip()
+    from_peer = _PEER_RE.search(stripped) is not None
+    stripped = _PEER_RE.sub("", stripped).strip()
     if not stripped:
-        return None
+        # another agent's message alone: a new turn, with no human words in it
+        return (
+            Event(kind=model.USER_MESSAGE, line=line, synthetic=True, **base) if from_peer else None
+        )
     if stripped.startswith(INTERRUPT_PREFIX):
         return Event(kind=model.INTERRUPT, line=line, text=stripped, **base)
     if stripped.startswith(COMMAND_PREFIXES):
@@ -195,6 +247,18 @@ def _user_text(text: str, line: int, base: dict[str, Any]) -> Event | None:
     if stripped.startswith(WRAPPER_PREFIXES) or common.HOOK_FEEDBACK_RE.match(stripped):
         return None
     return Event(kind=model.USER_MESSAGE, line=line, text=stripped, **base)
+
+
+def _prompted(decision: object) -> bool | None:
+    """Was the call approved by a person? From the line's ``permissionDecision``.
+
+    ``{"decision": "accept", "source": "config"}`` is the permission settings (or
+    the mode, or a hook) deciding at once. Any other source is somebody answering
+    a prompt. ``None`` when the line carries no decision.
+    """
+    if not isinstance(decision, dict) or not isinstance(decision.get("source"), str):
+        return None
+    return bool(decision["source"].casefold() != "config")
 
 
 def _line_events(obj: dict[str, Any], line: int) -> list[Event] | None:
@@ -225,6 +289,10 @@ def _line_events(obj: dict[str, Any], line: int) -> list[Event] | None:
             event = _user_text(content, line, base)
             if event is not None:
                 events.append(event)
+        for notice in _NOTIFICATION_RE.findall(content):
+            ended = _outcome(notice, line, base)
+            if ended is not None:
+                events.append(ended)
         return events
     if not isinstance(content, list):
         return None
@@ -235,9 +303,17 @@ def _line_events(obj: dict[str, Any], line: int) -> list[Event] | None:
         if block.get("type") == "tool_result":
             result = _tool_result(block, obj.get("toolUseResult"), line, base)
             if result is not None:
+                result.prompted = _prompted(obj.get("permissionDecision"))
                 events.append(result)
+                polled = _outcome(_flatten(block.get("content")), line, base, result.call_id)
+                if polled is not None and not result.background:
+                    events.append(polled)
         elif block.get("type") == "text" and isinstance(block.get("text"), str):
             texts.append(block["text"])
+    for notice in _NOTIFICATION_RE.findall("\n".join(texts)):
+        ended = _outcome(notice, line, base)
+        if ended is not None:
+            events.append(ended)
     if human and texts:
         event = _user_text("\n".join(texts), line, base)
         if event is not None:
@@ -284,13 +360,13 @@ def parse_file(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFi
     side = Stream(session_id=session, source=path, kind=KIND, sidechain=True)
     parsed = ParsedFile(path=path, kind=KIND, streams=[])
     asking = {False: False, True: False}  # per stream: did the agent just ask something?
-    with path.open(encoding="utf-8", errors="replace") as handle:
+    with model.open_transcript(path) as handle:
         for number, raw in enumerate(handle, 1):
             raw = raw.strip()
             if not raw:
                 continue
             try:
-                obj = json.loads(raw)
+                obj = model.load_json_line(raw)
             except (ValueError, RecursionError):
                 parsed.skipped_lines += 1
                 continue
@@ -305,6 +381,7 @@ def parse_file(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFi
                 if uuid in seen:
                     if resumed_from is None and seen[uuid] != session:
                         resumed_from = seen[uuid]
+                    parsed.duplicate_lines += 1
                     continue
                 seen[uuid] = session
                 added.append(uuid)
@@ -323,6 +400,8 @@ def parse_file(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFi
                         event.after_question = asking[target.sidechain]
                         asking[target.sidechain] = False
             target.events.extend(events)
+    main.events = common.pair_background(main.events)
+    side.events = common.pair_background(side.events)
     if resumed_from is not None and not in_subagent_dir:
         main.session_id = side.session_id = resumed_from
         for uuid in added:

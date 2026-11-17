@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from agent_friction import scoring, signals
+from agent_friction.adapters import common
+from agent_friction.model import Finding
 from agent_friction.signals import correction_confidence
 from tests import builders
 from tests.builders import Session, by_signal, detect
@@ -20,7 +22,7 @@ def keys(finding: object) -> list[tuple[str, str]]:
 
 def test_catalog_is_consistent() -> None:
     ids = [s.id for s in signals.CATALOG]
-    assert len(ids) == len(set(ids)) == 17
+    assert len(ids) == len(set(ids)) == 18
     for definition in signals.CATALOG:
         assert definition.title and definition.description and definition.why
         assert definition.attribution and definition.severity > 0
@@ -71,15 +73,37 @@ def test_successful_edits_and_outside_repo_edits_are_not_misses(tmp_path: Path) 
 def test_time_estimate_is_capped(tmp_path: Path) -> None:
     s = Session().user("go")
     s.edit(A, error=builders.EDIT_NOT_FOUND)
-    s.tick(3600).edit(A)
+    s.tick(280).say("Let me look at the file again.")  # ten busy minutes, no silence
+    s.tick(280).edit(A)
     (miss,) = detect(s, tmp_path)
     assert miss.interval is not None
     assert miss.interval[1] - miss.interval[0] == signals.TIME_CAP_SECONDS
 
 
+def test_nobody_was_working_during_a_silence_inside_a_turn(tmp_path: Path) -> None:
+    # the laptop slept for four hours between the failure and the next call
+    s = Session().user("go")
+    s.edit(A, error=builders.EDIT_NOT_FOUND)
+    s.tick(4 * 3600).edit(A)
+    (miss,) = detect(s, tmp_path)
+    assert miss.interval is not None and miss.interval[1] - miss.interval[0] < 10
+    s = Session().user("go").bash("pytest", "bash: pytest: command not found", exit_code=127)
+    s.tick(4 * 3600).bash("python -m pytest", "3 passed")
+    (failure,) = detect(s, tmp_path)
+    assert failure.interval is not None and failure.interval[1] - failure.interval[0] < 10
+    s = Session().user("go").edit(A, "a", "b")
+    s.tick(4 * 3600).edit(A, "b", "a")
+    (revert,) = detect(s, tmp_path)
+    assert revert.interval is not None and revert.interval[1] - revert.interval[0] < 10
+    # a command that itself ran for ten minutes was not a silence
+    s = Session().user("go").bash("make build", "error: linker failed", exit_code=2, took=600)
+    (failure,) = detect(s.bash("make build", "ok"), tmp_path)
+    assert failure.run is not None and failure.run[1] - failure.run[0] >= 30
+
+
 def test_stale_edit_variants(tmp_path: Path) -> None:
     s = Session().user("go")
-    s.write(A, error=builders.NOT_READ)
+    s.edit(A, error=builders.NOT_READ)
     s.edit(A, error=builders.STALE)
     found = by_signal(detect(s, tmp_path), signals.STALE_EDIT)
     assert [f.detail["variant"] for f in found] == ["not-read", "modified"]
@@ -213,7 +237,8 @@ def test_search_miss_attribution(tmp_path: Path) -> None:
         ("dir", "docs"),
     ]
     assert found[0].excerpt == "pattern: Needle" and "Needle" not in found[0].summary
-    assert found[0].detail == {"pattern": "Needle", "scope": "src"}
+    # the same word was searched for again in the turn: the agent wanted a hit
+    assert found[0].detail == {"pattern": "Needle", "scope": "src", "wanted": "1"}
 
 
 # ---- command-failure / retry-loop ---------------------------------------------------------
@@ -315,7 +340,7 @@ def test_linters_and_exit_code_checks_are_ordinary_failures(tmp_path: Path) -> N
         ('npm error Missing script: "tset"', 1),
         ("fatal: not a git repository (or any of the parent directories): .git", 128),
         ("error: could not find `Cargo.toml` in `/r` or any parent directory", 101),
-        ("curl: (7) Failed to connect to localhost port 8000: Connection refused", 7),
+        ("curl: (3) URL using bad/illegal format or missing URL", 3),
     ],
 )
 def test_invocation_error_shapes(output: str, code: int) -> None:
@@ -594,6 +619,12 @@ def test_interrupt_negative_cases(tmp_path: Path) -> None:
 
 
 STRONG_CORRECTIONS = [
+    "Don't use requests here, use httpx instead",
+    "Please don't use mocks here; use the real db instead",
+    "we don't use moment in this codebase, use date-fns",
+    "don't use any here, use unknown",
+    "again: never commit directly to main",
+    "Never edit the generated client by hand",
     "No, that's the wrong file",
     "no. use the other one",
     "Nope, try again",
@@ -650,13 +681,11 @@ STRONG_CORRECTIONS = [
 ]
 
 PROBABLE_CORRECTIONS = [
-    "Don't use requests here, use httpx instead",
     "Don't call legacy_charge() here, it's deprecated. Use PaymentClient.charge() instead.",
     "Actually, use the factory instead",
     "the result is wrong, it shouldn't include drafts",
     "that helper is deprecated, don't import it",
     "you used the old client again, that's a mistake",
-    "Please don't use mocks here; use the real db instead",
 ]
 
 BENIGN_FOLLOW_UPS = [
@@ -995,7 +1024,7 @@ def test_only_a_command_doing_the_same_job_is_a_replacement(tmp_path: Path) -> N
             "npm error code E401\nnpm error Incorrect or missing password.",
             1,
             "npm install",
-            "invocation",
+            "environment",  # the registry wants a login
         ),
         (
             "pip install -r requirements.txt && pytest tests/test_a.py",
@@ -1594,7 +1623,7 @@ def test_probable_corrections_are_a_signal_of_their_own(tmp_path: Path) -> None:
     s.write("/repo/src/helper.py", "x = 1\n")
     (found,) = detect(s, tmp_path)
     assert found.signal == signals.PROBABLE_CORRECTION and found.weight == 1.0
-    assert found.summary.startswith("Probable correction (confidence 0.4; matched ")
+    assert found.summary.startswith("Wording that could be a correction (confidence 0.4; matched ")
     assert signals.SEVERITY[signals.PROBABLE_CORRECTION] < signals.SEVERITY[signals.EDIT_MISS]
 
 
@@ -2425,7 +2454,14 @@ NO_CHANGES = ["cat src/a.py", "git status", "ls -la", "grep -rn foo src", "ruff 
 def test_a_change_made_by_a_command_is_a_change(tmp_path: Path, change: str) -> None:
     fixed = Session().user("go").bash("npm test", "1 failing", exit_code=1)
     fixed.bash(change, "").bash("npm test", "3 passing")
-    assert detect(fixed, tmp_path) == []  # red -> change -> green: the loop working
+    found = detect(fixed, tmp_path)
+    if change in ("python scripts/patch.py", "./scripts/regenerate.sh"):
+        # no file was seen to change: recurrence across sessions decides (see the engine)
+        assert [f.detail["fixed_by_command"] for f in found] == [change.removeprefix("./")]
+    elif change == "npm install left-pad":
+        assert [f.detail["fixed_by_setup"] for f in found] == ["npm install"]
+    else:
+        assert found == []  # red -> change -> green: the loop working
 
     loop = Session().user("go")
     for _ in range(3):
@@ -2476,7 +2512,8 @@ def test_a_possible_change_is_not_an_edit_and_never_its_own_fix(tmp_path: Path) 
     # ... but a script that ran earlier on the same line is
     same_line = Session().user("go").bash("npm test", "1 failing", exit_code=1)
     same_line.bash("python scripts/patch.py && npm test", "3 passing")
-    assert detect(same_line, tmp_path) == []
+    (maybe,) = detect(same_line, tmp_path)
+    assert maybe.detail["fixed_by_command"] == "python scripts/patch.py"
 
     # rounds of "run a script, run the check" are not counted as edit-and-run rounds:
     # nobody saw an edit, so no-convergence is not claimed and no file is named
@@ -2514,3 +2551,2515 @@ def test_inline_and_stdin_keys_carry_the_directory_too(tmp_path: Path) -> None:
         [("command", "python <stdin> (web/)")],
         [("command", "node <inline> (web/)")],
     ]
+
+
+# ---- round 12 -----------------------------------------------------------------------------
+
+PG_DOWN = (
+    'E   psycopg2.OperationalError: connection to server at "localhost" (127.0.0.1), '
+    "port 5432 failed: Connection refused\n12 errors in 1.31s"
+)
+PLAYWRIGHT = "Error: browserType.launch: Executable doesn't exist at /root/.cache/chrome"
+SETUP_FIXES = [
+    ("pytest tests/test_a.py", PG_DOWN, "docker compose up -d db", "docker compose up -d"),
+    ("npm run build", "Error: boom", "cp .env.example .env", "cp .env.example .env"),
+    ("npm run e2e", PLAYWRIGHT, "npx playwright install chromium", "npx playwright install"),
+    ("npm run e2e", PLAYWRIGHT, "pip install -r requirements.txt", "pip install"),
+    ("pytest", "1 failed in 1s", "make bootstrap", "make bootstrap"),
+]
+
+
+@pytest.mark.parametrize(("command", "output", "fix", "label"), SETUP_FIXES)
+def test_a_failure_fixed_by_a_setup_step_is_what_we_are_here_for(
+    tmp_path: Path, command: str, output: str, fix: str, label: str
+) -> None:
+    s = Session().user("go").edit(A).bash(command, output, exit_code=1)
+    s.bash(fix, "ok").bash(command, "5 passed")
+    (found,) = detect(s, tmp_path)
+    assert found.detail["fixed_by_setup"] == label and found.weight == 1.0
+    assert not scoring.is_weak(found) and found.interval is not None
+    assert "passed after a setup step, with no file edited" in found.summary
+    assert [t.kind for t in found.targets] == ["command"]  # the test file was not the cause
+
+    # with an edit in between nobody can say what fixed it: the development loop
+    for order in ((fix, None), (None, fix)):
+        edited = Session().user("go").bash(command, output, exit_code=1)
+        for step in order:
+            edited = edited.bash(step, "ok") if step else edited.edit(A)
+        edited.bash(command, "5 passed")
+        assert detect(edited, tmp_path) == []
+
+    # a retry loop is never erased by a later green run, and it learns what fixed it
+    loop = Session().user("go")
+    for _ in range(4):
+        loop.bash(command, output, exit_code=1)
+    loop.bash(fix, "ok").bash(command, "5 passed")
+    found_loop = detect(loop, tmp_path)
+    assert len(by_signal(found_loop, signals.RETRY_LOOP)) == 1
+    failures = by_signal(found_loop, signals.COMMAND_FAILURE)
+    assert [f.detail.get("fixed_by_setup") for f in failures] == [label] * 4
+
+
+def test_a_setup_step_going_well_is_not_the_check_going_green(tmp_path: Path) -> None:
+    # `npx playwright install` is "a test tool" by name; it must not stand in for the tests
+    s = Session().user("go").bash("npm run e2e", PLAYWRIGHT, exit_code=1)
+    s.bash("npx playwright install", "ok")
+    (found,) = detect(s, tmp_path)
+    assert found.detail.get("never_green") == "1" and "fixed_by_setup" not in found.detail
+    # version control is never "the fix": the failure is dropped as before
+    git = Session().user("go").bash("npm test", "1 failing", exit_code=1)
+    git.bash("git commit -m wip", "[main 1a2b3c4] wip").bash("npm test", "3 passing")
+    assert detect(git, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        (PG_DOWN, ("service", "PostgreSQL")),
+        ("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker "
+         "daemon running?", ("service", "the Docker daemon")),
+        ("Error: connect ECONNREFUSED 127.0.0.1:6379", ("service", "Redis")),
+        ("curl: (7) Failed to connect to localhost port 8080: Connection refused",
+         ("service", "the service on port 8080")),
+        ("django.db.utils.OperationalError: could not connect to server", ("service", "")),
+        ("Error: Missing required environment variable DATABASE_URL", ("variable", "DATABASE_URL")),
+        ("./run.sh: line 3: API_TOKEN: unbound variable", ("variable", "API_TOKEN")),
+        ("KeyError: 'STRIPE_KEY'", ("variable", "STRIPE_KEY")),
+        ("Error: AWS credentials expired", ("auth", "")),
+        ("error: You must be logged in to the server (Unauthorized)", ("auth", "")),
+        ("To get started with GitHub CLI, please run:  gh auth login", ("auth", "")),
+        ("FAILED tests/test_a.py::test_x - AssertionError\n1 failed, 3 passed", None),
+        ("E   assert response.status_code == 401", None),
+        ("KeyError: 'user_id'", None),
+        ("error TS2304: Cannot find name 'foo'.", None),
+    ],
+)  # fmt: skip
+def test_environment_errors(output: str, expected: tuple[str, str] | None) -> None:
+    assert signals.environment_error(output) == expected
+
+
+def test_an_environment_failure_counts_in_full_unless_code_fixed_it(tmp_path: Path) -> None:
+    s = Session().user("go").edit(A).bash("pytest tests/test_a.py", PG_DOWN, exit_code=1)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["variant"] == "environment" and found.detail["service"] == "PostgreSQL"
+    assert found.weight == 1.0 and found.interval is not None and not scoring.is_weak(found)
+    assert found.summary == "`pytest` failed (exit 1; PostgreSQL was not reachable)"
+    assert [t.kind for t in found.targets] == ["command"]
+    s.edit(A, "localhost", "db").bash("pytest tests/test_a.py", "12 passed")  # wrong host in code
+    assert detect(s, tmp_path) == []
+    snippet = Session().user("go").bash("python -c 'import redis; redis.Redis().ping()'",
+                                        "redis.exceptions.ConnectionError: Connection refused",
+                                        exit_code=1)  # fmt: skip
+    assert detect(snippet, tmp_path)[0].detail["variant"] == "ordinary"  # ad-hoc code
+
+
+def test_the_same_command_under_another_name_or_in_another_place(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.bash("python scripts/gen.py", "bash: python: command not found", exit_code=127)
+    s.bash("python3 scripts/gen.py", "generated")
+    (found,) = detect(s, tmp_path)
+    assert (found.detail["not_found"], found.detail["works_as"]) == ("python", "python3")
+    same = Session().user("go")
+    same.bash("python scripts/gen.py", "bash: python: command not found", exit_code=127)
+    same.bash("source .venv/bin/activate && python scripts/gen.py", "generated")
+    assert "works_as" not in detect(same, tmp_path)[0].detail
+
+    wd = Session().user("go")
+    wd.bash("npm test", "npm error enoent Could not read package.json", exit_code=254)
+    wd.bash("cd web && npm test", "Tests: 3 passed, 3 total")
+    assert detect(wd, tmp_path)[0].detail["works_in"] == "web/"
+    again = Session().user("go")
+    again.bash("npm test", "npm error enoent Could not read package.json", exit_code=254)
+    again.bash("npm install", "ok").bash("npm test", "Tests: 3 passed, 3 total")
+    assert "works_in" not in detect(again, tmp_path)[0].detail
+
+
+# ---- round 13 -----------------------------------------------------------------------------
+
+OWN_MODULE = (
+    "ImportError while loading conftest '/repo/tests/conftest.py'.\n"
+    "tests/conftest.py:1: in <module>\n    from app import x\n"
+    "E   ModuleNotFoundError: No module named 'app'"
+)
+APP = "/repo/app/__init__.py"
+WORKING_FORMS = [
+    ("make test", None, "recovered_by", "make test"),
+    ("python -m pytest", None, "recovered_by", "python -m pytest"),
+    ("uv run pytest", None, "recovered_by", "uv run pytest"),
+    ("PYTHONPATH=src pytest -q", None, "works_with", "PYTHONPATH=src pytest"),
+    ("pytest -q", "pip install -e .", "fixed_by_setup", "pip install"),
+]
+
+
+@pytest.mark.parametrize(("second", "between", "field", "value"), WORKING_FORMS)
+@pytest.mark.parametrize("edits_later", [False, True])
+def test_a_package_that_was_there_all_along_was_not_what_was_missing(
+    tmp_path: Path, second: str, between: str | None, field: str, value: str, edits_later: bool
+) -> None:
+    s = Session().user("run the tests").bash("pytest -q", OWN_MODULE, exit_code=4)
+    if between:
+        s.bash(between, "ok")
+    s.bash(second, "3 passed in 0.1s")
+    if edits_later:  # work on the package afterwards must not erase the failure
+        s.read(APP).edit(APP).bash(second, "3 passed in 0.1s")
+    (found,) = detect(s, tmp_path, known=("app/__init__.py",))
+    assert found.detail[field] == value and found.detail["variant"] == "invocation"
+    assert found.weight == 1.0 and not scoring.is_weak(found) and found.interval is not None
+    assert "setup/invocation error" in found.summary
+
+
+def test_an_import_typo_fixed_by_an_edit_is_still_the_development_loop(tmp_path: Path) -> None:
+    # the same command goes green after an edit: a bug was fixed, nothing to document
+    s = Session().user("go").bash("pytest -q", OWN_MODULE, exit_code=4)
+    s.edit("/repo/tests/conftest.py", "from app", "from apps").bash("pytest -q", "3 passed")
+    assert detect(s, tmp_path, known=("app/__init__.py",)) == []
+    # never resolved: ordinary, as documented
+    red = Session().user("go").bash("pytest -q", OWN_MODULE, exit_code=4)
+    (left,) = detect(red, tmp_path, known=("app/__init__.py",))
+    assert left.detail["variant"] == "ordinary" and left.detail["own_module"] == "1"
+    # a variable in front after an edit proves nothing either way: dropped with the edit
+    both = Session().user("go").bash("pytest -q", OWN_MODULE, exit_code=4)
+    both.edit("/repo/tests/conftest.py").bash("PYTHONPATH=src pytest -q", "3 passed")
+    assert detect(both, tmp_path, known=("app/__init__.py",)) == []
+
+
+def test_test_first_needs_a_file_that_is_created_before_anything_went_green(
+    tmp_path: Path,
+) -> None:
+    missing = "ERROR: file or directory not found: tests/test_new.py"
+    new = "/repo/tests/test_new.py"
+    first = Session().user("go").bash("pytest tests/test_new.py", missing, exit_code=4)
+    first.write(new).bash("pytest tests/test_new.py", "1 passed")
+    assert detect(first, tmp_path) == []  # test-first: the file is created, then green
+
+    edited = Session().user("go").read(new).bash("pytest tests/test_new.py", missing, exit_code=4)
+    edited.edit(new).bash("pytest tests/test_new.py", "1 passed")
+    assert len(detect(edited, tmp_path)) == 1  # it was there: an edit did not supply it
+
+    late = Session().user("go").bash("pytest tests/test_new.py", missing, exit_code=4)
+    late.bash("cd api && pytest tests/test_new.py", "1 passed")  # resolved another way
+    late.write(new).bash("pytest tests/test_new.py", "1 passed")
+    (kept,) = detect(late, tmp_path)
+    assert kept.detail["works_in"] == "api/"
+
+
+def test_an_inspection_command_that_cannot_reach_its_subject_counts(tmp_path: Path) -> None:
+    daemon = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock."
+    s = Session().user("go").bash("docker ps", daemon, exit_code=1)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["service"] == "the Docker daemon" and keys(found) == [
+        ("command", "docker ps")
+    ]
+    quiet = Session().user("go").bash("docker ps --filter name=x -q | grep x", "", exit_code=1)
+    quiet.bash("grep -rn 'Connection refused' logs/", "", exit_code=1)
+    quiet.bash("cat missing.log", "cat: missing.log: No such file or directory", exit_code=1)
+    assert detect(quiet, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("message", "voided"),
+    [
+        ("Not quite what I had in mind but fine. Add a docstring too", True),
+        ("no, wait, also add a --verbose flag", True),
+        ("That's wrong but good enough for now, moving on", True),
+        ("no, wait, that breaks the API. undo it", False),
+        ("That's not what I asked for, but fix the test first", False),
+    ],
+)
+def test_a_shrug_or_an_afterthought_is_not_a_correction(message: str, voided: bool) -> None:
+    confidence, _ = correction_confidence(message)
+    assert (confidence == 0.0) is voided
+
+
+def test_a_refusal_is_filed_under_the_step_that_cannot_be_undone(tmp_path: Path) -> None:
+    command = "cat >> notes.md <<'EOF'\nx\nEOF\ngit add -A && git commit -m wip && git push -f"
+    said = "Permission to use Bash with command git has been denied. "
+    s = Session().user("go").tool("Bash", {"command": command}, said + command, is_error=True)
+    s.reject("Bash", {"command": command})
+    denied, declined = detect(s, tmp_path)
+    assert keys(denied) == [("command", "git push")] == keys(declined)
+    only = "git add -A && git commit -m wip"
+    plain = Session().user("go").reject("Bash", {"command": only})
+    assert keys(detect(plain, tmp_path)[0]) == [("command", "git commit")]
+
+
+def test_the_excerpt_of_a_line_of_commands_ends_at_the_step_that_failed(tmp_path: Path) -> None:
+    output = (
+        "Found 3 errors.\n" + "\n".join(f"ok line {n}" for n in range(400)) + "\n5 passed in 1s"
+    )
+    s = Session().user("go").bash("ruff check . | tail -1; pytest -q | tail -500", output)
+    (found,) = detect(s, tmp_path)
+    assert keys(found) == [("command", "ruff check")]
+    assert found.excerpt.endswith("Found 3 errors.")
+
+
+# ---- round 14 ------------------------------------------------------------------------
+
+
+def test_one_stall_is_not_both_thrash_and_no_convergence(tmp_path: Path) -> None:
+    found = detect(stuck(7), tmp_path)
+    assert len(by_signal(found, signals.NO_CONVERGENCE)) == 1
+    assert by_signal(found, signals.EDIT_THRASH) == []  # the seven edits are the seven rounds
+    # ... but a file thrashed in a turn that did not get that far is still thrash
+    s = Session().user("go")
+    for i in range(7):
+        s.edit(A, f"a{i}", f"b{i}")
+    s.bash("python scripts/gen.py", "Traceback\nValueError: x", exit_code=1)
+    (thrash,) = by_signal(detect(s, tmp_path), signals.EDIT_THRASH)
+    assert "checked" not in thrash.detail
+    # ... and the event says whether the turn ran a check
+    s = Session().user("go")
+    for i in range(7):
+        s.edit(A, f"a{i}", f"b{i}")
+    s.bash("pytest", "1 failed", exit_code=1)
+    (thrash,) = by_signal(detect(s, tmp_path), signals.EDIT_THRASH)
+    assert thrash.detail["checked"] == "1"
+
+
+QUOTED_FROM_OTHERS = [
+    "Here's the reviewer's comment: 'No, I said to keep the old name'. Do you agree?",
+    'Bob wrote: "no, that is wrong, revert it"',
+    "The ticket says “this is still broken, undo the change” - can you look into it?",
+]
+
+
+@pytest.mark.parametrize("text", QUOTED_FROM_OTHERS)
+def test_a_correction_quoted_from_someone_else_is_not_one(text: str) -> None:
+    assert correction_confidence(text) == (0.0, []), text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "No, I said to keep the old name",
+        'As I said: "no emojis". Wrong again, revert it',
+        "No, the reviewer's comment was about the tests, don't touch them",
+        "No - the review said nothing about the tests, revert that",
+    ],
+)
+def test_the_humans_own_words_still_count(text: str) -> None:
+    assert correction_confidence(text)[0] == signals.CORRECTION_STRONG, text
+
+
+def test_a_screenshot_with_still_not_right_is_a_correction(tmp_path: Path) -> None:
+    text = "[Image #1] still not aligned, wrong color"
+    assert correction_confidence(text)[0] == signals.CORRECTION_STRONG
+    assert correction_confidence("[Image #1] here is the design") == (0.0, [])
+    assert correction_confidence("the sidebar is off by default, add a toggle") == (0.0, [])
+    s = Session().user("fix the header").edit(A).user(text).edit(A, "x", "y")
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", "src/a.py")]
+    # the agent did not go back to the file: only a probable correction
+    s = Session().user("fix the header").edit(A).user(text).read(B)
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.PROBABLE_CORRECTION]
+
+
+def test_an_inline_snippet_run_outside_the_repo_is_not_about_it(tmp_path: Path) -> None:
+    snippet = "python - <<'EOF'\nimport app\nEOF"
+    output = 'Traceback (most recent call last):\n  File "<stdin>", line 1\nValueError: x'
+    outside = Session(cwd="/tmp/scratch").user("go").bash(snippet, output, exit_code=1).edit(A)
+    assert detect(outside, tmp_path) == []
+    inside = Session(cwd="/repo").user("go").bash(snippet, output, exit_code=1).edit(A)
+    (found,) = detect(inside, tmp_path)
+    assert keys(found) == [("command", "python <stdin>")]
+
+
+def test_windows_commands_keep_their_paths(tmp_path: Path) -> None:
+    home = "C:\\Users\\dev\\shop"
+    error = "python: can't open file 'scripts\\gen.py': [Errno 2] No such file or directory"
+    s = Session(cwd=home).user("go").bash("python scripts\\gen.py", error, exit_code=2)
+    (found,) = detect(s, tmp_path, repo=home)
+    assert keys(found) == [("command", "python scripts/gen.py")]
+    # a POSIX session keeps POSIX escapes
+    s = Session().user("go").bash("python my\\ script.py", error, exit_code=2)
+    (found,) = detect(s, tmp_path)
+    assert keys(found) == [("command", "python my script.py")]
+
+
+# ---- round 15 ------------------------------------------------------------------------
+
+CLASSIFIED = [
+    (
+        "git push",
+        "remote: Permission to acme/x.git denied to bot.\nfatal: unable to access "
+        "'https://github.com/acme/x.git/': The requested URL returned error: 403",
+        ("environment", "auth"),
+    ),
+    ("git fetch", "remote: Invalid username or password.", ("environment", "auth")),
+    (
+        "npm run dev",
+        "Error: listen EADDRINUSE: address already in use :::3000",
+        ("environment", "port"),
+    ),
+    ("npm run build", "Error: ENOSPC: no space left on device, write", ("environment", "disk")),
+    ("yarn test", 'error Command "test" not found.', ("invocation", None)),
+    ("pnpm test", "ERR_PNPM_NO_SCRIPT  Missing script: test", ("invocation", None)),
+    (
+        "npm ci",
+        'npm ERR! engine Unsupported engine: wanted: {"node":">=20"} (current: {"node":"18"})',
+        ("invocation", None),
+    ),
+    # ... and what only looks like those stays an ordinary failure
+    ("git push", "! [rejected] main -> main (non-fast-forward)", ("ordinary", None)),
+    ("yarn test", "error Command failed with exit code 1.", ("ordinary", None)),
+    ("npm run build", "error TS2304: Cannot find name 'space'", ("ordinary", None)),
+    ("pytest", "E   assert response.status_code == 403\n1 failed", ("ordinary", None)),
+]
+
+
+@pytest.mark.parametrize(("command", "output", "expected"), CLASSIFIED)
+def test_more_failures_of_the_surroundings_are_told_apart(
+    tmp_path: Path, command: str, output: str, expected: tuple[str, str | None]
+) -> None:
+    s = Session().user("go").bash(command, output, exit_code=1)
+    (found,) = detect(s, tmp_path)
+    assert (found.detail["variant"], found.detail.get("environment")) == expected
+
+
+def test_a_command_after_a_cd_that_failed_never_ran(tmp_path: Path) -> None:
+    gone = "/bin/bash: line 1: cd: missing-dir: No such file or directory"
+    s = Session().user("go").bash("cd missing-dir && npm test", gone, exit_code=1)
+    # no failure of `npm test (missing-dir/)`: what is on record is the guessed directory
+    (miss,) = detect(s, tmp_path)
+    assert miss.signal == signals.PATH_MISS and keys(miss) == [("file", "missing-dir")]
+    # the directory was there: the failure is that of the command in it
+    s = Session().user("go").bash("cd web && npm test", "1 failing", exit_code=1)
+    (found,) = detect(s, tmp_path)
+    assert keys(found) == [("command", "npm test (web/)")]
+    # the same words from a command that changed no directory are its own failure
+    s = (
+        Session()
+        .user("go")
+        .bash("make build", "sh: cd: out: No such file or directory", exit_code=2)
+    )
+    assert len(detect(s, tmp_path)) == 1
+
+
+def test_an_undo_the_human_asked_for_is_not_a_reverted_edit(tmp_path: Path) -> None:
+    def session(said: str) -> Session:
+        s = Session().user("rename it").edit(A, "a", "b")
+        return s.user(said).edit(A, "b", "a")
+
+    (found,) = detect(session("No, revert src/a.py"), tmp_path)
+    assert found.signal == signals.USER_CORRECTION  # counted once, as what the human said
+    assert detect(session("Please put the old name back"), tmp_path) == []
+    # the agent backing out on its own is still a reverted edit
+    assert [f.signal for f in detect(session("hmm, the build is slow today"), tmp_path)] == [
+        signals.EDIT_REVERT
+    ]
+    s = Session().user("rename it").edit(A, "a", "b").edit(A, "b", "a")
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.EDIT_REVERT]
+
+
+def test_commands_run_through_a_variable(tmp_path: Path) -> None:
+    def key(command: str) -> str:
+        s = Session().user("go").bash(command, "Error: boom", exit_code=1)
+        (found,) = detect(s, tmp_path)
+        return found.targets[0].key
+
+    assert key("A=scripts/x.sh; $A") == "scripts/x.sh"
+    assert key("SP=scripts && node ${SP}/shot.js") == "node scripts/shot.js"
+    assert key("node $SP/shot.js") == "node <variable>/shot.js"
+    assert key("$RUNNER test") == key("$OTHER --all") == "<variable>"
+
+
+def test_an_interrupted_command_is_named_on_the_event(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.tool("Bash", {"command": "npm run e2e"}, builders.INTERRUPT_TOOL, is_error=True)
+    s.user(builders.INTERRUPT_TOOL, as_blocks=True)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.USER_INTERRUPT and found.targets == []
+    assert found.detail == {"interrupted": "npm run e2e"}
+    s = Session().user("go").read(A).interrupt()
+    (found,) = detect(s, tmp_path)
+    assert "interrupted" not in found.detail and keys(found) == [("file", "src/a.py")]
+
+
+# ---- round 16 ------------------------------------------------------------------------
+
+
+def test_a_miss_the_agent_keeps_chasing_wanted_a_hit(tmp_path: Path) -> None:
+    def details(s: Session) -> list[dict[str, str]]:
+        found = by_signal(detect(s, tmp_path), signals.SEARCH_MISS)
+        return [{k: v for k, v in f.detail.items() if k in ("wanted", "hygiene")} for f in found]
+
+    # reworded and searched again; then a file of that name is tried
+    s = Session().user("change the refund policy")
+    s.grep("RefundPolicy", "/repo/src").grep("refund_policy", "/repo/src")
+    s.read("/repo/src/policy.py", missing=True)
+    assert details(s) == [{"wanted": "1"}, {"wanted": "1"}]
+    # content with the empty result: on to something else
+    s = Session().user("add a feature")
+    s.grep("RefundPolicy", "/repo/src").read(A).edit(A)
+    assert details(s) == [{}]
+    # an unrelated search afterwards is not the same hunt
+    s = Session().user("add a feature")
+    s.grep("RefundPolicy", "/repo/src").grep("ShippingRate", "/repo/src")
+    assert details(s) == [{}, {}]
+    # a new turn is a new question
+    s = Session().user("add a feature").grep("RefundPolicy", "/repo/src")
+    s.user("and now?").grep("refund_policy", "/repo/src")
+    assert details(s) == [{}, {}]
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        r"console\.log|debugger",
+        "TODO|FIXME|XXX",
+        "<<<<<<<|>>>>>>>",
+        r"it\.only|describe\.only",
+        r"pdb|breakpoint\(\)",
+        r"print\(",
+    ],
+)
+def test_searching_for_leftovers_is_marked_as_such(tmp_path: Path, pattern: str) -> None:
+    s = Session().user("clean up").edit(A).grep(pattern, "/repo/src").grep(pattern, "/repo")
+    found = by_signal(detect(s, tmp_path), signals.SEARCH_MISS)
+    assert found and all(f.detail.get("hygiene") == "1" for f in found)
+    for ordinary in ("TodoList", "debugger_port", "only_admins", "printer", "DataXXL"):
+        s = Session().user("go").grep(ordinary, "/repo/src")
+        (miss,) = detect(s, tmp_path)
+        assert "hygiene" not in miss.detail, ordinary
+
+
+def test_red_before_the_first_edit_counts_as_a_run(tmp_path: Path) -> None:
+    def rounds(command: str, code: int, edits: int) -> list[Finding]:
+        s = Session().user("fix it")
+        for i in range(edits + 1):
+            if i:
+                s.edit(A, f"a{i}", f"b{i}")
+            s.bash(command, "E  assert 1 == 2\n1 failed in 0.1s", exit_code=code, took=30)
+        return by_signal(detect(s, tmp_path), signals.NO_CONVERGENCE)
+
+    # red, edit, red, edit, red, edit, red: four runs, piped or not, blamed on the file
+    for command, code in (("pytest -q 2>&1 | tail -5", 0), ("pytest -q", 1)):
+        (found,) = rounds(command, code, 3)
+        assert keys(found) == [("command", "pytest"), ("file", "src/a.py")]
+        assert found.detail["count"] == "4" and "4 runs with edits in between" in found.summary
+        assert rounds(command, code, 2) == []  # three runs are not yet a stall
+
+
+def test_a_time_boxed_start_that_came_up_is_not_a_failure(tmp_path: Path) -> None:
+    up = "> dev\n  VITE v5.0 ready in 300 ms\n  Local: http://localhost:5173/"
+    for banner in (up, "Server listening on port 3000", "webpack compiled successfully"):
+        s = Session().user("go").bash("timeout 10 npm run dev", banner, exit_code=124)
+        assert detect(s, tmp_path) == [], banner
+    # a server or a watcher only ever ends by its time box, whatever it had logged by then
+    for command in ("timeout 10 npm run dev", "timeout 20 npx tsc -w", "timeout 5 jest --watch"):
+        s = Session().user("go").bash(command, "> dev\nstarting...", exit_code=124)
+        assert detect(s, tmp_path) == [], command
+    # it never came up, it was not time-boxed, or it ended some other way: a failure
+    for command, output, code in (
+        ("timeout 10 npm run dev", up, 1),
+        ("npm run build", up, 124),
+        ("timeout 60 pytest", "collected 3 items", 124),
+    ):
+        s = Session().user("go").bash(command, output, exit_code=code)
+        assert len(detect(s, tmp_path)) == 1, (command, code)
+
+
+def test_reading_between_green_runs_is_not_a_read_loop(tmp_path: Path) -> None:
+    s = Session().user("go")
+    for _ in range(5):
+        s.read(A).bash("pytest -q", "3 passed")
+    assert detect(s, tmp_path) == []
+    # between red runs, or with nothing run at all, it still is one
+    s = Session().user("go")
+    for _ in range(5):
+        s.read(A).bash("pytest -q", "1 failed", exit_code=1)
+    assert len(by_signal(detect(s, tmp_path), signals.READ_LOOP)) == 1
+    s = Session().user("go")
+    for _ in range(5):
+        s.read(A).bash("git status", "clean")
+    assert len(by_signal(detect(s, tmp_path), signals.READ_LOOP)) == 1
+
+
+def test_a_plain_rerun_that_passes_is_remembered(tmp_path: Path) -> None:
+    s = Session().user("go").bash("npm test", "Tests: 1 failed", exit_code=1)
+    s.bash("npm test", "Tests: 11 passed")
+    (found,) = detect(s, tmp_path)
+    assert found.detail["rerun_green"] == "1" and found.detail["variant"] == "ordinary"
+    # twice red, then green untouched: not "waiting" where a test suite is concerned
+    s = Session().user("go")
+    s.bash("npm test", "Tests: 1 failed", exit_code=1).bash("npm test", "1 failed", exit_code=1)
+    s.bash("npm test", "Tests: 11 passed")
+    assert all(
+        f.detail.get("rerun_green") for f in by_signal(detect(s, tmp_path), signals.COMMAND_FAILURE)
+    )
+    # ... but polling something else still is
+    s = Session().user("go")
+    for _ in range(3):
+        s.bash("gh pr checks 12", "build pending", exit_code=8)
+    s.bash("gh pr checks 12", "build pass")
+    assert detect(s, tmp_path) == []
+    # an edit in between is the development loop
+    s = Session().user("go").bash("npm test", "Tests: 1 failed", exit_code=1).edit(A)
+    assert detect(s.bash("npm test", "Tests: 11 passed"), tmp_path) == []
+
+
+# ---- round 17 ------------------------------------------------------------------------
+
+LAUNCHED = "Command running in background with ID: {}"
+CONFTEST = "ImportError while loading conftest\nModuleNotFoundError: No module named 'yaml'"
+
+
+def background(s: Session, command: str, task: str, ended: str | None = None) -> Session:
+    s.tool("Bash", {"command": command, "run_in_background": True}, LAUNCHED.format(task))
+    if ended is not None:
+        s.tool("BashOutput", {"bash_id": task}, ended)
+    return s
+
+
+def test_a_background_launch_is_neither_red_nor_green(tmp_path: Path) -> None:
+    # red in the foreground, then only launched again: nothing is known to have passed
+    s = Session().user("go").bash("pytest -q", CONFTEST, exit_code=4)
+    background(s, "pip install pyyaml", "b0")
+    background(s, "pytest -q", "b1")
+    (found,) = detect(s, tmp_path)
+    assert found.detail["variant"] == "invocation"
+    assert not {"fixed_by_setup", "recovered_by", "rerun_green"} & found.detail.keys()
+    # the same launches in the foreground would have closed it
+    s = Session().user("go").bash("pytest -q", CONFTEST, exit_code=4)
+    s.bash("pip install pyyaml", "ok").bash("pytest -q", "3 passed")
+    assert detect(s, tmp_path)[0].detail["fixed_by_setup"] == "pip install"
+
+
+def test_how_a_background_command_ended_is_judged_like_a_foreground_run(tmp_path: Path) -> None:
+    failed = "<status>failed</status>\n<exit_code>{}</exit_code>\n<stdout>\n{}\n</stdout>"
+    s = Session().user("go")
+    background(s, "pytest -q", "b1", failed.format(4, CONFTEST))
+    background(s, "npm run dev", "b2", failed.format(1, "Error: listen EADDRINUSE :::3000"))
+    background(s, "make build", "b3", "<status>completed</status>\n<exit_code>0</exit_code>")
+    first, second = detect(s, tmp_path)
+    assert keys(first) == [("command", "pytest")] and first.detail["variant"] == "invocation"
+    assert "ModuleNotFoundError" in first.excerpt and first.excerpt.startswith("$ pytest -q")
+    assert keys(second) == [("command", "npm run dev")]
+    assert second.detail["environment"] == "port"
+    # a reported green end is a green run: red, edit, green in the background is the loop
+    s = Session().user("go").bash("pytest -q", "1 failed", exit_code=1).edit(A)
+    background(s, "pytest -q", "b1", "<status>completed</status>\n<exit_code>0</exit_code>")
+    assert detect(s, tmp_path) == []
+
+
+def test_a_missing_module_the_agent_just_imported_is_its_own_bug(tmp_path: Path) -> None:
+    missing = (
+        "ImportError while loading conftest\nE   ModuleNotFoundError: No module named 'tenacity'"
+    )
+
+    def session(added: str) -> Session:
+        s = Session().user("add retries").edit(A, "import os", added)
+        return s.bash("pytest -q", missing, exit_code=4)
+
+    (found,) = detect(session("import os\nimport tenacity"), tmp_path)
+    assert found.detail["variant"] == "ordinary"
+    (found,) = detect(session("import os\nfrom tenacity import retry"), tmp_path)
+    assert found.detail["variant"] == "ordinary"
+    # an edit that has nothing to do with it leaves the failure what it is: a setup problem
+    (found,) = detect(session("import os\nimport json  # tenacity later"), tmp_path)
+    assert found.detail["variant"] == "invocation"
+    s = Session().user("go").bash("pytest -q", missing, exit_code=4)
+    assert detect(s, tmp_path)[0].detail["variant"] == "invocation"
+
+
+# ---- round 18: self-blame, questions, activation, trailing red runs ----------------------
+
+BLAMES_THE_AGENT = [
+    "that doesn't work, I get a KeyError when I run it",
+    "Still failing when I run make test",
+    "It's still broken after I pulled your change",
+    "That didn't work. When I click save nothing happens",
+    "you broke the login since I can't sign in anymore",
+    "No, that's wrong because we use tabs here",
+]
+BLAMES_THEMSELVES = [
+    "That didn't work because I hadn't pulled. Try again now.",
+    "It's not working because my VPN was off.",
+    "tests failing again after I merged main",
+    "Still failing since we never rebased, sorry",
+]
+
+
+@pytest.mark.parametrize("text", BLAMES_THE_AGENT)
+def test_saying_what_the_human_saw_is_not_taking_the_blame(tmp_path: Path, text: str) -> None:
+    assert correction_confidence(text)[0] == signals.CORRECTION_STRONG, text
+    assert signals.softened_correction(text) == []
+    s = Session().user("add the feature").edit(A).say("Done.").user(text).edit(A, "p", "q")
+    (fix,) = detect(s, tmp_path)
+    assert fix.signal == signals.USER_CORRECTION and keys(fix) == [("file", "src/a.py")]
+
+
+@pytest.mark.parametrize("text", BLAMES_THEMSELVES)
+def test_self_blame_voids_a_correction_unless_the_agent_redoes_its_work(
+    tmp_path: Path, text: str
+) -> None:
+    assert correction_confidence(text) == (0.0, []), text
+    assert signals.softened_correction(text), text
+    # the agent only runs the tests again: the human was right to blame themselves
+    calm = Session().user("add the feature").edit(A).say("Done.").user(text)
+    calm.bash("pytest", "1 passed")
+    assert detect(calm, tmp_path) == []
+    # the agent goes back to the file it had just changed: its work did need redoing
+    redo = Session().user("add the feature").edit(A).say("Done.").user(text).edit(A, "p", "q")
+    (fix,) = detect(redo, tmp_path)
+    assert fix.signal == signals.PROBABLE_CORRECTION and keys(fix) == [("file", "src/a.py")]
+    assert fix.detail["corroborated"] == "softened" and fix.excerpt == ""
+    assert fix.line == 5 and "named their own action as the cause" in fix.summary
+    # another file, or the next prompt's work, is not a response to it
+    other = Session().user("add the feature").edit(A).say("Done.").user(text).edit(B)
+    other.user("now the docs").edit(A, "p", "q")
+    assert detect(other, tmp_path) == []
+
+
+def test_praise_after_a_phrase_is_never_a_softened_correction(tmp_path: Path) -> None:
+    text = "still failing but that's unrelated, ignore it. Add a flag to src/a.py"
+    assert signals.softened_correction(text) == []
+    s = Session().user("add the feature").edit(A).say("Done.").user(text).edit(A, "p", "q")
+    assert detect(s, tmp_path) == []
+
+
+CLOSERS = [
+    "Done. Anything else?",
+    "All tests pass. Let me know if you'd like any changes?",
+    "I've updated the handler. Is there anything else you'd like me to change or add?",
+    "Done.\n\nHow does that look?",
+    "What would you like to do next?",
+]
+OFFERS = [
+    "Should I also rename the helper?",
+    "Do you want me to add tests?",
+    "Use the REST client or the gRPC one?",
+    "Which module?",
+    "Done.\n\nWant me to refactor util.py? It would take a few minutes.",
+    "Shall I proceed?",
+]
+
+
+def test_only_an_offer_or_a_choice_makes_the_reply_an_answer() -> None:
+    from agent_friction.adapters.common import asks_question
+
+    assert not any(asks_question(text) for text in CLOSERS)
+    assert all(asks_question(text) for text in OFFERS)
+
+
+@pytest.mark.parametrize("closer", CLOSERS)
+def test_a_closing_courtesy_does_not_swallow_a_correction(tmp_path: Path, closer: str) -> None:
+    for text in ("wrong. use PaymentClient", "no no no. roll it back", "No, keep the old name"):
+        s = Session().user("add the feature").edit(A).say(closer).user(text).edit(A, "p", "q")
+        (fix,) = detect(s, tmp_path)
+        assert fix.signal == signals.USER_CORRECTION, (closer, text)
+
+
+def test_wrong_and_roll_it_back_are_corrections_after_any_question(tmp_path: Path) -> None:
+    for text in ("wrong. use PaymentClient", "no no no. roll it back", "roll it back"):
+        assert correction_confidence(text, after_question=True)[0] == signals.CORRECTION_STRONG
+        s = Session().user("add the feature").edit(A).say("Should I also add tests?")
+        s.user(text).edit(A, "p", "q")
+        (fix,) = detect(s, tmp_path)
+        assert fix.signal == signals.USER_CORRECTION, text
+    for text in ("No, keep the old name", "Stop. Just commit.", "Not quite, only the unit tests"):
+        assert correction_confidence(text, after_question=True) == (0.0, []), text
+
+
+NO_FLASK = "Traceback\nModuleNotFoundError: No module named 'flask'"
+
+
+@pytest.mark.parametrize(
+    ("line", "step"),
+    [
+        ("source .venv/bin/activate && pytest", "source .venv/bin/activate"),
+        (". .venv/bin/activate && pytest", "source .venv/bin/activate"),
+        ("poetry shell && pytest", "poetry shell"),
+        ("conda activate shop && pytest", "conda activate shop"),
+    ],
+)
+def test_an_activation_in_front_of_the_green_run_is_the_setup_step(
+    tmp_path: Path, line: str, step: str
+) -> None:
+    s = Session().user("go").bash("pytest", NO_FLASK, exit_code=1).bash(line, "5 passed")
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["fixed_by_setup"] == step
+    assert failure.summary.endswith("it passed with an environment activated first")
+
+
+def test_an_activation_is_not_the_fix_when_it_was_there_before_or_code_changed(
+    tmp_path: Path,
+) -> None:
+    line = "source .venv/bin/activate && pytest"
+    both = Session().user("go").bash(line, NO_FLASK, exit_code=1).bash(line, "5 passed")
+    edited = Session().user("go").bash("pytest", NO_FLASK, exit_code=1).edit(A).bash(line, "ok")
+    for s in (both, edited):
+        assert all("fixed_by_setup" not in f.detail for f in detect(s, tmp_path))
+
+
+def test_a_red_run_with_nothing_after_it_is_marked_trailing(tmp_path: Path) -> None:
+    last = Session().user("go").bash("pytest", "1 failed", exit_code=1)
+    (failure,) = detect(last, tmp_path)
+    assert failure.detail["trailing"] == "1"
+    # the agent's closing words do not resolve it
+    (failure,) = detect(last.say("The test still fails."), tmp_path)
+    assert failure.detail["trailing"] == "1"
+    for more in (
+        Session().user("go").bash("pytest", "1 failed", exit_code=1).read(A),
+        Session().user("go").bash("pytest", "1 failed", exit_code=1).user("ok, leave it"),
+    ):
+        assert all("trailing" not in f.detail for f in detect(more, tmp_path))
+
+
+def test_a_tool_denied_without_a_target_is_named_once(tmp_path: Path) -> None:
+    s = Session().user("go")
+    refused = "Claude requested permissions to use WebFetch, but you haven't granted it yet."
+    s.tool("WebFetch", {"url": "https://example.com"}, refused, is_error=True)
+    s.reject("mcp__tracker__create", {"title": "x"})
+    denied, declined = detect(s, tmp_path)
+    assert denied.summary == "WebFetch was denied by permission settings; it did not run"
+    assert declined.summary == "The user declined mcp__tracker__create"
+
+
+# ---- round 19 ----------------------------------------------------------------------------
+
+ONE_RED = "FAILED tests/test_x.py::test_a\n1 failed, 40 passed in 2.0s"
+
+
+@pytest.mark.parametrize(
+    ("red", "output", "code", "green"),
+    [
+        ("pytest", ONE_RED, 1, "pytest tests/test_cart.py"),
+        ("npm test", "Tests: 1 failed, 40 passed", 1, "npm test -- src/cart.test.js"),
+        ("pytest -k discount", "no tests ran in 0.1s", 5, "pytest tests/test_a.py"),
+    ],
+)
+def test_a_narrower_selection_passing_is_not_a_plain_rerun(
+    tmp_path: Path, red: str, output: str, code: int, green: str
+) -> None:
+    narrowed = Session().user("go").bash(red, output, exit_code=code).bash(green, "5 passed")
+    (failure,) = detect(narrowed, tmp_path)
+    assert "rerun_green" not in failure.detail and failure.detail["variant"] == "ordinary"
+    # the same line again, also after a wait, is one
+    for again in (red, f"sleep 2 && {red}"):
+        same = Session().user("go").bash(red, output, exit_code=code).bash(again, "41 passed")
+        (failure,) = detect(same, tmp_path)
+        assert failure.detail["rerun_green"] == "1", again
+
+
+REFUSED = "curl: (7) Failed to connect to localhost port 3000 after 0 ms: Connection refused"
+
+
+def test_polling_a_server_that_is_starting_is_waiting(tmp_path: Path) -> None:
+    s = Session().user("start the app")
+    s.tool("Bash", {"command": "npm run dev", "run_in_background": True}, "started")
+    s.bash("curl -s localhost:3000/health", REFUSED, exit_code=7)
+    s.bash("sleep 3 && curl -s localhost:3000/health", '{"ok":true}')
+    assert detect(s, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        REFUSED,
+        "curl: (28) Operation timed out after 5001 milliseconds",
+        "curl: (52) Empty reply from server",
+        "curl: (56) Recv failure: Connection reset by peer",
+    ],
+)
+def test_a_server_that_never_answers_is_an_environment_failure(tmp_path: Path, output: str) -> None:
+    assert not signals.is_invocation_error(output, 7)
+    s = Session().user("go").bash("curl -s localhost:3000/health", output, exit_code=7)
+    s.bash("pytest", "5 passed")
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["variant"] == "environment" and failure.detail["environment"] == "service"
+    # another URL answering does not make the first one a wait
+    other = Session().user("go").bash("curl -s localhost:3000/health", output, exit_code=7)
+    other.bash("curl -s localhost:9999/health", "ok")
+    assert len(detect(other, tmp_path)) == 1
+
+
+def test_a_declined_call_does_not_claim_the_time_the_human_took(tmp_path: Path) -> None:
+    s = Session().user("clean up")
+    call = s.call("Bash", {"command": "rm -rf build"})
+    s.tick(900).result(call, builders.REJECTED + builders.REJECTED_SAID + "keep it", is_error=True)
+    s.tick(6).read(A)
+    (declined,) = detect(s, tmp_path)
+    assert declined.signal == signals.TOOL_REJECTED and declined.interval is not None
+    start, end = declined.interval
+    assert 0 < end - start <= 10  # from the answer to the agent's next move, not the prompt
+    # nothing follows: nothing is claimed
+    alone = Session().user("clean up")
+    call = alone.call("Bash", {"command": "rm -rf build"})
+    alone.tick(900).result(call, builders.REJECTED + builders.REJECTED_STOP, is_error=True)
+    (declined,) = detect(alone, tmp_path)
+    assert declined.interval is None
+
+
+POWERSHELL = (
+    "python : The term 'python' is not recognized as the name of a cmdlet, function, script "
+    "file, or operable program. Check the spelling of the name, or if a path was included, "
+    "verify that the path is correct and try again.\nAt line:1 char:1\n+ python -m pytest\n"
+    "    + CategoryInfo          : ObjectNotFound: (python:String) [], CommandNotFoundException"
+)
+
+
+def test_powershell_command_not_found_and_the_py_launcher(tmp_path: Path) -> None:
+    assert signals.is_invocation_error(POWERSHELL, 1)
+    s = Session().user("go").bash("python -m pytest", POWERSHELL, exit_code=1)
+    s.bash("py -m pytest", "5 passed in 0.1s")
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["variant"] == "invocation" and failure.detail["not_found"] == "python"
+    assert failure.detail["works_as"] == "py" and keys(failure) == [("command", "python -m pytest")]
+    cmd = "'pnpm' is not recognized as an internal or external command,\noperable program"
+    s = Session().user("go").bash("pnpm test", cmd, exit_code=1)
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["not_found"] == "pnpm"
+
+
+def test_another_runner_passing_untouched_is_remembered(tmp_path: Path) -> None:
+    s = Session().user("go").bash("yarn test", "Tests: 1 failed", exit_code=1)
+    s.bash("pnpm test", "Tests: 5 passed")
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["green_as"] == "pnpm test"
+    # not after an edit, and not if the first runner works later in the session
+    edited = Session().user("go").bash("yarn test", "Tests: 1 failed", exit_code=1).edit(A)
+    edited.bash("pnpm test", "Tests: 5 passed")
+    later = Session().user("go").bash("yarn test", "Tests: 1 failed", exit_code=1)
+    later.bash("pnpm test", "Tests: 5 passed").bash("yarn test", "Tests: 5 passed")
+    for other in (edited, later):
+        assert all("green_as" not in f.detail for f in detect(other, tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("green", "passed"),
+    [
+        ("pytest tests/test_core.py -q", "12 passed"),
+        ("python -m pytest tests/test_core.py::test_new", "1 passed"),
+        ("pytest -k core", "12 passed"),
+        ("pytest -m 'not slow'", "40 passed"),
+        ("pytest --lf", "1 passed"),
+        ("pytest", "12 passed"),  # nothing selected, yet far fewer tests than the red run
+        ("pytest tests/unit/", "38 passed"),
+        ("pytest tests/test_billing.py::test_tax", "1 passed"),  # another test of that file
+    ],
+)
+def test_a_runner_that_ran_less_than_the_red_run_is_no_replacement(
+    tmp_path: Path, green: str, passed: str
+) -> None:
+    red = "FAILED tests/test_billing.py::test_total - AssertionError\n1 failed, 40 passed in 2s"
+    s = Session().user("go").bash("make test", red, exit_code=2).bash(green, passed)
+    (failure,) = detect(s, tmp_path)
+    assert "green_as" not in failure.detail and "rerun_green" not in failure.detail
+    # ... and it does not close the red run either: an edit and a narrower green later
+    # is not the development loop on a test that was never run again
+    s = Session().user("go").bash("make test", red, exit_code=2).edit(A).bash(green, passed)
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.COMMAND_FAILURE], green
+
+
+@pytest.mark.parametrize(
+    ("green", "passed"),
+    [
+        ("pytest", "41 passed"),
+        ("pytest -q", "41 passed"),
+        ("pytest -x", "41 passed"),
+        ("pytest", ""),  # no summary to count: nothing says it ran less
+        ("pytest tests/test_billing.py", "3 passed"),  # the failing test is in the selection
+        ("pytest tests/", "41 passed"),
+        ("pytest tests/test_billing.py::test_total", "1 passed"),
+    ],
+)
+def test_a_runner_that_ran_the_failing_test_is_a_replacement(
+    tmp_path: Path, green: str, passed: str
+) -> None:
+    red = "FAILED tests/test_billing.py::test_total - AssertionError\n1 failed, 40 passed in 2s"
+    s = Session().user("go").bash("make test", red, exit_code=2).bash(green, passed)
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["green_as"] == "pytest"
+    # and after an edit it closes the red run
+    s = Session().user("go").bash("make test", red, exit_code=2).edit(A).bash(green, passed)
+    assert detect(s, tmp_path) == [], green
+
+
+def test_a_runner_that_went_red_in_the_session_is_no_replacement(tmp_path: Path) -> None:
+    red = "FAILED tests/test_billing.py::test_total - AssertionError\n1 failed, 40 passed in 2s"
+    s = Session().user("go").bash("make test", red, exit_code=2)
+    s.bash("pytest", red, exit_code=1).bash("pytest", "41 passed")
+    assert all("green_as" not in f.detail for f in detect(s, tmp_path))
+
+
+def test_what_a_test_line_selects() -> None:
+    for line, paths, options in (
+        ("make test", [], []),
+        ("pytest -q", [], []),
+        ("pytest tests/test_core.py -q", ["tests/test_core.py"], []),
+        ("python -m pytest tests/test_core.py::test_new", ["tests/test_core.py::test_new"], []),
+        ("pytest -k total -m slow", [], ["-k", "-m"]),
+        ("pytest -c config/pytest.ini", [], []),  # an option's value is not a selection
+        ("cd src/app && pytest -q", [], []),
+        ("npx vitest run src/app/core.test.ts", ["src/app/core.test.ts"], []),
+        ("npm test -- src/a.test.ts", ["src/a.test.ts"], []),
+        ("go test ./...", [], []),
+        ("go test ./pkg/...", ["pkg/..."], []),
+        ("dotnet test --filter Billing", [], ["--filter"]),
+        ("python scripts/patch.py && npm test", [], []),  # only what the test step names
+        ("pytest tests/test_a.py | tail -3", ["tests/test_a.py"], []),
+    ):
+        assert signals.selection(line) == (frozenset(paths), frozenset(options)), line
+    assert signals.selects("tests/", "tests/test_a.py")
+    assert signals.selects("tests/test_a.py::test_x", "tests/test_a.py")
+    assert signals.selects("pkg/...", "pkg/billing/total_test.go")
+    assert not signals.selects("tests/test_core.py", "tests/test_billing.py")
+    assert signals.tests_counted("1 failed, 40 passed in 2s") == 41
+    assert signals.tests_counted("all good") == 0
+
+
+def test_a_test_file_that_does_not_exist_is_a_path_miss(tmp_path: Path) -> None:
+    missing = "ERROR: file or directory not found: tests/test_new_feature.py\n\nno tests ran"
+    s = Session().user("go").bash("pytest tests/test_new_feature.py", missing, exit_code=4)
+    (miss,) = detect(s, tmp_path)
+    assert miss.signal == signals.PATH_MISS and keys(miss) == [
+        ("file", "tests/test_new_feature.py")
+    ]
+    assert miss.summary == "`pytest` was pointed at tests/test_new_feature.py, which does not exist"
+    # test-first: the file is then written, and nothing was missed
+    first = Session().user("go").bash("pytest tests/test_new_feature.py", missing, exit_code=4)
+    first.write("/repo/tests/test_new_feature.py", "def test_a(): pass\n")
+    assert by_signal(detect(first, tmp_path), signals.PATH_MISS) == []
+
+
+def test_a_flag_that_made_the_command_work_is_named(tmp_path: Path) -> None:
+    eresolve = "npm ERR! code ERESOLVE\nnpm ERR! ERESOLVE unable to resolve dependency tree"
+    s = Session().user("go").bash("npm install", eresolve, exit_code=1)
+    s.bash("npm install --legacy-peer-deps", "added 100 packages")
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["works_with"] == "npm install --legacy-peer-deps"
+    # another argument is not a flag that fixed it
+    s = Session().user("go").bash("npm install", eresolve, exit_code=1)
+    s.bash("npm install left-pad", "added 1 package")
+    assert all("works_with" not in f.detail for f in detect(s, tmp_path))
+
+
+def test_stop_plus_what_the_product_does_is_a_request(tmp_path: Path) -> None:
+    for text in (
+        "Stop showing the banner after the user dismisses it",
+        "Stop sending the welcome email twice",
+        "stop logging passwords in the audit trail",
+    ):
+        assert correction_confidence(text) == (0.0, []), text
+    for text in ("Stop editing the tests", "stop. use the other client", "Stop doing that"):
+        assert correction_confidence(text) == (signals.CORRECTION_STRONG, ["stop."]), text
+
+
+def test_the_matched_label_names_what_was_said(tmp_path: Path) -> None:
+    for text, label in (
+        ("that's not what I asked for", "that's not what I …"),
+        ("That's wrong, the port is 8080", "that's wrong"),
+        ("this is not right", "that's not right"),
+        ("wrong. use PaymentClient", "wrong."),
+        ("It doesn't work", "that doesn't work"),
+        ("roll it back", "roll it back"),
+        ("failing again", "failing again"),
+    ):
+        assert correction_confidence(text)[1][0] == label, text
+    s = Session().user("add it").edit(A).say("Done.").user("that's not what I asked for")
+    s.edit(A, "p", "q")
+    (fix,) = detect(s, tmp_path)
+    assert fix.summary.startswith(
+        'The user corrected the agent (confidence 1; matched "that\'s not what I …", '
+    )
+
+
+# ---- round 20 ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "label"),
+    [
+        ("we don't use moment in this codebase, use date-fns", "we don't use …"),
+        ("don't use any here, use unknown", "don't use X, use Y"),
+        ("again: never commit directly to main", "never …"),
+        ("Again, we never use default exports", "we don't use …"),
+        ("again: the header goes on top", "again: …"),
+    ],
+)
+def test_a_rule_stated_in_reply_is_a_correction_once_the_agent_goes_back(
+    tmp_path: Path, text: str, label: str
+) -> None:
+    confidence, labels = correction_confidence(text)
+    assert confidence == signals.CORRECTION_STRONG and labels[0] == label
+    s = Session().user("add the feature").edit(A).say("Done.").user(text).edit(A, "p", "q")
+    (fix,) = detect(s, tmp_path)
+    assert fix.signal == signals.USER_CORRECTION and keys(fix) == [("file", "src/a.py")]
+    # the agent moves on to something else: wording alone is not a correction
+    s = Session().user("add the feature").edit(A).say("Done.").user(text).edit(B)
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.PROBABLE_CORRECTION]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "never mind, it works now",
+        "I have never seen this error before, can you explain it?",
+        "Again, thanks for the help!",
+        "we don't have a staging environment yet, can you add one?",
+        "don't forget to update the changelog",
+        "use date-fns for the new picker",
+        "Can we never show the banner to admins?",
+        "once again, great work",
+        "Again, can you also add a --verbose flag?",
+    ],
+)
+def test_rule_cues_leave_ordinary_follow_ups_alone(text: str) -> None:
+    assert correction_confidence(text) == (0.0, []), text
+
+
+def test_network_and_path_forms_of_a_missing_program(tmp_path: Path) -> None:
+    for output in (
+        "curl: (6) Could not resolve host: registry.example",
+        "wget: unable to resolve host address ‘registry.example’",
+    ):
+        assert not signals.is_invocation_error(output, 6)
+        assert signals.environment_error(output) == (signals.ENV_NETWORK, "")
+    s = Session().user("go")
+    s.bash("zebractl status", "bash: zebractl: command not found", exit_code=127)
+    s.bash("./bin/zebractl status", "ok")
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["works_as"] == "./bin/zebractl"
+
+
+def test_the_tests_a_red_run_names_are_kept(tmp_path: Path) -> None:
+    red = "FAILED tests/test_legacy.py::test_old - AssertionError\n1 failed, 40 passed in 2.0s"
+    s = Session().user("go").bash("pytest", red, exit_code=1)
+    (failure,) = detect(s, tmp_path, known=("tests/test_legacy.py",))
+    assert failure.detail["failed_tests"] == "tests/test_legacy.py::test_old"
+    assert failure.detail["failed_test_files"] == "tests/test_legacy.py"
+    go = Session().user("go").bash("go test ./...", "--- FAIL: TestOld (0.00s)\nFAIL", exit_code=1)
+    (failure,) = detect(go, tmp_path)
+    assert failure.detail["failed_tests"] == "TestOld" and failure.detail["failed_test_files"] == ""
+
+
+# ---- round 21 ----------------------------------------------------------------------------
+
+
+def test_a_new_file_refused_by_the_read_first_rule_is_weak(tmp_path: Path) -> None:
+    new = Session().user("go").write("/repo/src/new.py", error=builders.NOT_READ)
+    (refused,) = detect(new, tmp_path)
+    assert refused.signal == signals.STALE_EDIT and refused.detail["variant"] == "unread-write"
+    assert scoring.is_weak(refused) and refused.interval is None
+    # a file the session had read or changed is the real thing
+    known = Session().user("go").read(A).write(A, error=builders.NOT_READ)
+    (stale,) = detect(known, tmp_path)
+    assert stale.detail["variant"] == "not-read" and not scoring.is_weak(stale)
+
+
+def test_an_interrupt_after_a_missing_read_is_not_about_that_path(tmp_path: Path) -> None:
+    s = Session().user("go").read("/repo/src/nope.py", missing=True).interrupt()
+    miss, stop = detect(s, tmp_path)
+    assert miss.signal == signals.PATH_MISS and keys(miss) == [("file", "src/nope.py")]
+    assert stop.signal == signals.USER_INTERRUPT and stop.targets == []
+    assert "a file that does not exist" in stop.summary
+    # after a read that worked, the file is what the agent was on
+    s = Session().user("go").read(A).interrupt()
+    (stop,) = detect(s, tmp_path)
+    assert keys(stop) == [("file", "src/a.py")]
+
+
+def test_a_denied_chain_is_keyed_to_its_first_step(tmp_path: Path) -> None:
+    refused = "Claude requested permissions to use Bash, but you haven't granted it yet."
+    for line, key in (
+        ("cat notes.md && uv run ruff check .", "cat"),
+        ("cd api && sleep 2 && npm run build && npm test", "npm run build (api/)"),
+        ("npm run build && git push -f origin main", "git push"),  # the destructive step
+    ):
+        s = Session().user("go").tool("Bash", {"command": line}, refused, is_error=True)
+        (denied,) = detect(s, tmp_path)
+        assert keys(denied) == [("command", key)], line
+
+
+# ---- round 22 ------------------------------------------------------------------------------
+
+NPM_RED = "Tests:       1 failed, 40 passed, 41 total\nnpm ERR! Test failed.  See above."
+MAKE_RED = "1 failed, 1317 passed in 6.2s\nmake: *** [Makefile:20: test] Error 1"
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "code", "key"),
+    [
+        # the runner's line (`npm ERR!`, `make: ***`) fits both steps: the summary decides
+        ("npm run lint && npm test 2>&1 | tail -5", NPM_RED, 0, "npm test"),
+        ("make lint && make test 2>&1 | tail -5", MAKE_RED, 0, "make test"),
+        ("make lint && make test", MAKE_RED, 2, "make test"),
+        # ... and so does the target or script the runner names
+        (
+            "make lint && make test 2>&1 | tail -3",
+            "make: *** [Makefile:12: lint] Error 1",
+            0,
+            "make lint",
+        ),
+        ("make lint && make test", "make: *** [Makefile:12: lint] Error 1", 2, "make lint"),
+        (
+            "npm run lint && npm test 2>&1 | tail -3",
+            "npm ERR! code ELIFECYCLE\nnpm ERR! shop@1.0.0 lint: `eslint .`\nnpm ERR! Exit 1",
+            0,
+            "npm run lint",
+        ),
+        (
+            "npm run lint && npm test 2>&1 | tail -3",
+            "npm error Lifecycle script `test` failed with error:\nnpm error code 1",
+            0,
+            "npm test",
+        ),
+        # a step sent to /dev/null printed none of it
+        ("npm run build >/dev/null 2>&1; npm test | tail -3", NPM_RED, 0, "npm test"),
+        ("npm run build &>/dev/null; npm test | tail -3", NPM_RED, 0, "npm test"),
+        ("make examples >/dev/null 2>&1; make check 2>&1 | tail -2", MAKE_RED, 0, "make check"),
+        ("make examples > /dev/null 2> /dev/null; make check | tail -2", MAKE_RED, 0, "make check"),
+        # only stdout is hidden: the error line may still be the first step's
+        (
+            "make examples >/dev/null; make check 2>&1 | tail -2",
+            "make: *** [Makefile:9: examples] Error 1",
+            0,
+            "make examples",
+        ),
+    ],
+)
+def test_a_red_run_is_pinned_on_the_step_that_printed_it(
+    tmp_path: Path, command: str, output: str, code: int, key: str
+) -> None:
+    s = Session().user("go").bash(command, output, exit_code=code)
+    (failure,) = detect(s, tmp_path)
+    assert keys(failure)[0] == ("command", key) and "ambiguous_step" not in failure.detail
+    if key.split()[-1] not in ("test", "check"):
+        return
+    # red, an edit, green: the development loop, for the step that was red
+    green = "Tests:       41 passed, 41 total" if "npm" in command else "1318 passed in 6.1s"
+    loop = Session().user("go").bash(command, output, exit_code=code).edit(A)
+    loop.bash(command, green)
+    assert detect(loop, tmp_path) == []
+
+
+def test_a_runner_line_alone_still_blames_the_first_step_it_fits(tmp_path: Path) -> None:
+    # nothing names a target and no summary is shown: as before
+    s = Session().user("go").bash("make lint && make test", "make: *** Error 1", exit_code=2)
+    (failure,) = detect(s, tmp_path)
+    assert keys(failure)[0] == ("command", "make lint")
+    # two different tools each keep their own verdict
+    both = "error: could not compile `shop`\n===== 1 failed, 2 passed in 0.31s ====="
+    s = Session().user("go").bash("cargo build; pytest | tail -5", both)
+    (failure,) = detect(s, tmp_path)
+    assert keys(failure)[0] == ("command", "cargo build")
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "/bin/bash: line 1: cd: frontend: No such file or directory",
+        "bash: cd: frontend: No such file or directory",
+        "(eval):cd:1: no such file or directory: frontend",
+        "cd:1: no such file or directory: frontend",
+        "cd: no such file or directory: frontend",
+        "sh: 1: cd: can't cd to frontend",
+    ],
+)
+def test_a_cd_into_a_directory_that_is_not_there_is_a_path_miss(
+    tmp_path: Path, output: str
+) -> None:
+    s = Session().user("go").bash("cd frontend && npm test", output, exit_code=1)
+    (miss,) = detect(s, tmp_path)
+    assert miss.signal == signals.PATH_MISS and keys(miss) == [("file", "frontend")]
+    assert miss.summary == "`cd` was pointed at frontend, which does not exist"
+    assert miss.detail == {"variant": "directory"} and miss.interval is not None
+    # resolved against where the shell stood
+    s = Session().user("go").bash("cd web && cd frontend && npm test", output, exit_code=1)
+    (miss,) = detect(s, tmp_path)
+    assert keys(miss) == [("file", "web/frontend")]
+
+
+def test_a_failed_cd_out_of_the_repo_or_into_a_real_directory_is_nothing(
+    tmp_path: Path,
+) -> None:
+    gone = "bash: cd: /srv/elsewhere: No such file or directory"
+    s = Session().user("go").bash("cd /srv/elsewhere && npm test", gone, exit_code=1)
+    assert detect(s, tmp_path) == []
+    # the directory is on disk: the shell stood somewhere else, nobody guessed a path
+    s = Session().user("go")
+    s.bash("cd frontend && npm test", "bash: cd: frontend: No such file or directory", exit_code=1)
+    assert detect(s, tmp_path, dirs=("frontend",)) == []
+
+
+ENVIRONMENT_VOCABULARY = [
+    (
+        "mysql -e 'select 1'",
+        "ERROR 1045 (28000): Access denied for user 'root'@'localhost'",
+        "auth",
+    ),
+    (
+        "docker pull registry.example/x",
+        'Error response from daemon: Get "https://registry.example/v2/": unauthorized: '
+        "incorrect username or password",
+        "auth",
+    ),
+    ("terraform apply", "Error: No valid credential sources found", "auth"),
+    (
+        "aws s3 cp a s3://b",
+        "An error occurred (InvalidAccessKeyId) when calling the PutObject operation: The AWS "
+        "Access Key Id you provided does not exist in our records.",
+        "auth",
+    ),
+    (
+        "aws s3 cp a s3://b",
+        "An error occurred (ExpiredToken) when calling the PutObject operation: The provided "
+        "token has expired.",
+        "auth",
+    ),
+    (
+        "aws dynamodb create-table",
+        "An error occurred (UnrecognizedClientException): The security token included in the "
+        "request is invalid.",
+        "auth",
+    ),
+    ("gh api -X POST repos/a/b/issues", '{"message":"Bad credentials","status":"401"}', "auth"),
+    (
+        "npm install",
+        "npm ERR! code E403\nnpm ERR! 403 403 Forbidden - GET https://npm.pkg.example/@acme%2fui",
+        "auth",
+    ),
+    ("pip install -r requirements.txt", "ERROR: HTTP error 403 while getting https://x", "auth"),
+    (
+        "kubectl apply -f k8s/",
+        "Unable to connect to the server: dial tcp 10.0.0.1:6443: i/o timeout",
+        "service",
+    ),
+]
+
+
+@pytest.mark.parametrize(("command", "output", "kind"), ENVIRONMENT_VOCABULARY)
+def test_credentials_and_clusters_in_the_words_of_more_tools(
+    tmp_path: Path, command: str, output: str, kind: str
+) -> None:
+    s = Session().user("go").bash(command, output, exit_code=1)
+    (found,) = detect(s, tmp_path)
+    assert (found.detail["variant"], found.detail.get("environment")) == ("environment", kind)
+    assert signals.environment_error(output) is not None
+
+
+def test_a_cluster_that_does_not_answer_a_question_is_still_down(tmp_path: Path) -> None:
+    timeout = "Unable to connect to the server: dial tcp 10.0.0.1:6443: i/o timeout"
+    s = Session().user("go").bash("kubectl get pods", timeout, exit_code=1)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["service"] == "the Kubernetes cluster"
+    assert "the Kubernetes cluster was not reachable" in found.summary
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "E   AssertionError: expected 403 Forbidden but got 200\n1 failed in 0.2s",
+        "FAILED tests/test_auth.py::test_denied - assert 403 == 200\n1 failed in 0.2s",
+        "E   AssertionError: 'Access granted for user' != 'ok'\n1 failed in 0.2s",
+        "error: test expected status 200\n  got 403\n1 failed in 0.2s",
+    ],
+)
+def test_a_test_about_permissions_is_not_a_credential_problem(tmp_path: Path, output: str) -> None:
+    s = Session().user("go").bash("pytest", output, exit_code=1)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["variant"] == "ordinary" and signals.environment_error(output) is None
+
+
+def test_a_push_the_remote_turned_down_is_an_ordinary_failure_with_a_name(
+    tmp_path: Path,
+) -> None:
+    rejected = (
+        "To github.com:acme/shop.git\n ! [rejected]        main -> main (non-fast-forward)\n"
+        "error: failed to push some refs to 'github.com:acme/shop.git'\n"
+        "hint: Updates were rejected because the tip of your current branch is behind"
+    )
+    s = Session().user("go").bash("git push", rejected, exit_code=1)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["variant"] == "ordinary" and found.detail["push_rejected"] == "1"
+    assert found.summary == (
+        "`git push` failed (exit 1; the remote branch had commits the local one lacked)"
+    )
+    assert scoring.is_weak(found)
+    # any other failed push is just that
+    denied = "remote: Permission to acme/shop.git denied to dev.\nfatal: unable to access"
+    s = Session().user("go").bash("git push", denied, exit_code=128)
+    (found,) = detect(s, tmp_path)
+    assert "push_rejected" not in found.detail and found.detail["variant"] == "environment"
+
+
+INSTRUCTIONS = [
+    ("Don't use time.sleep here, it makes the suite slow", "don't …"),
+    ("I don't want a new dependency for this, write it by hand", "I don't want …"),
+    ("you're overcomplicating this, a dict is enough", "you're over… this"),
+    ("We already have a retry helper in utils, use that instead", "use that instead"),
+    ("again, no mocks in these tests", "no … here"),
+    ("can you not change the public API? restore the old name", "can you not …"),
+]
+
+
+@pytest.mark.parametrize(("text", "label"), INSTRUCTIONS)
+def test_an_instruction_the_agent_acts_on_is_a_correction(
+    tmp_path: Path, text: str, label: str
+) -> None:
+    assert label in signals.instruction_cues(text)
+    assert correction_confidence(text)[0] == 0  # the wording alone says nothing
+    s = Session().user("go").edit(A, "a", "b").say("done").user(text).edit(A, "b", "c")
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", "src/a.py")]
+    assert f'matched "{label}"' in found.summary and found.detail["corroborated"] == "followed"
+    assert "the agent then changed src/a.py again" in found.summary
+    # the agent moves on to another file: an instruction for what comes next, not recorded
+    s = Session().user("go").edit(A, "a", "b").say("done").user(text).edit(B, "b", "c")
+    assert detect(s, tmp_path) == []
+    # nothing had been changed: there is no work it could redirect
+    s = Session().user("go").read(A).say("done").user(text).edit(A, "b", "c")
+    assert detect(s, tmp_path) == []
+    # in reply to a question from the agent it is the answer
+    assert signals.instruction_cues(text, after_question=True) == []
+
+
+def test_dont_use_x_use_y_reads_a_dotted_name(tmp_path: Path) -> None:
+    confidence, labels = correction_confidence("Don't use time.sleep. Use the scheduler.")
+    assert (confidence, labels) == (1.0, ["don't use X, use Y"])
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Don't forget to update the changelog",
+        "Don't commit yet",
+        "Don't worry about the docs",
+        "No tests are needed here, thanks",
+        "Now add logging to it",
+        "I don't want to bother you but can you also add a flag",
+        "use tabs instead of spaces in the new file",
+        "use the factory instead",
+        "next task: don't use the cache in the importer",
+        "Looks great. Don't change anything else",
+        "My bad, I don't want the flag after all",
+        "restore the database from the backup and run the migration",
+        "can you note the public API in the README?",
+    ],
+)
+def test_ordinary_instructions_are_not_cues(tmp_path: Path, text: str) -> None:
+    assert signals.instruction_cues(text) == []
+    s = Session().user("go").edit(A, "a", "b").say("done").user(text).edit(A, "b", "c")
+    assert by_signal(detect(s, tmp_path), signals.USER_CORRECTION) == []
+
+
+def test_an_instruction_with_weaker_cues_stays_probable_if_nothing_follows(
+    tmp_path: Path,
+) -> None:
+    text = "Don't call legacy_charge() here, it's deprecated. Use the client instead."
+    s = Session().user("go").edit(A, "a", "b").say("done").user(text).read(B)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.PROBABLE_CORRECTION and "weaker cues only" in found.summary
+    assert found.excerpt == "" and "quote" not in found.detail
+    s = Session().user("go").edit(A, "a", "b").say("done").user(text).edit(A, "b", "c")
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.USER_CORRECTION and 'matched "don\'t …"' in found.summary
+
+
+def test_red_after_the_agents_own_change_is_marked(tmp_path: Path) -> None:
+    red = "FAILED tests/test_a.py::test_old - AssertionError\n1 failed, 40 passed in 2.0s"
+    s = (
+        Session()
+        .user("go")
+        .bash("pytest", red, exit_code=1)
+        .edit(A)
+        .bash("pytest", red, exit_code=1)
+    )
+    first, second = by_signal(detect(s, tmp_path), signals.COMMAND_FAILURE)
+    assert "after_edit" not in first.detail and second.detail["after_edit"] == "1"
+
+
+# ---- round 23 ------------------------------------------------------------------------------
+
+CONFIG = {"decision": "accept", "source": "config"}
+DENIED_BY_SETTINGS = "Claude requested permissions to use Bash, but you haven't granted it yet."
+
+
+@pytest.mark.parametrize(
+    ("decision", "seconds"),
+    [(CONFIG, 284), ({"decision": "accept", "source": "user"}, 14), (None, 44)],
+)
+def test_a_round_trip_never_includes_a_persons_time_at_the_prompt(
+    tmp_path: Path, decision: dict[str, str] | None, seconds: float
+) -> None:
+    s = Session().user("go")
+    s.decision = decision
+    s.bash("terraform plan", "Error: No valid credential sources found", exit_code=1, took=270)
+    s.tick(10).read(A)
+    (found,) = detect(s, tmp_path)
+    assert found.interval is not None
+    assert found.interval[1] - found.interval[0] == pytest.approx(seconds)
+
+
+def test_a_failed_edit_that_waited_at_a_prompt_claims_what_followed(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.decision = {"decision": "accept", "source": "prompt"}
+    call = s.call("Edit", {"file_path": A, "old_string": "a", "new_string": "b"})
+    s.result(call, builders.EDIT_NOT_FOUND, is_error=True, took=120)
+    s.tick(6).read(A)
+    (miss,) = detect(s, tmp_path)
+    assert miss.interval is not None
+    assert miss.interval[1] - miss.interval[0] == pytest.approx(10)  # 6 s + 4 s of thinking
+
+
+def test_a_message_from_another_agent_is_not_a_human_correction(tmp_path: Path) -> None:
+    wrapped = '<teammate-message teammate_id="lead" summary="x">No, that is wrong, revert that.'
+    wrapped += "</teammate-message>"
+    s = Session().user("go").edit(A, "a", "b").say("done").user(wrapped).edit(A, "b", "a")
+    found = detect(s, tmp_path)
+    assert by_signal(found, signals.USER_CORRECTION) == []
+    assert by_signal(found, signals.PROBABLE_CORRECTION) == []
+    # ... but it does start a new turn, like any instruction
+    assert [f.signal for f in found] == [signals.EDIT_REVERT]
+    # what the human typed next to it is the human's, and the envelope is never quoted
+    s = Session().user("go").edit(A, "a", "b").say("done")
+    s.user('<agent-message from="peer">status: ok</agent-message>\nNo, that is wrong, revert that.')
+    s.edit(A, "b", "a")
+    (found_one,) = by_signal(detect(s, tmp_path), signals.USER_CORRECTION)
+    assert found_one.detail["quote"] == "No, that is wrong, revert that."
+
+
+def test_a_correction_about_work_in_another_repository_is_not_ours(tmp_path: Path) -> None:
+    wrong = "No, that is wrong, revert that in repoB"
+    # started above both repositories: read here, edited next door
+    s = Session(cwd="/").user("go").read(A).edit("/repoB/x.py", "a", "b").say("done")
+    s.user(wrong).edit("/repoB/x.py", "b", "a")
+    assert detect(s, tmp_path) == []
+    # the human names a path next door, and nothing was changed here
+    s = Session(cwd="/").user("go").read(A).say("done").user("No, that's wrong: fix /repoB/x.py")
+    assert detect(s, tmp_path) == []
+    # nothing was edited anywhere and nothing outside is named: still on record
+    s = Session(cwd="/").user("go").read(A).say("done").user("No, that is wrong.")
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.PROBABLE_CORRECTION and found.targets == []
+    # an edit here keeps the correction here, whatever else was touched
+    s = Session(cwd="/").user("go").edit(A, "a", "b").edit("/repoB/x.py").say("done")
+    s.user("No, that is wrong.").edit(A, "b", "c")
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", "src/a.py")]
+
+
+@pytest.mark.parametrize(
+    ("command", "target"),
+    [
+        ("cat > notes.md <<'EOF'\nhi\nEOF", ("file", "notes.md")),
+        ("cat >> docs/notes.md <<'EOF'\nhi\nEOF\nuv run ruff check .", ("file", "docs/notes.md")),
+        ("echo hi | tee notes.md", ("file", "notes.md")),
+        ("cd web && cat > a.txt <<EOF\nx\nEOF", ("file", "web/a.txt")),
+        ("cat notes.md", ("command", "cat")),
+        ("cat a.txt b.txt > /dev/null", ("command", "cat")),
+    ],
+)
+def test_a_refused_redirected_write_is_about_the_file(
+    tmp_path: Path, command: str, target: tuple[str, str]
+) -> None:
+    s = Session().user("go").tool("Bash", {"command": command}, DENIED_BY_SETTINGS, is_error=True)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.PERMISSION_DENIED and keys(found) == [target]
+    if target[0] == "file":
+        assert found.summary.startswith(f"Bash on {target[1]} was denied")
+    # a file outside the repository is nobody's here
+    away = Session().user("go")
+    away.tool("Bash", {"command": "cat > /tmp/x <<EOF\nhi\nEOF"}, DENIED_BY_SETTINGS, is_error=True)
+    assert detect(away, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "code", "key", "variant"),
+    [
+        (
+            '( /usr/bin/time -v mytool scan . ; echo "exit $?" ); ls; which time',
+            "bash: line 1: /usr/bin/time: No such file or directory\nexit 127\nREADME.md",
+            0,
+            "time",
+            "invocation",
+        ),
+        ("time -v pytest", "bash: time: command not found", 127, "time", "invocation"),
+        ('mytool run; echo "exit $?"', "exit 127", 0, "mytool", "invocation"),
+        ('pytest -q; echo "exit $?"', "some output\nexit 1", 0, "pytest", "ordinary"),
+        # the wrapper is there and the command behind it failed: the command's failure
+        ("time pytest -q", "1 failed in 0.2s\nreal 0m0.2s", 1, "pytest", "ordinary"),
+    ],
+)
+def test_a_missing_wrapper_and_an_echoed_status(
+    tmp_path: Path, command: str, output: str, code: int, key: str, variant: str
+) -> None:
+    s = Session().user("go").bash(command, output, exit_code=code).read(A)
+    (found,) = detect(s, tmp_path)
+    assert keys(found)[0] == ("command", key) and found.detail["variant"] == variant
+
+
+def test_an_echoed_zero_is_a_pass(tmp_path: Path) -> None:
+    s = Session().user("go").bash('pytest -q; echo "exit $?"', "some output\nexit 0").read(A)
+    assert detect(s, tmp_path) == []
+    assert signals.echoed_status('make; echo "exit $?"', "exit 2") == 2
+    assert signals.echoed_status('make; echo "rc=$?"', "rc=0") == 0
+    # no echo of the status in the line, or more than one answer: nothing is read into it
+    assert signals.echoed_status("make test", "exit 2") is None
+    assert signals.echoed_status('a; echo "exit $?"; b; echo "exit $?"', "exit 1\nexit 0") is None
+
+
+# ---- round 24 ------------------------------------------------------------------------
+
+TROUBLESHOOTING = (
+    "# Troubleshooting\n\n"
+    "make: *** No rule to make target 'tset'.  Stop.\n"
+    " ERR_PNPM_NO_SCRIPT  Missing script: tset\n"
+    "If you see `bash: foo: command not found`, install foo.\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("command", "output"),
+    [
+        ("make build; cat docs/troubleshooting.md", "built ok\n" + TROUBLESHOOTING),
+        ("pnpm build && cat docs/troubleshooting.md", "built ok\n" + TROUBLESHOOTING),
+        ("make build || head -20 docs/troubleshooting.md", TROUBLESHOOTING),
+        ("pytest -q; sed -n 1,40p docs/ci.md", "ok\n1 failed in 0.1s is what CI printed"),
+        (
+            "make build; grep -n rule docs/troubleshooting.md",
+            "built\n3:If you see: No rule to make target, check the Makefile.",
+        ),
+        # words inside a line are not the tool's own error line
+        ("make build | tail -3", "see the docs: No rule to make target means a typo"),
+        ("pnpm build | tail -3", "docs: ERR_PNPM_NO_SCRIPT means the script is missing"),
+    ],
+)
+def test_a_document_printed_after_a_command_is_not_its_verdict(
+    tmp_path: Path, command: str, output: str
+) -> None:
+    s = Session().user("go").bash(command, output).read(A)
+    assert detect(s, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "code", "variant"),
+    [
+        ("make tset | tail -3", "make: *** No rule to make target 'tset'.  Stop.", 0, "invocation"),
+        ("gmake tset", "gmake[1]: *** No rule to make target 'tset'.  Stop.", 2, "invocation"),
+        ("pnpm tset | tail", " ERR_PNPM_NO_SCRIPT  Missing script: tset", 0, "invocation"),
+        # the file printed is the one the command wrote: that is its own output
+        (
+            "pytest -q > out.log 2>&1; tail -5 out.log",
+            "FAILED tests/test_a.py::test_x - assert 1 == 2\n1 failed in 0.1s",
+            0,
+            "ordinary",
+        ),
+        (
+            "mytool build > out.log 2>&1; cat out.log",
+            "bash: mytool: command not found",
+            0,
+            "invocation",
+        ),
+        # a pipe into a reader prints the command's output, not a file
+        ("pytest -q 2>&1 | grep -v warning", "1 failed in 0.1s", 0, "ordinary"),
+    ],
+)
+def test_the_tools_own_error_line_still_counts(
+    tmp_path: Path, command: str, output: str, code: int, variant: str
+) -> None:
+    s = Session().user("go").bash(command, output, exit_code=code).read(A)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.COMMAND_FAILURE and found.detail["variant"] == variant
+
+
+def test_which_step_owns_the_exit_status() -> None:
+    from agent_friction import attribution
+
+    assert attribution.status_is_last_steps("pytest -q; which time")
+    assert attribution.status_is_last_steps("( time mytool . ); ls; command -v time")
+    assert not attribution.status_is_last_steps("pytest -q && which time")
+    assert not attribution.status_is_last_steps("pytest -q | tail")
+    assert not attribution.status_is_last_steps("pytest -q")
+    assert attribution.prints_another_file("make; cat docs/x.md")
+    assert attribution.prints_another_file("make || tail -n 20 docs/x.md")
+    assert attribution.prints_another_file("make; grep -n rule docs/x.md")
+    assert not attribution.prints_another_file("make > x.log; cat x.log")
+    assert not attribution.prints_another_file("make 2>&1 | tee x.log; tail -3 x.log")
+    assert not attribution.prints_another_file("make | grep rule")
+    assert not attribution.prints_another_file("make; tail -5")
+    assert not attribution.prints_another_file("cat docs/x.md")
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "code", "expected"),
+    [
+        # the exit status is that of the question asked afterwards
+        ("mytool scan .; which time", "scanned 3 files", 1, None),
+        ("mytool scan .; command -v jq", "scanned 3 files", 1, None),
+        ("pytest -q; ls nothere", "3 passed in 0.2s\nls: cannot access 'nothere'", 2, None),
+        (
+            "( /usr/bin/time -v mytool scan . ); ls; which time",
+            "bash: line 1: /usr/bin/time: No such file or directory\nREADME.md",
+            1,
+            ("time", "invocation", "hidden"),
+        ),
+        # ... while the output still says what the command before it did
+        ("pytest -q; which time", "1 failed in 0.2s", 1, ("pytest", "ordinary", "hidden")),
+        # with `&&` the later step never ran: the status is the command's own
+        ("pytest -q && which time", "1 failed in 0.2s", 1, ("pytest", "ordinary", "")),
+    ],
+)
+def test_a_failed_question_at_the_end_is_not_the_commands_failure(
+    tmp_path: Path, command: str, output: str, code: int, expected: tuple[str, str, str] | None
+) -> None:
+    s = Session().user("go").bash(command, output, exit_code=code).read(A)
+    found = detect(s, tmp_path)
+    if expected is None:
+        assert found == []
+        return
+    (one,) = found
+    key, variant, status = expected
+    assert keys(one)[0] == ("command", key) and one.detail["variant"] == variant
+    assert one.detail.get("status", "") == status
+    assert ("exit 1" in one.summary) == (not status)
+
+
+LOOKS = ("ls .venv/bin", "which pytest", "cat pyproject.toml", "git status", "pip list", "ls")
+
+
+@pytest.mark.parametrize("looks", [0, 2, 6])
+def test_looking_around_does_not_use_up_the_look_ahead(tmp_path: Path, looks: int) -> None:
+    s = Session().user("go").bash("pytest -q", "bash: pytest: command not found", exit_code=127)
+    for command in LOOKS[:looks]:
+        s.bash(command, "x")
+    s.bash(".venv/bin/pytest -q", "3 passed in 0.1s").read(A)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["works_as"] == ".venv/bin/pytest"
+    # six other jobs in between: whatever passes afterwards is no longer its fix
+    far = Session().user("go").bash("pytest -q", "bash: pytest: command not found", exit_code=127)
+    for command in ("npm run build", "make docs", "cargo build", "go build ./...", "make x"):
+        far.bash(command, "ok")
+    far.bash(".venv/bin/pytest -q", "3 passed in 0.1s").read(A)
+    (found,) = detect(far, tmp_path)
+    assert "works_as" not in found.detail
+
+
+def test_a_command_that_works_by_its_local_path(tmp_path: Path) -> None:
+    conftest = (
+        "ImportError while loading conftest '/repo/tests/conftest.py'.\n"
+        "E   ModuleNotFoundError: No module named 'requests'"
+    )
+    s = Session().user("go").bash("pytest -q", conftest, exit_code=4)
+    s.bash("ls .venv/bin", "pytest").bash("which pytest", "/usr/bin/pytest")
+    s.bash(".venv/bin/pytest -q", "3 passed in 0.1s").read(A)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["works_with"] == ".venv/bin/pytest"
+    # a red test that goes green by another path is a test going green
+    red = Session().user("go").bash("pytest -q", "1 failed in 0.2s", exit_code=1)
+    red.bash(".venv/bin/pytest -q", "3 passed in 0.1s").read(A)
+    assert all("works_with" not in f.detail for f in detect(red, tmp_path))
+    # ... and an edit in between means the edit may have fixed it
+    edited = Session().user("go").bash("pytest -q", conftest, exit_code=4)
+    edited.edit(A).bash(".venv/bin/pytest -q", "3 passed in 0.1s").read(A)
+    assert all("works_with" not in f.detail for f in detect(edited, tmp_path))
+
+
+def powershell_missing(cmdlet: str, path: str) -> str:
+    return (
+        f"{cmdlet} : Cannot find path '{path}' because it does not exist.\n"
+        "At line:1 char:1\n"
+        f"    + CategoryInfo          : ObjectNotFound: ({path}:String) [{cmdlet}], "
+        "ItemNotFoundException"
+    )
+
+
+def test_powershell_saying_a_path_is_not_there_is_a_path_miss(tmp_path: Path) -> None:
+    def one(command: str, output: str, **kw: object) -> Finding:
+        s = Session().user("go").bash(command, output, exit_code=1).read(A)
+        (found,) = detect(s, tmp_path, **kw)  # type: ignore[arg-type]
+        return found
+
+    read = one(
+        "Get-Content src/missing.py", powershell_missing("Get-Content", "/repo/src/missing.py")
+    )
+    assert read.signal == signals.PATH_MISS and keys(read) == [("file", "src/missing.py")]
+    assert read.summary == "`Get-Content` was pointed at src/missing.py, which does not exist"
+    assert read.detail == {"variant": "command"} and not scoring.is_weak(read)
+    # PowerShell 7 prints no space before the colon; an alias is named as typed
+    seven = "gc: Cannot find path '/repo/src/missing.py' because it does not exist."
+    assert one("gc src/missing.py | Select-Object -First 5", seven).signal == signals.PATH_MISS
+    # asking whether something is there is a question, as with `ls`
+    listing = one("Get-ChildItem src/nodir", powershell_missing("Get-ChildItem", "/repo/src/nodir"))
+    assert listing.detail == {"variant": "command", "probe": "1"} and scoring.is_weak(listing)
+    assert listing.summary.endswith("(a look at whether it is there)")
+    optional = one("Get-Content README.md", powershell_missing("Get-Content", "/repo/README.md"))
+    assert optional.detail.get("probe") == "1"
+    moved = one("Set-Location web", powershell_missing("Set-Location", "/repo/web"))
+    assert moved.detail == {"variant": "directory"} and keys(moved) == [("file", "web")]
+    # a path that is there after all, or outside the repository, is nobody's miss ...
+    there = Session().user("go")
+    there.bash(
+        "Get-Content src/a.py", powershell_missing("Get-Content", "/repo/src/a.py"), exit_code=1
+    )
+    there.bash("Get-Content /etc/x", powershell_missing("Get-Content", "/etc/x"), exit_code=1)
+    assert detect(there.read(A), tmp_path) == []
+    # ... and any other error of a cmdlet is still a command failing
+    denied = "Get-Content : Access to the path '/repo/src/a.py' is denied."
+    assert one("Get-Content src/a.py", denied).signal == signals.COMMAND_FAILURE
+
+
+# ---- round 25 ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Still getting the error? If so edit src/a.py again",
+        "Still failing? Paste the output if it is.",
+        "the tests are still failing on main since yesterday, can you look at src/a.py",
+        "still broken for weeks, nothing to do with this - now fix src/a.py",
+        "that broke nothing as far as I can tell. continue with src/a.py",
+    ],
+)
+def test_questions_old_problems_and_negations_are_not_corrections(
+    tmp_path: Path, message: str
+) -> None:
+    assert correction_confidence(message)[0] == 0
+    s = Session().user("fix it").read(A).edit(A).user(message).read(A).edit(A)
+    assert detect(s, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Still getting the same error.",
+        "still failing in src/a.py",
+        "that broke the build, revert it",
+    ],
+)
+def test_the_same_words_as_a_verdict_still_correct(tmp_path: Path, message: str) -> None:
+    s = Session().user("fix it").read(A).edit(A).user(message).read(A).edit(A)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.USER_CORRECTION
+
+
+def test_wrong_file_and_the_agent_going_to_the_one_named_is_a_correction(tmp_path: Path) -> None:
+    other = "/repo/src/parser.py"
+    message = "No, wrong file — the bug is in parser.py"
+    s = Session().user("fix the bug").read(A).edit(A).user(message).read(other).edit(other)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", "src/a.py")]
+    assert found.detail["corroborated"] == "redirected"
+    assert "the agent then went to src/parser.py, the file the user named instead" in found.summary
+    # by path as well as by name
+    by_path = Session().user("fix the bug").read(A).edit(A)
+    by_path.user("that's the wrong module, the problem is in src/parser.py").edit(other)
+    assert detect(by_path, tmp_path)[0].detail["corroborated"] == "redirected"
+    # going somewhere the human did not name confirms nothing ...
+    astray = Session().user("fix the bug").read(A).edit(A).user(message).edit("/repo/src/lexer.py")
+    (found,) = detect(astray, tmp_path)
+    assert found.signal == signals.PROBABLE_CORRECTION
+    # ... nor does a "no" that names a file without saying the place was wrong
+    plain = Session().user("fix the bug").read(A).edit(A)
+    plain.user("No, look at parser.py first").edit(other)
+    (found,) = detect(plain, tmp_path)
+    assert found.signal == signals.PROBABLE_CORRECTION
+
+
+STORE = (
+    "Python was not found; run without arguments to install from the Microsoft Store, or "
+    "disable this shortcut from Settings > Manage App Execution Aliases."
+)
+
+
+def test_the_windows_python_stub_is_a_command_not_found(tmp_path: Path) -> None:
+    s = Session().user("go").bash("python scripts/x.py", STORE, exit_code=9009)
+    s.bash("py scripts/x.py", "ok").read(A)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["variant"] == "invocation" and found.detail["not_found"] == "python"
+    assert found.detail["works_as"] == "py"
+    assert signals.is_invocation_error(STORE, 1) and signals.is_invocation_error("", 9009)
+    # the sentence quoted inside a line is not the stub speaking
+    assert not signals.is_invocation_error(f"docs say: {STORE}", 1)
+
+
+@pytest.mark.parametrize(
+    ("command", "target"),
+    [
+        (
+            "cat >> tests/test_a.py <<'EOF'\nx\nEOF\ngit add -A && git commit -m x && git push",
+            ("file", "tests/test_a.py"),
+        ),
+        ("cat > notes.md <<EOF\nhi\nEOF\n&& git push origin main", ("file", "notes.md")),
+        # no write up front: the destructive step, as before
+        ("git add -A && git push", ("command", "git push")),
+        ("cat notes.md && git push", ("command", "git push")),
+    ],
+)
+def test_a_refused_write_followed_by_a_push_is_about_the_write(
+    tmp_path: Path, command: str, target: tuple[str, str]
+) -> None:
+    s = Session().user("go").tool("Bash", {"command": command}, DENIED_BY_SETTINGS, is_error=True)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.PERMISSION_DENIED and keys(found) == [target]
+    # what the refusal names wins over where the line starts
+    said = "Permission to use Bash with command git push has been denied."
+    named = Session().user("go")
+    named.tool("Bash", {"command": "cat > notes.md <<EOF\nhi\nEOF\ngit push"}, said, is_error=True)
+    (found,) = detect(named, tmp_path)
+    assert keys(found) == [("command", "git push")]
+
+
+# ---- round 26 ------------------------------------------------------------------------
+
+JEST = (
+    "FAIL src/cart.test.ts\n  ● cart › adds an item\n\n    expect(received).toBe(expected)\n"
+    "  ● cart › removes an item\n\nFAIL src/api.test.ts\n  ● Test suite failed to run\n\n"
+    "Tests:       2 failed, 5 passed, 7 total"
+)
+VITEST = (
+    " FAIL  src/cart.test.ts > cart > adds an item\nAssertionError: expected 1 to be 2\n"
+    " FAIL  src/cart.test.ts > cart > removes an item 12ms\n Test Files  1 failed (1)"
+)
+
+
+def test_failed_test_names_from_every_runner() -> None:
+    assert signals.failed_tests("FAILED tests/test_a.py::test_x - assert 1\n--- FAIL: TestY") == [
+        ("tests/test_a.py::test_x", "tests/test_a.py"),
+        ("TestY", ""),
+    ]
+    assert signals.failed_tests(JEST) == [
+        ("src/cart.test.ts › cart › adds an item", "src/cart.test.ts"),
+        ("src/cart.test.ts › cart › removes an item", "src/cart.test.ts"),
+        ("src/api.test.ts", "src/api.test.ts"),  # red as a whole: named by itself
+    ]
+    assert signals.failed_tests(VITEST) == [
+        ("src/cart.test.ts > cart > adds an item", "src/cart.test.ts"),
+        ("src/cart.test.ts > cart > removes an item", "src/cart.test.ts"),
+    ]
+    assert signals.failed_tests("PASS src/cart.test.ts\nTests: 7 passed") == []
+    assert signals.failed_tests("FAILURES in the log, FAIL is a word") == []
+
+
+def test_a_red_js_test_is_named_on_the_failure(tmp_path: Path) -> None:
+    s = Session().user("go").bash("npm test", JEST, exit_code=1).read(A)
+    (found,) = detect(s, tmp_path, known=("src/cart.test.ts",))
+    assert found.detail["failed_tests"].split("\n")[0] == "src/cart.test.ts › cart › adds an item"
+    assert found.detail["failed_test_files"].split("\n") == ["src/cart.test.ts"] * 2 + [""]
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        'service "web" is not running',
+        "no such service: web",
+        "Error response from daemon: Container 4f2a9c is not running",
+    ],
+)
+def test_a_compose_service_that_is_down_is_the_environment(tmp_path: Path, output: str) -> None:
+    s = Session().user("go").bash("docker compose exec web pytest", output, exit_code=1).read(A)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["variant"] == "environment" and found.detail["environment"] == "service"
+    # the same words from a test are that test's business
+    s = Session().user("go")
+    s.bash("pytest -q", f"E   AssertionError: {output}\n1 failed in 0.1s", exit_code=1).read(A)
+    assert all(f.detail.get("variant") != "environment" for f in detect(s, tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("said", "variant", "by"),
+    [
+        (
+            "Permission for this action was denied by the Claude Code auto mode classifier. "
+            "Reason: [Destructive or Unwanted Actions]. If you have other tasks, continue.",
+            "classifier",
+            "the auto-mode classifier",
+        ),
+        (
+            "Permission for this command was denied by a built-in Claude Code safety check, "
+            "not by the user. The check stops removals that can delete far more than intended.",
+            "safety",
+            "a built-in safety check",
+        ),
+        (DENIED_BY_SETTINGS, "permission", "permission settings"),
+        (
+            "Permission to use Bash with command rm -rf build has been denied.",
+            "permission",
+            "permission settings",
+        ),
+        # a later mention of the classifier is not the sentence that refuses
+        (
+            "Permission to use Bash has been denied.\nNote: the auto mode classifier is off.",
+            "permission",
+            "permission settings",
+        ),
+    ],
+)
+def test_who_refused_is_said_when_the_transcript_says_it(
+    tmp_path: Path, said: str, variant: str, by: str
+) -> None:
+    s = Session().user("go").tool("Bash", {"command": "rm -rf build"}, said, is_error=True)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.PERMISSION_DENIED and found.detail["variant"] == variant
+    assert found.summary == f"Bash on `rm` was denied by {by}; it did not run"
+
+
+# ---- round 27: reverts after a correction, checked reverts, other tools ---------------------
+
+
+def test_taking_a_change_back_after_a_correction_is_not_a_second_event(tmp_path: Path) -> None:
+    def session(said: str, back: str = A) -> Session:
+        s = Session().user("charge the card").edit(A, "PaymentClient", "legacy_charge")
+        s.edit(B, "x", "y")
+        s.user(said)
+        return s.edit(back, *(("legacy_charge", "PaymentClient") if back == A else ("y", "x")))
+
+    # no "revert", "undo" or "restore" anywhere: the correction names the file
+    said = "you used legacy_charge again in src/a.py. I told you: PaymentClient only"
+    (found,) = detect(session(said), tmp_path)
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", "src/a.py")]
+    # ... while undoing another file in that turn is still the agent going in a circle
+    kinds = [f.signal for f in detect(session(said, back=B), tmp_path)]
+    assert kinds == [signals.USER_CORRECTION, signals.EDIT_REVERT]
+    # a probable correction about the file does the same
+    probable = detect(session("actually, not allowed, use the client instead"), tmp_path)
+    assert [f.signal for f in probable] == [signals.PROBABLE_CORRECTION]
+    assert ("file", "src/a.py") in keys(probable[0])
+    # and a prompt that corrects nothing leaves the revert standing
+    plain = detect(session("now add a docstring"), tmp_path)
+    assert [f.signal for f in plain] == [signals.EDIT_REVERT]
+
+
+def test_a_revert_says_whether_a_check_ran_in_between(tmp_path: Path) -> None:
+    def session(*between: tuple[str, str, int]) -> Session:
+        s = Session().user("speed it up").edit(A, "a", "b")
+        for command, output, code in between:
+            s.bash(command, output, exit_code=code)
+        return s.edit(A, "b", "a")
+
+    (blind,) = detect(session(), tmp_path)
+    assert blind.signal == signals.EDIT_REVERT and "checked" not in blind.detail
+    assert blind.summary == "Edit on src/a.py undid an earlier edit from the same session"
+    red = ("make test", "FAILED tests/test_a.py::test_a\n1 failed", 2)
+    checked = by_signal(detect(session(red), tmp_path), signals.EDIT_REVERT)[0]
+    assert checked.detail["checked"] == "1"
+    assert checked.summary.endswith("after a check had run on it")
+    green = by_signal(detect(session(("pytest -q", "3 passed", 0)), tmp_path), signals.EDIT_REVERT)
+    assert green[0].detail["checked"] == "1"
+    # a command that checks nothing is not a check
+    (other,) = detect(session(("git status", "clean", 0), ("echo hi", "hi", 0)), tmp_path)
+    assert "checked" not in other.detail
+    # a write that restores an earlier version, with a check in between
+    s = Session().user("go").write(A, "one\n").write(A, "two\n")
+    s.bash("ruff check .", "All checks passed!").write(A, "one\n")
+    assert by_signal(detect(s, tmp_path), signals.EDIT_REVERT)[0].detail["checked"] == "1"
+    s = Session().user("go").write(A, "one\n").write(A, "two\n").write(A, "one\n")
+    assert "checked" not in by_signal(detect(s, tmp_path), signals.EDIT_REVERT)[0].detail
+
+
+def test_a_failing_tool_that_is_no_file_tool_or_shell_is_a_tool_failure(tmp_path: Path) -> None:
+    s = Session().user("look it up")
+    s.tool("mcp__postgres__query", {"sql": "select 1"}, "connection refused", is_error=True)
+    s.tool("WebFetch", {"url": "https://example.com"}, "Request failed: 403", is_error=True)
+    s.tool("mcp__postgres__query", {"sql": "select 2"}, "ok")
+    found = detect(s, tmp_path)
+    assert [f.signal for f in found] == [signals.TOOL_FAILURE, signals.TOOL_FAILURE]
+    first, second = found
+    assert first.targets == [] and first.detail == {"tool": "mcp__postgres__query"}
+    assert first.summary == "mcp__postgres__query returned an error"
+    assert first.excerpt == "connection refused" and first.interval is None
+    assert second.detail["tool"] == "WebFetch"
+    assert scoring.is_weak(first)
+    # never started, declined, a "no" to a question: none of these is the tool failing
+    s = Session().user("go")
+    s.tool("mcp__x__y", {}, "InputValidationError: bad arguments", is_error=True)
+    s.reject("mcp__x__y", {"q": "1"}, "not now")
+    s.tool("AskUserQuestion", {"questions": []}, "The user did not answer", is_error=True)
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.TOOL_REJECTED]
+    # and the file tools, search and the shell keep their own signals
+    s = Session().user("go").bash("make build", "boom", exit_code=2)
+    assert signals.TOOL_FAILURE not in [f.signal for f in detect(s, tmp_path)]
+
+
+def _stream(session: Session, tmp_path: Path) -> signals.Detection:
+    from agent_friction.adapters import parse_transcript
+    from agent_friction.attribution import PathResolver
+
+    ctx = signals.DetectContext(PathResolver(Path("/repo")), lambda rel: True, lambda rel: True)
+    (stream,) = parse_transcript(session.save(tmp_path)).streams
+    return signals.detect_stream(stream, ctx)
+
+
+def test_calls_that_went_wrong_outside_the_repository_are_counted_not_reported(
+    tmp_path: Path,
+) -> None:
+    s = Session().user("go")
+    s.tool("Bash", {"command": "cd /srv/other && rm -rf build"}, DENIED, is_error=True)
+    s.tool("Bash", {"command": "rm -rf /var/tmp/cache"}, DENIED, is_error=True)
+    s.bash("cd /srv/other && make test", "boom", exit_code=2)
+    s.reject("Bash", {"command": "cd /srv/other && git push"})
+    s.edit("/srv/other/a.py", error=builders.EDIT_NOT_FOUND)
+    found = _stream(s, tmp_path)
+    assert found.findings == [] and len(found.outside) == 5
+    # inside the repository the same calls are events, and nothing is counted as outside
+    s = Session().user("go")
+    s.tool("Bash", {"command": "rm -rf build"}, DENIED, is_error=True)
+    s.bash("make test", "boom", exit_code=2)
+    s.edit(A, error=builders.EDIT_NOT_FOUND)
+    found = _stream(s, tmp_path)
+    assert len(found.findings) == 3 and found.outside == []
+    # what went well outside, or only looked around there, is not counted either
+    s = Session().user("go").bash("cd /srv/other && make test", "ok")
+    s.bash("ls /srv/other/missing", "ls: cannot access", exit_code=2)
+    assert _stream(s, tmp_path).outside == []
+
+
+DENIED = "Permission to use Bash with command rm has been denied."
+
+
+def test_a_time_box_that_ran_out_in_silence_is_not_a_failure(tmp_path: Path) -> None:
+    quiet = Session().user("go").bash("timeout 5 nc -l 8080", "", exit_code=124)
+    assert detect(quiet, tmp_path) == []
+    # with something to say, without the wrapper, or with another status, it is judged
+    said = Session().user("go").bash("timeout 5 make serve", "Traceback: boom", exit_code=124)
+    assert [f.signal for f in detect(said, tmp_path)] == [signals.COMMAND_FAILURE]
+    bare = Session().user("go").bash("make serve", "", exit_code=124)
+    assert [f.signal for f in detect(bare, tmp_path)] == [signals.COMMAND_FAILURE]
+    other = Session().user("go").bash("timeout 5 make serve", "", exit_code=2)
+    assert [f.signal for f in detect(other, tmp_path)] == [signals.COMMAND_FAILURE]
+
+
+def _generic(tmp_path: Path, gap: int, message: bool = False) -> Finding:
+    base = {"session": "g1", "cwd": "/repo"}
+    events: list[dict[str, object]] = [
+        {**base, "ts": 1_800_000_000, "kind": "user_message", "text": "build it"},
+        {
+            **base,
+            "ts": 1_800_000_010,
+            "kind": "tool_call",
+            "id": 1,
+            "op": "shell",
+            "command": "make build",
+        },
+        {
+            **base,
+            "ts": 1_800_000_020,
+            "kind": "tool_result",
+            "id": 1,
+            "ok": False,
+            "exit_code": 127,
+            "output": "make: cc: command not found",
+        },
+    ]
+    if message:
+        events.append(
+            {**base, "ts": 1_800_000_025, "kind": "assistant_message", "text": "No compiler."}
+        )
+    events += [
+        {
+            **base,
+            "ts": 1_800_000_020 + gap,
+            "kind": "tool_call",
+            "id": 2,
+            "op": "read",
+            "path": "/repo/Makefile",
+        },
+        {**base, "ts": 1_800_000_022 + gap, "kind": "tool_result", "id": 2, "ok": True},
+    ]
+    path = tmp_path / f"g{gap}{message}.jsonl"
+    path.write_text("".join(json.dumps(e) + "\n" for e in events))
+    (found,) = detect(path, tmp_path)
+    return found
+
+
+def test_an_idle_gap_after_a_failure_is_not_claimed(tmp_path: Path) -> None:
+    def seconds(finding: Finding) -> float:
+        assert finding.interval is not None
+        return finding.interval[1] - finding.interval[0]
+
+    # tool calls only: the next call three hours later is not the end of a round trip
+    assert seconds(_generic(tmp_path, 3 * 3600)) == 10
+    # ... while one that follows shortly is, and so is a long one within the limit
+    assert seconds(_generic(tmp_path, 30)) == 40
+    assert seconds(_generic(tmp_path, int(signals.IDLE_GAP_SECONDS) - 10)) == 300
+    # an agent message right after the failure ends the round trip, as ever
+    assert seconds(_generic(tmp_path, 3 * 3600, message=True)) == 15
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("make: *** No rule to make target 'lint'.  Stop.", ("Makefile", "lint")),
+        ("gmake[1]: *** No rule to make target `fmt'.  Stop.", ("Makefile", "fmt")),
+        ('npm error Missing script: "lint"', ("package.json", "lint")),
+        ("npm ERR! Missing script: test:unit", ("package.json", "test:unit")),
+        (" ERR_PNPM_NO_SCRIPT  Missing script: typecheck", ("package.json", "typecheck")),
+        ('error Command "lint" not found.', ("package.json", "lint")),
+        # a prerequisite that is missing is a broken target, not a missing one
+        ("make: *** No rule to make target 'gen.c', needed by 'all'.  Stop.", None),
+        ("the docs say: make: *** No rule to make target 'lint'.  Stop.", None),
+        ("ruff: command not found", None),
+    ],
+)
+def test_missing_target(output: str, expected: tuple[str, str] | None) -> None:
+    assert signals.missing_target(output) == expected
+
+
+def test_a_missing_target_is_noted_on_the_failure(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.bash("make lint", "make: *** No rule to make target 'lint'.  Stop.", exit_code=2)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["variant"] == "invocation"
+    assert (found.detail["no_target_in"], found.detail["no_target"]) == ("Makefile", "lint")
+    s = Session().user("go").bash("make lint", "ruff: command not found", exit_code=127)
+    assert "no_target" not in detect(s, tmp_path)[0].detail
+
+
+# ---- round 29 ------------------------------------------------------------------------------
+
+
+def test_a_search_in_a_directory_that_does_not_exist_is_a_path_miss(tmp_path: Path) -> None:
+    said = "<tool_use_error>Path does not exist: /repo/srcs/api</tool_use_error>"
+    s = Session().user("go")
+    s.tool("Grep", {"pattern": "Client", "path": "/repo/srcs/api"}, said, is_error=True)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.PATH_MISS and keys(found) == [("file", "srcs/api")]
+    assert found.summary == "Grep was pointed at srcs/api, which does not exist"
+    assert found.detail == {"variant": "search"}
+    # a directory that is there, a path outside the repo, and an empty search are not
+    assert detect(s, tmp_path, dirs=("srcs/api",)) == []
+    s = Session().user("go")
+    s.tool("Grep", {"pattern": "x", "path": "/srv/other"}, said, is_error=True)
+    assert detect(s, tmp_path) == []
+    s = Session().user("go").grep("Client", "/repo/src")
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.SEARCH_MISS]
+
+
+# ---- round 30 ------------------------------------------------------------------------------
+
+
+def _stalled(named: bool = True, api_between: int = 0) -> Session:
+    api, util = "/repo/src/api.ts", "/repo/src/util.ts"
+    red = "src/util.ts(3,5): error TS2322: Type 'string' is not assignable" if named else "error"
+    s = Session().user("add the helper").edit(api, "a0", "a1")
+    s.bash("npm run build", "built in 2s")
+    for i in range(4):
+        s.edit(util, f"u{i}", f"u{i + 1}")
+        if i < api_between:
+            s.edit(api, f"a{i + 1}", f"a{i + 2}")
+        s.bash("npx tsc", f"{red}\nFound 1 error.", exit_code=2)
+    return s
+
+
+def test_a_file_edited_before_the_first_red_run_is_no_part_of_the_stall(tmp_path: Path) -> None:
+    (found,) = by_signal(detect(_stalled(), tmp_path), signals.NO_CONVERGENCE)
+    assert keys(found) == [("command", "npx tsc"), ("file", "src/util.ts")]
+    assert [t.share for t in found.targets] == [1.0, 1.0]
+    assert "(edits to src/util.ts)" in found.summary and "api.ts" not in found.summary
+    # the same when the output names no file: api.ts was changed before anything was red
+    (found,) = by_signal(detect(_stalled(named=False), tmp_path), signals.NO_CONVERGENCE)
+    assert keys(found) == [("command", "npx tsc"), ("file", "src/util.ts")]
+
+
+def test_files_edited_between_red_runs_share_by_edits_unless_the_output_names_some(
+    tmp_path: Path,
+) -> None:
+    # both edited between the red runs, nothing named: split by how often each was edited
+    (found,) = by_signal(
+        detect(_stalled(named=False, api_between=2), tmp_path), signals.NO_CONVERGENCE
+    )
+    shares = {t.key: t.share for t in found.targets if t.kind == "file"}
+    assert shares == {"src/util.ts": pytest.approx(3 / 4), "src/api.ts": pytest.approx(1 / 4)}
+    # the failing output names util.ts: api.ts stood by
+    (found,) = by_signal(detect(_stalled(api_between=2), tmp_path), signals.NO_CONVERGENCE)
+    assert keys(found) == [("command", "npx tsc"), ("file", "src/util.ts")]
+    # one edit and then only re-runs is no stall of edits at all (a retry loop instead)
+    s = Session().user("go").edit(A, "a", "b")
+    for _ in range(4):
+        s.bash("npx tsc", "error", exit_code=2)
+    assert by_signal(detect(s, tmp_path), signals.NO_CONVERGENCE) == []
+
+
+def test_a_make_error_about_another_target_is_not_a_missing_target(tmp_path: Path) -> None:
+    said = "make: *** No rule to make target 'tst'.  Stop."
+    s = Session().user("go").bash("make test", said, exit_code=2)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["variant"] == "invocation" and "no_target" not in found.detail
+    s = Session().user("go").bash("make tst", said, exit_code=2)
+    assert detect(s, tmp_path)[0].detail["no_target"] == "tst"
+    # `tst` inside another word is not the target that was asked for
+    s = Session().user("go").bash("make tst-all", said, exit_code=2)
+    assert "no_target" not in detect(s, tmp_path)[0].detail
+
+
+# ---- round 31 ------------------------------------------------------------------------------
+
+
+def test_a_snippet_between_red_and_green_changes_nothing(tmp_path: Path) -> None:
+    red = "FAILED tests/test_a.py::test_a - AssertionError\n1 failed"
+    s = Session().user("go").bash("pytest", red, exit_code=1)
+    s.bash("python -c 'print(1)'", "1").bash("pytest", "1 passed")
+    (found,) = detect(s, tmp_path)
+    assert "fixed_by_command" not in found.detail and "fixed_by_setup" not in found.detail
+    assert found.detail["rerun_green"] == "1"
+    # a command that may well have changed something is still remembered as a candidate
+    s = Session().user("go").bash("pytest", red, exit_code=1)
+    s.bash("python scripts/seed.py", "ok").bash("pytest", "1 passed")
+    (found,) = detect(s, tmp_path)
+    assert found.detail["fixed_by_command"] == "python scripts/seed.py"
+
+
+def test_green_in_a_subdirectory_is_noted_only_when_nothing_changed(tmp_path: Path) -> None:
+    red = "FAILED src/tests/test_a.py::test_a - FileNotFoundError: data.json\n1 failed"
+    s = Session().user("go").bash("pytest", red, exit_code=1)
+    s.bash("cd src && pytest", "1 passed")
+    (found,) = detect(s, tmp_path)
+    assert found.detail["green_in"] == "src/" and "rerun_green" not in found.detail
+    # a failing test outside that directory was not run there
+    for output, passed in (
+        ("FAILED tests/test_a.py::test_a - AssertionError\n1 failed", "1 passed"),
+        ("E   ModuleNotFoundError: No module named 'app'\n1 error, 40 passed", "3 passed"),
+    ):
+        s = Session().user("go").bash("pytest", output, exit_code=1)
+        s.bash("cd src && pytest", passed)
+        (found,) = detect(s, tmp_path)
+        assert "green_in" not in found.detail, output
+    # nor is a directory where the command also went red an answer
+    s = Session().user("go").bash("pytest", "E   fixture 'db' not found\n1 error", exit_code=1)
+    s.bash("cd src && pytest", "E   fixture 'db' not found\n1 error", exit_code=1)
+    s.bash("cd src && pytest", "1 passed")
+    assert all("green_in" not in f.detail for f in detect(s, tmp_path))
+    # green in the same place is a plain re-run
+    s = Session().user("go").bash("pytest", red, exit_code=1).bash("pytest", "1 passed")
+    (found,) = detect(s, tmp_path)
+    assert "green_in" not in found.detail and found.detail["rerun_green"] == "1"
+    # with an edit in between it is red, edit, green: dropped
+    s = Session().user("go").bash("pytest", red, exit_code=1).edit(A)
+    s.bash("cd src && pytest", "1 passed")
+    assert detect(s, tmp_path) == []
+
+
+def test_an_interrupt_to_add_to_the_job_is_not_held_against_the_agent(tmp_path: Path) -> None:
+    def session(said: str) -> Session:
+        s = Session().user("release it").edit(A, "a", "b").bash("make build", "ok")
+        s.interrupt()
+        return s.user(said)
+
+    for said in (
+        "also bump the version",
+        "Oh, and update the changelog too",
+        "plus add a test for it",
+        "One more thing: tag the release",
+        "While you're at it, fix the typo in the README",
+    ):
+        assert detect(session(said), tmp_path) == [], said
+    # anything that objects, redirects or says nothing of the kind keeps the interrupt
+    for said in (
+        "also, don't touch the lockfile",
+        "and stop running the build every time",
+        "No, wrong file",
+        "use the other branch",
+        "andes is the codename, keep going",
+    ):
+        kinds = [f.signal for f in detect(session(said), tmp_path)]
+        assert signals.USER_INTERRUPT in kinds, said
+    # an interrupt with nothing said after it stands
+    s = Session().user("release it").edit(A, "a", "b")
+    s.interrupt()
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.USER_INTERRUPT]
+
+
+def test_wrong_thing_opens_a_correction_and_old_history_is_not_the_agents_work() -> None:
+    for said in (
+        "wrong file — it should go in util.py",
+        "wrong file - it should go in util.py",
+        "Wrong file, the bug is in parser.py",
+        "wrong branch. use main",
+        "revert the commit",
+        "revert the commit abc1234 you just made",
+        "revert the last commit",
+    ):
+        assert signals.correction_confidence(said)[0] == 1.0, said
+    for said in (
+        "Wrong version of node is installed in CI, fix it",
+        "The wrong file is opened when I click the link, fix that",
+        "revert the commit abc123 from last week and reapply on core.py",
+        "revert the changes from last sprint",
+        "Revert the commit from yesterday, it broke the importer",
+    ):
+        assert signals.correction_confidence(said)[0] < 1.0, said
+
+
+FLAKY_RED = "FAILED tests/test_app.py::test_x - AssertionError: 3 != 4\n1 failed, 40 passed in 2s"
+JS_FLAKY_RED = " FAIL  src/app.test.ts > adds\nTests  1 failed | 40 passed (41)"
+
+
+@pytest.mark.parametrize(
+    ("red", "output", "green", "passed"),
+    [
+        ("pytest", FLAKY_RED, "pytest -v", "41 passed"),
+        ("pytest -q", FLAKY_RED, "pytest -q --tb=long", "41 passed"),
+        ("uv run pytest", FLAKY_RED, "uv run pytest -x", "41 passed"),
+        ("pytest 2>&1 | tail -5", FLAKY_RED, "pytest", "41 passed"),
+        ("pytest", FLAKY_RED, "pytest tests/test_app.py::test_x", "1 passed"),
+        ("pytest", FLAKY_RED, "pytest tests/test_app.py", "6 passed"),
+        ("pytest", FLAKY_RED, "pytest --lf", "1 passed"),
+        ("pytest", FLAKY_RED, "pytest -k test_x", "1 passed"),
+        ("npm test", JS_FLAKY_RED, "npm test -- --verbose", "Tests  41 passed (41)"),
+        ("npm test", JS_FLAKY_RED, "npm test -- -t adds", "Tests  1 passed (1)"),
+        ("make test", FLAKY_RED, "make test V=1", "41 passed"),
+        ("go test ./...", "--- FAIL: TestAdd (0.00s)\nFAIL", "go test ./pkg -run TestAdd", "ok"),
+    ],
+)
+def test_the_same_command_green_untouched_is_a_rerun_whatever_its_flags(
+    tmp_path: Path, red: str, output: str, green: str, passed: str
+) -> None:
+    s = Session().user("go").bash(red, output, exit_code=1).bash(green, passed)
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["rerun_green"] == "1"
+    # ... and after an edit the same green run closes the red one
+    s = Session().user("go").bash(red, output, exit_code=1).edit(A).bash(green, passed)
+    assert detect(s, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("green", "passed"),
+    [
+        ("pytest tests/test_other.py", "5 passed"),
+        ("pytest tests/test_app.py::test_y", "1 passed"),
+        ("pytest -k other", "5 passed"),
+        ("pytest -k 'test_x and not slow'", "1 passed"),  # an expression proves nothing
+        ("pytest -m unit", "30 passed"),
+        ("pytest", "12 passed"),
+    ],
+)
+def test_a_selection_that_leaves_the_failing_test_out_is_no_rerun(
+    tmp_path: Path, green: str, passed: str
+) -> None:
+    s = Session().user("go").bash("pytest", FLAKY_RED, exit_code=1).bash(green, passed)
+    (failure,) = detect(s, tmp_path)
+    assert "rerun_green" not in failure.detail
+    s = Session().user("go").bash("pytest", FLAKY_RED, exit_code=1).edit(A).bash(green, passed)
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.COMMAND_FAILURE]
+
+
+def test_pasted_output_is_not_the_humans_verdict() -> None:
+    for said in (
+        "here is the log:\n```\nNo, that is wrong. you forgot the flag. still failing\n```\nlook?",
+        "> No, I told you to stop\n> you broke it\nwhat does this reviewer mean?",
+        "```\nstill failing: you broke the build, revert that",  # a fence left open
+    ):
+        assert signals.correction_confidence(said)[0] == 0.0, said
+    # what the human says around it still counts
+    for said in (
+        "```\nTraceback ...\n```\nNo, that is wrong, revert that",
+        "No, use this:\n```\nx = 1\n```",
+        "> 1 failed\nstill failing",
+    ):
+        assert signals.correction_confidence(said)[0] == 1.0, said
+
+
+def test_a_switch_flipped_run_and_flipped_back_is_not_an_edit_revert(tmp_path: Path) -> None:
+    for on, off in (
+        ("DEBUG = False", "DEBUG = True"),
+        ('"logLevel": "info",', '"logLevel": "debug",'),
+        ("  verbose: 0", "  verbose: 1"),
+    ):
+        s = Session().user("go").edit(A, on, off).bash("python -m app", "ok").edit(A, off, on)
+        assert by_signal(detect(s, tmp_path), signals.EDIT_REVERT) == [], on
+        # nothing ran with it in place, or what ran failed: the change was taken back
+        unused = Session().user("go").edit(A, on, off).edit(A, off, on)
+        assert len(by_signal(detect(unused, tmp_path), signals.EDIT_REVERT)) == 1, on
+    # any other replacement that is undone after a run is a retreat
+    s = Session().user("go").edit(A, "retries = 3", "retries = 5").bash("python -m app", "ok")
+    assert len(by_signal(detect(s.edit(A, "retries = 5", "retries = 3"), tmp_path), "edit-revert"))
+    assert common.is_toggle("DEBUG = True", "DEBUG = False")
+    assert not common.is_toggle("x = 1\ny = 2", "x = 0\ny = 2")
+    assert not common.is_toggle("name = 'a'", "name = 'b'")
+
+
+def test_a_missing_package_manager_and_the_one_that_worked(tmp_path: Path) -> None:
+    s = Session().user("go").bash("pnpm install", "bash: pnpm: command not found", exit_code=127)
+    s.bash("npm install", "added 100 packages")
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["works_as"] == "npm" and failure.detail["not_found"] == "pnpm"
+    # another job under another manager is not "the same command"
+    s = Session().user("go").bash("pnpm install", "bash: pnpm: command not found", exit_code=127)
+    s.bash("npm test", "5 passing")
+    assert all("works_as" not in f.detail for f in detect(s, tmp_path))
+    # and a manager that was there but failed was not missing
+    s = Session().user("go").bash("pnpm install", "ERR_PNPM_OUTDATED_LOCKFILE", exit_code=1)
+    s.bash("npm install", "added 100 packages")
+    assert all("works_as" not in f.detail for f in detect(s, tmp_path))
+
+
+def test_a_chain_of_git_commands_names_the_one_that_failed(tmp_path: Path) -> None:
+    rejected = (
+        " ! [rejected]        main -> main (fetch first)\n"
+        "error: failed to push some refs to 'origin'\n"
+        "hint: Updates were rejected because the remote contains work that you do not have"
+    )
+    s = Session().user("go").bash("git merge origin/main && git push", rejected, exit_code=1)
+    (failure,) = detect(s, tmp_path)
+    assert keys(failure) == [("command", "git push")] and "push_rejected" in failure.detail
+    conflict = "CONFLICT (content): Merge conflict in a.py\nAutomatic merge failed; fix conflicts"
+    s = Session().user("go").bash("git merge origin/main && git push", conflict, exit_code=1)
+    (failure,) = detect(s, tmp_path)
+    assert keys(failure) == [("command", "git merge")]
+
+
+def test_a_file_the_human_blames_gets_the_correction_not_the_one_being_edited(
+    tmp_path: Path,
+) -> None:
+    other = "/repo/src/b.py"
+    known = Session().user("go").read(other).user("ok, now a.py")  # b.py is a file of the repo
+    s = known.edit(A, "a", "b").user("No, you broke src/b.py").edit(A, "b", "c")
+    (found,) = by_signal(detect(s, tmp_path), signals.USER_CORRECTION)
+    assert keys(found) == [("file", "src/b.py")] and "also_named" not in found.detail
+    assert "names src/b.py, which it had not touched" in found.summary
+    # a file named for any other reason: still about the work just done, and noted
+    s = Session().user("go").read(other).user("ok, now a.py").edit(A, "a", "b")
+    s.user("No, look at how src/b.py does it").edit(A, "b", "c")
+    (found,) = by_signal(detect(s, tmp_path), signals.USER_CORRECTION)
+    assert keys(found) == [("file", "src/a.py")] and found.detail["also_named"] == "src/b.py"
+    # a path that is no file of the repository is nobody's
+    s = Session().user("go").edit(A, "a", "b").user("No, you broke src/nope.py").edit(A, "b", "c")
+    (found,) = by_signal(detect(s, tmp_path), signals.USER_CORRECTION)
+    assert keys(found) == [("file", "src/a.py")] and "also_named" not in found.detail
+
+
+TSC_RED = "src/a.ts(3,5): error TS2322: Type 'string' is not assignable.\nFound 1 error."
+
+
+def test_a_static_check_red_then_an_edit_and_any_green_check_is_normal_work(
+    tmp_path: Path,
+) -> None:
+    for red, output, green, passed in (
+        ("npx tsc --noEmit", TSC_RED, "npm test", "Tests: 5 passed"),
+        ("ruff check .", "a.py:1:1: F401 unused\nFound 1 error.", "pytest -q", "5 passed"),
+        ("mypy src", "a.py:3: error: bad type\nFound 1 error in 1 file", "make check", "ok"),
+    ):
+        s = Session().user("go").bash(red, output, exit_code=1).edit(A).bash(green, passed)
+        assert detect(s, tmp_path) == [], red
+        # without an edit nothing was fixed, and what passed says nothing about it
+        s = Session().user("go").bash(red, output, exit_code=1).bash(green, passed)
+        assert [f.signal for f in detect(s, tmp_path)] == [signals.COMMAND_FAILURE], red
+    # only a check closes it, only in the same turn, and only a static check is closed so
+    s = Session().user("go").bash("npx tsc --noEmit", TSC_RED, exit_code=2).edit(A)
+    assert len(detect(s.bash("node scripts/gen.js", "done"), tmp_path)) == 1
+    s = Session().user("go").bash("npx tsc --noEmit", TSC_RED, exit_code=2).edit(A)
+    assert len(detect(s.user("now run the tests").bash("npm test", "5 passed"), tmp_path)) == 1
+    s = Session().user("go").bash("pytest", "1 failed", exit_code=1).edit(A)
+    assert len(detect(s.bash("ruff check .", "All checks passed!"), tmp_path)) == 1
+    # a type checker that could not run at all is not fixed by the tests passing
+    s = Session().user("go").bash("npx tsc --noEmit", "sh: 1: tsc: not found", exit_code=127)
+    assert len(detect(s.edit(A).bash("npm test", "5 passed"), tmp_path)) == 1
+
+
+def test_the_excerpt_of_a_line_of_several_commands_ends_at_the_error(tmp_path: Path) -> None:
+    error = (
+        "ERROR: usage: pytest [options] [file_or_dir] [file_or_dir] [...]\n"
+        "pytest: error: unrecognized arguments: -n0\n"
+        "  inifile: /repo/pyproject.toml\n"
+    )
+    status = "".join(f" M src/m{i}.py\n" for i in range(40))
+    s = Session().user("go")
+    s.bash("pytest -q -n0 2>&1 | tail -5; git status --short | head -40", error + status)
+    (failure,) = detect(s, tmp_path)
+    assert failure.excerpt.endswith("pytest: error: unrecognized arguments: -n0")
+    # one command: its whole output is its own
+    s = Session().user("go").bash("pytest -q -n0", error + "extra", exit_code=4)
+    (failure,) = detect(s, tmp_path)
+    assert failure.excerpt.endswith("extra")

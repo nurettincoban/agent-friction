@@ -18,6 +18,7 @@ from itertools import islice
 from pathlib import Path
 
 from agent_friction.attribution import PathResolver
+from agent_friction.model import load_json_line, open_transcript
 
 _ENCODE_RE = re.compile(r"[^A-Za-z0-9]")
 #: Lines read from a transcript when checking which cwd a project dir belongs to.
@@ -47,11 +48,10 @@ def claude_config_dirs(
     return [base / ".claude", (Path(xdg) if xdg else base / ".config") / "claude"]
 
 
-def git_worktrees(repo: Path) -> list[Path]:
-    """Roots of all git worktrees of ``repo`` (empty when git is unavailable)."""
+def _git(repo: Path, *args: str) -> str | None:
     try:
         proc = subprocess.run(
-            ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+            ["git", "-C", str(repo), *args],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -60,14 +60,105 @@ def git_worktrees(repo: Path) -> list[Path]:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def git_worktrees(repo: Path) -> list[Path]:
+    """Where ``repo`` lives in each git worktree (empty when git is unavailable).
+
+    For a repository root these are the worktree roots, including entries git
+    calls prunable (the directory is gone, the record is not): their sessions
+    are still this repository's.
+
+    When ``repo`` is a directory *inside* a git repository (one package of a
+    monorepo), the worktrees are those of the enclosing repository, and only
+    the same directory inside each of them is ``repo``: ``<worktree>/<prefix>``,
+    where it exists. The worktree roots themselves are never returned then, or
+    the whole enclosing repository would be read as this directory.
+    """
+    listing = _git(repo, "worktree", "list", "--porcelain")
+    shown = _git(repo, "rev-parse", "--show-prefix")
+    if listing is None or shown is None:
         return []
-    if proc.returncode != 0:
-        return []
-    return [
-        Path(line[len("worktree ") :])
-        for line in proc.stdout.splitlines()
-        if line.startswith("worktree ") and line[len("worktree ") :].strip()
-    ]
+    prefix = shown.strip().strip("/")
+    found: list[Path] = []
+    for line in listing.splitlines():
+        if not line.startswith("worktree ") or not line[len("worktree ") :].strip():
+            continue
+        root = Path(line[len("worktree ") :])
+        if not prefix:
+            found.append(root)
+            continue
+        with contextlib.suppress(OSError):
+            if (root / prefix).is_dir():
+                found.append(root / prefix)
+    return found
+
+
+def repo_name(repo: Path) -> str:
+    """What the repository at ``repo`` is called.
+
+    The directory's name, except in a linked git worktree: `shop-fix-123/` is the
+    repository `shop`, and a scan from there must name it as a scan of the main
+    worktree does, or two results for one repository would look like two.
+    """
+    name = repo.name or "repo"
+    listing = _git(repo, "worktree", "list", "--porcelain")
+    shown = _git(repo, "rev-parse", "--show-prefix")
+    if not listing or shown is None or shown.strip().strip("/"):
+        return name  # not git, or a directory inside a repository: its own name
+    first = listing.split("\n\n", 1)[0].splitlines()
+    main = next((line[len("worktree ") :].strip() for line in first if line[:9] == "worktree "), "")
+    if not main:
+        return name
+    with contextlib.suppress(OSError):
+        if Path(main).resolve() == repo.resolve():
+            return name
+    found = Path(main).name
+    if "bare" in first and found.endswith(".git"):
+        found = found[: -len(".git")]
+    return found or name
+
+
+def removed_sibling_sessions(
+    repo: Path, config_dirs: Sequence[Path] | None = None
+) -> list[tuple[str, int]]:
+    """Session files recorded in a vanished directory beside ``repo`` named after it.
+
+    ``(directory, session files)`` for Claude Code project directories whose
+    sessions ran in ``<parent of repo>/<repo name><-._ anything>`` when that
+    directory no longer exists: most likely a git worktree that was removed
+    (``git worktree remove`` leaves no trace to ask git about). Such sessions
+    are not read by a scan; passing the directory as a repo alias includes
+    them. A guess from names alone: a deleted unrelated checkout called
+    ``<repo>-old`` looks the same.
+    """
+    root = repo.absolute()
+    encoded = encode_cwd(root)
+    resolver = PathResolver(repo, repo_roots(repo)[1:])
+    found: dict[str, int] = {}
+    for config in config_dirs if config_dirs is not None else claude_config_dirs():
+        projects = config / "projects"
+        try:
+            entries = sorted(e for e in projects.iterdir() if e.is_dir())
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.name.startswith(encoded + "-"):
+                continue
+            for session in _session_files(entry):
+                cwd = _file_cwd(session)
+                if cwd is None or resolver.contains(cwd):
+                    continue  # a worktree git still knows is read like the repository
+                here = Path(cwd)
+                beside = here.parent == root.parent and re.match(
+                    re.escape(root.name) + r"[-._]", here.name
+                )
+                with contextlib.suppress(OSError):
+                    if beside and not here.exists():
+                        found[cwd] = found.get(cwd, 0) + 1
+    return sorted(found.items(), key=lambda pair: (-pair[1], pair[0]))
 
 
 def repo_roots(repo: Path, include_worktrees: bool = True) -> list[Path]:
@@ -87,10 +178,10 @@ def repo_roots(repo: Path, include_worktrees: bool = True) -> list[Path]:
 def _file_cwd(path: Path) -> str | None:
     """First ``cwd`` recorded near the top of a transcript, if any."""
     try:
-        with path.open(encoding="utf-8", errors="replace") as handle:
+        with open_transcript(path) as handle:
             for raw in islice(handle, CWD_PROBE_LINES):
                 try:
-                    obj = json.loads(raw)
+                    obj = load_json_line(raw)
                 except (ValueError, RecursionError):
                     continue
                 if isinstance(obj, dict) and isinstance(obj.get("cwd"), str) and obj["cwd"]:
@@ -152,6 +243,12 @@ def discover_project_dirs(
                 continue
             exact = entry.name in encoded
             if not exact and not any(entry.name.startswith(e + "-") for e in encoded):
+                # ... or the repository under another name: sessions started through a
+                # symbolic link are filed under the link's spelling. One transcript
+                # says which directory that was; the file system says where it leads.
+                first = next(iter(_session_files(entry)), None)
+                if first is not None and resolver.adopt(_file_cwd(first)):
+                    found.append(entry)
                 continue
             cwds = [c for c in map(_file_cwd, _session_files(entry)) if c is not None]
             if any(resolver.contains(c) for c in cwds) if cwds else exact:
@@ -212,7 +309,7 @@ def discover_repo_transcripts(repo: Path, roots: Sequence[Path] | None = None) -
         for session in _session_files(directory):
             group = [session, *expand_transcript_paths([directory / session.stem])]
             cwd = _file_cwd(session)
-            inside = cwd is None or resolver.contains(cwd)
+            inside = cwd is None or resolver.adopt(cwd)
             if inside or (
                 PathResolver.normalize(cwd or "") in above
                 and any(_mentions(f, needles) for f in group)

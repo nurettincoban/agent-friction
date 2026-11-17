@@ -7,9 +7,12 @@ Everything downstream (scoring, recommendations, output) only sees findings.
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any, TextIO
 
 # Event kinds
 TOOL_CALL = "tool_call"
@@ -19,6 +22,10 @@ INTERRUPT = "interrupt"
 #: The agent wrote prose. Only the time is kept (the text never leaves the parser): it
 #: marks agent activity, so that waiting for a human is not mistaken for lost time.
 AGENT_MESSAGE = "agent_message"
+#: How a command launched in the background ended. Parsers emit it where the outcome is
+#: reported; ``adapters.common.pair_background`` turns it into a call and a result of the
+#: launched command, and no detector ever sees it.
+BACKGROUND_OUTCOME = "background_outcome"
 
 # Canonical tool operations
 OP_READ = "read"
@@ -83,7 +90,8 @@ class Event:
     pattern: str | None = None
     read_range: str = ""
     edits: tuple[tuple[str, str], ...] = ()  # (digest(old), digest(new)) pairs
-    #: Those of ``edits`` that only added text (the old text survives inside the new).
+    #: Those of ``edits`` that only added text (the old text survives inside the new) or
+    #: only flipped a switch (``DEBUG = False`` -> ``DEBUG = True``): possible probes.
     insertions: frozenset[tuple[str, str]] = frozenset()
     content_digest: str = ""  # digest of full content for writes
     #: Text an edit or write put into the file (capped). Held in memory only, to see whether
@@ -105,7 +113,19 @@ class Event:
     #: The result is the harness's own error message, not output of the tool.
     harness_error: bool = False
     synthetic: bool = False  # slash command etc.: a turn boundary, never a correction
+    #: tool_call: the command was launched in the background. tool_result: this is only the
+    #: acknowledgement of such a launch; how the command ended is not known from it.
+    background: bool = False
+    #: The background task or shell a launch started, a poll asks about, an outcome is of.
+    task_id: str = ""
+    task_status: str = ""  # background_outcome: "completed", "failed", "killed", ...
+    #: tool_call: not a call the agent made, but the reported end of a background command.
+    derived: bool = False
     after_question: bool = False  # the agent's last words before this message were a question
+    #: tool_result: did a human have to approve the call before it ran? ``True`` (the
+    #: time until the result includes the human's), ``False`` (permission settings let it
+    #: through at once) or ``None`` when the transcript does not say.
+    prompted: bool | None = None
 
 
 @dataclass
@@ -130,6 +150,7 @@ class ParsedFile:
     streams: list[Stream]
     skipped_lines: int = 0  # malformed or structurally invalid lines
     ignored_lines: int = 0  # well-formed lines of a type we do not analyse
+    duplicate_lines: int = 0  # lines an earlier file had already contributed
 
 
 @dataclass(frozen=True)
@@ -158,5 +179,74 @@ class Finding:
     #: Further pieces of claimed time, for an event made of several separate stretches.
     intervals: tuple[tuple[float, float], ...] = ()
     stream: str = ""  # intervals are only merged within one stream
+    #: When the call behind the event ran (epoch seconds), whether or not it claims time.
+    run: tuple[float, float] | None = None
+    #: The episode of work it happened in (see docs/methodology.md); "" = the session.
+    episode: str = ""
+
+    @property
+    def unit(self) -> str:
+        """What recurrence is counted over: the episode, or the session if none is set."""
+        return self.episode or self.session_id
+
     detail: dict[str, str] = field(default_factory=dict)
     fid: int = -1
+
+
+_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
+
+def _whole(value: Any) -> Any:
+    if isinstance(value, str):
+        return _SURROGATE_RE.sub("\ufffd", value)
+    if isinstance(value, list):
+        return [_whole(item) for item in value]
+    if isinstance(value, dict):
+        return {_whole(key): _whole(item) for key, item in value.items()}
+    return value
+
+
+def text_encoding(path: Path) -> str:
+    """The encoding a transcript file is in, judged by its first bytes.
+
+    UTF-8 unless the file starts with a byte-order mark (PowerShell's ``Out-File
+    -Encoding utf8`` writes one, and its ``>`` writes UTF-16), or its first
+    characters are ASCII spread over two or four bytes (UTF-16/32 without a mark).
+    """
+    with path.open("rb") as handle:
+        head = handle.read(4)
+    if head.startswith(b"\xef\xbb\xbf"):
+        return "utf-8-sig"
+    if head.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        return "utf-32"
+    if head.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return "utf-16"
+    # No mark: a JSON line starts with ASCII, which UTF-16/32 spread over 2 or 4 bytes.
+    starts = b"{[ \t\r\n"
+    if len(head) == 4 and head[0] in starts:
+        if head[1:] == b"\x00\x00\x00":
+            return "utf-32-le"
+        if not head[1] and 0 < head[2] < 0x80 and not head[3]:
+            return "utf-16-le"
+    if len(head) == 4 and not head[0]:
+        if head[:3] == b"\x00\x00\x00" and head[3] in starts:
+            return "utf-32-be"
+        if head[1] in starts and not head[2] and 0 < head[3] < 0x80:
+            return "utf-16-be"
+    return "utf-8"
+
+
+def open_transcript(path: Path) -> TextIO:
+    """Open a transcript for reading as text, in whichever Unicode encoding it is in."""
+    return path.open(encoding=text_encoding(path), errors="replace")
+
+
+def load_json_line(raw: str) -> Any:
+    """``json.loads`` for a transcript line, with nothing in it that cannot be written out.
+
+    JSON may escape half of a surrogate pair (``"\\ud83d"``, a truncated emoji).
+    Python reads that as a lone surrogate, which no UTF-8 writer accepts. Every
+    such character becomes U+FFFD here, at the boundary, in keys and values.
+    """
+    obj = json.loads(raw)
+    return _whole(obj) if "\\u" in raw else obj

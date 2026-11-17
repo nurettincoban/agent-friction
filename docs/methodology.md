@@ -14,10 +14,13 @@ constants live next to the code that uses them and are listed here.
    discarded at this step and never reach the output. Of the agent's prose
    two things are kept: *when* it was written (a marker that the agent was
    active, used for time estimates) and whether the last message before a
-   human reply asked something (a question mark in its final paragraph, or a
-   question/choice tool). Of the text of an edit only hashes are kept, plus
+   human reply offered something or asked for a choice (in its final
+   paragraph, or with a question/choice tool). Of the text of an edit only hashes are kept, plus
    one bit: whether it only added text. Harness and IDE blocks inside user
-   turns (`<system-reminder>`, `<ide_opened_file>`, ...) are stripped.
+   turns (`<system-reminder>`, `<ide_opened_file>`, ...) are stripped, and a
+   message from another agent (`<teammate-message>`, `<agent-message>`) only
+   marks a new turn. Of a tool result's `permissionDecision` one bit is kept:
+   whether the permission settings let the call through or a person did.
 3. **Detect.** Deterministic rules turn events into friction events
    ([signal catalog](signals.md)). Git history adds `human-rework`. An event
    a detector cannot handle is skipped and counted
@@ -37,10 +40,41 @@ directory) if set, otherwise `~/.claude` and `~/.config/claude`.
 - Directories for the repo root, its git worktrees and their subdirectories
   are used. Because the encoding is lossy (`/a/b-c` and `/a/b/c` collide),
   each session is checked against the working directory recorded inside it.
+- **A directory inside a git repository** (one package of a monorepo,
+  `agent-friction scan packages/web`) is only that directory. Git reports the
+  worktrees of the *enclosing* repository; what counts as the scanned
+  directory is the same relative path inside each of them
+  (`<worktree>/packages/web`, where it exists), never a worktree's root. A
+  session started in the parent counts only if it touched something under
+  the scanned directory, and only those calls count: `README.md` of the
+  monorepo and the neighbouring package are outside, and what went wrong
+  there is in `totals.events_outside_repo`.
+- **Worktrees.** The worktrees `git worktree list` reports are roots like the
+  repository, including those it calls prunable (the directory is gone, git's
+  record is not). A worktree kept *inside* the repository,
+  `<repo>/.claude/worktrees/<name>/` (Claude Code's own) or
+  `<repo>/.worktrees/<name>/`, is recognised by its path alone, whether or
+  not it still exists: such worktrees are removed after a merge, and their
+  sessions would otherwise key every file as
+  `.claude/worktrees/<name>/src/app.py` and split one hotspot into several.
+  **Limit:** a worktree that lived *outside* the repository and was removed
+  with `git worktree remove` leaves nothing to ask git about. Its sessions
+  are not read. `discovery.removed_sibling_sessions` finds the likely cases
+  by name alone (session files recorded in a directory beside the
+  repository called `<repo name>-…`, `<repo name>.…` or `<repo name>_…`
+  that no longer exists) so that the CLI can name them; passing that
+  directory as `--repo-alias` includes them (an alias takes part in
+  discovery like a root). A removed worktree with an unrelated name, or
+  somewhere else, is invisible.
 - Directories for **parent directories** of the repo are scanned too, because
   starting the agent in `~` or a monorepo root is common. A session from
   there is read only if it (or one of its subagent transcripts) contains the
   repo's path, and then only its events inside the repo count.
+- Directories filed under **another name for the repo** are used as well: a
+  session started through a symbolic link is stored under the link's
+  spelling. For each remaining project directory one transcript is opened to
+  read its working directory; if that directory exists here and its real
+  path is the repository's (or lies inside it), the directory is the repo's.
 
 ## Sessions
 
@@ -58,10 +92,53 @@ directory) if set, otherwise `~/.claude` and `~/.config/claude`.
   `exposure_sessions` and is reported as `agent_commits`, but not towards
   `totals.sessions` and not towards confidence.
 
+### Episodes
+
+Recurrence is the heart of the score, and a session id is a poor unit for
+it: `claude --continue` keeps one id alive for days. Ten tasks on ten days
+in one session id are ten independent occasions on which the same friction
+happened, not one bad afternoon. So recurrence is counted over **episodes of
+work**:
+
+- Within a session id, a new episode starts at a **human prompt that follows
+  2 hours or more without any event** in that session
+  (`EPISODE_IDLE_SECONDS`). An overnight break, a lunch break of two hours,
+  a session picked up the next week: each starts a new episode. Calendar
+  days are not used: timestamps are UTC, and midnight UTC falls in the
+  middle of somebody's working day.
+- Only a human prompt can start one. An agent that works on its own for
+  five hours, however long its commands take, is in one episode.
+- **Subagents never start an episode** and are never episodes of their own.
+  Their prompts are written by the agent that spawned them, and seventeen
+  subagents hitting the same wall in one afternoon are one coordinator's one
+  attempt, not seventeen independent observations. Their events belong to
+  whichever episode of the parent session they fall in.
+- A session that was never left idle is one episode, so for most sessions
+  nothing changes.
+
+Episodes are what the score's *recurrence* and *consistency*, the
+confidence levels and every "in N or more sessions" threshold (a setup step
+in 2, a check that stays red in 3, a flaky test in 3, a stopped command in
+3, a search pattern in 2) count. Wherever this document says "sessions" for
+those, read "episodes". What is **displayed** stays the session:
+`sessions`, `exposure_sessions`, `friction_rate` and the wording of
+recommendations count session ids, and `episodes` / `exposure_episodes`
+stand beside them in the JSON (`totals.episodes` for the whole scan). When
+they differ, the hotspot's `why` says so ("in the only session that touched
+it (in 10 separate episodes of work)").
+
 ## Attribution
 
 **Paths.** Absolute paths are matched lexically against the repo root, its
-symlink-resolved form, its git worktrees and any `repo_aliases`. Relative
+symlink-resolved form, its git worktrees and any `repo_aliases`; below a
+root, a leading `.claude/worktrees/<name>/` or `.worktrees/<name>/` is
+dropped (a nested worktree is the repository, see Discovery). A session
+started *through* a symbolic link to the repository (`~/proj` for
+`/data/proj`) recorded the link's spelling: where a session's working
+directory exists on this machine and its real path is the repository's or
+lies inside it, that spelling becomes one more root (`PathResolver.adopt`),
+and Claude Code project directories filed under it are discovered when the
+real path is scanned. Nothing else is resolved through the file system. Relative
 paths are resolved against the session's working directory. Paths outside the
 repo and inside `.git` are dropped. Symlinks in the target path are not
 followed, and files need not exist any more.
@@ -75,9 +152,25 @@ together, and so that the key can be shown even when excerpts are off:
    `done`, `fi`, ...) are looked through, and `bash -c '<script>'` is replaced
    by the commands of its script. Redirections, leading `VAR=value`
    assignments and wrappers (`sudo`, `env`, `time`, `timeout N`, `nohup`,
-   `xargs`, `nice`, `watch`, ...) are stripped from each command, together
+   `xargs`, `nice`, `watch`, ...; also by absolute path, `/usr/bin/time -v`)
+   are stripped from each command, together
    with the wrapper's own options and their values (`WRAPPER_VALUE_OPTIONS`:
    `sudo -u alice pytest` -> `pytest`, `xargs -n 1 pytest` -> `pytest`).
+   Programs that start another command with something added to its
+   environment are looked through in the same way (`ENV_LAUNCHERS`): `dotenv
+   run -- pytest`, `dotenv -e .env -- npm test`, `doppler run -- npm test`,
+   `op run --env-file=.env -- make test`, `direnv exec . pytest`, `xvfb-run -a
+   npm test`, `script -q /dev/null pytest` and `script -qc 'pytest -q'
+   /dev/null` are about the command they start. Doing their own business
+   (`op item get`, `doppler secrets`, `direnv allow`) they keep their name.
+   A key never comes from data: an armored block passed as an argument
+   (`-----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----`) is one
+   opaque word however many lines it has, a word that begins with `-` or `=`
+   is never a command, and where a quote opens and never closes only the
+   first line is read (the rest is most likely the argument's other lines).
+   One thing is remembered about the redirections: a command whose standard
+   output and standard error both go to `/dev/null` is *silenced*, and
+   nothing in the line's output is taken for its verdict.
 2. **Pick the command that names the line:** the **last significant** one.
    Setup (`cd`, `export`, `source`, `echo`, ...), housekeeping (`mkdir`,
    `touch`, `rm`, `cp`, `mv`, ...) and read-only inspection (`cat`, `tail`,
@@ -90,6 +183,8 @@ together, and so that the key can be shown even when excerpts are off:
    `python3`, `python3.12` become `python`; `./scripts/build.sh` becomes
    `scripts/build.sh`.
 4. **Keep arguments only where they are known to be names, not data:**
+   - a script run through a shell is the script: `bash scripts/run.sh`, `sh
+     -x ./scripts/run.sh` and `scripts/run.sh` are all `scripts/run.sh`;
    - interpreters keep `-m module` or the script path (`python -m pytest`,
      `python scripts/gen.py`), plus the subcommand of a script that is itself
      a dispatcher (`python manage.py migrate`, `php artisan migrate`);
@@ -105,12 +200,39 @@ together, and so that the key can be shown even when excerpts are off:
      /repo commit` -> `git commit`, `pnpm --filter web test` -> `pnpm test`,
      `kubectl -n prod get pods` -> `kubectl get`, `uv run --group dev pytest`
      -> `uv run pytest`);
+   - a **launcher** runs another command inside an environment, and its key
+     is the launcher followed by the key of what it runs, by these same
+     rules (`LAUNCHERS`): `uv run`, `poetry run`, `pipenv run`, `hatch run`,
+     `pdm run`, `rye run`, `conda run` (and `mamba`, `micromamba`), `bundle
+     exec`, `npx`, `npm exec`, `pnpm exec` / `dlx`, `yarn exec` / `dlx`,
+     `bunx`, `bun x`, `uvx`, and `bun run <file>`. The launcher's own
+     options are skipped with their values (`uv run --with rich --python
+     3.12`, `conda run -n dev`, `npx -p typescript`). So `uv run python
+     scripts/seed.py` and `uv run flask db upgrade` are `uv run python
+     scripts/seed.py` and `uv run flask db`, not one `uv run python` /
+     `uv run flask` for everything; `bundle exec rails test` is `bundle exec
+     rails test`, `npx tsx scripts/a.ts` is `npx tsx scripts/a.ts`, `uv run
+     pytest -q` stays `uv run pytest`. A launched command has the role of
+     what it runs, and it can stand in for the same command run bare
+     (`is_replacement`);
    - one further word is kept only after a script runner or command group of
-     that tool (`CONTINUING_SUBCOMMANDS`: `npm run build`, `uv run pytest`,
-     `poetry run python -m pytest`, `bundle exec rspec`, `docker compose
-     up`, `gh pr create`), and `yarn workspace <name> <script>` keeps both
-     (the workspace name is project-specific and becomes a placeholder
-     without excerpts);
+     that tool (`CONTINUING_SUBCOMMANDS`: `npm run build`, `bun run build`,
+     `docker compose up`, `gh pr create`). A workspace selector that reads
+     as a directory is where the command runs, not part of its name: `pnpm
+     --filter web test`, `pnpm --filter=web test`, `pnpm -F web test` and
+     `yarn workspace web test` are `pnpm test` / `yarn test` run in that
+     package. Where the package lives is asked of the repository: `web/` if
+     that directory exists (`pnpm test (web/)`, exactly as `npm --prefix web
+     test` is `npm test (web/)`); otherwise the one directory called `web`
+     up to three levels down, past hidden, third-party and build directories
+     (`pnpm test (packages/web/)`); and with none or several candidates no
+     directory at all (`pnpm test`): a package name is not a path. A scoped package name (`@acme/web`), a pattern (`web...`,
+     `!web`) or a git range (`[main]`) does not say where: `--filter` is then
+     dropped like any option, and `yarn workspace @acme/web <script>` keeps
+     both words (the workspace name is project-specific and becomes a
+     placeholder without excerpts). `pip3` and `pip3.12` are `pip`, as
+     `python3` is `python`, and what Windows appends to a program's name is
+     dropped (`npm.cmd test` -> `npm test`, `python.exe -m pytest` -> `python -m pytest`);
    - **every other program is its executable name alone**: `./run s3cret` is
      `run`, `mytool acme-codename --x` is `mytool`, `ssh host cmd` is `ssh`,
      `docker run <image>` is `docker run`;
@@ -129,6 +251,15 @@ together, and so that the key can be shown even when excerpts are off:
 5. **Sanitize.** A key is cut at the first word that is a number or that the
    redactor would change (`make 2` is `make`; a key that would start with
    such a word is discarded). Every key passes through the redactor.
+
+   A shell variable is followed only if the same line assigns it a plain
+   value on its own (`A=scripts/x.sh; $A` is `scripts/x.sh`; `SP=scripts &&
+   node $SP/shot.js` is `node scripts/shot.js`). Nothing is evaluated: a
+   prefix assignment (`A=x make $A`), a computed value (`A=$(pwd)`) or a
+   variable from the environment stays unknown and is written `<variable>`
+   in the key (`$RUNNER test` is `<variable>`, `node $SP/shot.js` is `node
+   <variable>/shot.js`), so that such lines share one row instead of one
+   per variable name.
 
 6. **Say where, for tools that work on the directory they are in.** For
    build, test, lint and package tools (`DIRECTORY_TOOLS`: `npm`, `pnpm`,
@@ -156,8 +287,12 @@ subcommands, and generic target names such as `test`, `build`, `lint`;
 the first 6 hex digits of its SHA-256: `python <script:93d162>`, `make
 <target:37bd73>`, `<tool:373279>`. The same name always maps to the same
 placeholder, so hotspots still group and two reports can still be compared;
-`pytest`, `npm test`, `git commit` stay readable. With excerpts on, keys are
-shown as they are.
+`pytest`, `npm test`, `git commit` stay readable, and so do two kinds of
+word the report shows anyway: a path of a file in the repository
+(`scripts/deploy.sh`) and the repository's own name (a project called
+`shopfront` whose CLI is `shopfront`: the name is in every report's title;
+`-`, `_` and `.` are not told apart). With excerpts on, keys are shown as
+they are.
 
 **Roles.** For recommendations a key has a role if one of its words says what
 job it does (`ROLE_WORDS`): test (`pytest`, `make test`, `npm run
@@ -176,6 +311,65 @@ Files are attributed from a command line only if they are arguments of the
 command that names the line. When a human declines a chain of commands, the
 event is keyed by the step they most plausibly objected to (see
 [`tool-rejected`](signals.md)).
+
+### Third-party and build directories
+
+Friction inside other people's code or build output is not something the
+repository's instructions can fix, and it must not outrank first-party
+files. Files and directories are set aside when
+
+- a component of their path is one of `node_modules`, `bower_components`,
+  `site-packages`, `dist-packages`, `vendor`, `.venv`, `venv`, `.tox`,
+  `.nox`, `__pycache__`, `.git`, `.mypy_cache`, `.pytest_cache`,
+  `.ruff_cache`, `.gradle`, `.next`, `.nuxt`, `.eggs` or ends in
+  `.egg-info` (`THIRD_PARTY_DIRS`), wherever it occurs;
+- or they lie in a directory that `.gitignore` rules match (one `git
+  check-ignore` call per scan, only when git is in use and the repository
+  is a git repository). An ignored *file* in a tracked directory (`.env`)
+  is still the repository's own;
+- or, when git cannot be asked (`--no-git`, no repository), they lie in a
+  directory named `dist`, `build` or `target` (`BUILD_DIRS`). With git, those
+  three names are judged by `.gitignore` alone, so a tracked `src/build/`
+  package stays first-party.
+
+Such paths are in no hotspot, directory row, tree node or exposure count,
+and get no recommendation. An event that was only about such paths is
+dropped and counted in `totals.third_party_events`; an event that also has
+a first-party file or a command keeps those. Commands are never set aside:
+`node_modules/.bin/jest` failing is a failure of `jest`.
+
+### Calls that acted outside the repository
+
+A session often works on more than this repository: `cd ../other && make`,
+a script under `/tmp`, a file in the home directory. A call that was
+declined, denied or failed while acting outside (the step ran in a directory
+outside, a housekeeping command only named paths outside, a script that lives
+outside, a file tool pointed at a path outside) says nothing about this
+repository and produces no event. It is counted, so that the headline can
+be checked against the transcript: `totals.events_outside_repo` is the
+number of such calls (each call once; read-only inspection commands,
+interrupted calls and calls the harness never started are not in it). On a
+machine where most permission denials are for commands run elsewhere, this
+is where they went.
+
+### Tools that are not files or commands
+
+A failing MCP tool, web fetch or sub-agent call belongs to no file, command
+or directory. From the second failure of the same tool in the scan these are
+`tool-failure` events: weak, unattributed, claiming no time, counted in
+`totals.tool_failures` and listed per tool in the top-level `tool_failures`
+(see the [catalog](signals.md)).
+
+### One command, several directories
+
+A check command is keyed by where it runs (`pytest`, `pytest (src/)`,
+`pytest (tests/)`), because where it runs is part of how it is run, and each
+key is scored and advised on its own. So that one habit spread over three
+directories is not read as three small problems, every command row whose
+command also appears under another directory carries `family`: the bare
+command, the rows that belong together, and the distinct events and sessions
+of all of them. Nothing is merged, and no score or recommendation is
+computed for the family.
 
 ## Exposure
 
@@ -218,16 +412,26 @@ score       = 100 x severity x recurrence x consistency
 ```
 
 - **severity(signal)** is the per-signal constant from the [catalog](signals.md).
-- **weight** is 1 except that an ordinary `command-failure` uses 0.3.
+- **weight** is 1 except that an ordinary `command-failure` uses 0.3 (one
+  that passed only after a setup step counts 1, like setup/invocation and
+  environment failures).
 - **Weak evidence is capped.** If every event on a target is of a weak kind
-  (`edit-thrash`, `read-loop`, `search-miss`, `probable-correction`, or an
+  (`edit-thrash`, `read-loop`, `search-miss`, `tool-failure`, `probable-correction`, or an
   *ordinary* `command-failure`; see the [catalog](signals.md); also a `path-miss` on a routinely probed optional file, and `no-convergence` events that all come from one session), the score is capped at **19**, below the band where
   a single real incident lands, `score_detail.capped` is true, and no
   recommendation is made. Such a target can be a lead; it cannot be an alarm
   or fail a build on its own. This is what keeps `git stash pop` with nothing
   stashed, a red `mypy` run or ten unrelated `python -c` snippets from adding
-  up to "a command that keeps failing": it takes a setup/invocation error, a
-  retry loop or a human reaction to lift a command out of the cap.
+  up to "a command that keeps failing": it takes a setup/invocation error,
+  an environment failure, a failure that a setup step fixed, a retry loop or
+  a human reaction to lift a command out of the cap. One more thing does: a
+  command that failed 2 or more times in a session and was still red when
+  the session ended, in 3 or more sessions (`RECURRING_RED_MIN_SESSIONS`).
+  Those failures are no longer weak, and each claims its own run time.
+  Likewise a `search-miss` for the same pattern in 2+ episodes by agents
+  that wanted a hit is lifted out of the cap (see "What lifts it" under
+  `search-miss` in the [catalog](signals.md)); `edit-thrash` and `read-loop`
+  on their own stay capped however often they recur.
 - **share** is 1 except when one correction is split over several files.
 - **log2 per session** gives diminishing returns: a session contributes one
   more point each time its friction doubles, so one pathological session
@@ -274,17 +478,75 @@ Rough reading: below 20 is a single incident or a rare one; 20-45 is a
 pattern worth a line in AGENTS.md; above 45 is a place where agents reliably
 struggle. Read the score together with `friction_rate` and the confidence.
 
+### The repository's base rate
+
+An edit that does not find its text, or a write refused because the file was
+not read or had changed, happens at some rate wherever agents edit files.
+Sixty healthy sessions over fifteen files with a 6% chance of a miss before
+each edit put two or three misses on most files; that is one fact about the
+repository, not a pattern in each file. So for the two mechanical signals
+that have a meaningful denominator, `edit-miss` and `stale-edit`
+(`scoring.BASELINE_SIGNALS`), a file is singled out only if it shows clearly
+more than the rest (`scoring.baseline`):
+
+- A **visit** is one session (episode) touching one file. For each file with
+  such events, the null hypothesis is the rate of the *other* files: visits
+  with the signal / visits, and events / visits. Neither is taken below
+  **5%** (`BASELINE_FLOOR`), and the floor alone is used when the other files
+  add up to fewer than 20 visits (`BASELINE_MIN_VISITS`): a small or quiet
+  repository is judged against one visit in twenty. Advice for a file that
+  was singled out this way says that there was nothing to compare it with
+  (`Baseline.sparse`, `no_comparison` on its events), not that it misses
+  "more often than the rest of this repository".
+- Two tails are computed: binomial, for this many visits with the signal
+  among the file's visits, and Poisson, for this many events (forty misses
+  in one session are one visit, and not background). The smaller, doubled, is
+  the file's p-value.
+- Files are selected by the Benjamini-Hochberg procedure at 0.05
+  (`BASELINE_ALPHA`), so that testing many files does not by itself produce
+  outliers.
+
+Examples against the floor: 2 visits with a miss out of 4, or 4 of 5, are
+above; 3 of 30 is not; one miss in a file's only visit is not; three misses
+in that one visit are.
+
+Events on a file that is *not* above the rate are marked `within_baseline`
+and are weak evidence from then on: they still count in the totals and in
+the score, but a file with nothing else is capped at 19, is "low"
+confidence and gets no advice, and its misses feed no recommendation.
+Generated files are exempt (one failed edit of generated output is already
+the pattern). When a signal has 5+ events in 3+ files and 3+ sessions, the
+result's top-level `recommendations` carries one repository-level item,
+`note-the-background-rate`: "Edit misses run at 8% of file visits across the
+repository", the counts, and the files that are above it.
+
+**Not covered:** `path-miss` and `search-miss` have no such denominator (the
+target of a miss is the thing that is not there, so every visit to it is a
+miss); they keep their own rules (probes and search misses are weak, advice
+needs the same path or pattern in 2+ sessions). **Limits:** the test assumes
+visits are alike; a file that is only ever read dilutes nothing but its own
+rate, while a file agents edit ten times per visit has more chances to miss
+than one edited once, and may be called above for that reason alone. With
+few visits nothing can be told apart from 5%, so a real but mild problem in
+a rarely touched file stays below the line until it recurs.
+
 ## Estimated time lost
 
-Each event may claim a wall-clock interval from transcript timestamps:
+Each event may claim a wall-clock interval from transcript timestamps.
+Timestamps that cannot be right are treated as missing: anything before the
+year 2000 (a zeroed clock) or more than a year ahead of today (a unit
+mix-up). Epoch numbers are read as seconds, milliseconds, microseconds or
+nanoseconds according to their size.
 
 | Event | Interval |
 | --- | --- |
 | `edit-miss`, `stale-edit` | one round trip; extended to the edit of the same file that lands only if every tool call in between failed too |
-| `command-failure` (setup/invocation) | one round trip; extended to the end of the command that recovered it (the same command succeeding, or a replacement doing the same job, within the next 5 shell calls of the turn) only if every tool call in between failed too |
+| `command-failure` (setup/invocation) | one round trip; extended to the end of the command that recovered it (the same command succeeding, or a replacement doing the same job, within the next 5 shell calls of the turn, read-only inspection such as `ls`, `which` or `cat` not counted) only if every tool call in between failed too |
 | `command-failure` (ordinary) | none |
-| `path-miss`, `file-too-large`, `tool-rejected`, `permission-denied` | one round trip (a `path-miss` that is a routine probe for an optional file: none) |
-| `search-miss`, `probable-correction` | none: weak signals never claim time |
+| `path-miss`, `file-too-large`, `permission-denied` | one round trip (a `path-miss` that is a routine probe for an optional file: none) |
+| any interval that starts at a call | starts later where a person had to approve the call: see "A person's time at a permission prompt" below |
+| `tool-rejected` | from the human's answer to the next event in the transcript; the time the permission prompt was open (call to result) is a human's time and is never counted |
+| `search-miss`, `probable-correction`, `tool-failure` | none: weak signals never claim time |
 | `edit-revert` | from the original edit to the revert if both are in the same turn; otherwise one round trip |
 | `user-correction` | the rework only: from the agent's first tool call after the correction to its last change to the files the correction was about, in that turn; one round trip (that first call) if it does not return to those files; nothing if the session ends there. A `probable-correction` claims nothing |
 | `user-interrupt` | the call that was cut short: from its start to the interrupt |
@@ -297,6 +559,19 @@ human message, the agent's turn was over: only the call itself (call to
 result) is claimed, never the time until the human replied. A failure that
 the agent reports and then waits an hour on costs seconds, not an hour.
 
+**An idle gap is not a round trip.** Where the agent's next activity comes
+more than 5 minutes after the call's result (`IDLE_GAP_SECONDS`), nobody was
+working in between: a closed laptop, a session resumed the next morning. Only
+the call itself is claimed then. This matters most for transcripts without
+agent messages (the generic format may hold tool calls only), where the next
+activity is the next tool call, however much later it came. The same holds
+in the middle of a turn and for every other interval (a failure until the
+command that resolved it, an edit until its revert, the rework after a
+correction): no interval reaches across a silence of more than 5 minutes
+between two transcript events. What came before the silence is claimed, or,
+if the interval starts at it, what came after. The time between a call and
+its own result is the command running and is never a silence.
+
 **As soon as anything succeeds, the clock stops.** A failed edit followed by
 eight green test cycles on another file and, much later, an unrelated edit of
 the first file cost one round trip, not the minutes in between: that time was
@@ -307,6 +582,24 @@ Every interval is capped at **5 minutes** (`no-convergence`: 15). `est_minutes_l
 a tree node or the whole report is the length of the **union** of its
 intervals (merged per transcript stream), so overlapping events are never
 counted twice.
+
+**A person's time at a permission prompt is never the agent's.** Between a
+call and its result lies the tool's own run time and, where somebody had to
+approve the call first, the time the prompt stood open. Only the first is
+claimed, wherever an interval starts at a call (a round trip, a red run):
+
+- Claude Code records how each call was let through (`permissionDecision` on
+  the result line). `"source": "config"` is the permission settings, the mode
+  or a hook deciding at once: call to result is the tool's time and counts.
+  Any other source is a person answering: nothing before the result is
+  claimed, only result to next activity.
+- Where the transcript does not say (older Claude Code versions, generic
+  logs without `prompted`), call to result counts **up to the larger of 30
+  seconds (`UNATTENDED_RUN_SECONDS`) and the median call-to-result time of
+  the same command's (or tool's) other runs in the session**. A `terraform
+  plan` that failed 270 s after it was called, in a session where it
+  otherwise takes 20 s, claims 30 s of them plus the time to the next
+  activity.
 
 **Weak evidence claims no time.** Search misses, probable corrections,
 ordinary command failures, probes for optional files, and a `no-convergence`
@@ -336,13 +629,16 @@ when `max_evidence` hides some events).
 
 | Level | Rule |
 | --- | --- |
-| `high` | 3 or more distinct sessions **and** 2 or more distinct signal types, not counting hotspots whose only signals are the weak ones (`read-loop`, `edit-thrash`, `search-miss`, `probable-correction`, ordinary command failures) |
+| `high` | 3 or more distinct sessions **and** 2 or more distinct signal types. The weak kinds (`read-loop`, `edit-thrash`, `search-miss`, `probable-correction`, `tool-failure`) are never one of the two: they do not corroborate anything. A hotspot whose only evidence is weak (those, or ordinary command failures) is "low" |
 | `medium` | 2 or more distinct sessions |
 | `low` | a single session, **or** a target whose score is capped because all its evidence is weak (see Score), in however many sessions |
 
 A signal that is computed from other events is not a second kind of evidence
 next to them: `retry-loop` and `no-convergence` are derived from
-`command-failure`, so a command with them has one signal type (`DERIVED_SIGNALS`). A command that fails with
+`command-failure`, so a command with them has one signal type (`DERIVED_SIGNALS`).
+For the same reason one stall is one event: a file edited round after round
+while a check stays red gets a `no-convergence` event and no `edit-thrash`
+event for that turn. A command that fails with
 the same setup error in every session is therefore "medium" until something
 independent (a correction, a declined call) is also seen.
 
@@ -370,26 +666,182 @@ the evidence that triggered them. A target whose only evidence is weak (see
 
 | Id | Fires when |
 | --- | --- |
-| `edit-the-source-not-the-output` | the file looks generated (marker such as "DO NOT EDIT" / "generated by" in its first 2 KB, or a path like `*_pb2.py`, `*.min.js`, lock files, `dist/`) and has any edit-related or rework event |
-| `split-or-anchor-large-file` | 2+ `edit-miss` and the file has 800+ lines, or 2+ `file-too-large` reads |
-| `make-edits-land` | 2+ `edit-miss` on a file that is neither large nor generated (wording depends on whether misses were mostly ambiguous or not-found) |
+| `edit-the-source-not-the-output` | the file is generated (see "Which files count as generated" below) and the transcripts show trouble editing it: 1+ `edit-miss`, `stale-edit`, `edit-revert` or corroborated `user-correction`. With a generated-file header the advice is plain ("Generated file: point agents at its source"); when only the name or the directory says so it is hedged ("Possibly a generated file: if so, ...", "judging only by its name; it carries no generated-file header, so check"). Git history alone never fires it: a lockfile bump is not an agent editing output by hand |
+| `split-or-anchor-large-file` | 2+ `edit-miss` and the file has 800+ lines, or 2+ `file-too-large` reads (the file's line count is cited only if it is 800+ today) |
+| `make-edits-land` | 2+ `edit-miss` (above the repository's base rate, see Score) on a file that is neither large nor generated. Mostly ambiguous: "Repeated blocks: make edit targets unique". Mostly not-found: "Agents misremember this file: check what rewrites it" **only with evidence of a rewrite** (a `stale-edit` on the file, or a miss before which a command that rewrites files, such as a formatter, a fixer, `sed -i` or a commit hook, ran since the agent last read or edited the file; `rewritten` on the event); otherwise the neutral "Edits to this file keep missing their target", which asserts no cause |
 | `document-what-rewrites-this-file` | 2+ `stale-edit` of the "modified since read" kind |
-| `path-agents-expect` | 2+ `path-miss` |
+| `path-agents-expect` | 2+ `path-miss` (a read, an edit, a test command pointed at a missing test file, or a `cd` into a missing directory) |
 | `write-down-the-rule` | corroborated `user-correction` events whose attributed shares sum to 0.5 or more; quotes up to 3. "The rule the human keeps repeating" is claimed only when 2+ of the corrections share wording (two content words, or one distinctive word of 7+ letters, e.g. the same class name); otherwise the recommendation only asks whether the correction(s) reflect a standing rule. A `probable-correction` never counts |
 | `state-the-boundary` | 2+ `tool-rejected`, or 1 with a stated reason |
 | `allow-or-document-the-boundary` | 2+ `permission-denied` |
-| `clarify-before-acting` | 2+ `user-interrupt` |
-| `add-a-fast-check` | 2+ `edit-revert` events or `edit-thrash` events of turns that did not end on a successful command |
+| `clarify-before-acting` | 2+ `user-interrupt`. On a command (one that humans stopped in 3+ sessions, see the signal) the advice is to say when it should be run and what to run instead |
+| `add-a-fast-check` | 2+ `edit-revert` events with no check run between the edit and its undoing (see `state-the-constraint`), or `edit-thrash` events of turns that did not end on a successful command and ran no test, lint or type check (thrash next to a check was not for want of one). Not when the file has 2+ `no-convergence` events: a check that will not pass needs `explain-the-failing-check`, not another check. The text names only what was seen ("2 reverted edits in 2 sessions") |
+| `state-the-constraint` | 2+ `edit-revert` where `add-a-fast-check` does not apply because a test, lint, type-check or build command ran between an edit and its undoing (`checked` on the event): the agents had a check and used it, and backed the change out. The advice is to write down what the file does not allow. Not when the file has 2+ `no-convergence` events |
 | `learn-from-rework` | 2+ `human-rework` |
-| `add-a-pointer` | 2+ `search-miss` in the file or directory, with other evidence or the same pattern in 2+ sessions; lists the patterns |
+| `add-a-pointer` | 2+ `search-miss` in the file or directory, not counting searches for leftovers (`TODO`, `console.log`, conflict markers, ...), with other evidence or the same pattern missed in 2+ sessions by agents that went on looking for it (see the signal); lists the patterns |
 | `summarize-this-file` | 2+ `read-loop`, next to other evidence |
-| `use-the-working-command` | 2+ *setup/invocation* failures of a command were followed by the same successful command *doing the same job* (same role, or a wrapper of the same tool), in sessions where the failing command never worked afterwards. Never an install, version-control or housekeeping command |
-| `document-the-setup-step` | 2+ failures of a command that then worked after the same setup command (`pip install`, `npm ci`, ...) |
-| `document-the-command` | 2+ setup/invocation failures of a command (and neither of the above) |
+| `use-the-working-command` | 2+ *setup/invocation* failures of a command were followed by the same successful command *doing the same job* (same role, or a wrapper of the same tool), in sessions where the failing command never worked afterwards. Never an install, version-control or housekeeping command. Also: 2+ `command not found` failures after which the same command ran under a versioned name of the program ("use `python3`, not `python`"), and 2+ setup/invocation failures after which the same command ran with a variable set in front of it and no file edited in between ("use `PYTHONPATH=src pytest`"; the value is shown only for a fixed set of variables such as `PYTHONPATH`, `NODE_ENV`, `DJANGO_SETTINGS_MODULE`, and only with excerpts, otherwise `NAME=...`) or with an option added ("use `npm install --legacy-peer-deps`"; only with excerpts). Also: ordinary failures after which another command for the same job passed with nothing changed, in 3+ sessions (`pnpm test` after a red `yarn test`: the wrong runner); never when the green run ran less than the red one (a path, a node id, `-k`, `--filter` ... the red line lacks, or under half its tests, unless the failing tests it named are in the selection) or when that runner went red in the session too. On Windows the launcher counts as a name of the program ("use `py`, not `python`") |
+| `document-the-setup-step` | 2+ failures of a command that then passed after the same setup step with no file edited in between (`pip install`, `npm ci`, `docker compose up`, `cp .env.example .env`, or any other command that did so in 2+ sessions), or that then passed on a line that first activated an environment (`source .venv/bin/activate && pytest`, `poetry shell`, `conda activate <env>`): "run X before Y". Each failure is bound to the steps run between it and the next run of the same command; every step that helped 2+ times is listed, in order, with its own count ("run `pip install`, then `docker compose up -d` before `pytest`"), and named so that it can be run as written (`npx playwright install`, `go mod download`) |
+| `document-the-environment` | 2+ *environment* failures of a command (and none of the above): a service that was not reachable ("say how to start PostgreSQL before `pytest`"; the service is named when the output identifies it), missing, expired or refused credentials (also a database, registry or cloud API that turns them down), an unset environment variable (named only with excerpts), a port that was already in use, a full disk, or a host name that could not be resolved (no network, or a host that is not allowed: "say what `curl` can reach from where agents work") |
+| `document-the-command` | 2+ setup/invocation failures of a command (and none of the above). If the same command then worked in a subdirectory, the advice names it ("run `npm test` from `web/`"). A command that is keyed by where it ran (`pytest (src/)`) is titled "Document how to run `pytest` in `src/`"; a command whose name is a placeholder without excerpts is titled "Document how to run this command (its name is hidden without excerpts)" |
+| `name-the-missing-target` | 2+ setup/invocation failures of a command, most of which say that the make target or package script does not exist (`make: *** No rule to make target 'lint'.  Stop.`, npm's `Missing script`, `ERR_PNPM_NO_SCRIPT`, yarn's `Command "lint" not found`; a missing *prerequisite*, "needed by", is not this, and neither is an error that names another target than the one on the command line: `make test` answering "No rule to make target 'tst'" is a broken Makefile). Replaces `document-the-command`: there is nothing to document about running something that is not there. The text lists up to 12 targets or scripts the Makefile or `package.json` (in the directory the command ran in) does define, and asks for an alias or a line saying what to run instead. Without excerpts neither the missing name nor the list is shown |
 | `make-the-failure-actionable` | 1+ `retry-loop` on a command |
 | `run-it-in-the-background` | 2+ harness timeouts of a command that is a server or watcher (`npm run dev`, `uvicorn`, ...); replaces `document-the-command` for those |
 | `give-it-more-time` | 2+ harness timeouts of any other command (`npm run build` cut off after 2 minutes): say how long it takes, raise the timeout or run it in the background, or name a narrower command; replaces `document-the-command` for those |
 | `explain-the-failing-check` | 2+ `no-convergence` events from 2+ sessions, on the command ("Agents cannot get `pytest` to pass") or on a file edited during the rounds: document how to run and debug the check and what it expects |
+| `say-if-it-is-known-broken` | A command lifted out of the weak class because it stays red: it failed 2+ times and was still red at the end, in 3+ sessions (and there is no `no-convergence` event on it): "`npm run e2e` keeps ending red": say that it is known to be broken and what to run instead, or fix it. Also: the same test named as failed in 3+ sessions, none of which made it pass, and at least once before the session had changed any file ("`tests/test_legacy.py::test_old` is red session after session": fix it, or mark it as a known failure and say so); this form also appears on the test file's row |
+| `fix-the-flaky-test` | A test command failed and then passed on a plain re-run, with nothing changed in between, in 3+ sessions (variant `flaky`): "`npm test` looks flaky": fix or quarantine the flaky test, and say in AGENTS.md that a red run should be re-run once before anything is changed |
+| `pull-before-pushing` | `git push` was rejected as non-fast-forward (the remote branch had commits the local one lacked) in 3+ sessions: "tell agents to bring the branch up to date before `git push`": say in AGENTS.md to fetch and rebase (or merge) before pushing, and whether a force-push is ever acceptable. No time is claimed |
+| `file-is-gone` | a file hotspot whose file is not in the working tree **and** whose last commit in git deleted or renamed it (`file.removed_at`; needs git). Replaces every rule about what the file is like (`edit-the-source-not-the-output`, `split-or-anchor-large-file`, `make-edits-land`, `document-what-rewrites-this-file`, `path-agents-expect`, `add-a-fast-check`, `state-the-constraint`, `add-a-pointer`, `summarize-this-file`): "This file was renamed to `src/client.ts`" or "This file is no longer in the tree", with the date of that commit and `--since <date>` to leave the history out. What a human said (`write-down-the-rule`, `state-the-boundary`, ...) is kept below it. A path git never tracked, or a scan without git, is not "gone": nothing is known, and nothing changes |
+| `note-the-background-rate` | repository-level only (top-level `recommendations`, never on a hotspot): `edit-miss` or `stale-edit` with 5+ events in 3+ files and 3+ sessions. States the rate per file visit and names the files clearly above it (see "The repository's base rate"). Mentions a rewriting command only when misses followed one |
+
+### Which files count as generated
+
+A file counts as generated on one of three grounds (`recommend.file_facts`),
+strongest first:
+
+1. **A header that says so.** One of its first 10 lines is a *comment line*
+   (it starts with `#`, `//`, `/*`, `*`, `<!--`, `--` or `;`) that carries
+   `DO NOT EDIT` / `DO NOT MODIFY` (in capitals), `@generated`,
+   `auto-generated` / `autogenerated`, or starts "Code generated by ...",
+   "This file is generated by ...", "Generated by ..." (`generated_header`).
+   In prose files (`.md`, `.rst`, `.txt`, `.adoc`) only an HTML comment
+   counts: `#` is a heading there and `*` a bullet. Prose anywhere else does
+   not count: a docstring saying "the summary is generated by the scan", a
+   code generator holding the header as a string literal, a CONTRIBUTING.md
+   asking not to edit the changelog by hand, a header below line 10.
+2. **A name only tools write:** lockfiles, `*_pb2.py`, `*.pb.go`,
+   `*.min.js`, `*.generated.*` and the like.
+3. **An output directory that git does not track:** a path under `dist/`,
+   `build/`, `out/`, `gen/`, `generated/`, `vendor/` or `node_modules/`
+   counts only if git ignores it or does not have it. A tracked
+   `build/package/Dockerfile`, `internal/gen/writer.go` or `cmd/out/main.go`
+   is source like any other file.
+
+What follows from each: the `edit-the-source-not-the-output` advice is plain
+on ground 1 and hedged on 2 and 3. Human rework is set aside only on ground 2
+(a lockfile bump or a regenerated client is a tool being re-run); a human
+changing a file that merely *says* it is generated, or that sits in an output
+directory, is counted like any other rework. How many rework events were set
+aside is reported as `rework_set_aside` on the git source.
+
+**Known false positives and misses:** a hand-written file whose first lines
+quote such a header in a comment (a template for generated files, a test
+fixture for a code generator) is taken as generated; a tool that puts its
+notice in a docstring, in a string, or below a licence block longer than ten
+lines is missed, as is a notice in another language or in lower-case "do not
+edit". A hand-maintained file with a tool's name pattern (`*_pb2.py` written
+by hand) gets the hedged advice, and human rework on it is not counted.
+
+### What the repository already says
+
+Most advice here ends in "say so in AGENTS.md". Where that has been done,
+repeating it is wasted effort, so before a recommendation is given the
+repository's instruction files are searched for what it is about
+(`guidance.py`):
+
+- **Files read:** `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `GEMINI.md`,
+  `.github/copilot-instructions.md`, `.cursorrules` and `.windsurfrules` at
+  the root; the files directly in `.cursor/rules/` and every `*.md` under
+  `.claude/rules/` (at most 50 each); files that a `CLAUDE.md` or
+  `CLAUDE.local.md` pulls in with an `@path/to/file.md` line (one level
+  deep: imports of imported files are not followed; at most 20 per file;
+  not inside code fences; only inside the repository); `AGENTS.md` and `CLAUDE.md` in every directory between the root
+  and the hotspot (for `web/src/a.ts`: `web/` and `web/src/`; for a command
+  keyed `npm test (web/)`: `web/`); and the `permissions.deny` rules of
+  `.claude/settings.json` and `.claude/settings.local.json` (only the lines
+  holding a deny rule; allow rules and other settings are not instructions).
+  Files over 200 KB, binary files, and links that lead outside the
+  repository are not read; a file reachable under two names is read once.
+- **Above a scanned package.** When the scanned directory lies inside a git
+  repository (`scan packages/web`), agents started there also load the
+  instruction files above it. `AGENTS.md` and `CLAUDE.md` in every directory
+  up to the repository root, and the full root list at the root itself (the
+  directory holding `.git`), are read too, and cited relative to the scanned
+  directory: `../../AGENTS.md:3`. Nothing above the repository root is read,
+  nothing when the scanned directory is the root or is in no repository,
+  and nothing when `repo_aliases` are given (the sessions were then recorded
+  where this copy does not live, so what lies above the copy is not what
+  those agents loaded).
+- **What is looked for:** for a file, its repo-relative path or its file name
+  (the path only for names such as `__init__.py` or `index.ts`); for a
+  command, its key without the directory suffix (also for the command a
+  rule proposes: `pnpm test (packages/web/)` is looked for as `pnpm test`,
+  in the root files and in `packages/web/`; titles name the command as it
+  is typed and the text says the directory); for advice that proposes
+  something specific (`make test` instead of `pytest`, a setup step), that
+  proposal. Matching is plain text on word boundaries: `pytest` is not
+  found in `pytest-cov` or `pytest.ini`, `a.py` not in `data.py`. That makes
+  a **mention**. For the "already documented" form more is required, an
+  **instruction**: a command of several words (`make test`) must stand where
+  a command stands (inside backticks, in a code fence, after a `$` prompt,
+  or right after run / use / using / with / via / call / invoke / execute /
+  try), so "We make test data with factories", "Please make test names
+  descriptive" and "The CI runs make test on every PR" do not document
+  `make test` (a single distinctive word such as `pytest` is enough as it
+  is); and for a generated file the line that names it must also carry an
+  instruction word (edit, change, modify, generated, regenerate, never,
+  don't, do not, must not, overwrite, rewrite, touch, read-only), so "See
+  src/schema_gen.py for an example of our style" does not count. For the
+  two rules whose "already documented" form says that the files recommend
+  something (`use-the-working-command`, `document-the-setup-step`), a line
+  that names the proposal only to rule it out is not a mention: "Do not run
+  `make test` locally", "never pytest directly", "`make test` was removed",
+  "we no longer use make test" (a negation in the 40 characters before the
+  name within its sentence, or "was removed / is deprecated / no longer",
+  "is slow / is flaky / is too expensive" right after it). Terms
+  shorter than 4 characters, bare launchers (`make`, `npm`... alone) and
+  pseudonymized keys are not looked for, so with `--no-excerpts` only paths
+  and public command names can match.
+- **What changes:** the recommendation gets `documented_in` (file and line,
+  at most 3 places) and `documented_as`. If the files hold an *instruction*
+  for what the rule would have proposed (`documented_as: "instruction"`),
+  its title and text switch to a form that asks the reader to confirm it and
+  then to enforce it: "`AGENTS.md:12` already names `make test`; agents
+  still ran `pytest` and failed 7 times in 4 sessions. Check that the cited
+  line tells agents to use `make test` here. If it does, another line will
+  not help; the next step is to enforce it: a hook or permission rule that
+  blocks `pytest`, or a wrapper ..." (`use-the-working-command`,
+  `document-the-setup-step`, `edit-the-source-not-the-output`). If there is
+  only a *mention* (`documented_as: "mention"`), and for other advice that
+  amounts to writing something down (`DOCUMENTABLE` in `recommend.py`), the
+  recommendation keeps its normal title and text and gains a neutral note:
+  "(Also mentioned at `AGENTS.md:12`: check whether it already says this.
+  If it does, enforce it with a hook, a permission rule or a wrapper rather
+  than adding another line.)". If the files say the *opposite* of what the
+  sessions show (`documented_as: "conflict"`): an instruction to run the
+  very command that keeps failing ("Use `make test`, not `pytest`", "Always
+  run tests with `make test`", a code fence that lists it), or a line that
+  rules out the command agents fell back to ("Never run `pytest`
+  directly"), `use-the-working-command` never proposes the contradicting
+  line. It says: "`AGENTS.md:3` tells agents to run `make test`, which
+  failed 4 times in 4 sessions; agents fell back to `pytest`. Make `make
+  test` work where agents run, or change that line." (or "... tells agents
+  not to run `pytest`, yet `make test` failed ..."), and has no
+  `replacement`. Advice that is not about documentation
+  (splitting a large file, learning from rework) is never changed.
+- **What it does not know:** whether the line says the right thing. The
+  context rules are about form, not meaning: "`make test` only works in CI"
+  or "ask before you run `make test`" stands in command context without
+  recommending it, and "schema_gen.py changed a lot last year" has an
+  instruction word without instructing anything; both are taken as
+  instructions (the residual false positive, which is why the text asks the
+  reader to check the cited line instead of asserting what it says).
+  Conversely an instruction split over two lines (the file named on one,
+  "never edit it" on the next) is only a mention. Nor is it known whether
+  the line was written before or
+  after the sessions that were analysed; the text says so ("if that line is
+  newer than these sessions, give it time first"). The instruction files
+  are never quoted, with or without excerpts: only `file:line` is shown.
+
+### One session is a lead
+
+A hotspot seen in a single transcript session with a score below 20 gets no
+recommendation: one bad afternoon is something to look at, not grounds for
+telling anyone to change their repository. The exception is advice that
+rests on the human's own words in that session, which is passed on as the
+question it is: `write-down-the-rule` (in its "check whether this is a
+standing rule" form) and `state-the-boundary`.
 
 ## Privacy and redaction
 
@@ -400,7 +852,9 @@ Transcripts contain secrets. The engine therefore:
   search patterns, command lines, command output, reasons for declining,
   commit subjects) in exactly two places: `excerpt` and the quotes inside
   recommendation details. Both disappear with `--no-excerpts`.
-  What remains then is structural: tool names, repo-relative paths, counts,
+  What remains then is structural: tool names (built-in ones as they are;
+  any other, such as an MCP server's or a plugin's, as `<tool:hash>` or
+  `mcp__<server:hash>__<tool:hash>`), repo-relative paths, counts,
   commit hashes and **command keys**. Without excerpts a key contains only
   words from a fixed public vocabulary (`pytest`, `npm run build`, `git
   commit`); every project-specific name in it (an unknown executable, a
@@ -422,7 +876,10 @@ Transcripts contain secrets. The engine therefore:
   connection-string fields (`AccountKey=`, `SharedAccessKey=`, `Password=`);
   `mysql -pSECRET` / `sshpass -p SECRET`; SendGrid keys (`SG.x.y`); prose
   such as "the password is x"; `docker login -p x`; assignments to names
-  ending in `_KEY`, `_ID`, `_SALT` ... (`SECRET_KEY = '...'`); e-mail
+  ending in `_KEY`, `_ID`, `_SALT` ... (`SECRET_KEY = '...'`); upper-case
+  environment-style names with `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD` or
+  `KEY` anywhere in them (`SECRET_KEY_BASE=x`, `SIGNING_KEY=x`); `vault
+  login X`, `htpasswd -b file user X`, `net use ... /user:u X`; e-mail
   addresses (not `user@8.8.4.4`: an IP host is not a mailbox); private
   network addresses (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) and host
   names ending in `.internal`, `.local`, `.corp` or `.lan` (`db.internal`,
@@ -459,12 +916,38 @@ follow one rule: anything that looks like a home directory becomes `~`.
 
 ## Known limitations
 
+- **Prompt time is known only where the transcript records it.** Without a
+  `permissionDecision` (or `prompted`) the split between "the command ran"
+  and "the prompt stood open" is a bound, not a measurement: a failing
+  command that honestly ran for minutes, in a session with no other run of
+  it to compare with, is counted at 30 seconds, and a prompt answered within
+  30 seconds is counted as run time. A person-approved call claims nothing
+  before its result, although the tool also ran for part of that time. Both
+  err towards claiming less.
+
+- **Background commands are only as visible as their reports.** A command
+  launched in the background is judged from the first `BashOutput` /
+  `TaskOutput` result or `<task-notification>` that says how it ended. If
+  the agent never asks and no notification is recorded, the command has no
+  outcome: it is neither a failure nor a success, and a server that crashed
+  unnoticed leaves no event. A notification carries no output, so a failure
+  known only from one is an ordinary failure with nothing to classify,
+  unless the agent reads the log afterwards. A report with status `running`
+  is not judged even if the output so far already shows an error, and a
+  task the agent killed is never a failure, whatever it had printed. The
+  time such a command took is not known and none is claimed for the run
+  itself.
+
 - **Heuristics, not understanding.** A correction is recognised by its
   wording plus what the agent does next; a setup error by its output. Both directions of error exist and are
   listed per signal in the catalog.
 - **Exit statuses that are not the command's own.** `pytest | tail -5`,
   `make test; echo done` and `pytest || true` exit 0 whatever happened. Such
-  a run is judged from its output (see `command-failure` in the catalog). What
+  a run is judged from its output (see `command-failure` in the catalog); so
+  is `pytest; which time` with a non-zero exit, whose status is that of the
+  question asked last. When a later step of the line prints a file that
+  nothing earlier on the line names (`make build; cat docs/troubleshooting.md`),
+  the output is not judged at all: an error in it may be the document's. What
   remains: a failure whose telling lines were cut off by the filter (`| tail
   -1` on a tool that prints its verdict earlier, `| grep -c`), or printed in
   a shape that is not on the list, is "unknown" and counts as neither red nor
@@ -514,9 +997,11 @@ follow one rule: anything that looks like a home directory becomes `~`.
   code that calls a write function count as edits. Any other command that
   ran and is neither a look nor a check (`python tools/fix_imports.py`, `npm
   install`, `git commit`) counts as "may have changed something": enough to
-  end a retry loop and to make the next green run a fix, never enough to
-  name a file. This errs towards forgiving: a failure that went away after
-  an unrelated command is read as fixed. It still misses changes made
+  end a retry loop, never enough to name a file. A red run that goes green
+  after such commands alone is kept when the command was a setup step, or
+  when the same pair recurs in two sessions; otherwise it is dropped, which
+  errs towards forgiving: a one-off script that really was the missing
+  setup step is not reported until it happens again. It still misses changes made
   outside the transcript (the human's editor, another agent or subagent, a
   watcher) and changes made by commands named like checks (`pytest
   --snapshot-update`, a `make test` that regenerates files): there, red
@@ -547,7 +1032,9 @@ follow one rule: anything that looks like a home directory becomes `~`.
   are one hotspot; `pytest` and `python -m pytest` are two; every use of a
   tool that is not on the subcommand allowlist is one hotspot (`mytool build`
   and `mytool deploy` are both `mytool`). When `a && b` fails we cannot tell
-  which step failed unless the output shows it. The shell is tokenized,
+  which step failed unless the output shows it (a target or script the
+  runner names, a check's own summary, or the runner's generic line, in that
+  order; see `command-failure`). The shell is tokenized,
   not interpreted: aliases, functions, `eval` and command substitution are not
   followed.
 - **Corrections are under-counted on purpose.** `totals.corrections` counts

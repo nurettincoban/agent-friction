@@ -4,6 +4,7 @@ import io
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -92,11 +93,16 @@ def test_compare(tmp_path: Path) -> None:
     data["hotspots"][0]["events"] = 1
     after = tmp_path / "after.json"
     after.write_text(json.dumps(data), encoding="utf-8")
-    code, out, _ = run("compare", str(before), str(after))
-    assert code == EXIT_OK and "Improved (1)" in out
-    code, out, _ = run("compare", str(after), str(before), "-f", "json", "--fail-on-regression")
+    code, out, _ = run("compare", "--allow-overlap", str(before), str(after))
+    assert code == EXIT_OK and "Improved (1 target)" in out
+    code, out, err = run(
+        "compare", "--allow-overlap", str(after), str(before), "-f", "json", "--fail-on-regression"
+    )
     assert code == EXIT_GATE
     assert json.loads(out)["changes"][0]["status"] == "regressed"
+    path = data["hotspots"][0]["path"]
+    assert "--fail-on-regression: 1 target regressed or new" in err
+    assert f"{path} (regressed)" in err
 
 
 @pytest.mark.parametrize(
@@ -110,9 +116,9 @@ def test_compare(tmp_path: Path) -> None:
 def test_compare_rejects_bad_input(tmp_path: Path, content: str, message: str) -> None:
     bad = tmp_path / "bad.json"
     bad.write_text(content, encoding="utf-8")
-    code, _, err = run("compare", str(bad), str(bad))
+    code, _, err = run("compare", "--allow-overlap", str(bad), str(bad))
     assert code == EXIT_ERROR and message in err
-    code, _, err = run("compare", str(tmp_path / "missing.json"), str(bad))
+    code, _, err = run("compare", "--allow-overlap", str(tmp_path / "missing.json"), str(bad))
     assert code == EXIT_ERROR and "no such file" in err
 
 
@@ -122,6 +128,9 @@ def test_no_transcripts_is_a_clean_error(tmp_path: Path, monkeypatch: pytest.Mon
     code, _, err = run("scan", str(tmp_path))
     assert code == EXIT_ERROR
     assert err.startswith("agent-friction: ") and "Traceback" not in err
+    assert "--allow-empty" in err
+    code, _, err = run("scan", str(tmp_path), "--no-git")
+    assert code == EXIT_ERROR and "--allow-empty" not in err
     code, _, err = run("sources", str(tmp_path))
     assert code == EXIT_ERROR and "No Claude Code transcripts found" in err
 
@@ -185,10 +194,18 @@ def test_compare_low_sample_does_not_trip_gate(tmp_path: Path) -> None:
     data["totals"]["sessions"] = 2
     after = tmp_path / "after.json"
     after.write_text(json.dumps(data), encoding="utf-8")
-    code, _, err = run("compare", str(before), str(after), "--fail-on-regression")
+    code, _, err = run(
+        "compare", "--allow-overlap", str(before), str(after), "--fail-on-regression"
+    )
     assert code == EXIT_OK and "low sample" in err
     code, _, _ = run(
-        "compare", str(before), str(after), "--fail-on-regression", "--min-sessions", "1"
+        "compare",
+        "--allow-overlap",
+        str(before),
+        str(after),
+        "--fail-on-regression",
+        "--min-sessions",
+        "1",
     )
     assert code == EXIT_GATE
 
@@ -196,7 +213,7 @@ def test_compare_low_sample_does_not_trip_gate(tmp_path: Path) -> None:
 def test_compare_rejects_hollow_result(tmp_path: Path) -> None:
     hollow = tmp_path / "hollow.json"
     hollow.write_text('{"schema_version": 1}', encoding="utf-8")
-    code, _, err = run("compare", str(hollow), str(hollow))
+    code, _, err = run("compare", "--allow-overlap", str(hollow), str(hollow))
     assert code == EXIT_ERROR and "not an agent-friction result" in err
 
 
@@ -207,9 +224,12 @@ def test_compare_refuses_different_repos(tmp_path: Path) -> None:
     data["repo"]["name"] = "something-else"
     other = tmp_path / "other.json"
     other.write_text(json.dumps(data), encoding="utf-8")
-    code, _, err = run("compare", str(before), str(other))
+    code, _, err = run("compare", "--allow-overlap", str(before), str(other))
     assert code == EXIT_ERROR and "different repositories" in err
-    assert run("compare", str(before), str(other), "--allow-repo-mismatch")[0] == EXIT_OK
+    assert (
+        run("compare", "--allow-overlap", str(before), str(other), "--allow-repo-mismatch")[0]
+        == EXIT_OK
+    )
 
 
 def test_show_accepts_a_raw_command_line(tmp_path: Path) -> None:
@@ -235,7 +255,7 @@ def test_inverted_window_is_a_usage_error() -> None:
 
 def test_output_into_missing_directory_is_an_error(tmp_path: Path) -> None:
     code, _, err = run("scan", *INPUT, "-o", str(tmp_path / "missing" / "x.html"))
-    assert code == EXIT_USAGE and "does not exist" in err
+    assert code == EXIT_ERROR and "does not exist" in err
 
 
 def test_sources_with_explicit_transcripts() -> None:
@@ -277,16 +297,16 @@ def test_git_only_scan_with_allow_empty(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_bad_json_inputs_are_clean_errors(tmp_path: Path) -> None:
-    code, _, err = run("compare", str(tmp_path), str(tmp_path))
+    code, _, err = run("compare", "--allow-overlap", str(tmp_path), str(tmp_path))
     assert code == EXIT_ERROR and "is a directory" in err
     good = tmp_path / "r.json"
     run("scan", *INPUT, "-o", str(good))
     utf16 = tmp_path / "ps.json"
     utf16.write_text(good.read_text(encoding="utf-8"), encoding="utf-16")
-    assert run("compare", str(good), str(utf16))[0] == EXIT_OK
+    assert run("compare", "--allow-overlap", str(good), str(utf16))[0] == EXIT_OK
     garbage = tmp_path / "bin.json"
     garbage.write_bytes(b"\x80\x81\x82{")
-    code, _, err = run("compare", str(good), str(garbage))
+    code, _, err = run("compare", "--allow-overlap", str(good), str(garbage))
     assert code == EXIT_ERROR and "Traceback" not in err
 
 
@@ -314,6 +334,7 @@ def test_scan_from_a_subdirectory_uses_the_repo_root(
     monkeypatch.chdir(tmp_path / "src")
     _, _, err = run("sources", "-t", str(tmp_path / "none.jsonl"))
     assert f"using the repository root {tmp_path}" in err
+    assert "pass . to map only this directory" in err
 
 
 def test_show_accepts_repo_positionally() -> None:
@@ -349,3 +370,314 @@ def test_scan_of_a_missing_repo_says_so() -> None:
 def test_output_dash_is_stdout() -> None:
     code, out, _ = run("scan", *INPUT, "-f", "json", "-o", "-")
     assert code == EXIT_OK and json.loads(out)["schema_version"] == 1
+
+
+def test_compare_writes_to_a_file_with_format_from_extension(tmp_path: Path) -> None:
+    saved = tmp_path / "scan.json"
+    assert run("scan", *INPUT, "-o", str(saved))[0] == EXIT_OK
+    report = tmp_path / "cmp.md"
+    code, out, _ = run("compare", "--allow-overlap", str(saved), str(saved), "-o", str(report))
+    assert code == EXIT_OK and out == ""
+    assert report.read_text(encoding="utf-8").startswith("# Friction comparison")
+
+
+def test_an_unwritable_output_is_an_error_not_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def deny(*_a: object, **_k: object) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "write_text", deny)
+    code, _, err = run("scan", *INPUT, "-o", str(tmp_path / "x.html"))
+    assert code == EXIT_ERROR and "cannot write" in err and "Permission denied" in err
+
+
+def test_a_failing_stdout_is_an_error_not_a_traceback() -> None:
+    class Full(io.StringIO):
+        def write(self, s: str) -> int:
+            raise OSError(28, "No space left on device")
+
+    err = io.StringIO()
+    code = main(["scan", *INPUT, "-f", "json"], stdout=Full(), stderr=err)
+    assert code == EXIT_ERROR and "No space left" in err.getvalue()
+
+
+def test_compare_rejects_damaged_entries(tmp_path: Path) -> None:
+    saved = tmp_path / "scan.json"
+    assert run("scan", *INPUT, "-o", str(saved))[0] == EXIT_OK
+    data = json.loads(saved.read_text(encoding="utf-8"))
+    data["commands"] = [1, 2]
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps(data), encoding="utf-8")
+    code, _, err = run("compare", "--allow-overlap", str(saved), str(bad))
+    assert code == EXIT_ERROR and "commands[0] is not an object" in err
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    [
+        (lambda d: d["hotspots"][0].pop("events"), "hotspots[0].events is missing"),
+        (lambda d: d["hotspots"][0].update(sessions="3"), "hotspots[0].sessions is not an"),
+        (lambda d: d["commands"][0].update(score=None), "commands[0].score is not a number"),
+        (lambda d: d["hotspots"][1].pop("path"), "hotspots[1].path is missing"),
+        (lambda d: d["exposure"]["file"].update(x="2"), "exposure.file is not a map"),
+    ],
+)
+def test_compare_names_the_damaged_field(tmp_path: Path, damage: Any, message: str) -> None:
+    saved = tmp_path / "scan.json"
+    run("scan", *INPUT, "-o", str(saved))
+    data = json.loads(saved.read_text(encoding="utf-8"))
+    damage(data)
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps(data), encoding="utf-8")
+    code, _, err = run("compare", "--allow-overlap", str(saved), str(bad))
+    assert code == EXIT_ERROR and message in err and "Traceback" not in err
+
+
+def test_package_root_exports_the_python_api() -> None:
+    import agent_friction
+
+    assert agent_friction.analyze.__name__ == "analyze"
+    assert agent_friction.AnalyzeOptions.__name__ == "AnalyzeOptions"
+
+
+def test_scan_warns_about_unreadable_transcripts(monkeypatch: pytest.MonkeyPatch) -> None:
+    import agent_friction.cli as cli
+
+    real = cli._analyze
+
+    def fake(args: object, repo: Path, err: object = None) -> dict:  # type: ignore[type-arg]
+        result = real(args, repo)  # type: ignore[arg-type]
+        result["sources"].append(
+            {"kind": "unreadable", "path": "x.jsonl", "error": "permission denied"}
+        )
+        return result
+
+    monkeypatch.setattr(cli, "_analyze", fake)
+    code, _, err = run("scan", *INPUT)
+    assert code == EXIT_OK and "skipped x.jsonl: permission denied" in err
+
+
+def test_more_than_fifty_hotspots_are_all_kept(tmp_path: Path) -> None:
+    """--top trims the terminal view only; JSON, show and compare see every hotspot."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    lines = []
+    n = 0
+    for f in range(60):
+        (repo / f"m{f:02}.py").write_text("x = 1\n")
+        for s in range(2):
+            n += 1
+            sid, minute = f"s{f}-{s}", f % 50
+            base = f"2026-11-05T{10 + s:02}:{minute:02}"
+            lines += [
+                {"session": sid, "ts": base + ":00Z", "kind": "user_message", "text": "go"},
+                {
+                    "session": sid,
+                    "ts": base + ":05Z",
+                    "kind": "tool_call",
+                    "id": n,
+                    "op": "edit",
+                    "path": f"m{f:02}.py",
+                    "old": "nope",
+                    "new": "y",
+                    "cwd": str(repo),
+                },
+                {
+                    "session": sid,
+                    "ts": base + ":09Z",
+                    "kind": "tool_result",
+                    "id": n,
+                    "ok": False,
+                    "error": "edit_not_found",
+                    "output": "String to replace not found",
+                },
+            ]
+    log = tmp_path / "log.jsonl"
+    log.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+    args = [str(repo), "--transcripts", str(log), "--no-git"]
+    code, out, _ = run("scan", *args, "-f", "json")
+    assert code == EXIT_OK
+    assert len(json.loads(out)["hotspots"]) == 60
+    code, out, _ = run("scan", *args, "--top", "3")
+    assert code == EXIT_OK and "m59.py" not in out.split("What to fix first")[0]
+    code, out, _ = run("show", "m59.py", *args)
+    assert code == EXIT_OK and "m59.py" in out
+    saved = tmp_path / "a.json"
+    run("scan", *args, "-o", str(saved))
+    code, out, _ = run("compare", "--allow-overlap", str(saved), str(saved), "-f", "json")
+    assert code == EXIT_OK
+    assert len(json.loads(out)["changes"]) == 60
+
+
+def test_option_abbreviations_are_rejected(capsys: pytest.CaptureFixture[str]) -> None:
+    code, _, _ = run("scan", *INPUT, "--no-exc")
+    assert code == EXIT_USAGE and "unrecognized arguments: --no-exc" in capsys.readouterr().err
+
+
+def test_show_accepts_an_absolute_or_cwd_relative_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    target = (FIXTURES / "shopfront" / "api" / "openapi.yaml").resolve()
+    code, out, _ = run("show", str(target), "--repo", *INPUT)
+    assert code == EXIT_OK and "file: api/openapi.yaml" in out
+    monkeypatch.chdir(FIXTURES / "shopfront" / "api")
+    code, out, _ = run("show", "openapi.yaml", "--repo", *INPUT)
+    assert code == EXIT_OK and "file: api/openapi.yaml" in out
+
+
+def test_missing_transcript_path_is_an_error_even_with_allow_empty(tmp_path: Path) -> None:
+    code, _, err = run("scan", str(tmp_path), "-t", str(tmp_path / "nope"), "--allow-empty")
+    assert code == EXIT_ERROR and "transcript path does not exist" in err
+
+
+def test_compare_json_is_a_versioned_document(tmp_path: Path) -> None:
+    saved = tmp_path / "a.json"
+    run("scan", *INPUT, "-o", str(saved))
+    code, out, _ = run("compare", "--allow-overlap", str(saved), str(saved), "-f", "json")
+    doc = json.loads(out)
+    assert code == EXIT_OK and doc["schema_version"] == 1
+    assert doc["tool"]["version"] == __version__ and doc["before"]["sessions"] == 6
+    assert isinstance(doc["changes"], list) and doc["low_sample"] is False
+
+
+def test_show_with_an_empty_target_is_a_usage_error() -> None:
+    code, _, err = run("show", "  ", "--repo", *INPUT)
+    assert code == EXIT_USAGE and "needs a target" in err
+
+
+def _windowed(tmp_path: Path, name: str, first: str, last: str) -> Path:
+    saved = tmp_path / "base.json"
+    if not saved.exists():
+        run("scan", *INPUT, "-o", str(saved))
+    data = json.loads(saved.read_text(encoding="utf-8"))
+    data["window"].update(first_event=first, last_event=last, start=first, end=last)
+    out = tmp_path / name
+    out.write_text(json.dumps(data), encoding="utf-8")
+    return out
+
+
+def test_compare_refuses_overlapping_or_swapped_windows(tmp_path: Path) -> None:
+    before = _windowed(tmp_path, "b.json", "2026-10-01T00:00:00Z", "2026-10-31T12:00:00Z")
+    overlapping = _windowed(tmp_path, "o.json", "2026-10-01T00:00:00Z", "2026-11-30T00:00:00Z")
+    later = _windowed(tmp_path, "l.json", "2026-11-01T00:00:00Z", "2026-11-30T00:00:00Z")
+    code, _, err = run("compare", str(before), str(overlapping))
+    assert code == EXIT_ERROR and "overlap" in err and "--since 2026-10-31T12:00:01Z" in err
+    code, _, err = run("compare", str(later), str(before), "--fail-on-regression")
+    assert code == EXIT_ERROR and "swapped" in err
+    assert run("compare", str(before), str(later))[0] == EXIT_OK
+    assert run("compare", "--allow-overlap", str(before), str(overlapping))[0] == EXIT_OK
+
+
+def test_sources_names_copies_and_encodings(tmp_path: Path) -> None:
+    line = {"session": "s", "ts": "2026-11-05T10:00:00Z", "kind": "user_message", "text": "go"}
+    (tmp_path / "a.jsonl").write_text(json.dumps(line) + "\n", encoding="utf-8")
+    (tmp_path / "b.jsonl").write_text(json.dumps(line) + "\n", encoding="utf-8")
+    other = {**line, "session": "t"}
+    (tmp_path / "c.jsonl").write_text(json.dumps(other) + "\n", encoding="utf-16")
+    code, out, _ = run("sources", str(tmp_path), "-t", str(tmp_path))
+    assert code == EXIT_OK
+    assert "repeat an earlier file" in out and "read as utf-16" in out
+
+
+def test_show_json_and_output_file(tmp_path: Path) -> None:
+    saved = tmp_path / "r.json"
+    run("scan", *INPUT, "-o", str(saved))
+    code, out, _ = run("show", "pytest", "--from", str(saved), "-f", "json")
+    doc = json.loads(out)
+    assert code == EXIT_OK and doc["hotspot"]["path"] == "pytest" and doc["directory"] is None
+    target = tmp_path / "detail.txt"
+    code, out, _ = run("show", "src/shopfront", "--from", str(saved), "-o", str(target))
+    assert code == EXIT_OK and out == ""
+    assert "directory: src/shopfront" in target.read_text(encoding="utf-8")
+
+
+def test_compare_accepts_color(tmp_path: Path) -> None:
+    saved = tmp_path / "a.json"
+    run("scan", *INPUT, "-o", str(saved))
+    data = json.loads(saved.read_text(encoding="utf-8"))
+    data["hotspots"][0]["events"] = 1
+    after = tmp_path / "b.json"
+    after.write_text(json.dumps(data), encoding="utf-8")
+    code, out, _ = run("compare", "--allow-overlap", "--color", "always", str(saved), str(after))
+    assert code == EXIT_OK and "\033[" in out
+    assert "\033[" not in run("compare", "--allow-overlap", str(saved), str(after))[1]
+
+
+def test_no_session_in_repo_names_where_sessions_ran() -> None:
+    code, _, err = run(
+        "scan",
+        str(FIXTURES / "shopfront"),
+        "--transcripts",
+        str(FIXTURES / "transcripts"),
+        "--no-git",
+    )
+    assert code == EXIT_ERROR and "--repo-alias /home/dev/shopfront" in err
+
+
+def test_format_accepts_extension_spellings() -> None:
+    code, out, _ = run("scan", *INPUT, "-f", "md")
+    assert code == EXIT_OK and out.startswith("# Agent friction map")
+    code, out, _ = run("scan", *INPUT, "-f", "txt")
+    assert code == EXIT_OK and out.startswith("agent-friction · ")
+
+
+def test_outside_a_git_repository_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _, _, err = run("sources", "-t", str(tmp_path / "none.jsonl"))
+    assert "is not inside a git repository" in err
+
+
+def test_removed_worktree_sessions_are_pointed_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_friction import cli, discovery
+
+    monkeypatch.setattr(discovery, "removed_sibling_sessions", lambda repo: [("/w/shop-wt2", 2)])
+    err = io.StringIO()
+    cli._note_removed_worktrees(Path(), err)
+    assert "2 sessions ran in /w/shop-wt2" in err.getvalue()
+    assert "--repo-alias /w/shop-wt2" in err.getvalue()
+
+
+def test_compare_rejects_deeply_nested_json_cleanly(tmp_path: Path) -> None:
+    deep = tmp_path / "deep.json"
+    deep.write_text('{"a":' + "[" * 100000 + "]" * 100000 + "}", encoding="utf-8")
+    code, _, err = run("compare", "--allow-overlap", str(deep), str(deep))
+    # Python 3.14's decoder parses it (then it is not a result); older ones hit the depth limit.
+    assert code == 1 and err.startswith("agent-friction: ")
+    assert "nested too deeply" in err or "not an agent-friction result" in err
+
+
+def test_show_lists_directories_when_a_command_ran_in_several(tmp_path: Path) -> None:
+    before = tmp_path / "scan.json"
+    run("scan", *INPUT, "-o", str(before))
+    data = json.loads(before.read_text(encoding="utf-8"))
+    base = dict(data["commands"][0])
+    data["commands"] = [
+        {**base, "path": "npm test (packages/web/)"},
+        {**base, "path": "npm test (packages/api/)"},
+    ]
+    scan = tmp_path / "two.json"
+    scan.write_text(json.dumps(data), encoding="utf-8")
+    code, _, err = run("show", "npm test", "--from", str(scan))
+    assert code == EXIT_USAGE
+    assert "ran in several directories" in err and "'npm test (packages/api/)'" in err
+    data["commands"] = data["commands"][:1]
+    scan.write_text(json.dumps(data), encoding="utf-8")
+    code, out, _ = run("show", "npm test", "--from", str(scan))
+    assert code == EXIT_OK and "packages/web/" in out
+
+
+def test_show_from_a_saved_scan_refuses_flags_it_cannot_honour(tmp_path: Path) -> None:
+    saved = tmp_path / "scan.json"
+    run("scan", *INPUT, "-o", str(saved))
+    target = json.loads(saved.read_text(encoding="utf-8"))["commands"][0]["path"]
+    code, out, err = run("show", target, "--from", str(saved), "--no-excerpts")
+    assert code == EXIT_USAGE and "scan --no-excerpts" in err and out == ""
+    for flag in (["--since", "7d"], ["-t", str(tmp_path / "nope")], ["--no-git"]):
+        code, _, err = run("show", target, "--from", str(saved), *flag)
+        assert code == EXIT_USAGE and "not valid with --from" in err, flag
+    code, out, _ = run("show", target, "--from", str(saved), "--max-evidence", "1", "-f", "json")
+    assert code == EXIT_OK
+    private = tmp_path / "private.json"
+    run("scan", *INPUT, "--no-excerpts", "-o", str(private))
+    hidden = json.loads(private.read_text(encoding="utf-8"))["commands"][0]["path"]
+    code, _, _ = run("show", hidden, "--from", str(private), "--no-excerpts")
+    assert code == EXIT_OK

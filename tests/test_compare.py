@@ -50,9 +50,9 @@ def test_render_compare_text_and_markdown() -> None:
     after["hotspots"][0]["events"] = 1
     changes = compare(before, after)
     text = render_compare(before, after, changes)
-    assert "Improved (1)" in text and "schema.py" in text
+    assert "Improved (1 target)" in text and "schema.py" in text
     md = render_compare(before, after, changes, markdown=True)
-    assert md.startswith("# Friction comparison") and "## Improved (1)" in md
+    assert md.startswith("# Friction comparison") and "## Improved (1 target)" in md
     same = render_compare(before, before, compare(before, before))
     assert "No meaningful change." in same
 
@@ -107,3 +107,58 @@ def test_score_moving_against_the_verdict_is_explained() -> None:
     assert "not the score" in text
     plain = render_compare(before, before, compare(before, before))
     assert "not the score" not in plain
+
+
+def _replaced_pair(replacement_runs: int, replacement_events: int = 0) -> tuple[dict, dict]:  # type: ignore[type-arg]
+    before, after = sample_result(), sample_result()
+    cmd = {
+        **before["commands"][0],
+        "path": "npm test",
+        "events": 8,
+        "sessions": 4,
+        "exposure_sessions": 4,
+        "recommendations": [
+            {"id": "use-the-working-command", "title": "Tell agents to use `npm run test:unit`"}
+        ],
+    }
+    before["commands"] = [cmd]
+    after["commands"] = []
+    after["exposure"] = {"command": {"npm run test:unit": replacement_runs}}
+    if replacement_events:
+        after["commands"] = [
+            {
+                **cmd,
+                "path": "npm run test:unit",
+                "events": replacement_events,
+                "sessions": 1,
+                "exposure_sessions": replacement_runs,
+                "recommendations": [],
+            }
+        ]
+    return before, after
+
+
+def test_a_command_replaced_by_the_recommended_one_counts_as_fixed() -> None:
+    before, after = _replaced_pair(4)
+    (change,) = [c for c in compare(before, after) if c.path == "npm test"]
+    assert change.status == "replaced" and change.replaced_by == "npm run test:unit"
+    assert change.to_dict()["replacement_sessions"] == 4
+    text = render_compare(before, after, compare(before, after))
+    assert "Replaced (agents ran the recommended command instead)" in text
+    assert "`npm run test:unit` ran in 4 sessions with 0 friction events" in text
+
+
+def test_a_replacement_that_fails_as_often_is_not_a_fix() -> None:
+    before, after = _replaced_pair(4, replacement_events=8)
+    assert _statuses(before, after)["npm test"] == "inactive"
+    before, after = _replaced_pair(0)
+    assert _statuses(before, after)["npm test"] == "inactive"
+    text = render_compare(before, after, compare(before, after))
+    assert "Not touched afterwards" in text and "steers agents away" in text
+
+
+def test_structured_replacement_field_wins_over_the_title() -> None:
+    before, after = _replaced_pair(3)
+    before["commands"][0]["recommendations"][0]["replacement"] = "npm run test:unit"
+    before["commands"][0]["recommendations"][0]["title"] = "something else"
+    assert _statuses(before, after)["npm test"] == "replaced"
