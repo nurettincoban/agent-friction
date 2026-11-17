@@ -247,6 +247,8 @@ def removal(repo: Path, rel: str) -> tuple[str | None, str | None]:
     sha, _, date = last.partition("\t")
     if not sha or not date:
         return None, None
+    if date.endswith("Z"):  # newer git writes UTC as "Z"; keep one form across versions
+        date = date[:-1] + "+00:00"
     shown = git("show", "-M", "--relative", "--name-status", "--format=", sha) or ""
     for line in shown.splitlines():
         fields = line.split("\t")
