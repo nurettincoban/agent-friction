@@ -716,3 +716,111 @@ def test_columns_narrows_the_terminal_table(monkeypatch: pytest.MonkeyPatch) -> 
     assert _term_width(None, io.StringIO()) == 40
     monkeypatch.delenv("COLUMNS")
     assert _term_width(None, io.StringIO()) == 100
+
+
+# ---- Git Bash path conversion ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("given", "meant"),
+    [
+        ("C:/Program Files/Git/home/dev/shop", "/home/dev/shop"),
+        ("D:/Tools/Git/tmp/repo", "/tmp/repo"),
+        ("C:/msys64/home/me/x", "/home/me/x"),
+        ("c:/program files/git/Users/me/code", "/Users/me/code"),
+    ],
+)
+def test_a_path_git_bash_rewrote_is_recognized(given: str, meant: str) -> None:
+    from agent_friction.cli import undo_msys_rewrite
+
+    assert undo_msys_rewrite(given) == meant
+
+
+@pytest.mark.parametrize(
+    "given",
+    ["/home/dev/shop", r"C:\Users\Dev\Shop", "C:/Users/Dev/Shop", "C:/Program Files/Git"],
+)
+def test_ordinary_paths_are_left_alone(given: str) -> None:
+    from agent_friction.cli import undo_msys_rewrite
+
+    assert undo_msys_rewrite(given) is None
+
+
+def test_scan_undoes_a_git_bash_rewrite_and_says_how_to_stop_it() -> None:
+    argv = [
+        a if a != "/home/dev/shopfront" else "C:/Program Files/Git/home/dev/shopfront"
+        for a in INPUT
+    ]
+    code, out, err = run("scan", *argv, "--color", "never")
+    assert code == EXIT_OK and "schema_gen.py" in out
+    assert "Git Bash rewrote --repo-alias /home/dev/shopfront" in err
+    assert "MSYS_NO_PATHCONV=1" in err
+
+
+def test_no_session_hint_names_where_the_sessions_ran(tmp_path: Path) -> None:
+    code, _, err = run(
+        "scan",
+        str(tmp_path),
+        "--transcripts",
+        str(FIXTURES / "transcripts"),
+        "--repo-alias",
+        "/somewhere/else",
+        "--no-git",
+    )
+    assert code == EXIT_ERROR
+    assert "pass --repo-alias /home/dev/shopfront" in err
+
+
+# ---- demo, prompt, skill ---------------------------------------------------------------
+
+
+def test_demo_needs_no_input(tmp_path: Path) -> None:
+    code, out, err = run("demo", "--color", "never")
+    assert code == EXIT_OK and "schema_gen.py" in out and "make test" in out
+    assert "agent-friction demo -o demo.html" in err
+    target = tmp_path / "demo.html"
+    code, _, err = run("demo", "-o", str(target))
+    assert code == EXIT_OK and "<html" in target.read_text(encoding="utf-8")
+    assert "bundled demo" not in err
+
+
+def test_scan_from_a_saved_result_renders_the_prompt(tmp_path: Path) -> None:
+    saved = tmp_path / "scan.json"
+    assert run("scan", *INPUT, "-f", "json", "-o", str(saved))[0] == EXIT_OK
+    code, out, _ = run("scan", "--from", str(saved), "-f", "prompt", str(FIXTURES / "shopfront"))
+    assert code == EXIT_OK
+    assert out.startswith("# Reduce agent friction in shopfront")
+    assert "make test" in out
+    code, _, err = run("scan", "--from", str(saved), "--since", "30d", str(tmp_path))
+    assert code == EXIT_USAGE and "not valid with --from" in err
+
+
+def test_install_skill(tmp_path: Path) -> None:
+    from agent_friction.cli import SKILL_NAME, skill_text
+
+    text = skill_text()
+    assert text.startswith("---\nname: agent-friction-fix\n")
+    assert "-f prompt" in text and "approv" in text
+    code, out, _ = run("install-skill", "--print")
+    assert code == EXIT_OK and out == text
+    code, _, err = run("install-skill", "--project", str(tmp_path))
+    target = tmp_path / ".claude" / "skills" / SKILL_NAME / "SKILL.md"
+    assert code == EXIT_OK and target.read_text(encoding="utf-8") == text
+    assert f"/{SKILL_NAME}" in err
+    assert run("install-skill", "--project", str(tmp_path))[0] == EXIT_OK  # up to date
+    target.write_text("mine\n", encoding="utf-8")
+    code, _, err = run("install-skill", "--project", str(tmp_path))
+    assert code == EXIT_ERROR and "--force" in err
+    assert target.read_text(encoding="utf-8") == "mine\n"
+    assert run("install-skill", "--project", str(tmp_path), "--force")[0] == EXIT_OK
+    assert target.read_text(encoding="utf-8") == text
+    code, _, err = run("install-skill", "--project", str(tmp_path / "nope"))
+    assert code == EXIT_ERROR and "not a directory" in err
+
+
+def test_install_skill_defaults_to_the_home_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    assert run("install-skill")[0] == EXIT_OK
+    assert (tmp_path / ".claude" / "skills" / "agent-friction-fix" / "SKILL.md").is_file()

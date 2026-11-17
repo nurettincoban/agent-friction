@@ -26,6 +26,23 @@ MAX_FACT_BYTES = 5_000_000
 GENERATED_HEAD_BYTES = 2048
 #: Events needed before most rules fire (one-off events do not justify a change).
 MIN_EVENTS = 2
+#: A recommendation resting on fewer events than this is marked ``"evidence": "thin"``:
+#: it is still listed under its hotspot, but kept out of "What to fix first". Three
+#: interruptions of `ls` over hundreds of runs is not a reason to change AGENTS.md.
+THIN_EVIDENCE_EVENTS = 5
+#: Rules grounded in a fact about the repository (a generated-file header, a make target
+#: that does not exist, a file that is gone) or in a human's own words: one event
+#: carries them, so they are never "thin".
+FACT_BACKED_RULES = frozenset(
+    {
+        "edit-the-source-not-the-output",
+        "document-what-rewrites-this-file",
+        "write-down-the-rule",
+        "name-the-missing-target",
+        "file-is-gone",
+        "note-the-background-rate",
+    }
+)
 #: Verbatim quotes / patterns / commands shown per recommendation, at most.
 MAX_QUOTES = 3
 #: Summed attribution share of corrections needed before "write down the rule" fires.
@@ -253,6 +270,16 @@ def _top(values: Sequence[str], limit: int = MAX_QUOTES) -> list[tuple[str, int]
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
 
 
+_BLOCKED_SAID_RE = re.compile(r"\bBlocked: [^\n]*?[.!](?:\s+|$)([^\n]+)")
+
+
+def _harness_instead(excerpt: str) -> str:
+    """What a harness block ("Blocked: sleep 30 followed by: ... . To wait, use ...") says
+    to do instead: the sentences after the one that refuses, or ``""``."""
+    match = _BLOCKED_SAID_RE.search(excerpt)
+    return match.group(1).strip() if match else ""
+
+
 def code(value: str) -> str:
     """``value`` as a Markdown inline code span, whatever it contains.
 
@@ -366,6 +393,8 @@ class _Rules:
         based_on: Sequence[str],
         already: Already | None = None,
         against: tuple[str, str, str, str, str] | None = None,
+        events: int | None = None,
+        stated: bool = False,
         **named: str,
     ) -> None:
         """Record a recommendation, in its "already documented" form where that applies.
@@ -373,8 +402,14 @@ class _Rules:
         ``already`` is the rule's own wording for the case that the instruction files
         name what it would have suggested; any other documentable rule whose subject
         (the path, the command) is named there gets a note instead of new advice.
+        ``events`` is how many events the advice rests on (default: this hotspot's
+        events of the ``based_on`` signals); ``stated`` says a human gave the reason in
+        so many words, which carries the advice however few the events are.
         """
         assert rule_id in RULE_IDS, rule_id
+        if events is None:
+            events = len({f.fid for signal in based_on for f in self.get(signal)})
+        thin = events < THIN_EVIDENCE_EVENTS and not stated and rule_id not in FACT_BACKED_RULES
         mentions: list[Mention] = []
         documented = ""
         guidance = self.guidance
@@ -438,6 +473,8 @@ class _Rules:
                 "title": title,
                 "detail": detail,
                 "signals": sorted(set(based_on)),
+                "events": events,
+                **({"evidence": "thin"} if thin else {}),
                 "documented_in": [m.as_dict() for m in mentions],
                 # "instruction": a line there says what this advice would say (in command
                 # or instruction context); "mention": the words occur there, no more;
@@ -555,7 +592,14 @@ class _Rules:
             detail += " Reasons given: " + " / ".join(
                 f'"{self.quote(r, QUOTE_CHARS)}"' for r, _ in _top(reasons)
             )
-        self.add("state-the-boundary", "State the boundary", detail, [signals.TOOL_REJECTED])
+        self.add(
+            "state-the-boundary",
+            "State the boundary",
+            detail,
+            [signals.TOOL_REJECTED],
+            events=len(found),
+            stated=bool(reasons),
+        )
 
     def interrupts(self) -> None:
         found = self.get(signals.USER_INTERRUPT)
@@ -913,6 +957,7 @@ class _Rules:
             f"Agents tried {what} {_in_sessions(held)} and were refused by {by} before "
             f"anything ran, {went}.{said} {closing}",
             [signals.PERMISSION_DENIED],
+            events=len(held),
         )
         if ways:
             self.out[-1]["replacement"] = ways[0][0]
@@ -928,13 +973,27 @@ class _Rules:
         hooks = sum(f.detail.get("variant") == "hook" for f in denied)
         blocked = sum(f.detail.get("variant") == "blocked" for f in denied)
         if blocked * 2 > len(denied):
+            # Claude Code refuses some forms by itself ("Blocked: sleep 100 followed by:
+            # ..."): a rule of the agent tool, the same in every repository. Nothing here
+            # caused it and no setting of this repository changes it.
+            instead = _top([_harness_instead(f.excerpt) for f in denied])
+            says = (
+                f' Its message says what to do instead: "{self.quote(instead[0][0], QUOTE_CHARS)}"'
+                if instead and self.quote is not None
+                else " Its message says what to do instead (see the cited lines)."
+            )
             self.add(
                 "allow-or-document-the-boundary",
-                "Tell agents what the harness wants instead",
-                f"Agents tried {what} {_in_sessions(denied)} in a form the harness itself "
-                "refuses to run (see the cited lines for what it suggests instead). Put that "
-                "alternative in AGENTS.md so the first attempt is the right one.",
+                f"Built into the agent tool, not this repository: agents keep trying {what}",
+                f"Agents tried {what} {_in_sessions(denied)} in a form the agent tool itself "
+                "refuses to run: a built-in rule of the harness (Claude Code), not a hook, "
+                f"a permission setting or anything in this repository.{says} Nothing in the "
+                "repository needs to change. If the round trips cost too much, one line in "
+                "AGENTS.md (or CLAUDE.md) with that alternative makes the first attempt the "
+                "right one.",
                 [signals.PERMISSION_DENIED],
+                events=len(denied),
+                origin="agent-tool",
             )
             return
         automatic = sum(f.detail.get("variant") in ("classifier", "safety") for f in denied)
@@ -948,6 +1007,8 @@ class _Rules:
                 "not available to agents and what to do instead (a narrower command, or "
                 "stop and ask).",
                 [signals.PERMISSION_DENIED],
+                events=len(denied),
+                origin="agent-tool",
             )
             return
         by = "a hook" if hooks * 2 > len(denied) else "permission settings"
@@ -969,6 +1030,7 @@ class _Rules:
                     "through; if it is fine, narrow the guardrail so the first attempt is "
                     "not refused.",
                     [signals.PERMISSION_DENIED],
+                    events=len(denied),
                 )
             else:
                 self.add(
@@ -979,6 +1041,7 @@ class _Rules:
                     "seen. The guardrail is there on purpose: say in AGENTS.md that this "
                     "is refused and what to do instead, or have the refusal itself say it.",
                     [signals.PERMISSION_DENIED],
+                    events=len(denied),
                 )
             return
         self.add(
@@ -989,6 +1052,7 @@ class _Rules:
             "stalling on it; if it is meant to be off limits, say so in AGENTS.md together "
             "with what to do instead.",
             [signals.PERMISSION_DENIED],
+            events=len(denied),
         )
 
     # ---- command rules ---------------------------------------------------------------
@@ -1510,6 +1574,7 @@ class _Rules:
                 "it takes too long or should not be run here, say so in AGENTS.md together "
                 "with what to run instead (a narrower or faster command).",
                 [signals.USER_INTERRUPT],
+                events=len(stopped),
             )
 
 
@@ -1625,6 +1690,24 @@ def _error_line(finding: Finding) -> str:
     return ""
 
 
+def fmt_percent(part: int, whole: int) -> str:
+    """``part`` of ``whole`` as a percentage that never rounds a real rate away.
+
+    2 of 1,000 is "0.2%", not "0%"; 1 of 20,000 is "<0.1%"; 199 of 200 is "99%",
+    not "100%". Whole percentages from 1% up.
+    """
+    if whole <= 0 or part <= 0:
+        return "0%"
+    if part >= whole:
+        return "100%"
+    pct = 100.0 * part / whole
+    if pct < 0.1:
+        return "<0.1%"
+    if pct < 1:
+        return f"{pct:.1f}%"
+    return f"{min(round(pct), 99):.0f}%"
+
+
 def repo_wide(
     signal: str, base: scoring.Baseline, sessions: int, rewritten: int = 0
 ) -> dict[str, object] | None:
@@ -1643,7 +1726,7 @@ def repo_wide(
         or base.visits < REPO_WIDE_MIN_VISITS
     ):
         return None
-    percent = f"{100.0 * base.hit_visits / base.visits:.0f}%" if base.visits else "0%"
+    percent = fmt_percent(base.hit_visits, base.visits)
     if signal == signals.EDIT_MISS:
         what, title = "edits did not find their target text", "Edit misses"
     else:
@@ -1703,6 +1786,16 @@ def repo_wide(
     }
 
 
+def is_thin(rec: Mapping[str, object]) -> bool:
+    """Advice resting on too few events to act on (see ``THIN_EVIDENCE_EVENTS``)."""
+    return rec.get("evidence") == "thin"
+
+
+def _strong_first(recs: list[dict[str, object]]) -> list[dict[str, object]]:
+    """The hotspot's advice, that with enough events behind it first, in rule order."""
+    return sorted(recs, key=is_thin)
+
+
 def recommend(
     kind: str,
     key: str,
@@ -1740,7 +1833,7 @@ def recommend(
         rules.guardrail("to change this file" if kind == model.FILE else code(key))
         if kind == model.COMMAND:
             rules.hook_habit(key)
-        return rules.out
+        return _strong_first(rules.out)
     if kind == model.FILE:
         rules.file(facts)
         if facts is not None and not facts.exists and facts.removed_at:
@@ -1750,4 +1843,4 @@ def recommend(
     else:
         rules.search_misses(f"under {key}/" if key != "." else "the whole repo")
         rules.corrections()
-    return rules.out
+    return _strong_first(rules.out)

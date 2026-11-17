@@ -172,3 +172,11 @@ def test_documented_rules_for_recurring_red_runs_match_the_code() -> None:
         assert f"failed {runs} or more times in a session" in text.replace("fails", "failed")
         assert f"in {sessions} or more sessions" in text
     assert "`dropped_red_runs`" in read("schema.md") and "`dropped_minutes`" in read("schema.md")
+
+
+def test_thin_evidence_threshold_matches_the_code() -> None:
+    method = read("methodology.md")
+    assert f"With fewer than {recommend.THIN_EVIDENCE_EVENTS}\n(`THIN_EVIDENCE_EVENTS`)" in method
+    section = method.split("**Thin evidence.**")[1].split("\n\n")[0]
+    for rule in recommend.FACT_BACKED_RULES:
+        assert f"`{rule}`" in section, rule

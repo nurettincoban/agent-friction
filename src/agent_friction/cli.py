@@ -24,6 +24,7 @@ from agent_friction.report import (
     render_html,
     render_json,
     render_markdown,
+    render_prompt,
     render_terminal,
 )
 from agent_friction.report._common import (
@@ -68,6 +69,44 @@ def _absolute_path(value: str) -> str:
     if not (PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()):
         raise argparse.ArgumentTypeError(f"{value!r} is not an absolute path")
     return value
+
+
+#: What Git Bash (MSYS) makes of a POSIX path it passes to a Windows program:
+#: ``/home/dev/shop`` arrives as ``C:/Program Files/Git/home/dev/shop``.
+_MSYS_REWRITTEN_RE = re.compile(
+    r"^[A-Za-z]:/(?:[^/]+/)*?(?:Git|msys64|msys32|msys2|cygwin64|cygwin)/"
+    r"(?P<rest>(?:home|tmp|mnt|srv|opt|var|usr|root|workspaces?|Users|data)(?:/.*)?)$",
+    re.I,
+)
+
+
+def undo_msys_rewrite(value: str) -> str | None:
+    """The POSIX path Git Bash turned into ``value``, or ``None`` if it did not.
+
+    ``--repo-alias /home/dev/shop`` typed in Git Bash on Windows reaches us as
+    ``C:/Program Files/Git/home/dev/shop``: a path under the Git installation, which
+    no session was ever recorded in.
+    """
+    match = _MSYS_REWRITTEN_RE.match(value)
+    if match is None or Path(value).exists():
+        return None
+    return "/" + match.group("rest")
+
+
+def _undo_msys_aliases(args: argparse.Namespace, err: TextIO) -> None:
+    aliases = getattr(args, "repo_alias", None)
+    if not aliases:
+        return
+    for i, value in enumerate(aliases):
+        posix = undo_msys_rewrite(value)
+        if posix is None:
+            continue
+        aliases[i] = posix
+        err.write(
+            f"agent-friction: note: Git Bash rewrote --repo-alias {posix} as {value}; "
+            f"using {posix}. Run `export MSYS_NO_PATHCONV=1` (or prefix the command with "
+            "it) to keep Git Bash from rewriting paths.\n"
+        )
 
 
 def _find_repo_root(start: Path) -> Path | None:
@@ -267,9 +306,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Map where coding agents lose time, make mistakes, and need human "
         "correction in your codebase, with the evidence to decide what to fix.",
         epilog="Examples:\n"
+        "  agent-friction demo                      # try it on the bundled example\n"
         "  agent-friction scan                      # friction map for the current repo\n"
         "  agent-friction scan --since 30d -o map.html\n"
         "  agent-friction show src/api/client.py   # evidence for one file\n"
+        "  agent-friction scan -f prompt            # the fixes, as a task for your agent\n"
+        "  agent-friction install-skill             # ... or let Claude Code apply them\n"
         "  agent-friction scan -f json -o before.json  # ...fix things, later:\n"
         "  agent-friction compare before.json after.json",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -302,12 +344,62 @@ def build_parser() -> argparse.ArgumentParser:
     out.add_argument(
         "--color", choices=("auto", "always", "never"), default="auto", help="terminal colors"
     )
+    scan.add_argument(
+        "--from",
+        dest="from_json",
+        type=Path,
+        metavar="JSON",
+        help="render a saved `scan -f json` result in another format instead of scanning "
+        "(for example `-f prompt`)",
+    )
     out.add_argument(
         "--fail-on",
         type=_score,
         metavar="SCORE",
         help="exit 3 if any hotspot scores at least SCORE (for CI gates)",
     )
+
+    demo = sub.add_parser(
+        "demo",
+        allow_abbrev=False,
+        help="scan the bundled example repository and its sessions (nothing to set up)",
+        description="Scan the small example repository and synthetic agent sessions that "
+        "ship with agent-friction, to see what a report looks like before pointing it at "
+        "your own repository.",
+    )
+    demo_out = demo.add_argument_group("output")
+    demo_out.add_argument(
+        "-f", "--format", type=_format_name, choices=FORMATS, help="output format, as for `scan`"
+    )
+    demo_out.add_argument("-o", "--output", type=Path, metavar="FILE", help="write to FILE")
+    demo_out.add_argument(
+        "--top", type=_positive_int, default=10, metavar="N", help="rows per table (default 10)"
+    )
+    demo_out.add_argument(
+        "--color", choices=("auto", "always", "never"), default="auto", help="terminal colors"
+    )
+
+    skill = sub.add_parser(
+        "install-skill",
+        allow_abbrev=False,
+        help="install the Claude Code skill that scans and applies the fixes, with approval",
+        description="Write the agent-friction-fix skill for Claude Code. In Claude Code, "
+        "ask it to fix agent friction (or type /agent-friction-fix): it scans, proposes "
+        "small changes with their evidence, applies the ones you approve, and compares "
+        "with the last scan next time.",
+    )
+    where = skill.add_mutually_exclusive_group()
+    where.add_argument(
+        "--project",
+        type=Path,
+        metavar="REPO",
+        help="install into REPO/.claude/skills (shared with everyone who clones it) "
+        "instead of ~/.claude/skills",
+    )
+    where.add_argument(
+        "--print", action="store_true", help="print the skill to standard output instead"
+    )
+    skill.add_argument("--force", action="store_true", help="overwrite an existing copy")
 
     show = sub.add_parser(
         "show", allow_abbrev=False, help="show the evidence behind one file, directory, or command"
@@ -495,9 +587,12 @@ def _analyze(args: argparse.Namespace, repo: Path, err: TextIO | None = None) ->
             seen = []
         if seen:
             listed = ", ".join(f"{d} ({plural(n, 'session')})" for d, n in seen)
-            where = (
-                f" The sessions in these transcripts ran in {listed}; if one of those is this "
-                f"repository on another machine, pass --repo-alias {seen[0][0]}."
+            fresh = [d for d, _ in seen if d not in args.repo_alias]
+            where = f" The sessions in these transcripts ran in {listed}" + (
+                f"; if one of those is this repository on another machine, pass "
+                f"--repo-alias {fresh[0]}."
+                if fresh
+                else "."
             )
         raise AgentFrictionError(
             f"found transcripts, but no agent session touched {repo.resolve()}{window}, "
@@ -659,7 +754,16 @@ def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
             )
             return EXIT_USAGE
     fmt = fmt or "terminal"
-    result = _analyze(args, args.repo, stderr)
+    if getattr(args, "from_json", None) is not None:
+        _check_from_json_flags(args)
+        result = _load_json(args.from_json)
+        if args.no_excerpts and (result.get("settings") or {}).get("excerpts", True):
+            raise UsageError(
+                f"{args.from_json} was scanned with transcript text; --no-excerpts cannot "
+                "remove it afterwards. Make the saved scan with `scan --no-excerpts -f json`"
+            )
+    else:
+        result = _analyze(args, args.repo, stderr)
     _warn_unreadable(result, stderr)
     if fmt == "json":
         text = render_json(result)
@@ -667,6 +771,8 @@ def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         text = render_markdown(result, top=args.top)
     elif fmt == "html":
         text = render_html(result)
+    elif fmt == "prompt":
+        text = render_prompt(result)
     else:
         color = args.output is None and _use_color(args.color, stdout)
         text = render_terminal(
@@ -685,6 +791,75 @@ def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
             )
             return EXIT_GATE
     return EXIT_OK
+
+
+SKILL_NAME = "agent-friction-fix"
+
+
+def skill_text() -> str:
+    """The Claude Code skill shipped with the package (``skill/SKILL.md``)."""
+    return (Path(__file__).resolve().parent / "skill" / "SKILL.md").read_text(encoding="utf-8")
+
+
+def _cmd_install_skill(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    text = skill_text()
+    if args.print:
+        stdout.write(text)
+        return EXIT_OK
+    base = args.project if args.project is not None else Path.home()
+    if args.project is not None and not args.project.is_dir():
+        raise AgentFrictionError(f"{args.project}: not a directory")
+    target = base / ".claude" / "skills" / SKILL_NAME / "SKILL.md"
+    if target.exists() and not args.force:
+        if target.read_text(encoding="utf-8") == text:
+            stderr.write(f"agent-friction: {target} is already up to date\n")
+            return EXIT_OK
+        raise AgentFrictionError(f"{target} exists and differs; pass --force to overwrite it")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        raise AgentFrictionError(f"cannot write {target}: {exc.strerror or exc}") from None
+    stderr.write(
+        f"wrote {target}\nIn Claude Code, inside a repository: /{SKILL_NAME} (or ask it to "
+        "fix agent friction). It scans, proposes changes with their evidence, and applies "
+        "only the ones you approve.\n"
+    )
+    return EXIT_OK
+
+
+#: Where the bundled demo sessions were recorded (see tests/fixture_story.py).
+DEMO_RECORDED_AT = "/home/dev/shopfront"
+
+
+def demo_data() -> tuple[Path, Path]:
+    """The bundled example repository and its transcripts.
+
+    A wheel carries them as ``agent_friction/_demo``; a source checkout has them
+    under ``tests/fixtures``.
+    """
+    here = Path(__file__).resolve().parent
+    for base in (here / "_demo", here.parent.parent / "tests" / "fixtures"):
+        if (base / "shopfront").is_dir() and (base / "transcripts").is_dir():
+            return base / "shopfront", base / "transcripts"
+    raise AgentFrictionError("the bundled demo data is missing from this installation")
+
+
+def _cmd_demo(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    repo, transcripts = demo_data()
+    args.repo, args.transcripts = repo, [transcripts]
+    args.repo_alias, args.no_git, args.allow_empty = [DEMO_RECORDED_AT], True, False
+    args.since = args.until = None
+    args.no_excerpts, args.max_evidence, args.rework_days = False, None, 14
+    args.agent_commit, args.bot_author, args.fail_on = [], [], None
+    code = _cmd_scan(args, stdout, stderr)
+    if code == EXIT_OK and args.output is None:
+        stderr.write(
+            "agent-friction: this was the bundled demo (a made-up shop and six agent "
+            "sessions). Full map: `agent-friction demo -o demo.html`. "
+            "Your own repository: `agent-friction scan` inside it.\n"
+        )
+    return code
 
 
 def _target_in_repo(target: str, repo: Path | None) -> str:
@@ -973,11 +1148,14 @@ def main(
         return EXIT_USAGE
     handlers = {
         "scan": _cmd_scan,
+        "demo": _cmd_demo,
+        "install-skill": _cmd_install_skill,
         "show": _cmd_show,
         "compare": _cmd_compare,
         "sources": _cmd_sources,
     }
     try:
+        _undo_msys_aliases(args, err)
         if hasattr(args, "repo"):
             _resolve_repo(args, err)
         return handlers[args.command](args, out, err)

@@ -55,6 +55,11 @@ exclude = ["docs/assets"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_friction"]
 
+# `agent-friction demo` scans these; a source checkout reads them from tests/fixtures.
+[tool.hatch.build.targets.wheel.force-include]
+"tests/fixtures/shopfront" = "agent_friction/_demo/shopfront"
+"tests/fixtures/transcripts" = "agent_friction/_demo/transcripts"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"

@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data:">
-<title>agent-friction · find where coding agents keep getting stuck</title>
-<meta name="description" content="A local, zero-dependency CLI that reads your coding agent's transcripts and maps the files, commands and directories where it keeps failing, with quoted evidence and the fix to make.">
+<title>agent-friction · stop paying for the same agent mistake twice</title>
+<meta name="description" content="A local, zero-dependency CLI that reads your coding agent's transcripts, finds what keeps going wrong in your repository, and turns it into fixes with the evidence: fewer wasted turns and tokens, faster sessions, fewer corrections.">
 <link rel="canonical" href="https://nurettincoban.github.io/agent-friction/">
 <meta property="og:type" content="website">
-<meta property="og:title" content="agent-friction: find where coding agents keep getting stuck">
+<meta property="og:title" content="agent-friction: stop paying for the same agent mistake twice">
 <meta property="og:description" content="Reads the transcripts your coding agent already leaves on disk and maps recurring failures to your files and commands, with the evidence and the fix.">
 <meta property="og:url" content="https://nurettincoban.github.io/agent-friction/">
 <meta property="og:image" content="https://nurettincoban.github.io/agent-friction/assets/friction-map.png">
@@ -93,6 +93,9 @@ h2 { font-size: clamp(26px, 3.6vw, 36px); letter-spacing: -0.02em; line-height: 
 .section-lede { color: var(--muted); max-width: 44em; margin: 0 0 32px; font-size: 18px; }
 
 /* problem cards */
+.grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 1060px) { .grid4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 620px) { .grid4 { grid-template-columns: 1fr; } }
 .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 @media (max-width: 860px) { .grid3 { grid-template-columns: 1fr; } }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 22px; }
@@ -176,32 +179,43 @@ footer a { color: var(--muted); }
 <main id="main">
   <header class="hero wrap">
     <span class="eyebrow">Open source · MIT · Alpha</span>
-    <h1>See where your coding agent <em>keeps getting stuck</em></h1>
-    <p class="lede">agent-friction reads the transcripts your coding agent already leaves on disk, finds the failures that repeat across sessions, pins them to your files and commands, and tells you what to change. Every finding comes with the transcript evidence, so you can check it yourself.</p>
+    <h1>Stop paying for the same agent mistake <em>twice</em></h1>
+    <p class="lede">agent-friction reads the transcripts your coding agent already leaves on disk, finds what keeps going wrong in this repository, and turns it into a short list of fixes, each with the evidence behind it. Fix them, and your agents waste fewer turns and tokens, finish sooner, and need fewer corrections from you.</p>
     <div class="cta">
       <a class="btn primary" href="demo/">Open the live demo →</a>
       <a class="btn" href="https://github.com/nurettincoban/agent-friction">View on GitHub</a>
     </div>
     <div class="install" role="group" aria-label="Install command">
-      <span id="cmd">pipx install git+https://<wbr>github.com/<wbr>nurettincoban/<wbr>agent-friction</span>
-      <button class="copy" type="button" data-copy="cmd" aria-label="Copy the install command">Copy</button>
+      <span id="cmd">uvx --from git+https://<wbr>github.com/<wbr>nurettincoban/<wbr>agent-friction agent-friction scan</span>
+      <button class="copy" type="button" data-copy="cmd" aria-label="Copy the command">Copy</button>
     </div>
     <ul class="facts">
       <li>Runs locally, no network calls</li>
-      <li>Zero dependencies</li>
-      <li>Works with Claude Code out of the box</li>
+      <li>No model calls, same input gives the same report</li>
+      <li>No sessions yet? <code>agent-friction demo</code></li>
     </ul>
     <figure class="shot">
       <a href="demo/" aria-label="Open the interactive demo report">
         <picture>
         <source srcset="assets/friction-map-dark.png" media="(prefers-color-scheme: dark)">
-        <img src="assets/friction-map.png" width="2480" height="1600"
-             alt="An agent-friction HTML report: headline numbers (6 sessions, 33 friction events, about 9 minutes lost, 4 human corrections) above a treemap where the generated file schema_gen.py is the largest, darkest tile, next to a panel explaining why it scores 56.8 and what to change.">
+        <img src="assets/friction-map.png" width="2480" height="2300"
+             alt="An agent-friction HTML report: headline numbers (6 sessions, 22 friction events plus 11 weak ones, about 9 minutes lost, 4 human corrections), then What to fix first (point agents at the source of the generated schema_gen.py, use make test instead of pytest, write down the rule the human keeps repeating), then a treemap where schema_gen.py is the largest, darkest tile.">
         </picture>
       </a>
       <figcaption>The interactive report for a sample repository. <a href="demo/">Click through it yourself</a>: it is one self-contained HTML file.</figcaption>
     </figure>
   </header>
+
+  <section class="wrap" aria-labelledby="payoff">
+    <h2 id="payoff">What fixing them gets you</h2>
+    <p class="section-lede">Every failed command, missed edit and retry is a round trip your agent pays for in tokens and minutes. The report counts them per file and command, with an estimate of the agent time each one cost, so you fix the expensive ones first.</p>
+    <div class="grid4">
+      <article class="card"><h3>Fewer wasted turns and tokens</h3><p>The agent stops trying what never works here: three failing <code>pytest</code> runs before <code>make test</code>, six missed edits to a generated file.</p></article>
+      <article class="card"><h3>Faster sessions</h3><p>It gets it right on the first try, because the line it needed is now in <code>AGENTS.md</code> or <code>CLAUDE.md</code>.</p></article>
+      <article class="card"><h3>Fewer corrections from you</h3><p>The rule you keep typing ("use <code>PaymentClient</code>") is written down once, where every future session reads it.</p></article>
+      <article class="card"><h3>Proof that it worked</h3><p><code>agent-friction compare</code> measures a later scan against the earlier one, file by file and command by command.</p></article>
+    </div>
+  </section>
 
   <section class="wrap" aria-labelledby="problem">
     <h2 id="problem">Small failures, repeated, are where agent time goes</h2>
@@ -227,27 +241,24 @@ footer a { color: var(--muted); }
 
   <section class="wrap" aria-labelledby="output">
     <h2 id="output">One command, a ranked list of what to fix</h2>
-    <p class="section-lede">Run it inside any repository you have used a coding agent on. Scores rank how reliably something hurts across sessions, so one bad afternoon is noise and the same failure in five sessions is a pattern. Below is the real output for the sample repository, abridged to its top rows.</p>
+    <p class="section-lede">Run it inside any repository you have used a coding agent on. Scores rank how reliably something hurts across sessions, so one bad afternoon is noise and the same failure in five sessions is a pattern. Below is the real output of <code>agent-friction demo</code>, abridged to its top rows. Advice resting on fewer than 5 events is marked as thin evidence and kept off this list.</p>
     <div class="term" role="region" aria-label="Example terminal output">
       <div class="bar" aria-hidden="true"><i></i><i></i><i></i></div>
-<pre tabindex="0"><span class="p">$</span> agent-friction scan
+<pre tabindex="0"><span class="p">$</span> agent-friction demo
 <span class="h">agent-friction · shopfront</span>
-<span class="dim">6 sessions · 74 tool calls · 33 friction events (11 weak) · ~9m lost · 4 human corrections</span>
-
-<span class="h">Files where agents struggle</span>
-<span class="dim">  score            path                                   sess events    lost</span>
-  <span class="hot">█████▋</span>      56.8 src/shopfront/api/schema_gen.py           4     12      4m
-  <span class="warm">████▎</span>       42.4 src/shopfront/checkout/service.py         3      5      2m
-
-<span class="h">Commands that keep failing</span>
-  <span class="hot">████▉</span>       48.6 pytest                                    4      7      3m
+<span class="dim">6 sessions · 74 tool calls · 22 friction events (+11 weak) · ~9m lost · 4 human corrections</span>
 
 <span class="h">What to fix first</span>
   1. src/shopfront/api/schema_gen.py: <span class="ok">Generated file: point agents at its source</span>
   2. pytest: <span class="ok">Tell agents to use `make test`</span>
-     <span class="dim">`pytest` failed 7 times in 4 sessions; 5 times the agent then got the same job
-     done with `make test`, and `pytest` did not work later in those sessions.</span>
-  3. src/shopfront/checkout/service.py: <span class="ok">Write down the rule the human keeps repeating</span></pre>
+     <span class="dim">`pytest` failed 7 times in 4 sessions; 5 times the agent then got the same job done with
+     `make test`, and `pytest` did not work later in those sessions.</span>
+  3. src/shopfront/checkout/service.py: <span class="ok">Write down the rule the human keeps repeating</span>
+
+<span class="h">Files where agents struggle</span>
+<span class="dim">  score            path                                   sess events    lost</span>
+  <span class="hot">█████▋</span>      56.8 src/shopfront/api/schema_gen.py           4     12      4m
+  <span class="warm">████▎</span>       42.4 src/shopfront/checkout/service.py         3      5      2m</pre>
     </div>
   </section>
 
@@ -262,10 +273,11 @@ footer a { color: var(--muted); }
 agent-friction show pytest</pre>
       </div>
       <div class="step">
-        <h3>Change one thing</h3>
-        <p>Add the missing line to <code>AGENTS.md</code>, split the file, or add a hook. It checks what your instruction files already say first.</p>
-<pre tabindex="0"># AGENTS.md
-- Use `make test`, not `pytest`.</pre>
+        <h3>Let your agent fix it</h3>
+        <p>Claude Code proposes each change with its evidence and applies only what you approve. Any other agent: <code>scan -f prompt</code> prints the same fixes as a task.</p>
+<pre tabindex="0">agent-friction install-skill
+# then, in Claude Code:
+/agent-friction-fix</pre>
       </div>
       <div class="step">
         <h3>Prove it helped</h3>
@@ -274,6 +286,21 @@ agent-friction show pytest</pre>
   before.json after.json</pre>
       </div>
     </div>
+  </section>
+
+  <section class="wrap" id="insights" aria-labelledby="insights-h">
+    <h2 id="insights-h">And Claude Code's <code>/insights</code>?</h2>
+    <p class="section-lede">They answer different questions and work well together. We <a href="https://github.com/nurettincoban/agent-friction/blob/main/docs/comparison.md">ran both on the same sessions</a>; both reports are published next to the write-up.</p>
+    <table>
+      <thead><tr><th scope="col"></th><th scope="col"><code>/insights</code></th><th scope="col">agent-friction</th></tr></thead>
+      <tbody>
+        <tr><td>Question</td><td>How do you and Claude work together?</td><td>Where does this repository trip agents up?</td></tr>
+        <tr><td>Method</td><td>A model summarizes a sample of your recent sessions</td><td>Documented rules over every session that touched the repo; no model, no network</td></tr>
+        <tr><td>Evidence</td><td>Narrative with examples</td><td>Counts per file and command, each event traceable to a transcript line</td></tr>
+        <tr><td>Same input, same output</td><td>No</td><td>Yes, so you can compare before and after</td></tr>
+        <tr><td>In our test, it also found</td><td>Prompting and verification habits, larger workflow ideas</td><td><code>pytest</code> vs <code>make test</code>, empty searches, 280 refusals by Claude Code's own <code>sleep</code> rule</td></tr>
+      </tbody>
+    </table>
   </section>
 
   <section class="wrap" id="signals" aria-labelledby="signals-h">
@@ -291,7 +318,7 @@ agent-friction show pytest</pre>
       <li class="sig"><b>path-miss</b><span>The agent read or edited a path that does not exist</span></li>
       <li class="sig"><b>search-miss</b><span>A search in a file or directory came back empty</span></li>
       <li class="sig"><b>file-too-large</b><span>A file too large for the agent to read</span></li>
-      <li class="sig"><b>…and 7 more</b><span><a href="https://github.com/nurettincoban/agent-friction#what-it-detects">See the full table</a></span></li>
+      <li class="sig"><b>…and 7 more</b><span><a href="https://github.com/nurettincoban/agent-friction/blob/main/docs/usage.md#what-it-detects">See the full table</a></span></li>
     </ul>
   </section>
 
@@ -320,7 +347,7 @@ agent-friction show pytest</pre>
 
   <section class="final wrap" aria-labelledby="start-h">
     <h2 id="start-h">Find out where your agent time goes</h2>
-    <p>Install it, run <code>agent-friction scan</code> in a repository, and read the top three lines.</p>
+    <p>Run it in a repository, read the top three lines, and let your agent fix them.</p>
     <div class="install" role="group" aria-label="Run without installing">
       <span id="cmd2">uvx --from git+https://<wbr>github.com/<wbr>nurettincoban/<wbr>agent-friction agent-friction scan</span>
       <button class="copy" type="button" data-copy="cmd2" aria-label="Copy the uvx command">Copy</button>

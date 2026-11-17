@@ -6,6 +6,8 @@ import math
 import re
 from typing import Any
 
+from agent_friction.recommend import THIN_EVIDENCE_EVENTS
+
 
 def gone_note(h: dict[str, Any]) -> str:
     """ " (renamed)" / " (not in tree)" for a file hotspot that is no longer in the tree."""
@@ -21,13 +23,17 @@ def repo_recommendations(result: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def events_phrase(totals: dict[str, Any]) -> str:
-    """ "34 friction events (11 weak)": weak signals alone are leads, not findings."""
+    """ "23 friction events (+11 weak)": the headline counts what can be acted on.
+
+    Weak signals (an empty search, a re-read) are what productive work also
+    produces; on a large repository they can be half of all events, so they are
+    named beside the count, not in it.
+    """
     events = int(totals.get("friction_events", 0) or 0)
-    text = plural(events, "friction event")
     strong = totals.get("strong_events")
     if isinstance(strong, int) and 0 <= strong < events:
-        text += f" ({events - strong} weak)"
-    return text
+        return f"{plural(strong, 'friction event')} (+{events - strong} weak)"
+    return plural(events, "friction event")
 
 
 def fmt_lost(minutes: float) -> str:
@@ -71,16 +77,21 @@ def plural(n: int, word: str) -> str:
     return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
 
+def is_thin(rec: dict[str, Any]) -> bool:
+    """Advice that rests on too few events to act on (``"evidence": "thin"``)."""
+    return rec.get("evidence") == "thin"
+
+
 def collect_recommendations(
     result: dict[str, Any], limit: int = 5
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """Highest-impact recommendations first: (hotspot, recommendation) pairs.
 
     Items backed by medium or high confidence come first, then by score; each
-    contributes its first (most relevant) recommendation.
+    contributes its first (most relevant) recommendation. Advice on thin evidence
+    (a handful of events) is left out while there is any other; with none other, it
+    is what there is, and each one says so.
     """
-    seen: set[str] = set()
-    out: list[tuple[dict[str, Any], dict[str, Any]]] = []
     ranked = sorted(
         all_items(result),
         key=lambda h: (
@@ -90,16 +101,48 @@ def collect_recommendations(
             h.get("path", ""),
         ),
     )
+    strong = _first_recs(ranked, limit, thin=False)
+    return strong or _first_recs(ranked, limit, thin=True)
+
+
+def _first_recs(
+    ranked: list[dict[str, Any]], limit: int, *, thin: bool
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    out: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for hotspot in ranked:
-        for rec in hotspot.get("recommendations", [])[:1]:
-            key = f"{hotspot.get('path')}::{rec.get('id')}"
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append((hotspot, rec))
+        recs = [r for r in hotspot.get("recommendations", []) if isinstance(r, dict)]
+        pick = [r for r in recs if is_thin(r) == thin][:1]
+        out.extend((hotspot, rec) for rec in pick)
         if len(out) >= limit:
             break
     return out
+
+
+def thin_count(result: dict[str, Any]) -> int:
+    """Pieces of advice anywhere in the result that rest on thin evidence."""
+    return sum(
+        is_thin(r)
+        for h in all_items(result)
+        for r in h.get("recommendations", [])
+        if isinstance(r, dict)
+    )
+
+
+def thin_note(result: dict[str, Any], shown: list[tuple[dict[str, Any], dict[str, Any]]]) -> str:
+    """The line under "What to fix first" about advice left out for thin evidence."""
+    if any(is_thin(rec) for _, rec in shown):
+        return (
+            f"Each of these rests on fewer than {THIN_EVIDENCE_EVENTS} events: a lead to "
+            "look at, not yet a reason to change the repository."
+        )
+    n = thin_count(result)
+    if not n:
+        return ""
+    verb, be = ("rests", "is") if n == 1 else ("rest", "are")
+    return (
+        f"{plural(n, 'more suggestion')} {verb} on fewer than {THIN_EVIDENCE_EVENTS} events "
+        f'each and {be} left out here (marked "thin evidence" under each item).'
+    )
 
 
 def all_items(result: dict[str, Any]) -> list[dict[str, Any]]:

@@ -1,4 +1,4 @@
-.PHONY: install check lint format typecheck test cov examples
+.PHONY: install check lint format typecheck test cov examples demo
 
 install:
 	uv sync --group dev
@@ -24,3 +24,6 @@ cov:
 
 examples:
 	uv run python scripts/build_examples.py
+
+demo:
+	uv run agent-friction demo -o demo.html

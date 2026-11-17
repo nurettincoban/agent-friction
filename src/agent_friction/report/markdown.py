@@ -13,9 +13,11 @@ from agent_friction.report._common import (
     gone_note,
     grouped_unattributed,
     headline_lost,
+    is_thin,
     plural,
     repo_recommendations,
     signal_titles,
+    thin_note,
     top_signals,
     unattributed_heading,
 )
@@ -52,6 +54,11 @@ def _table(items: list[dict[str, Any]], label: str) -> list[str]:
     return lines
 
 
+def _events(rec: dict[str, Any]) -> str:
+    n = rec.get("events")
+    return plural(n, "event") if isinstance(n, int) else "few events"
+
+
 def _details(h: dict[str, Any], titles: dict[str, str]) -> list[str]:
     out = [
         "<details>",
@@ -72,7 +79,8 @@ def _details(h: dict[str, Any], titles: dict[str, str]) -> list[str]:
                 _html_escape(str(rec.get("title", ""))),
                 _html_escape(str(rec.get("detail", ""))),
             )
-            out.append(f"- **{title}** {detail}".rstrip())
+            thin = f" _(thin evidence: {_events(rec)})_" if is_thin(rec) else ""
+            out.append(f"- **{title}**{thin} {detail}".rstrip())
         out.append("")
     ev = h.get("evidence", [])
     if ev:
@@ -175,18 +183,21 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
         if note:
             out += [f"_{note}_", ""]
         return "\n".join(out)
-    note = dropped_note(result)
-    if note:
-        out += [f"_{note}_", ""]
-
     recs = collect_recommendations(result, limit=5)
     if recs:
         out += ["## What to fix first", ""]
         for i, (h, rec) in enumerate(recs, 1):
             title = _html_escape(str(rec.get("title", "")))
             detail = _html_escape(str(rec.get("detail", "")))
-            out.append(f"{i}. {_code(h.get('path'))}: **{title}** {detail}")
+            thin = " _(thin evidence)_" if is_thin(rec) else ""
+            out.append(f"{i}. {_code(h.get('path'))}: **{title}**{thin} {detail}")
         out.append("")
+        said = thin_note(result, recs)
+        if said:
+            out += [f"_{said}_", ""]
+    note = dropped_note(result)
+    if note:
+        out += [f"_{note}_", ""]
     out += _repo_section(result)
 
     if hotspots:

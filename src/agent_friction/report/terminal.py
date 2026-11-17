@@ -15,9 +15,11 @@ from agent_friction.report._common import (
     gone_note,
     grouped_unattributed,
     headline_lost,
+    is_thin,
     plural,
     repo_recommendations,
     signal_titles,
+    thin_note,
     top_signals,
     unattributed_heading,
 )
@@ -180,6 +182,31 @@ def _hotspot_rows(
     return lines
 
 
+def _events(rec: dict[str, Any]) -> str:
+    n = rec.get("events")
+    return plural(n, "event") if isinstance(n, int) else "few events"
+
+
+def _fix_first(result: dict[str, Any], st: Style, width: int) -> list[str]:
+    """ "What to fix first": the answer, ahead of the tables it is drawn from."""
+    recs = collect_recommendations(result, limit=5)
+    if not recs:
+        return []
+    out = [st.bold("What to fix first")]
+    for i, (h, rec) in enumerate(recs, 1):
+        thin = st.yellow(" (thin evidence)") if is_thin(rec) else ""
+        out.append(f"  {i}. {st.cyan(str(h.get('path')))}: {rec.get('title', '')}{thin}")
+        detail = str(rec.get("detail", "")).strip()
+        if detail:
+            for line in textwrap.wrap(detail, width=max(40, width - 7)):
+                out.append(st.dim(f"     {line}"))
+    note = thin_note(result, recs)
+    if note:
+        out.extend(st.dim(f"  {line}") for line in textwrap.wrap(note, width=max(40, width - 2)))
+    out.append("")
+    return out
+
+
 def render_terminal(
     result: dict[str, Any], *, color: bool = False, top: int = 10, width: int = 100
 ) -> str:
@@ -242,6 +269,7 @@ def render_terminal(
             out.append(st.dim(note))
         return "\n".join(out) + "\n"
 
+    out.extend(_fix_first(result, st, width))
     if hotspots:
         out.append(st.bold("Files where agents struggle"))
         out.extend(_hotspot_rows(hotspots, st, titles, width))
@@ -261,17 +289,6 @@ def render_terminal(
 
     out.extend(_unattributed_rows(result, st, width))
     out.extend(_repo_rows(result, st, width))
-
-    recs = collect_recommendations(result, limit=5)
-    if recs:
-        out.append(st.bold("What to fix first"))
-        for i, (h, rec) in enumerate(recs, 1):
-            out.append(f"  {i}. {st.cyan(str(h.get('path')))}: {rec.get('title', '')}")
-            detail = str(rec.get("detail", "")).strip()
-            if detail:
-                for line in textwrap.wrap(detail, width=max(40, width - 7)):
-                    out.append(st.dim(f"     {line}"))
-        out.append("")
 
     out.append(
         st.dim(
@@ -343,7 +360,8 @@ def render_detail(
     if recs:
         out.append(st.bold("Recommendations"))
         for rec in recs:
-            out.append(f"  • {rec.get('title', '')}")
+            thin = st.yellow(f" (thin evidence: {_events(rec)})") if is_thin(rec) else ""
+            out.append(f"  • {rec.get('title', '')}{thin}")
             for line in textwrap.wrap(str(rec.get("detail", "")), width=max(40, width - 6)):
                 out.append(st.dim(f"    {line}"))
         out.append("")

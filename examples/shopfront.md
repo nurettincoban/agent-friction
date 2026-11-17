@@ -1,8 +1,6 @@
 # Agent friction map: shopfront
 
-6 agent sessions analysed · 33 friction events (11 weak) · ~9m lost · 4 human corrections · 5 files affected
-
-_Not counted: 1 failed run of normal work (the agent fixed the failure, or was only waiting and polled until it passed; ~6s of run time)._
+6 agent sessions analysed · 22 friction events (+11 weak) · ~9m lost · 4 human corrections · 5 files affected
 
 ## What to fix first
 
@@ -11,6 +9,8 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 3. `src/shopfront/checkout/service.py`: **Write down the rule the human keeps repeating** A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint." (The human also named `src/shopfront/payments/legacy.py`, which the agent had not touched.)
 4. `src/shopfront`: **Point agents to what they are searching for** Agents searched under src/shopfront/ and found nothing 5 times in 2 sessions. They looked for `RefundPolicy` (2x), `**/*policy*.py`, `DiscountPolicy`. If the concept exists under another name or elsewhere, add a pointer in AGENTS.md (or a comment/alias where agents look). If it does not exist, say so.
 5. `rm`: **State the boundary** A human declined the agent's action once in 1 session. State the boundary explicitly (what must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a permission rule. Reasons given: "never delete existing migrations, add a new revision on top"
+
+_Not counted: 1 failed run of normal work (the agent fixed the failure, or was only waiting and polled until it passed; ~6s of run time)._
 
 ## Files where agents struggle
 
