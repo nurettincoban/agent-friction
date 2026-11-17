@@ -915,3 +915,46 @@ def test_since_a_saved_scan_that_is_missing_or_empty_is_a_usage_error(
     assert run("scan", *INPUT, "--since", str(listed))[0] == EXIT_USAGE
     # Anything not ending in .json is still a time.
     assert run("scan", *INPUT, "--since", "2026-11-05", "--color", "never")[0] == EXIT_OK
+
+
+def test_since_a_saved_scan_reads_what_it_read_the_way_it_read_it(tmp_path: Path) -> None:
+    before, after = tmp_path / "before.json", tmp_path / "after.json"
+    assert run("scan", *INPUT, "--until", "2026-11-05", "-o", str(before))[0] == EXIT_OK
+    inputs = json.loads(before.read_text(encoding="utf-8"))["settings"]["inputs"]
+    assert inputs["repo_alias"] == ["/home/dev/shopfront"]
+    assert inputs["transcripts"][0].endswith("fixtures/transcripts")
+    # Only the repository and the saved scan: the rest comes from the saved scan.
+    code, _, err = run("scan", INPUT[0], "--since", str(before), "-o", str(after))
+    assert code == EXIT_OK, err
+    assert "as in the saved scan: --transcripts" in err
+    assert "--repo-alias /home/dev/shopfront --no-git" in err
+    assert json.loads(after.read_text(encoding="utf-8"))["totals"]["sessions"] > 0
+    code, _, err = run("compare", str(before), str(after))
+    assert code == EXIT_OK, err
+    assert "git history" not in err
+
+
+def test_a_scan_without_excerpts_records_no_paths_but_passes_the_mode_on(tmp_path: Path) -> None:
+    before, after = tmp_path / "before.json", tmp_path / "after.json"
+    assert (
+        run("scan", *INPUT, "--no-excerpts", "--until", "2026-11-05", "-o", str(before))[0]
+        == EXIT_OK
+    )
+    assert "inputs" not in json.loads(before.read_text(encoding="utf-8"))["settings"]
+    code, _, err = run("scan", *INPUT, "--since", str(before), "-o", str(after))
+    assert code == EXIT_OK, err
+    assert "as in the saved scan: --no-excerpts" in err
+    assert json.loads(after.read_text(encoding="utf-8"))["settings"]["key_mode"] == "pseudonymized"
+    assert run("compare", str(before), str(after))[0] == EXIT_OK
+
+
+def test_compare_notes_git_history_on_one_side_only(tmp_path: Path) -> None:
+    before, after = tmp_path / "before.json", tmp_path / "after.json"
+    assert run("scan", *INPUT, "--until", "2026-11-05", "-o", str(before))[0] == EXIT_OK
+    saved = json.loads(before.read_text(encoding="utf-8"))
+    assert run("scan", *INPUT, "--since", "2026-11-05", "-o", str(after))[0] == EXIT_OK
+    saved["settings"]["git"] = True
+    before.write_text(json.dumps(saved), encoding="utf-8")
+    code, _, err = run("compare", str(before), str(after))
+    assert code == EXIT_OK
+    assert "only the before scan read git history" in err

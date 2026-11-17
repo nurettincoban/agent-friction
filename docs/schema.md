@@ -71,7 +71,7 @@ by repository or time window, so `0` marks an empty, binary or foreign file.
 | `tool` | object | `{"name": "agent-friction", "version": str}`. |
 | `generated_at` | str | ISO-8601 UTC (`...Z`). |
 | `repo` | object | `root` (absolute; only the current user's own home directory is shown as `~`) and `name` (the directory's name; for a scan from a linked git worktree, the name of the main worktree, so that every scan of one repository names it alike). |
-| `settings` | object | What kind of scan this is: `excerpts` (bool, `include_excerpts`), `git` (bool: git history was read and used), `key_mode` (`"plain"`, or `"pseudonymized"` when command keys carry hash placeholders, i.e. without excerpts). Reports whose `settings` differ should not be compared: their command keys or evidence base differ. *Addition to the base contract.* |
+| `settings` | object | What kind of scan this is: `excerpts` (bool, `include_excerpts`), `git` (bool: git history was read and used), `key_mode` (`"plain"`, or `"pseudonymized"` when command keys carry hash placeholders, i.e. without excerpts). Reports whose `settings` differ should not be compared: their command keys or evidence base differ. `inputs` (only when given, and never with `--no-excerpts`): the `transcripts` and `repo_alias` paths the scan was run with, home as `~`, so that `scan --since this.json` reads the same. *Addition to the base contract.* |
 | `window` | object | See below. |
 | `sources` | list | One entry per input, see below. |
 | `totals` | object | See below. |

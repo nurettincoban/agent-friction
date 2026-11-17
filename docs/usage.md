@@ -86,7 +86,9 @@ agent-friction compare before.json after.json
 ```
 
 `--since before.json` is a shorthand for "after the last event in that saved scan": the later
-scan then holds only sessions the earlier one did not see, which is what `compare` needs.
+scan then holds only events the earlier one did not see, which is what `compare` needs. It
+also reads the transcripts the same way, unless you say otherwise: the `--transcripts` and
+`--repo-alias` the saved scan used, and `--no-git` or `--no-excerpts` if it had them.
 
 `compare` measures each file and command against the sessions that actually touched it (events per
 10 exposed sessions) and gives each one a verdict:
@@ -178,9 +180,10 @@ Then, inside a repository:
   (`scan --since that-scan.json`) and compares the two, file by file and command by command.
   Run it after a week or two of agent work.
 
-Each of them accepts scan options, such as `/agent-friction:scan --since 30d`. The scan files
-quote transcript text, so the first run asks whether to add `.agent-friction/` to
-`.gitignore`.
+`scan` and `fix` accept scan options, such as `/agent-friction:scan --since 30d`; `compare`
+takes two saved scans, or none to use the latest. The scan files quote transcript text, so
+each command asks whether to add `.agent-friction/` to `.gitignore` while it is not ignored.
+`compare` waits for at least 3 sessions after the scan before it reports verdicts.
 
 If you installed the command line tool instead, `agent-friction install-skill` puts the fix
 workflow alone into `~/.claude/skills` (or `--project .` for this repository), as
@@ -279,7 +282,8 @@ Transcripts contain your code and sometimes your secrets, so:
   anonymous, since someone who guesses the name can confirm it.
 - Even with `--no-excerpts`, reports always show your repository's file paths, its directory
   name, and when sessions happened; the JSON also records the repository's absolute path
-  (`repo.root`, with your home directory masked as `~`). Those are the map itself. A path the agent guessed that
+  (`repo.root`, with your home directory masked as `~`), and, without `--no-excerpts`, the
+`--transcripts` and `--repo-alias` paths it was given (`settings.inputs`). Those are the map itself. A path the agent guessed that
   never existed becomes a hash too (`src/<path:3f9a1c>`), since it may name something private.
 - Session ids are taken from the transcript file name (a UUID for Claude Code), and are shown
   even with `--no-excerpts`. If you pool transcripts under descriptive file names, rename them

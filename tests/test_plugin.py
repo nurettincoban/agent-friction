@@ -7,6 +7,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -104,7 +105,14 @@ def test_launcher_is_a_posix_script_with_unix_line_endings() -> None:
 
 
 @pytest.mark.skipif(shutil.which("sh") is None, reason="no POSIX shell")
-def test_launcher_runs_the_bundled_source(tmp_path: Path) -> None:
+def test_launcher_runs_the_bundled_source_not_the_scanned_repository(tmp_path: Path) -> None:
+    # The skills run the launcher inside the repository being scanned. Python files
+    # there must not be imported in place of the standard library or the package.
+    poison = 'print("from the scanned repository"); raise SystemExit(3)\n'
+    for name in ("json.py", "argparse.py", "runpy.py"):
+        (tmp_path / name).write_text(poison, encoding="utf-8")
+    (tmp_path / "agent_friction").mkdir()
+    (tmp_path / "agent_friction" / "__init__.py").write_text(poison, encoding="utf-8")
     done = subprocess.run(
         ["sh", str(LAUNCHER), "--version"],
         cwd=tmp_path,
@@ -113,5 +121,28 @@ def test_launcher_runs_the_bundled_source(tmp_path: Path) -> None:
         timeout=60,
         check=False,
     )
-    assert done.returncode == 0, done.stderr
+    assert done.returncode == 0, done.stdout + done.stderr
     assert __version__ in done.stdout
+    assert "scanned repository" not in done.stdout
+
+
+def test_launcher_bootstrap_puts_the_bundled_source_first(tmp_path: Path) -> None:
+    # The same bootstrap the launcher runs, asked where the package came from.
+    text = LAUNCHER.read_text(encoding="utf-8")
+    run = re.search(r"^run='(.*)'$", text, re.M)
+    assert run is not None
+    code = run.group(1).replace(
+        'runpy.run_module("agent_friction", run_name="__main__", alter_sys=True)',
+        "import agent_friction; print(agent_friction.__file__)",
+    )
+    assert code != run.group(1)
+    done = subprocess.run(
+        [sys.executable, "-c", code, str(ROOT / "src")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert Path(done.stdout.strip()).resolve().is_relative_to((ROOT / "src").resolve())

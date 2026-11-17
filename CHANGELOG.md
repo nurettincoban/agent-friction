@@ -37,8 +37,10 @@ All notable changes to this project are documented here. The format follows
   (`/plugin install agent-friction --marketplace nurettincoban/agent-friction`), with
   `/agent-friction:scan`, `/agent-friction:fix` and `/agent-friction:compare`. It runs its own
   copy of the package with any Python 3.10+, so nothing else needs installing.
-- `scan --since saved.json`: only events after the last one in a saved scan, so the two can
-  be compared without overlap.
+- `scan --since saved.json`: only events after the last one in a saved scan, read with the
+  same `--transcripts`, `--repo-alias`, `--no-git` and `--no-excerpts` it used (now recorded
+  in `settings.inputs`), so the two can be compared without overlap. `compare` notes when
+  only one side read git history.
 - `agent-friction install-skill`: a Claude Code skill (`/agent-friction-fix`) that scans,
   proposes each fix with its evidence, applies only what you approve, and compares against the
   last scan next time.

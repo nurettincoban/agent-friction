@@ -26,7 +26,7 @@ From the repository root, as one command (the variable does not survive between 
 `$ARGUMENTS` are the user's extra scan options, if any):
 
 ```sh
-mkdir -p .agent-friction && scan=.agent-friction/scan-$(date +%Y-%m-%d-%H%M).json && sh "${CLAUDE_PLUGIN_ROOT}/plugin/agent-friction" scan $ARGUMENTS -f json -o "$scan" && sh "${CLAUDE_PLUGIN_ROOT}/plugin/agent-friction" scan --from "$scan" --color never && sh "${CLAUDE_PLUGIN_ROOT}/plugin/agent-friction" scan --from "$scan" -o .agent-friction/map.html && echo "saved $scan"
+mkdir -p .agent-friction && scan=.agent-friction/scan-$(date -u +%Y-%m-%d-%H%M%S).json && sh "${CLAUDE_PLUGIN_ROOT}/plugin/agent-friction" scan $ARGUMENTS -f json -o "$scan" && sh "${CLAUDE_PLUGIN_ROOT}/plugin/agent-friction" scan --from "$scan" --color never && sh "${CLAUDE_PLUGIN_ROOT}/plugin/agent-friction" scan --from "$scan" -o .agent-friction/map.html && echo "saved $scan"
 ```
 
 If it fails because no session touched the repository, show the user its message (it names
