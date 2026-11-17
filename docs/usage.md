@@ -88,7 +88,9 @@ agent-friction compare before.json after.json
 `--since before.json` is a shorthand for "after the last event in that saved scan": the later
 scan then holds only events the earlier one did not see, which is what `compare` needs. It
 also reads the transcripts the same way, unless you say otherwise: the `--transcripts` and
-`--repo-alias` the saved scan used, and `--no-git` or `--no-excerpts` if it had them.
+`--repo-alias` the saved scan used, and `--no-git` or `--no-excerpts` if it had them. A scan
+made with `--no-excerpts` records only that those options were given, not their paths, so
+pass them again; the command says so.
 
 `compare` measures each file and command against the sessions that actually touched it (events per
 10 exposed sessions) and gives each one a verdict:

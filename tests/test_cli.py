@@ -940,7 +940,11 @@ def test_a_scan_without_excerpts_records_no_paths_but_passes_the_mode_on(tmp_pat
         run("scan", *INPUT, "--no-excerpts", "--until", "2026-11-05", "-o", str(before))[0]
         == EXIT_OK
     )
-    assert "inputs" not in json.loads(before.read_text(encoding="utf-8"))["settings"]
+    inputs = json.loads(before.read_text(encoding="utf-8"))["settings"]["inputs"]
+    assert inputs == {"transcripts": True, "repo_alias": True}  # that they were given, no paths
+    code, _, err = run("scan", INPUT[0], "--since", str(before))
+    assert code == EXIT_USAGE
+    assert "pass --transcripts again" in err
     code, _, err = run("scan", *INPUT, "--since", str(before), "-o", str(after))
     assert code == EXIT_OK, err
     assert "as in the saved scan: --no-excerpts" in err
@@ -958,3 +962,12 @@ def test_compare_notes_git_history_on_one_side_only(tmp_path: Path) -> None:
     code, _, err = run("compare", str(before), str(after))
     assert code == EXIT_OK
     assert "only the before scan read git history" in err
+
+
+def test_show_reads_what_a_saved_scan_read(tmp_path: Path) -> None:
+    before = tmp_path / "before.json"
+    assert run("scan", *INPUT, "--until", "2026-11-05", "-o", str(before))[0] == EXIT_OK
+    code, out, err = run("show", "pytest", INPUT[0], "--since", str(before), "--color", "never")
+    assert "pytest" in out
+    assert code == EXIT_OK, err
+    assert "as in the saved scan" in err

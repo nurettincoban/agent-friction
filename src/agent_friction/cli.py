@@ -226,21 +226,30 @@ def _inherit_inputs(args: argparse.Namespace, stderr: TextIO) -> None:
     the transcripts or aliases the first one needed, or differ in git or excerpts, and
     the comparison would be wrong.
     """
-    if not isinstance(args.since, SavedScanCut):
+    if not isinstance(getattr(args, "since", None), SavedScanCut):
         return
     settings = args.since.scan.get("settings") or {}
     inputs = settings.get("inputs") or {}
     took: list[str] = []
-    if args.transcripts is None and inputs.get("transcripts"):
-        args.transcripts = [Path(p).expanduser() for p in inputs["transcripts"]]
-        took += [f"--transcripts {p}" for p in inputs["transcripts"]]
-    if not args.repo_alias and inputs.get("repo_alias"):
-        args.repo_alias = list(inputs["repo_alias"])
-        took += [f"--repo-alias {p}" for p in inputs["repo_alias"]]
-    if settings.get("excerpts") is False and not args.no_excerpts:
+    for dest, flag in (("transcripts", "--transcripts"), ("repo_alias", "--repo-alias")):
+        given, saved = getattr(args, dest, None), inputs.get(dest)
+        if given or not saved:
+            continue
+        if saved is True:  # a --no-excerpts scan notes the option, not the paths
+            raise UsageError(
+                f"the saved scan was made with {flag}, but does not record its paths "
+                f"(it was made with --no-excerpts): pass {flag} again"
+            )
+        setattr(
+            args,
+            dest,
+            [Path(p).expanduser() for p in saved] if dest == "transcripts" else list(saved),
+        )
+        took += [f"{flag} {p}" for p in saved]
+    if settings.get("excerpts") is False and not getattr(args, "no_excerpts", True):
         args.no_excerpts = True
         took.append("--no-excerpts")
-    if settings.get("git") is False and not args.no_git:
+    if settings.get("git") is False and not getattr(args, "no_git", True):
         args.no_git = True
         took.append("--no-git")
     if took:
@@ -614,6 +623,8 @@ def _analyze(args: argparse.Namespace, repo: Path, err: TextIO | None = None) ->
 
     if not repo.is_dir():
         raise AgentFrictionError(f"{repo}: not a directory (pass the repository root)")
+    if err is not None:
+        _inherit_inputs(args, err)
     for given in args.transcripts or []:
         # Checked even with --allow-empty: a mistyped path in CI would otherwise pass every
         # gate with a git-only report.
@@ -646,13 +657,14 @@ def _analyze(args: argparse.Namespace, repo: Path, err: TextIO | None = None) ->
         raise NoTranscriptsError(
             f"{exc} For a map from the git history alone, run again with --allow-empty."
         ) from None
-    # What this scan read, so that `scan --since this.json` can read the same. Not
-    # with --no-excerpts: these are local paths, and that mode keeps to the map.
-    inputs: dict[str, list[str]] = {}
-    if args.transcripts and not args.no_excerpts:
-        inputs["transcripts"] = [_tilde(p) for p in args.transcripts]
-    if args.repo_alias and not args.no_excerpts:
-        inputs["repo_alias"] = [str(p) for p in args.repo_alias]
+    # What this scan read, so that `scan --since this.json` can read the same. With
+    # --no-excerpts only that the option was given: paths are local, that mode keeps to
+    # the map.
+    inputs: dict[str, list[str] | bool] = {}
+    if args.transcripts:
+        inputs["transcripts"] = args.no_excerpts or [_tilde(p) for p in args.transcripts]
+    if args.repo_alias:
+        inputs["repo_alias"] = args.no_excerpts or [str(p) for p in args.repo_alias]
     if inputs:
         result.setdefault("settings", {})["inputs"] = inputs
     if err is not None and args.transcripts is None and not args.repo_alias:
@@ -849,7 +861,6 @@ def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
                 "remove it afterwards. Make the saved scan with `scan --no-excerpts -f json`"
             )
     else:
-        _inherit_inputs(args, stderr)
         result = _analyze(args, args.repo, stderr)
     _warn_unreadable(result, stderr)
     if fmt == "json":
