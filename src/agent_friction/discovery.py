@@ -96,6 +96,31 @@ def git_worktrees(repo: Path) -> list[Path]:
     return found
 
 
+def repo_name(repo: Path) -> str:
+    """What the repository at ``repo`` is called.
+
+    The directory's name, except in a linked git worktree: `shop-fix-123/` is the
+    repository `shop`, and a scan from there must name it as a scan of the main
+    worktree does, or two results for one repository would look like two.
+    """
+    name = repo.name or "repo"
+    listing = _git(repo, "worktree", "list", "--porcelain")
+    shown = _git(repo, "rev-parse", "--show-prefix")
+    if not listing or shown is None or shown.strip().strip("/"):
+        return name  # not git, or a directory inside a repository: its own name
+    first = listing.split("\n\n", 1)[0].splitlines()
+    main = next((line[len("worktree ") :].strip() for line in first if line[:9] == "worktree "), "")
+    if not main:
+        return name
+    with contextlib.suppress(OSError):
+        if Path(main).resolve() == repo.resolve():
+            return name
+    found = Path(main).name
+    if "bare" in first and found.endswith(".git"):
+        found = found[: -len(".git")]
+    return found or name
+
+
 def removed_sibling_sessions(
     repo: Path, config_dirs: Sequence[Path] | None = None
 ) -> list[tuple[str, int]]:

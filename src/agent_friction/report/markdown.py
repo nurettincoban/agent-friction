@@ -11,6 +11,7 @@ from agent_friction.report._common import (
     events_phrase,
     fmt_lost,
     gone_note,
+    grouped_unattributed,
     headline_lost,
     plural,
     repo_recommendations,
@@ -110,7 +111,7 @@ def _unattributed(result: dict[str, Any]) -> list[str]:
     if heading is None:
         return []
     lines = [f"## {heading}", ""]
-    for ev in result.get("unattributed") or []:
+    for ev, n in grouped_unattributed(result):
         when = str(ev.get("timestamp") or "")[:16].replace("T", " ")
         when = f"{when} UTC" if when else when
         where = ""
@@ -118,7 +119,7 @@ def _unattributed(result: dict[str, Any]) -> list[str]:
             where = " · " + _code(f"{ev['source']}:{ev.get('line', '?')}")
         lines.append(
             f"- `{when}` {_code(ev.get('signal', '?'))}: "
-            f"{_html_escape(str(ev.get('summary', '')))}{where}"
+            f"{_html_escape(str(ev.get('summary', '')))}{where}" + (f" (×{n})" if n > 1 else "")
         )
     lines.append("")
     return lines

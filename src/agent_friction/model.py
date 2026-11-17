@@ -90,7 +90,8 @@ class Event:
     pattern: str | None = None
     read_range: str = ""
     edits: tuple[tuple[str, str], ...] = ()  # (digest(old), digest(new)) pairs
-    #: Those of ``edits`` that only added text (the old text survives inside the new).
+    #: Those of ``edits`` that only added text (the old text survives inside the new) or
+    #: only flipped a switch (``DEBUG = False`` -> ``DEBUG = True``): possible probes.
     insertions: frozenset[tuple[str, str]] = frozenset()
     content_digest: str = ""  # digest of full content for writes
     #: Text an edit or write put into the file (capped). Held in memory only, to see whether

@@ -267,6 +267,10 @@ corroborated: ...").
     remark on for discussion, not correcting the agent. "I said" and "you
     said" do not introduce somebody else's words ("No, I said to keep the old
     name" is a correction).
+  - *Pasted output:* fenced code blocks (``` ... ```, also one left open) and
+    Markdown-quoted lines (`> ...`) are taken out as well. "still failing",
+    "wrong" or "you forgot" in a pasted log is the log speaking. What the
+    human writes around the paste counts as usual.
   - *Moving on* voids a verdict: "next task", "new task", "another issue",
     "let's move on", "next: ..." ("It doesn't work on Windows yet; next task: add Windows
     support").
@@ -838,7 +842,11 @@ a different version was written in between. Strings are compared by hash.
 text (its old string survives inside its new string, e.g. a `print` after an
 existing line), a command ran successfully while it was in place, and the
 edit is then exactly undone, nothing is recorded. The agent looked at
-something and cleaned up after itself.
+something and cleaned up after itself. The same goes for a **switch** that
+is flipped, run with and flipped back: a one-line replacement that differs
+only in a value such as `True`/`False`, `0`/`1`, `on`/`off`, `debug`/`info`
+(`DEBUG = False` to `DEBUG = True` and back). Any other replacement that is
+undone is a revert, run or not.
 
 *An undo the human asked for is not a revert:* when the prompt that started
 the turn asks for a change to be taken back ("No, revert src/app.py", "undo
@@ -977,7 +985,10 @@ command's" below.
   versioned name (`python3` for `python`) or, on Windows, with the launcher
   (`py -m pytest` for `python -m pytest`; `py` and `python` share a command
   key), that name is recorded as `works_as` and the advice is "use `py`, not
-  `python`".
+  `python`". The same when a package manager is missing and the same job
+  then runs under another one (`pnpm: command not found`, then `npm
+  install`; `npm`, `pnpm`, `yarn`, `bun`): `works_as` is `npm`, and the
+  advice "use `npm`, not `pnpm`".
 - *"command not found" names its program:* if the shell says which program
   it could not find and that program is a step or pipeline stage of the line
   (`cat x | jqq . | sort`), the event is keyed to that stage.
@@ -1098,11 +1109,21 @@ command's" below.
   of the same command with **nothing changed in between** (no edit, no
   command that changes files, no setup step, no other spelling of the
   command) is at first an ordinary failure like any other. "The same
-  command" is the same command line (whitespace, leading variables and a
-  leading `sleep` aside): `pytest tests/test_cart.py` passing after a red
+  command" is the same command key, run without narrowing what is tested: `pytest tests/test_cart.py` passing after a red
   `pytest`, or `npm test -- src/cart.test.js` after `npm test`, is a narrower
   selection that leaves the failing test out. It says nothing about
-  flakiness, and the red run stays an ordinary failure. When that happens
+  flakiness, and the red run stays an ordinary failure. Other flags do not
+  make it another command: `pytest -v` after `pytest`, `pytest -q --tb=long`,
+  `uv run pytest -x`, `npm test -- --verbose`, `make test V=1`, or `pytest`
+  after `pytest 2>&1 | tail -5` are re-runs. So is a selection that
+  provably contains every failing test the red run named: its node id or
+  file (`pytest tests/test_app.py::test_x`), `--lf` / `--last-failed`, or a
+  plain name given to `-k`, `-t`, `-run`, `--grep` or `--testNamePattern`
+  that matches each of them (`pytest -k test_x`, `npm test -- -t adds`, `go
+  test ./pkg -run TestAdd`; an expression such as `-k "a and not b"` proves
+  nothing). The same holds for red, edit, green: such a run closes the red
+  one. A red run that passed on a re-run is never counted as "red session
+  after session" (below). When that happens
   in 3 or more episodes of work (`FLAKY_MIN_SESSIONS`), it is no longer
   chance: those failures become variant `flaky`, count fully (weight 1.0),
   claim their run time, are attributed to the command alone, and the command
@@ -1141,8 +1162,12 @@ command's" below.
   started. Nothing is recorded. The same holds when the time box ran out
   and the command had printed nothing at all (`timeout 5 nc -l 8080`): the
   agent set the limit itself, and the command was cut off, it did not fail.
-  With output that is not such a banner, with another exit status, or
-  without `timeout` in front, it is judged like any other run.
+  And when the command is a server or a watcher (`npm run dev`, `uvicorn`,
+  `tsc -w`, `jest --watch`, ...; `DEV_SERVER_RE`, `--watch` / `-w`): it never
+  exits by itself, so the time box ending it is the plan, whatever it had
+  logged. For any other command with output that is not such a banner, with
+  another exit status, or without `timeout` in front, it is judged like any
+  other run. (An invocation error in the output is always a failure.)
 - *A `cd` that failed:* in `cd missing-dir && npm test`, when the shell
   reports that it could not change directory (bash: `cd: missing-dir: No such
   file or directory`; zsh: `cd:1: no such file or directory: missing-dir`,
@@ -1163,7 +1188,10 @@ command's" below.
      the one aggregate target on the line that may include it (`make
      check`); `npm ERR! Test failed.`, ``npm error Lifecycle script `lint`
      failed`` and `npm ERR! shop@1.0.0 lint: ...` are about `npm test` and
-     `npm run lint` (`named_steps`);
+     `npm run lint` (`named_steps`); and git says which of its commands gave
+     up: in `git merge origin/main && git push`, `! [rejected]` / `failed to
+     push some refs` is about `git push`, `CONFLICT (...)` / `Automatic merge
+     failed` about `git merge`;
   2. a check's own summary (`Tests: 1 failed`, `1 failed, 40 passed in 2s`,
      `Found 3 errors`): it outranks the runner's generic line. In `npm run
      lint && npm test 2>&1 | tail -5` that ends in `Tests: 1 failed` and `npm
@@ -1436,7 +1464,7 @@ command's" below.
   failure (kinds `service` and `auth`) like any other.
 - *Ignored:* read-only inspection commands and probes whose exit status is
   the answer (`ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `find`, `sed`
-  without `-i`, `awk`, `jq`, `diff`, `test`, `[`, `which`, `command -v`,
+  without `-i`, `awk`, `jq`, `diff`, `test`, `[`, `[[`, `which`, `command -v`,
   `type`, `hash`, `pgrep`, `lsof`, `ag`, `fd`, `pg_isready`, `nc -z`, `ping`,
   `terraform plan -detailed-exitcode`, `git diff | status | log | show | blame |
   rev-parse | merge-base | check-ignore`, `gh pr view | status | checks`, `pip

@@ -276,7 +276,50 @@ class Guidance:
                         return found
         return found
 
+    def conflicts(self, told: str, proposed: str, near: str = "") -> list[Mention]:
+        """Where the files tell agents to run ``told``, or not to run ``proposed``.
 
+        Stricter than a mention: the line must *instruct*. ``told`` has to stand
+        where a command stands (backticks, after run/use/with/via) on a line with a
+        directive word, or in a code fence, and must not be ruled out there;
+        ``proposed`` has to be ruled out ("not `pytest`", "Never run `pytest`").
+        """
+        if self.repo is None:
+            return []
+        use = _pattern(told.strip()) if usable(told) else None
+        avoid = _pattern(proposed.strip()) if usable(proposed) else None
+        found: list[Mention] = []
+        for rel in self.files(near):
+            fenced = False
+            for number, line in self._read(rel):
+                if line.lstrip().startswith("```"):
+                    fenced = not fenced
+                    continue
+                hit = False
+                for match in use.finditer(line) if use else ():
+                    if _negated(line, match.start(), match.end()):
+                        continue
+                    hit = (
+                        hit
+                        or fenced
+                        or bool(_as_command(line, match.start()) and _DIRECTIVE_RE.search(line))
+                    )
+                for match in avoid.finditer(line) if avoid and not fenced else ():
+                    hit = hit or bool(
+                        _NEGATED_BEFORE_RE.search(line[: match.start()])
+                        and _as_command(line, match.start())
+                    )
+                if hit:
+                    found.append(Mention(rel, number))
+                    if len(found) >= MAX_MENTIONS:
+                        return found
+        return found
+
+
+#: Words that make a line with a command on it an instruction to run it.
+_DIRECTIVE_RE = re.compile(
+    r"\b(?:run|use|using|always|must|should|prefer|only|execute|invoke|via|with|call)\b", re.I
+)
 #: Words in front of a command that say "this is a command to run".
 _COMMAND_LEAD_RE = re.compile(
     r"(?:^\s*\$\s+|\b(?:run|use|using|with|via|call|invoke|execute|try)\s+(?:the\s+)?[\"']?)$",

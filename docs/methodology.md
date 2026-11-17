@@ -183,6 +183,8 @@ together, and so that the key can be shown even when excerpts are off:
    `python3`, `python3.12` become `python`; `./scripts/build.sh` becomes
    `scripts/build.sh`.
 4. **Keep arguments only where they are known to be names, not data:**
+   - a script run through a shell is the script: `bash scripts/run.sh`, `sh
+     -x ./scripts/run.sh` and `scripts/run.sh` are all `scripts/run.sh`;
    - interpreters keep `-m module` or the script path (`python -m pytest`,
      `python scripts/gen.py`), plus the subcommand of a script that is itself
      a dispatcher (`python manage.py migrate`, `php artisan migrate`);
@@ -655,7 +657,7 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | Id | Fires when |
 | --- | --- |
 | `edit-the-source-not-the-output` | the file is generated (see "Which files count as generated" below) and the transcripts show trouble editing it: 1+ `edit-miss`, `stale-edit`, `edit-revert` or corroborated `user-correction`. With a generated-file header the advice is plain ("Generated file: point agents at its source"); when only the name or the directory says so it is hedged ("Possibly a generated file: if so, ...", "judging only by its name; it carries no generated-file header, so check"). Git history alone never fires it: a lockfile bump is not an agent editing output by hand |
-| `split-or-anchor-large-file` | 2+ `edit-miss` and the file has 800+ lines, or 2+ `file-too-large` reads |
+| `split-or-anchor-large-file` | 2+ `edit-miss` and the file has 800+ lines, or 2+ `file-too-large` reads (the file's line count is cited only if it is 800+ today) |
 | `make-edits-land` | 2+ `edit-miss` (above the repository's base rate, see Score) on a file that is neither large nor generated. Mostly ambiguous: "Repeated blocks: make edit targets unique". Mostly not-found: "Agents misremember this file: check what rewrites it" **only with evidence of a rewrite** (a `stale-edit` on the file, or a miss before which a command that rewrites files, such as a formatter, a fixer, `sed -i` or a commit hook, ran since the agent last read or edited the file; `rewritten` on the event); otherwise the neutral "Edits to this file keep missing their target", which asserts no cause |
 | `document-what-rewrites-this-file` | 2+ `stale-edit` of the "modified since read" kind |
 | `path-agents-expect` | 2+ `path-miss` (a read, an edit, a test command pointed at a missing test file, or a `cd` into a missing directory) |
@@ -796,7 +798,17 @@ repository's instruction files are searched for what it is about
   recommendation keeps its normal title and text and gains a neutral note:
   "(Also mentioned at `AGENTS.md:12`: check whether it already says this.
   If it does, enforce it with a hook, a permission rule or a wrapper rather
-  than adding another line.)". Advice that is not about documentation
+  than adding another line.)". If the files say the *opposite* of what the
+  sessions show (`documented_as: "conflict"`): an instruction to run the
+  very command that keeps failing ("Use `make test`, not `pytest`", "Always
+  run tests with `make test`", a code fence that lists it), or a line that
+  rules out the command agents fell back to ("Never run `pytest`
+  directly"), `use-the-working-command` never proposes the contradicting
+  line. It says: "`AGENTS.md:3` tells agents to run `make test`, which
+  failed 4 times in 4 sessions; agents fell back to `pytest`. Make `make
+  test` work where agents run, or change that line." (or "... tells agents
+  not to run `pytest`, yet `make test` failed ..."), and has no
+  `replacement`. Advice that is not about documentation
   (splitting a large file, learning from rework) is never changed.
 - **What it does not know:** whether the line says the right thing. The
   context rules are about form, not meaning: "`make test` only works in CI"

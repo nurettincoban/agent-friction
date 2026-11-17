@@ -3539,3 +3539,84 @@ def test_a_test_a_setup_step_turns_green_is_not_a_standing_failure(tmp_path: Pat
         "`tests/test_sync.py::test_pull` is red session after session"
         in (row["recommendations"][0]["title"])
     )
+
+
+@pytest.mark.parametrize(
+    ("red", "green", "passed"),
+    [
+        ("pytest", "pytest -v", "41 passed"),
+        ("pytest", "pytest tests/test_billing.py::test_total", "1 passed"),
+        ("pytest", "pytest --lf", "1 passed"),
+        ("make test", "make test V=1", "41 passed"),
+    ],
+)
+def test_a_test_that_passes_on_a_rerun_with_other_flags_is_flaky_not_standing(
+    tmp_path: Path, red: str, green: str, passed: str
+) -> None:
+    def build(s: Session) -> None:
+        s.bash(red, STANDING_RED, exit_code=1).bash(green, passed)
+
+    (row,) = _commands(tmp_path, build)
+    assert [r["id"] for r in row["recommendations"]] == ["fix-the-flaky-test"]
+    assert "session after session" not in json.dumps(row)
+    # below the flaky threshold it is neither: an ordinary failure, weak evidence
+    (row,) = _commands(tmp_path / "two", build, count=2)
+    assert row["recommendations"] == [] and row["score_detail"]["capped"] is True
+
+
+def _documented_fallback(tmp_path: Path, text: str) -> dict[str, Any]:
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    (repo / "AGENTS.md").write_text(f"# Agents\n\n{text}\n")
+    red = "/bin/sh: 1: docker: command not found\nmake: *** [Makefile:3: test] Error 127"
+    sessions = []
+    for i in range(4):
+        s = Session(f"s{i}", cwd=str(repo)).user("go")
+        sessions.append(s.bash("make test", red, exit_code=2).bash("pytest", "41 passed"))
+    (row,) = scan(tmp_path / "t", sessions, repo)["commands"]
+    (rec,) = row["recommendations"]
+    assert rec["id"] == "use-the-working-command"
+    found: dict[str, Any] = rec
+    return found
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use `make test`, not `pytest`.",
+        "Always run tests with `make test`.",
+        "Never run `pytest` directly; use `make test`.",
+        "Tests:\n\n```\nmake test\n```",
+    ],
+)
+def test_advice_never_contradicts_an_instruction_the_files_hold(tmp_path: Path, text: str) -> None:
+    rec = _documented_fallback(tmp_path, text)
+    assert rec["documented_as"] == "conflict" and "replacement" not in rec
+    assert rec["title"] == "The documented `make test` does not work where agents run"
+    line = rec["documented_in"][0]["line"]
+    assert rec["detail"] == (
+        f"`AGENTS.md:{line}` tells agents to run `make test`, which failed 4 times in 4 "
+        "sessions; agents fell back to `pytest`. Make `make test` work where agents run, or "
+        "change that line."
+    )
+    assert "use `pytest`, not `make test`" not in rec["detail"]
+
+
+@pytest.mark.parametrize(
+    ("text", "documented"),
+    [
+        ("We used to have a `make test` target.", "mention"),
+        # ruling out the command that failed is what the advice would say, too
+        ("Do not run `make test` locally, it needs docker.", "mention"),
+        ("`make test` is slow.", "mention"),
+        ("Use `pytest` to run the tests.", "instruction"),
+        ("Format with `ruff format`.", None),
+    ],
+)
+def test_a_line_that_does_not_say_to_run_the_failing_command_is_no_conflict(
+    tmp_path: Path, text: str, documented: str | None
+) -> None:
+    rec = _documented_fallback(tmp_path, text)
+    assert rec.get("documented_as") == documented and rec["replacement"] == "pytest"
+    if documented != "instruction":
+        assert 'such as: "use `pytest`, not `make test`"' in rec["detail"]

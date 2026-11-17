@@ -805,6 +805,27 @@ def _step_signature(step: Step, runner: bool = True) -> list[re.Pattern[str]]:
     return [STEP_SIGNATURES[name] for name in names if name in STEP_SIGNATURES]
 
 
+#: What a git command prints when it is the one that failed.
+_GIT_STEP_SIGNATURES: dict[str, re.Pattern[str]] = {
+    "git push": re.compile(
+        r"failed to push some refs|^ ! \[(?:remote )?rejected\]|has no upstream branch"
+        r"|^hint: Updates were rejected",
+        re.M,
+    ),
+    "git merge": re.compile(
+        r"^CONFLICT \(|Automatic merge failed|not something we can merge"
+        r"|would be overwritten by merge",
+        re.M,
+    ),
+    "git rebase": re.compile(r"^CONFLICT \(|could not apply [0-9a-f]{7}|Cannot rebase:", re.M),
+    "git pull": re.compile(
+        r"^CONFLICT \(|Need to specify how to reconcile|no tracking information", re.M
+    ),
+    "git commit": re.compile(r"nothing to commit|no changes added to commit|hook\b.*failed", re.M),
+    "git checkout": re.compile(r"did not match any file|would be overwritten by checkout"),
+}
+
+
 def failing_step(cmd: ParsedCommand, output: str) -> tuple[Step | None, bool]:
     """Which command of a chain failed, judged by what the output looks like.
 
@@ -826,6 +847,11 @@ def failing_step(cmd: ParsedCommand, output: str) -> tuple[Step | None, bool]:
     # The runner names its target (`make: *** [Makefile:20: test] Error 1`) ...
     for step in named_steps(heard, output) or ():
         return step, True
+    # ... git says which of its commands gave up (`git merge ... && git push`) ...
+    for step in heard:
+        said = _GIT_STEP_SIGNATURES.get(step.key)
+        if said is not None and said.search(output):
+            return step, True
     # ... a check's own summary says more than its runner's `npm ERR!` or `make: ***` ...
     for step in heard:
         if any(pattern.search(output) for pattern in _step_signature(step, runner=False)):
@@ -1076,6 +1102,55 @@ def tests_counted(output: str) -> int:
     return sum(counts)
 
 
+#: Options that pick tests by name; a value that matches a failed test selects it.
+_NAMING_OPTIONS = frozenset({"-k", "-t", "-run", "--run", "--grep", "-g", "--testNamePattern"})
+#: Options that run what failed last time.
+_LAST_FAILED_OPTIONS = frozenset({"--lf", "--last-failed"})
+
+
+def _test_words(line: str) -> list[str]:
+    """The words of the steps of ``line`` that run tests, each step led by ``;``."""
+    try:
+        steps = parse_command(line).steps
+    except Exception:  # an unreadable line selects nothing we can name
+        return []
+    # Only the steps that run tests select tests: `python scripts/patch.py && npm test`
+    # names a script, not a test file.
+    testing = [s for s in steps if command_role(s.key) == "test"] or steps
+    words: list[str] = []
+    for step in testing:
+        words += [";", step.program, *step.args]
+    return words
+
+
+def selected_names(line: str) -> list[str]:
+    """The plain names a test line asks for: ``pytest -k test_total`` -> ``["test_total"]``.
+
+    Empty when a value is an expression (``-k "a and not b"``, a regex with operators):
+    what that selects cannot be told from here.
+    """
+    words = _test_words(line)
+    names: list[str] = []
+    for index, word in enumerate(words):
+        name, eq, value = word.partition("=")
+        if name not in _NAMING_OPTIONS:
+            continue
+        if not eq:
+            value = words[index + 1] if index + 1 < len(words) else ""
+        value = value.strip("^$'\"/")
+        if not re.fullmatch(r"[\w.:-]+(?: [\w.:-]+)*", value) or re.search(
+            r"\b(?:and|or|not)\b", value
+        ):
+            return []
+        names.append(value)
+    return names
+
+
+def _test_part(name: str) -> str:
+    """The test's own name in a failure line: after the file, before its parameters."""
+    return re.split(r"::| > | › ", name)[-1] if re.search(r"::| > | › ", name) else name
+
+
 def selection(line: str) -> tuple[frozenset[str], frozenset[str]]:
     """What a test command line picks out: ``(paths and node ids, selecting options)``.
 
@@ -1084,16 +1159,7 @@ def selection(line: str) -> tuple[frozenset[str], frozenset[str]]:
     """
     paths: set[str] = set()
     options: set[str] = set()
-    try:
-        steps = parse_command(line).steps
-    except Exception:  # an unreadable line selects nothing we can name
-        return frozenset(), frozenset()
-    # Only the steps that run tests select tests: `python scripts/patch.py && npm test`
-    # names a script, not a test file.
-    testing = [s for s in steps if command_role(s.key) == "test"] or steps
-    words: list[str] = []
-    for step in testing:
-        words += [";", step.program, *step.args]
+    words = _test_words(line)
     previous = ""
     for word in words:
         name = word.split("=", 1)[0]
@@ -1246,6 +1312,23 @@ DEV_SERVER_RE = re.compile(
     r"|python3? (?:\S*/)?manage\.py runserver\b"
     r")"
 )
+_PACKAGE_MANAGERS = frozenset({"npm", "pnpm", "yarn", "bun"})
+_INSTALL_WORDS = frozenset({"install", "i", "ci", "add"})
+
+
+def _same_job_other_manager(failed_key: str, key: str, unfound: str) -> bool:
+    """Is ``key`` the failed command under another package manager (``npm install``)?"""
+    was, now = failed_key.split(), key.split()
+    if not was or not now or was[0] != unfound or was[0] == now[0]:
+        return False
+    if was[0] not in _PACKAGE_MANAGERS or now[0] not in _PACKAGE_MANAGERS:
+        return False
+    rest, other = was[1:] or ["install"], now[1:] or ["install"]
+    return rest == other or (rest[0] in _INSTALL_WORDS and other[0] in _INSTALL_WORDS)
+
+
+#: A command told to watch for changes (`tsc -w`, `jest --watch`, `vitest watch`).
+_WATCH_RE = re.compile(r"\s(?:--watch(?:All)?|-w|watch)(?:\s|=|$)")
 #: "bash: pnpm: command not found" and its variants: the program a shell could not find.
 #: Also cmd.exe ("'x' is not recognized as an internal or external command") and
 #: PowerShell ("The term 'x' is not recognized as the name of a cmdlet, function, ...").
@@ -1698,6 +1781,8 @@ _INSTRUCTION_CUES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 #: ``[Image #1]``, ``[Pasted text #2 +14 lines]``: markers the harness puts where the
 #: human attached something.
 _ATTACHMENT_RE = re.compile(r"^(?:\s*\[(?:Image|Pasted text|File)[^\]\n]{0,40}\]\s*)+", re.I)
+#: A fenced code block (closed or running to the end) and Markdown-quoted lines.
+_QUOTED_BLOCK_RE = re.compile(r"```.*?(?:```|\Z)|^[ \t]*>[^\n]*$", re.S | re.M)
 #: A reporting phrase and the quotation it introduces: "the reviewer's comment: 'No, I
 #: said ...'", "Bob wrote: \"that's wrong\"".
 _REPORTED_SPEECH_RE = re.compile(
@@ -1815,7 +1900,10 @@ def _judge(
 ) -> tuple[float, list[str], list[str], list[str]]:
     """``correction_confidence``, the phrases only self-blame voided, and instructions."""
     # A pasted screenshot comes first in the message; the words after it are the reply.
-    head = _ATTACHMENT_RE.sub("", text.strip())[:CORRECTION_HEAD_CHARS].replace("’", "'")
+    # Pasted output (a code fence, `>` quoted lines) is material, not the human's verdict:
+    # "wrong", "still failing" or "you forgot" in a log say nothing about the agent.
+    said = _QUOTED_BLOCK_RE.sub("\n", _ATTACHMENT_RE.sub("", text.strip())).strip()
+    head = said[:CORRECTION_HEAD_CHARS].replace("’", "'")
     # Somebody else's words, quoted for discussion, are not the human correcting the agent.
     head = _REPORTED_SPEECH_RE.sub(" ", head)
     softeners = [m.start() for m in _SOFTENER_RE.finditer(head)]
@@ -2750,8 +2838,9 @@ class _Detector:
             if (new, old) in history:
                 made_at, commands_then, inserted, checks_then = history.pop((new, old))
                 if inserted and state.ok_commands > commands_then:
-                    # Lines were only added, a command ran successfully with them in place,
-                    # and now they are gone again: a temporary debug print, not a retreat.
+                    # Lines were only added (or a switch was flipped: `DEBUG = True`), a
+                    # command ran successfully with them in place, and now they are gone
+                    # again: a temporary debug print, not a retreat.
                     continue
                 reverted = True
                 checked = checked or state.checks_run > checks_then
@@ -3339,6 +3428,11 @@ class _Detector:
                     # the agent corrected itself. Nothing to document.
                     finding.detail["typo_of"] = shown(key)
                     finding.summary += f"; a mistyped `{shown(key)}`, which then ran"
+                elif _same_job_other_manager(failed_key, key, finding.detail.get("not_found", "")):
+                    # `pnpm: command not found`, then `npm install` works: the program
+                    # is what was wrong, as with `python` and `python3`.
+                    finding.detail["works_as"] = self.ctx.command_key(key.split()[0])
+                    self._recover(finding, action)
                 elif is_setup_command(key) and inner_key(key) != inner_key(failed_key):
                     if id(finding) not in state.bound:
                         step_name = shown(setup_label(located) if located else key)
@@ -3380,7 +3474,14 @@ class _Detector:
         if (
             result.exit_code == TIMEOUT_EXIT_CODE
             and _TIMEOUT_WRAPPER_RE.search(action.call.command or "")
-            and (READY_BANNER_RE.search(result.output) or not _said_anything(result.output))
+            and (
+                READY_BANNER_RE.search(result.output)
+                or not _said_anything(result.output)
+                # a server or a watcher never exits by itself: the time box ending it is
+                # the plan, whatever it logged meanwhile
+                or DEV_SERVER_RE.search(action.call.command or "")
+                or _WATCH_RE.search(action.call.command or "")
+            )
             and not INVOCATION_ERROR_RE.search(result.output)
         ):
             # `timeout 10 npm run dev` that came up and was then stopped by its own time
@@ -3616,7 +3717,9 @@ class _Detector:
                 step, certain = named, True
         return step, certain
 
-    def _covered(self, finding: Finding, failed_key: str, line: str, output: str) -> bool:
+    def _covered(
+        self, finding: Finding, failed_key: str, line: str, output: str, same: bool = True
+    ) -> bool:
         """Did the green run ``line`` run what ``finding``'s red run ran?
 
         `pytest tests/test_core.py` passing says nothing about the test that
@@ -3634,15 +3737,31 @@ class _Detector:
         fewer = bool(ran and passed and passed < ran * SUBSET_PASS_SHARE)
         if not (paths - red_paths) and not (options - red_options) and not fewer:
             return True
-        if options - red_options or not paths:
-            return False
         names = [n for n in finding.detail.get("failed_tests", "").split("\n") if n]
         files = finding.detail.get("failed_test_files", "").split("\n")
         if not names:
             return False
+        added = options - red_options
+        by_name = False
+        if added and added <= _LAST_FAILED_OPTIONS and same:
+            pass  # the tests that failed last time: exactly the ones the red run named
+        elif added and added <= _NAMING_OPTIONS:
+            # `-k test_total`, `-t adds`, `-run TestAdd`: a name that matches each failure
+            wanted = [w.lower() for w in selected_names(line)]
+            if not wanted or not all(
+                any(w in _test_part(name).lower() for w in wanted) for name in names
+            ):
+                return False
+            by_name = True
+        elif added or not (paths - red_paths):
+            return False  # some other selection, or simply far fewer tests
         for index, name in enumerate(names):
+            if not (paths - red_paths):
+                break
             known = files[index] if index < len(files) else ""
             where = [p for p in (known, name.split("::")[0] if "::" in name else "") if p]
+            if by_name and not where:
+                continue  # `go test ./pkg -run TestAdd`: the name is all there is to go by
             if not any(
                 selects(path, there) and ("::" not in path or name.startswith(path))
                 for there in where
@@ -3682,7 +3801,8 @@ class _Detector:
         def take(table: dict[str, list[Finding]], failed_key: str) -> list[Finding]:
             """The failures of ``failed_key`` this green run answers; the others stay."""
             found = table.pop(failed_key)
-            left = [f for f in found if not self._covered(f, failed_key, line, output)]
+            same = failed_key == actual
+            left = [f for f in found if not self._covered(f, failed_key, line, output, same)]
             if left:
                 # A narrower selection passing closes nothing: the red run is still red.
                 table[failed_key] = left
@@ -3774,10 +3894,11 @@ class _Detector:
                 elif (
                     finding.detail.get("variant") == "ordinary"
                     and command_role(failed_key) == "test"
-                    # the same line again: a narrower selection passing (`pytest
-                    # tests/test_cart.py` after a red `pytest`) says nothing about the
-                    # tests that were left out
-                    and normalize_argv(finding.detail["command"]) == normalize_argv(line)
+                    # The same command again, whatever its flags (`pytest -v` after
+                    # `pytest`, `make test V=1`). A narrower selection that leaves the
+                    # failing test out (`pytest tests/test_cart.py` after a red `pytest`)
+                    # never gets here: it closed nothing (`_covered`).
+                    and line
                 ):
                     # A test that fails and then passes untouched may be flaky. Whether
                     # it is, only its recurring across sessions can say (engine).

@@ -305,7 +305,8 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     crumbs.textContent = "";
     stack.forEach(function (n, i) {
       if (i) crumbs.appendChild(document.createTextNode(" / "));
-      var a = el("a", null, i === 0 ? (repo.name || "repo") : n.name);
+      var up = i > 1 ? String(stack[i - 1].path || "") : "", p = String(n.path || n.name || "");
+      var a = el("a", null, i === 0 ? (repo.name || "repo") : (up && p.indexOf(up + "/") === 0 ? p.slice(up.length + 1) : p));
       a.addEventListener("click", function () { stack = stack.slice(0, i + 1); draw(n); });
       crumbs.appendChild(a);
     });

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from agent_friction import scoring, signals
+from agent_friction.adapters import common
 from agent_friction.model import Finding
 from agent_friction.signals import correction_confidence
 from tests import builders
@@ -3022,9 +3023,12 @@ def test_a_time_boxed_start_that_came_up_is_not_a_failure(tmp_path: Path) -> Non
     for banner in (up, "Server listening on port 3000", "webpack compiled successfully"):
         s = Session().user("go").bash("timeout 10 npm run dev", banner, exit_code=124)
         assert detect(s, tmp_path) == [], banner
+    # a server or a watcher only ever ends by its time box, whatever it had logged by then
+    for command in ("timeout 10 npm run dev", "timeout 20 npx tsc -w", "timeout 5 jest --watch"):
+        s = Session().user("go").bash(command, "> dev\nstarting...", exit_code=124)
+        assert detect(s, tmp_path) == [], command
     # it never came up, it was not time-boxed, or it ended some other way: a failure
     for command, output, code in (
-        ("timeout 10 npm run dev", "> dev\nstarting...", 124),
         ("timeout 10 npm run dev", up, 1),
         ("npm run build", up, 124),
         ("timeout 60 pytest", "collected 3 items", 124),
@@ -4854,3 +4858,121 @@ def test_wrong_thing_opens_a_correction_and_old_history_is_not_the_agents_work()
         "Revert the commit from yesterday, it broke the importer",
     ):
         assert signals.correction_confidence(said)[0] < 1.0, said
+
+
+FLAKY_RED = "FAILED tests/test_app.py::test_x - AssertionError: 3 != 4\n1 failed, 40 passed in 2s"
+JS_FLAKY_RED = " FAIL  src/app.test.ts > adds\nTests  1 failed | 40 passed (41)"
+
+
+@pytest.mark.parametrize(
+    ("red", "output", "green", "passed"),
+    [
+        ("pytest", FLAKY_RED, "pytest -v", "41 passed"),
+        ("pytest -q", FLAKY_RED, "pytest -q --tb=long", "41 passed"),
+        ("uv run pytest", FLAKY_RED, "uv run pytest -x", "41 passed"),
+        ("pytest 2>&1 | tail -5", FLAKY_RED, "pytest", "41 passed"),
+        ("pytest", FLAKY_RED, "pytest tests/test_app.py::test_x", "1 passed"),
+        ("pytest", FLAKY_RED, "pytest tests/test_app.py", "6 passed"),
+        ("pytest", FLAKY_RED, "pytest --lf", "1 passed"),
+        ("pytest", FLAKY_RED, "pytest -k test_x", "1 passed"),
+        ("npm test", JS_FLAKY_RED, "npm test -- --verbose", "Tests  41 passed (41)"),
+        ("npm test", JS_FLAKY_RED, "npm test -- -t adds", "Tests  1 passed (1)"),
+        ("make test", FLAKY_RED, "make test V=1", "41 passed"),
+        ("go test ./...", "--- FAIL: TestAdd (0.00s)\nFAIL", "go test ./pkg -run TestAdd", "ok"),
+    ],
+)
+def test_the_same_command_green_untouched_is_a_rerun_whatever_its_flags(
+    tmp_path: Path, red: str, output: str, green: str, passed: str
+) -> None:
+    s = Session().user("go").bash(red, output, exit_code=1).bash(green, passed)
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["rerun_green"] == "1"
+    # ... and after an edit the same green run closes the red one
+    s = Session().user("go").bash(red, output, exit_code=1).edit(A).bash(green, passed)
+    assert detect(s, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("green", "passed"),
+    [
+        ("pytest tests/test_other.py", "5 passed"),
+        ("pytest tests/test_app.py::test_y", "1 passed"),
+        ("pytest -k other", "5 passed"),
+        ("pytest -k 'test_x and not slow'", "1 passed"),  # an expression proves nothing
+        ("pytest -m unit", "30 passed"),
+        ("pytest", "12 passed"),
+    ],
+)
+def test_a_selection_that_leaves_the_failing_test_out_is_no_rerun(
+    tmp_path: Path, green: str, passed: str
+) -> None:
+    s = Session().user("go").bash("pytest", FLAKY_RED, exit_code=1).bash(green, passed)
+    (failure,) = detect(s, tmp_path)
+    assert "rerun_green" not in failure.detail
+    s = Session().user("go").bash("pytest", FLAKY_RED, exit_code=1).edit(A).bash(green, passed)
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.COMMAND_FAILURE]
+
+
+def test_pasted_output_is_not_the_humans_verdict() -> None:
+    for said in (
+        "here is the log:\n```\nNo, that is wrong. you forgot the flag. still failing\n```\nlook?",
+        "> No, I told you to stop\n> you broke it\nwhat does this reviewer mean?",
+        "```\nstill failing: you broke the build, revert that",  # a fence left open
+    ):
+        assert signals.correction_confidence(said)[0] == 0.0, said
+    # what the human says around it still counts
+    for said in (
+        "```\nTraceback ...\n```\nNo, that is wrong, revert that",
+        "No, use this:\n```\nx = 1\n```",
+        "> 1 failed\nstill failing",
+    ):
+        assert signals.correction_confidence(said)[0] == 1.0, said
+
+
+def test_a_switch_flipped_run_and_flipped_back_is_not_an_edit_revert(tmp_path: Path) -> None:
+    for on, off in (
+        ("DEBUG = False", "DEBUG = True"),
+        ('"logLevel": "info",', '"logLevel": "debug",'),
+        ("  verbose: 0", "  verbose: 1"),
+    ):
+        s = Session().user("go").edit(A, on, off).bash("python -m app", "ok").edit(A, off, on)
+        assert by_signal(detect(s, tmp_path), signals.EDIT_REVERT) == [], on
+        # nothing ran with it in place, or what ran failed: the change was taken back
+        unused = Session().user("go").edit(A, on, off).edit(A, off, on)
+        assert len(by_signal(detect(unused, tmp_path), signals.EDIT_REVERT)) == 1, on
+    # any other replacement that is undone after a run is a retreat
+    s = Session().user("go").edit(A, "retries = 3", "retries = 5").bash("python -m app", "ok")
+    assert len(by_signal(detect(s.edit(A, "retries = 5", "retries = 3"), tmp_path), "edit-revert"))
+    assert common.is_toggle("DEBUG = True", "DEBUG = False")
+    assert not common.is_toggle("x = 1\ny = 2", "x = 0\ny = 2")
+    assert not common.is_toggle("name = 'a'", "name = 'b'")
+
+
+def test_a_missing_package_manager_and_the_one_that_worked(tmp_path: Path) -> None:
+    s = Session().user("go").bash("pnpm install", "bash: pnpm: command not found", exit_code=127)
+    s.bash("npm install", "added 100 packages")
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["works_as"] == "npm" and failure.detail["not_found"] == "pnpm"
+    # another job under another manager is not "the same command"
+    s = Session().user("go").bash("pnpm install", "bash: pnpm: command not found", exit_code=127)
+    s.bash("npm test", "5 passing")
+    assert all("works_as" not in f.detail for f in detect(s, tmp_path))
+    # and a manager that was there but failed was not missing
+    s = Session().user("go").bash("pnpm install", "ERR_PNPM_OUTDATED_LOCKFILE", exit_code=1)
+    s.bash("npm install", "added 100 packages")
+    assert all("works_as" not in f.detail for f in detect(s, tmp_path))
+
+
+def test_a_chain_of_git_commands_names_the_one_that_failed(tmp_path: Path) -> None:
+    rejected = (
+        " ! [rejected]        main -> main (fetch first)\n"
+        "error: failed to push some refs to 'origin'\n"
+        "hint: Updates were rejected because the remote contains work that you do not have"
+    )
+    s = Session().user("go").bash("git merge origin/main && git push", rejected, exit_code=1)
+    (failure,) = detect(s, tmp_path)
+    assert keys(failure) == [("command", "git push")] and "push_rejected" in failure.detail
+    conflict = "CONFLICT (content): Merge conflict in a.py\nAutomatic merge failed; fix conflicts"
+    s = Session().user("go").bash("git merge origin/main && git push", conflict, exit_code=1)
+    (failure,) = detect(s, tmp_path)
+    assert keys(failure) == [("command", "git merge")]

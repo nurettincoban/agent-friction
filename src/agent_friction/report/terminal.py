@@ -13,6 +13,7 @@ from agent_friction.report._common import (
     fmt_lost,
     fmt_minutes,
     gone_note,
+    grouped_unattributed,
     headline_lost,
     plural,
     repo_recommendations,
@@ -100,17 +101,19 @@ def _unattributed_rows(result: dict[str, Any], st: Style, width: int, limit: int
         if not result.get("hotspots") and not result.get("commands")
         else [st.bold(heading)]
     )
-    items = list(result.get("unattributed") or [])
-    for ev in items[:limit]:
+    items = grouped_unattributed(result)
+    for ev, n in items[:limit]:
         when = _utc_label(ev.get("timestamp"))
-        text = f"{ev.get('signal', '?')} · {ev.get('summary', '')}"
+        times = f" (×{n})" if n > 1 else ""
+        text = f"{ev.get('signal', '?')} · {ev.get('summary', '')}{times}"
         room = max(40, width - 20)
         text = text if len(text) <= room else text[: room - 1] + "…"
         lines.append(f"  {st.dim(when)} {text}")
         if ev.get("source"):
             lines.append(st.dim(f"      ↳ {ev['source']}:{ev.get('line', '?')}"))
     if len(items) > limit:
-        lines.append(st.dim(f"  … {len(items) - limit} more in --format json (unattributed)"))
+        rest = sum(n for _, n in items[limit:])
+        lines.append(st.dim(f"  … {rest} more in --format json (unattributed)"))
     lines.append("")
     return lines
 

@@ -148,6 +148,11 @@ def test_git_worktrees_are_discovered(tmp_path: Path, monkeypatch: pytest.Monkey
     in_worktree = project(config, worktree.resolve(), "wt")
     assert discover_transcripts(repo) == [in_worktree]
     assert discovery.git_worktrees(tmp_path / "elsewhere") == []
+    # a linked worktree is the same repository: it is named after the main one
+    assert discovery.repo_name(worktree) == "repo" == discovery.repo_name(repo)
+    assert discovery.repo_name(tmp_path / "elsewhere") == "elsewhere"  # not git at all
+    (repo / "pkg").mkdir()
+    assert discovery.repo_name(repo / "pkg") == "pkg"  # a directory inside one
 
 
 def test_expand_transcript_paths(tmp_path: Path) -> None:

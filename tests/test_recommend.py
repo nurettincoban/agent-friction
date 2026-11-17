@@ -739,7 +739,6 @@ def _working(tmp_path: Path, line: str) -> dict[str, object]:
         "Please make test names descriptive.",
         "The CI runs make test on every PR, but locally it needs Docker.",
         "`make test` is slow; prefer a single file.",
-        "Do not run `make test` locally.",
     ],
 )
 def test_words_that_only_look_like_the_command_do_not_document_it(
@@ -754,6 +753,15 @@ def test_words_that_only_look_like_the_command_do_not_document_it(
         in str(rec["detail"])
     )
     assert "another line will not help" not in str(rec["detail"])
+
+
+def test_a_line_that_rules_out_what_worked_is_a_conflict(tmp_path: Path) -> None:
+    rec = _working(tmp_path, "Do not run `make test` locally.")
+    assert rec["documented_as"] == "conflict" and "replacement" not in rec
+    assert rec["title"] == "`make test` is ruled out, yet it is what works"
+    assert str(rec["detail"]).startswith("`AGENTS.md:3` tells agents not to run `make test`, yet ")
+    assert str(rec["detail"]).endswith("work where agents run, or change that line.")
+    assert "Add a line" not in str(rec["detail"])
 
 
 @pytest.mark.parametrize(
@@ -950,3 +958,12 @@ def test_the_repo_wide_note_does_not_call_every_file_above_the_rate() -> None:
     assert "1 file is clearly above that rate and has its own entry: `hot.py`." in str(
         mixed["detail"]
     )
+
+
+def test_a_small_line_count_is_not_cited_for_a_file_too_large_to_read() -> None:
+    found = [finding(signals.FILE_TOO_LARGE, f"s{i}") for i in range(2)]
+    (rec,) = recommend.recommend(model.FILE, "a.json", found, FileFacts(True, 1))
+    assert rec["id"] == "split-or-anchor-large-file" and "(1 line)" not in str(rec["detail"])
+    assert "Reads of this file were refused as too large" in str(rec["detail"])
+    (rec,) = recommend.recommend(model.FILE, "a.py", found, FileFacts(True, 4200))
+    assert "Reads of this file (4200 lines) were refused" in str(rec["detail"])

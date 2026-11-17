@@ -137,9 +137,23 @@ def edit_pairs(
     added = frozenset(
         (digest(old), digest(new))
         for old, new in pairs
-        if old.strip() and old != new and old in new
+        if (old.strip() and old != new and old in new) or is_toggle(old, new)
     )
     return hashed, added
+
+
+_SWITCH_VALUE_RE = re.compile(
+    r"\b(?:true|false|on|off|yes|no|0|1|debug|info|warn|warning|error|verbose|quiet|none|null)\b",
+    re.I,
+)
+
+
+def is_toggle(old: str, new: str) -> bool:
+    """Do ``old`` and ``new`` differ only in a switch's value (``DEBUG = True`` / ``False``)?"""
+    old, new = old.strip(), new.strip()
+    if "\n" in old or "\n" in new or old == new or not _SWITCH_VALUE_RE.search(old):
+        return False
+    return _SWITCH_VALUE_RE.sub("@", old) == _SWITCH_VALUE_RE.sub("@", new)
 
 
 def digest(text: str) -> str:

@@ -358,7 +358,7 @@ VALUE_OPTIONS: dict[str, frozenset[str]] = {
 #: Read-only inspection commands. Their failures are routine probing, not friction.
 INSPECTION_PROGRAMS = frozenset(
     {"ls", "cat", "head", "tail", "wc", "stat", "file", "find", "cd", "pwd", "echo", "which"}
-    | {"type", "grep", "egrep", "fgrep", "rg", "test", "[", "diff", "cmp", "true", "false"}
+    | {"type", "grep", "egrep", "fgrep", "rg", "test", "[", "[[", "diff", "cmp", "true", "false"}
     | {"command", "du", "df", "ps", "tree", "sleep", "kill", "pkill", "lsof", "awk", "jq"}
     | {"sed", "sort", "uniq", "cut", "tr", "less", "more", "printf", "date", "env", "printenv"}
     | {"hash", "pgrep", "pidof", "nc", "ss", "netstat", "whoami", "id", "uname", "hostname"}
@@ -383,7 +383,7 @@ INSPECTION_KEYS = frozenset(
 _NOT_INSPECTION_FLAGS = ("-i", "--in-place")
 _IN_PLACE_EDITORS = frozenset({"sed", "awk", "sort"})
 #: Filters whose exit status 1 means "nothing matched / differs", not "failed".
-MATCH_FILTERS = frozenset({"grep", "egrep", "fgrep", "rg", "diff", "cmp", "test", "["})
+MATCH_FILTERS = frozenset({"grep", "egrep", "fgrep", "rg", "diff", "cmp", "test", "[", "[["})
 #: Programs that only trim or count another command's output at the end of a pipeline.
 OUTPUT_TRIMMERS = frozenset(
     {"head", "tail", "wc", "sort", "uniq", "less", "more", "cut", "tr", "column", "nl"}
@@ -874,6 +874,11 @@ def inner_key(key: str) -> str:
     return launcher_split(key)[1]
 
 
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+#: Switches of a shell that take no value (`-x`, `-eux`, `-e`); never `-c`, `-s`, `-o`.
+_SHELL_SWITCH_RE = re.compile(r"^-[abefhkmnptuvxBCEHPT]+$")
+
+
 def _raw_key(words: Sequence[str]) -> str:
     if not words:
         return ""
@@ -888,6 +893,12 @@ def _raw_key(words: Sequence[str]) -> str:
     if launched is not None:
         launcher, inner = launched
         return f"{launcher} {_raw_key(inner)}".strip()
+    if base in _SHELLS and "/" not in program:
+        # `bash scripts/run.sh`, `sh -x ./scripts/run.sh` and `scripts/run.sh` are one
+        # command: the script. Which shell ran it, and how loudly, is not what it is.
+        script = next((w for w in rest if not _SHELL_SWITCH_RE.match(w)), "")
+        if script and _looks_like_script(script):
+            return _program_name(script)
     if base in INTERPRETERS:
         if rest and rest[0] == "-m" and len(rest) > 1:
             return f"{program} -m {rest[1]}"

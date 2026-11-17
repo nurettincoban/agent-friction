@@ -330,3 +330,18 @@ def test_files_no_longer_in_the_tree_are_marked() -> None:
     h["file"]["renamed_to"] = None
     assert gone_note(h) == " (not in tree)"
     assert gone_note({"kind": "command", "path": "pytest"}) == ""
+
+
+def test_identical_unattributed_lines_are_collapsed() -> None:
+    result = sample_result()
+    ev = {
+        "signal": "tool-failure",
+        "summary": "WebFetch failed",
+        "timestamp": "2026-11-01T10:00:00Z",
+    }
+    result["unattributed"] = [dict(ev) for _ in range(5)]
+    result["totals"]["unattributed_events"] = 5
+    term = render_terminal(result)
+    assert term.count("WebFetch failed") == 1 and "(×5)" in term
+    md = render_markdown(result)
+    assert md.count("WebFetch failed") == 1 and "(×5)" in md

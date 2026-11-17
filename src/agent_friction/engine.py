@@ -37,6 +37,7 @@ from agent_friction.discovery import (
     claude_config_dirs,
     discover_repo_transcripts,
     expand_transcript_paths,
+    repo_name,
     repo_roots,
 )
 from agent_friction.errors import AgentFrictionError, BadTranscriptError, NoTranscriptsError
@@ -450,6 +451,9 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
         # session did make it pass, and that step is the advice (`fixed_by_setup`).
         and "fixed_by_setup" not in f.detail
         and "fixed_by_command" not in f.detail
+        # ... and one that passed on an untouched re-run is perhaps flaky, never
+        # "red session after session, and nothing made it pass".
+        and "rerun_green" not in f.detail
     ]
     for finding in naming:
         for key in _command_keys(finding):
@@ -819,6 +823,8 @@ class _Analysis:
         self.since = _utc(options.since)
         self.until = _utc(options.until)
         roots = repo_roots(self.repo)
+        #: The repository's name: the main worktree's, also when scanned from a linked one.
+        self.name = repo_name(self.repo)
         self.roots = roots
         self.resolver = PathResolver(
             self.repo, [*roots[1:], str(options.repo), *options.repo_aliases]
@@ -1084,7 +1090,7 @@ class _Analysis:
         working directory (user name, client, project), so it is never shown:
         the repository's own name stands in for it.
         """
-        name = self.repo.name or "repo"
+        name = self.name
         if item.kind == claude_code.KIND:
             return f"{claude_code.KIND}:{name}"
         if not self.options.include_excerpts:
@@ -1497,7 +1503,7 @@ class _Analysis:
             "schema_version": SCHEMA_VERSION,
             "tool": {"name": TOOL_NAME, "version": __version__},
             "generated_at": _iso(now),
-            "repo": {"root": self.display_path(self.repo), "name": self.repo.name or "repo"},
+            "repo": {"root": self.display_path(self.repo), "name": self.name},
             # What kind of scan this is; reports made with different settings do not compare.
             "settings": {
                 "excerpts": options.include_excerpts,
@@ -1826,7 +1832,7 @@ class _Analysis:
             friction = self.sessions_of(s.session_id for s in result.sessions)
             exposed = len(friction | self.sessions_of(beneath.get(path, set())))
             node = {
-                "name": path.rsplit("/", 1)[-1] if path else (self.repo.name or "repo"),
+                "name": path.rsplit("/", 1)[-1] if path else self.name,
                 "path": path,
                 "kind": model.DIR if is_dir else model.FILE,
                 "score": result.score,

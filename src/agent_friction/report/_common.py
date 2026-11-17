@@ -206,6 +206,21 @@ def dropped_note(result: dict[str, Any]) -> str | None:
     return " ".join(parts) or None
 
 
+def grouped_unattributed(result: dict[str, Any]) -> list[tuple[dict[str, Any], int]]:
+    """Unattributed evidence with identical lines collapsed: (first event, how many)."""
+    out: list[tuple[dict[str, Any], int]] = []
+    index: dict[tuple[str, str], int] = {}
+    for ev in result.get("unattributed") or []:
+        key = (str(ev.get("signal", "")), str(ev.get("summary", "")))
+        if key in index:
+            first, n = out[index[key]]
+            out[index[key]] = (first, n + 1)
+        else:
+            index[key] = len(out)
+            out.append((ev, 1))
+    return out
+
+
 def unattributed_heading(result: dict[str, Any]) -> str | None:
     """Heading for friction events that no file, directory, or command could own."""
     count = int(result.get("totals", {}).get("unattributed_events", 0) or 0)

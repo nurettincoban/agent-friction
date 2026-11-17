@@ -848,3 +848,29 @@ def test_under_a_windows_root_one_file_has_one_spelling(tmp_path: Path) -> None:
     posix = PathResolver(Path("/repo"))
     assert posix.resolve("/repo/SRC/a.py") == "SRC/a.py"
     assert posix.resolve("/repo/src/a.py") == "src/a.py"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "scripts/run.sh",
+        "./scripts/run.sh",
+        "bash scripts/run.sh",
+        "sh -x ./scripts/run.sh",
+        "bash -eux scripts/run.sh --fast",
+        "zsh scripts/run.sh",
+    ],
+)
+def test_a_script_is_one_command_whichever_shell_runs_it(command: str) -> None:
+    assert parse_command(command).key == "scripts/run.sh"
+
+
+def test_a_shell_running_code_or_nothing_is_not_a_script() -> None:
+    assert parse_command("bash -c 'make test'").key == "make test"
+    assert parse_command("bash").key == "bash"
+    assert parse_command("python scripts/run.py").key == "python scripts/run.py"
+
+
+@pytest.mark.parametrize("command", ["[[ -f x ]]", "[ -f x ]", "test -f x", "[[ -d a && -f b ]]"])
+def test_a_shell_test_is_inspection(command: str) -> None:
+    assert parse_command(command).inspection
