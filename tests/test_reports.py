@@ -356,3 +356,18 @@ def test_terminal_table_fits_a_narrow_terminal() -> None:
     assert rows
     assert all(len(line) <= 60 for line in rows)
     assert "█" not in narrow
+
+
+def test_not_counted_note_separates_calls_elsewhere_in_the_repository() -> None:
+    from agent_friction.report._common import dropped_note
+
+    package = dropped_note({"totals": {"events_outside_repo": 3, "events_elsewhere_in_repo": 3}})
+    assert package == (
+        "Not counted: 3 declined, denied, or failed calls that acted elsewhere in the "
+        "repository, outside the scanned directory."
+    )
+    mixed = dropped_note({"totals": {"events_outside_repo": 3, "events_elsewhere_in_repo": 1}})
+    assert mixed is not None
+    assert "1 declined, denied, or failed call that acted elsewhere in the repository" in mixed
+    assert "and 2 calls that acted outside this repository." in mixed
+    assert "events_elsewhere_in_repo" in render_html(sample_result())

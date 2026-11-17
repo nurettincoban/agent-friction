@@ -1053,6 +1053,7 @@
     "dropped_red_runs": 1,
     "episodes": 6,
     "est_minutes_lost": 8.8,
+    "events_elsewhere_in_repo": 0,
     "events_outside_repo": 0,
     "files_affected": 5,
     "friction_events": 33,

@@ -103,7 +103,7 @@ by repository or time window, so `0` marks an empty, binary or foreign file.
 | `sessions` | Distinct sessions with activity in the repo (for git: agent commits in the window). |
 | `skipped_lines` | Lines that were not valid JSON objects or lacked required structure. |
 | `skipped_events` | Events on which a detector raised an unexpected error. They are skipped; anything above 0 is a bug worth reporting. |
-| `ignored_lines` | Valid lines of a type that is not analysed (attachments, summaries, ...). |
+| `ignored_lines` | Valid lines of a type that is not analysed (attachments other than a queued message, summaries, ...). |
 | `duplicate_lines` | Lines that an earlier file had already contributed (the same line uuid, or for generic files the same session, timestamp, kind and payload) and that were therefore not read again: a copied or re-exported log. Not for git. *Addition within schema version 1.* |
 | `files` | Transcript files read (not for git). |
 | `sessions_outside_repo` | Sessions dropped because they never touched this repo (not for git). |
@@ -134,6 +134,7 @@ by repository or time window, so `0` marks an empty, binary or foreign file.
 | `unattributed_events` | Events that could not be tied to a path or command. Their evidence is the top-level `unattributed` list. |
 | `tool_failures` | `tool-failure` events: errors returned by tools that are neither file tools, search nor the shell (MCP tools, web fetches, sub-agents), for tools that failed 2+ times in the scan. They are part of `friction_events` and `unattributed_events`, never of `strong_events`; the top-level `tool_failures` list breaks the count down by tool. *Addition within schema version 1.* |
 | `events_outside_repo` | Calls that were declined, denied or failed while acting outside the repository (`cd ../other && make`, a script under `/tmp`, a file elsewhere). They are in no event, signal count or `friction_events`; the number is there so that the headline can be checked against the transcripts (methodology, "Calls that acted outside the repository"). *Addition within schema version 1.* |
+| `events_elsewhere_in_repo` | Those of `events_outside_repo` that acted elsewhere in the same git repository, when the scanned directory is a part of one (a sibling package of a monorepo, its root). 0 when the scanned directory is the repository root or git is unavailable. *Addition within schema version 1.* |
 
 ### `exposure`
 

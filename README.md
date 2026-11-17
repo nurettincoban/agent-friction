@@ -270,10 +270,11 @@ in any release; from 0.1.0 on, each one is listed in the CHANGELOG.
   friction, and the rules try hard not to count it; they will sometimes be wrong both ways.
   `show` exists so you can check.
 - A correction is counted only when the human's words address the agent's work and behaviour
-  backs it up: they name a file the agent just changed, or the agent goes back to one. Anything
-  else that merely sounds like a correction is "probable": shown as evidence, weighted lower,
-  never quoted, and excluded from the headline count. It is English-only and still a heuristic,
-  so treat the count as a floor.
+  backs it up: they name a file the agent just changed (with an edit, a shell command or a
+  subagent), or the agent goes back to one. Messages typed while the agent is still working are
+  read as well. Anything else that merely sounds like a correction is "probable": shown as
+  evidence, weighted lower, never quoted, and excluded from the headline count. It is
+  English-only and still a heuristic, so treat the count as a floor.
 - Time lost is a floor, not a measurement of human time.
 - Failures of tools that are neither file, search nor shell tools (MCP servers, `WebFetch`, a
   subagent launch) have no file or command to pin to. They are counted as weak `tool-failure`

@@ -103,8 +103,12 @@ read as a complaint about the agent.
 below makes a message a *candidate*. It becomes a correction with confidence
 1.0 only if behaviour corroborates it:
 
-1. the agent had changed files (Edit/Write) in the turn the human reacts to,
-   **and**
+1. the agent had changed files in the turn the human reacts to: with Edit or
+   Write, with a shell command that succeeded and rewrites a file it names
+   (`sed -i 's/a/b/' src/app.py`, `cat > src/app.py <<EOF`, a redirection
+   into a file), or through a subagent it launched in that turn (the
+   Edit/Write calls in `<session>/subagents/*.jsonl` that succeeded between
+   the launching call and its result), **and**
 2. either the human names one of those files, **or** in the turn that
    follows the agent changes one of those same files again (an edit, a
    write, or a shell command that rewrites, removes or restores it: `sed -i`,
@@ -117,6 +121,15 @@ getting the error? If so edit src/app.py again": the sentence that carries
 agent's work** ("the tests are still failing on main since yesterday, can you
 look at ..."), and a **negation** ("that broke nothing as far as I can tell",
 "that broke no tests").
+
+A command that changes files without naming them (`ruff format .`, a
+codemod, a script) changed *something*, and the evidence says so instead of
+claiming a file was untouched: "names src/app.py, which a command in the
+preceding turn may have changed", and "not corroborated: which files the
+preceding turn changed is not known" where the human names none. Such a
+candidate is a correction only if the human blames a file and the agent
+then goes and changes it. A command that failed, or one that only reads
+(`grep foo src/app.py`), changed nothing.
 
 A candidate without corroboration (nothing was changed before it, the agent
 went on to other things, or the session ends there) is not a
@@ -134,8 +147,9 @@ corroborated: ...").
   - "you broke / removed / deleted / forgot / missed / ignored / overwrote",
     "you've broken / removed / forgotten ..." (not "you forgot nothing"),
     "you didn't run | read | follow | use | fix | check ..." (not "you didn't
-    do anything wrong"), "you shouldn't have", "you weren't supposed", "you
-    keep <doing>";
+    do anything wrong"), "you shouldn't have", "you were / weren't supposed
+    (to)" (not "you are supposed to be careful with migrations"), "you keep
+    <doing>";
   - "you're editing the wrong file | branch | directory | function ...", "you
     changed the wrong thing | part | section | field ...";
   - "I told you", "I already said", "I asked you to", "I said use / don't /
@@ -143,6 +157,9 @@ corroborated: ...").
     you to" (not "I didn't ask before, but ..."), "I didn't want that". Not
     "I told you about X", and not when the sentence ends by asking for
     confirmation ("I told you to use pnpm, right?");
+  - "as / like I said | told you | mentioned | explained | asked before |
+    earlier | already | above", closing its clause ("As I said before, the
+    public names stay"; not "like I said earlier today in standup, ...");
   - "not | isn't | wasn't what I asked | wanted | meant | said";
   - "why did you delete | remove | change | add | use | skip | ignore ...";
   - an undo of the agent's own change: "revert" / "undo" / "roll back" at the
@@ -182,7 +199,9 @@ corroborated: ...").
     don't use moment in this codebase, use date-fns"), "don't use X, use Y"
     ("don't use any here, use unknown"), "never" plus something an agent does
     ("never commit directly to main"; a fixed list of verbs; not "never
-    mind", "never seen this"), and a leading "again:" ("again: never ...").
+    mind", "never seen this"), and a leading "again:" ("again: never ...")
+    or "Again, we use | use | I said ..." ("Again, we use pnpm here not npm";
+    not "Again, thanks" or "Again, please run the tests").
     Like every verdict they make a correction only if the human names a file
     the agent changed or the agent goes back to one; otherwise they are a
     probable correction;
@@ -243,7 +262,20 @@ corroborated: ...").
     use that instead", "again, no mocks in these tests", "can you not change
     the public API? restore the old name" (`instruction_cues`; labels
     "don't …", "I don't want …", "you're over… this", "use that instead",
-    "no … here", "can you not …", "restore the old …"). Behaviour decides:
+    "no … here", "can you not …", "restore the old …"). The same holds for
+    what a change did, said as it is found out, and for a question about
+    work in progress: "the tests fail now", "Now the build fails", "it now
+    crashes on startup" (an outcome with "now"), "this doesn't compile" (a
+    pronoun and "doesn't compile | build | start | run | pass | import |
+    load"; not "It doesn't compile on Windows"), "Why are you using
+    requests? We use httpx" ("why are you using | changing | adding |
+    skipping ..."), "we use pnpm, not npm", and an undo or a verdict by file
+    name: "Revert src/app.py", "src/app.py is still failing" (labels "it
+    fails now", "why are you …", "we use X, not Y", "revert/still failing,
+    by file"). Without "now" or a pronoun the same words describe a bug to
+    work on ("the build fails on Windows, can you look", "The app crashes
+    when the list is empty"), and "Revert README.md to last week's version"
+    is a task. Behaviour decides:
     if the agent had changed files in the turn before and changes one of
     them again in reply, the message is a correction (confidence 1,
     `corroborated: followed`, attributed to the files it went back to). If
@@ -338,7 +370,12 @@ come from a fixed vocabulary that names the kind of phrase ("that's wrong",
 never the human's own words: the summary is also shown without excerpts.
 
 **Attribution:** files the agent touched in the preceding turn that the
-message names (by path, or by bare file name if unambiguous). A file of the
+message names (by path, or by bare file name if unambiguous). Files a shell
+command rewrote and files a subagent of that turn changed are files of the
+turn like any other: "You broke src/app.py" after `sed -i ... src/app.py`
+names a file the agent had changed, and `git checkout -- src/app.py` or
+`git restore src/app.py` in reply is the agent going back to it ("the agent
+then ran `git checkout` on src/app.py"). A file of the
 repository that the human names and the agent had *not* touched yet ("no,
 stop using print in packages/api/main.py, I told you this already") gets
 the correction in two cases, neither with "wrong file": the agent then goes
@@ -377,7 +414,9 @@ strong wording.
 **False negatives (many, by design):** a real correction after which the
 agent fixes a *different* file, runs only commands, or the session ends (it
 is kept as probable); a correction of something the agent did with a command
-rather than an edit ("No, I told you not to push"); a real "Stop." or "No,
+that changes no file it names ("No, I told you not to push"; a formatter or
+a script run over the tree, unless the human blames a file and the agent
+then changes it); a real "Stop." or "No,
 ..." right after the agent asked something; corrections that do not open the
 message ("I ran it. It's still failing."); a verdict with a long subject ("the
 checkout page is still broken"); polite or indirect corrections ("hmm, could
@@ -713,7 +752,13 @@ days by default), **and** that human commit either
   next one to touch the file), or
 - *says it is a repair:* its subject starts with or contains `fix`, `fixes`,
   `fixed`, `revert`, `undo`, `rollback`, `hotfix`, `regression`, `broke`,
-  `broken`, `oops`, `mistake` (`FIX_SUBJECT_RE`).
+  `broken`, `oops`, `mistake` (`FIX_SUBJECT_RE`). A subject alone counts only
+  if the commit also removes or changes lines of the file: a `fix: ...` that
+  only adds lines to it (`+N/-0`) put new code next to the agent's and took
+  nothing back, so it is not rework unless the lines went inside what the
+  agent wrote (the first case). A commit that says it reverts, undoes or
+  rolls back (`UNDO_SUBJECT_RE`) counts either way: taking back a deletion
+  only adds lines.
 
 A commit whose subject says a tool rewrote the files (`style: ...`, `format:
 ...`, `lint: ...`, "run black", "apply prettier", "reformat ...", `gofmt`,
@@ -1271,7 +1316,12 @@ command's" below.
      check`); `npm ERR! Test failed.`, ``npm error Lifecycle script `lint`
      failed`` and `npm ERR! shop@1.0.0 lint: ...` are about `npm test` and
      `npm run lint` (`named_steps`); and git says which of its commands gave
-     up: in `git merge origin/main && git push`, `! [rejected]` / `failed to
+     up; a Python traceback that begins in `<string>` or `<stdin>` was
+     raised by the one inline snippet on the line (`agent-friction show x
+     --json | python -c "..." && agent-friction scan`: the `KeyError` is the
+     snippet's, keyed `python <inline>`, not the tool's that fed it or
+     followed it; a traceback out of a file, or one printed indented by
+     something else, pins nothing): in `git merge origin/main && git push`, `! [rejected]` / `failed to
      push some refs` is about `git push`, `CONFLICT (...)` / `Automatic merge
      failed` about `git merge`; and a launcher that could not start its
      program names it: ``error: Failed to spawn: `mypy` `` in `ruff check .;

@@ -172,6 +172,10 @@ class PathResolver:
             here = there
         return here
 
+    def absolute(self, raw: str, cwd: str | None = None) -> str | None:
+        """``raw`` as a normalized absolute path, or ``None`` if that cannot be told."""
+        return self._absolute(raw, cwd)
+
     def outside(self, raw: str, cwd: str | None = None) -> bool:
         """True if ``raw`` is a path that provably lies outside every root."""
         absolute = self._absolute(raw, cwd)

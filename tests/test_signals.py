@@ -5548,3 +5548,209 @@ def test_time_is_a_wrapper_also_when_it_is_missing(
     assert keys(found)[0] == ("command", "pytest")
     assert found.detail["variant"] == ("invocation" if missing else "ordinary")
     assert found.detail.get("not_found") == ("time" if missing else None)
+
+
+_BROKE = "You broke src/app.py, the public API must keep its names"
+_SED = "sed -i 's/foo/bar/g' src/app.py"
+
+
+@pytest.mark.parametrize(
+    ("change", "said", "after", "how"),
+    [
+        (_SED, _BROKE, "edit", "named"),
+        ("cat > src/app.py <<EOF\nx = 2\nEOF", _BROKE, "edit", "named"),
+        (_SED, _BROKE, "nothing", "named"),
+        (_SED, "you removed the public names, I told you to keep them", "edit", "followed"),
+        (_SED, "revert that", "git checkout -- src/app.py", "followed"),
+        (_SED, "No, that's wrong, revert that", "git restore src/app.py", "followed"),
+    ],
+)
+def test_a_change_made_by_a_shell_command_is_a_change_of_the_turn(
+    tmp_path: Path, change: str, said: str, after: str, how: str
+) -> None:
+    s = Session().user("rename the helpers").bash(change, "").user(said)
+    if after == "edit":
+        s.bash("git checkout -- src/app.py", "").edit("/repo/src/app.py", "x", "y")
+    elif after != "nothing":
+        s.bash(after, "")
+    (found,) = detect(s.user("thanks"), tmp_path, known=("src/app.py",))
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", "src/app.py")]
+    assert found.detail["corroborated"] == how
+    assert "had not touched" not in found.summary and "no file was changed" not in found.summary
+    if after.startswith("git"):
+        assert f"the agent then ran `{after.split(' --')[0].split(' src')[0]}` on" in found.summary
+
+
+def test_a_command_that_changed_nothing_does_not_corroborate_a_correction(tmp_path: Path) -> None:
+    known = ("src/app.py",)
+    # the sed failed, or the command only read the file: nothing of the agent's to blame
+    failed = Session().user("go").bash(_SED, "sed: can't read src/app.py", exit_code=2)
+    read = Session().user("go").bash("grep foo src/app.py", "foo")
+    for s in (failed, read):
+        found = detect(s.user(_BROKE).bash("ls", "x").user("thanks"), tmp_path, known=known)
+        (guess,) = by_signal(found, signals.PROBABLE_CORRECTION)
+        assert not by_signal(found, signals.USER_CORRECTION)
+        assert "no file was changed in the preceding turn" in guess.summary
+        assert "names src/app.py, which it had not touched" in guess.summary
+    # a shell edit followed by praise or a new task is nothing at all
+    s = Session().user("go").bash(_SED, "").user("great, now also update the docs")
+    assert detect(s.edit("/repo/src/app.py", "x", "y").user("thanks"), tmp_path, known=known) == []
+
+
+def test_a_command_that_changes_files_without_naming_them_is_said_so(tmp_path: Path) -> None:
+    known = ("src/app.py",)
+    # `ruff format .` changed something: the report must not claim the file was untouched
+    s = Session().user("go").bash("ruff format .", "3 files reformatted").user(_BROKE)
+    (found,) = detect(s.bash("ls", "x").user("thanks"), tmp_path, known=known)
+    assert found.signal == signals.PROBABLE_CORRECTION and keys(found) == [("file", "src/app.py")]
+    assert "which a command in the preceding turn may have changed" in found.summary
+    assert "had not touched" not in found.summary
+    # ... and it is a correction once the agent goes and changes the file the human blamed
+    s = Session().user("go").bash("ruff format .", "3 files reformatted").user(_BROKE)
+    (found,) = detect(s.edit("/repo/src/app.py", "x", "y").user("thanks"), tmp_path, known=known)
+    assert found.signal == signals.USER_CORRECTION and found.detail["corroborated"] == "followed"
+    # no file named: not attributed, and the reason given is the true one
+    s = Session().user("go").bash("ruff format .", "3 files reformatted")
+    s.user("No, that's wrong. I told you not to reformat").bash("ls", "x").user("thanks")
+    (found,) = detect(s, tmp_path, known=known)
+    assert found.signal == signals.PROBABLE_CORRECTION and found.targets == []
+    assert "which files the preceding turn changed is not known" in found.summary
+    assert "a command changed files in the preceding turn" in found.summary
+
+
+def test_a_correction_typed_while_the_agent_works_is_a_correction(tmp_path: Path) -> None:
+    said = "No, you broke src/app.py. I told you to use the PaymentClient, revert that"
+    s = Session().user("go").edit("/repo/src/app.py", "a", "b").queued(said)
+    found = detect(s.edit("/repo/src/app.py", "b", "a").user("thanks"), tmp_path)
+    (correction,) = by_signal(found, signals.USER_CORRECTION)
+    assert keys(correction) == [("file", "src/app.py")]
+    assert not by_signal(found, signals.EDIT_REVERT)  # taking it back was asked for
+    # the same words queued by a coordinator are not the human's: the revert stands
+    s = Session().user("go").edit("/repo/src/app.py", "a", "b")
+    s.queued(said, origin={"kind": "coordinator"}, meta=True)
+    found = detect(s.edit("/repo/src/app.py", "b", "a").user("thanks"), tmp_path)
+    assert not by_signal(found, signals.USER_CORRECTION)
+    assert by_signal(found, signals.EDIT_REVERT)
+    # a queued message that corrects nothing is nothing
+    s = Session().user("go").edit("/repo/src/app.py", "a", "b").queued("also bump the version")
+    assert detect(s.edit("/repo/src/app.py", "c", "d").user("thanks"), tmp_path) == []
+
+
+def _reply(text: str, tmp_path: Path, *, back: bool) -> list[Finding]:
+    s = Session().user("go").edit("/repo/src/app.py", "a", "b").user(text)
+    s = s.edit("/repo/src/app.py", "b", "c") if back else s.bash("ls", "x")
+    return detect(s.user("thanks"), tmp_path, known=("src/app.py", "README.md"))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "You were supposed to use the PaymentClient",
+        "As I said before, the public names stay",
+        "Again, we use pnpm here not npm",
+    ],
+)
+def test_reproaches_that_are_corrections_on_their_wording(tmp_path: Path, text: str) -> None:
+    (found,) = _reply(text, tmp_path, back=True)
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", "src/app.py")]
+    (found,) = _reply(text, tmp_path, back=False)
+    assert found.signal == signals.PROBABLE_CORRECTION
+    # as the first words of a session they are about nothing the agent did
+    assert detect(Session().user(text).edit("/repo/src/app.py"), tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Why are you using requests? We use httpx",
+        "we use pnpm, not npm",
+        "the tests fail now",
+        "Now the build fails",
+        "this doesn't compile",
+        "it now crashes on startup",
+        "Revert src/app.py",
+        "src/app.py is still failing",
+    ],
+)
+def test_verdicts_that_count_only_when_the_agent_goes_back_to_its_change(
+    tmp_path: Path, text: str
+) -> None:
+    (found,) = _reply(text, tmp_path, back=True)
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", "src/app.py")]
+    assert found.detail["corroborated"] == "followed"
+    # the agent does not go back, or had changed nothing: the same words are a briefing
+    assert _reply(text, tmp_path, back=False) == []
+    assert detect(Session().user(text).edit("/repo/src/app.py"), tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Again, thanks for that",
+        "Again, please run the tests",
+        "the build fails on Windows, can you look",
+        "The app crashes when the list is empty, fix it",
+        "It doesn't compile on Windows",
+        "Revert README.md to last week's version in the docs",
+        "we use pnpm in this repo",
+        "now add a test that fails",
+        "the tests run now, great",
+        "Now the build passes, commit it",
+        "this no longer loads the old config, good",
+        "Why are you so fast?",
+        "like I said earlier today in standup, ship it",
+        "You are supposed to be careful with migrations",
+    ],
+)
+def test_wording_near_the_new_correction_phrases_is_not_one(tmp_path: Path, text: str) -> None:
+    assert _reply(text, tmp_path, back=True) == []
+
+
+_KEY_ERROR = (
+    'Traceback (most recent call last):\n  File "<string>", line 1, in <module>\n'
+    "KeyError: 'hotspots'\n"
+)
+_SNIPPET = "python -c \"import json,sys; print(json.load(sys.stdin)['hotspots'])\""
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "key", "certain"),
+    [
+        # the snippet raised: it is the step that failed, wherever it stands on the line
+        (f"agent-friction show a --json | {_SNIPPET}", _KEY_ERROR, "python <inline>", True),
+        (
+            f"agent-friction scan --json | {_SNIPPET} && agent-friction show a",
+            _KEY_ERROR,
+            "python <inline>",
+            True,
+        ),
+        (
+            "agent-friction scan --json | python3 - <<'EOF'\nimport sys\nprint(x)\nEOF",
+            _KEY_ERROR.replace("<string>", "<stdin>"),
+            "python <stdin>",
+            True,
+        ),
+        # a traceback out of the tool's own files is not the snippet's
+        (
+            f"agent-friction scan --json | {_SNIPPET} && agent-friction show a",
+            _KEY_ERROR.replace("<string>", "/repo/src/agent_friction/cli.py"),
+            "agent-friction",
+            False,
+        ),
+        # ... nor is one that was only printed, indented, by something else
+        (
+            f"agent-friction scan --json | {_SNIPPET} && agent-friction show a",
+            "".join(f"    {line}\n" for line in _KEY_ERROR.splitlines()),
+            "agent-friction",
+            False,
+        ),
+        # no snippet on the line: nothing to pin it on
+        ("agent-friction scan --json | jq .x && make lint", _KEY_ERROR, "make lint", False),
+    ],
+)
+def test_a_traceback_out_of_an_inline_snippet_is_the_snippets_failure(
+    tmp_path: Path, command: str, output: str, key: str, certain: bool
+) -> None:
+    (found,) = detect(Session().user("go").bash(command, output, exit_code=1), tmp_path)
+    assert keys(found)[0] == ("command", key)
+    assert ("ambiguous_step" not in found.detail) == certain

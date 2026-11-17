@@ -82,6 +82,22 @@ directory) if set, otherwise `~/.claude` and `~/.config/claude`.
   `<id>`: subagents do not inflate session counts.
 - Lines with a `uuid` already seen in another file are skipped (resumed
   sessions replay earlier lines).
+- **What is read from a Claude Code transcript:** `user` and `assistant`
+  lines, and one kind of `attachment` line: a `queued_command`, which is how
+  a message typed *while the agent is working* is recorded when it reaches
+  the agent (`{"type": "attachment", "attachment": {"type":
+  "queued_command", "prompt": ...}}`, the prompt a string or a list of
+  content blocks). It is read as a human message at that point of the turn,
+  so "No, revert that" typed mid-turn is a correction like any other, and
+  taking the change back is following it, not an `edit-revert`. The same
+  record carries what the harness and other agents queue. Those are not the
+  human: an `origin.kind` other than `user`/`human` (`task-notification`,
+  `coordinator`, `peer`, ...), a `commandMode` other than `prompt`, `isMeta`,
+  or text that is a system block (`<system-reminder>`, `<task-notification>`,
+  ...). A queued `<task-notification>` is still read for how a background
+  command ended. Where the same text is recorded both as a queued message
+  and as a `user` line within 10 minutes (`REPLAY_SECONDS`), it was said
+  once. Every other line type is counted in `ignored_lines`.
 - A session with no activity in the repo (no working directory inside it, no
   path that resolves into it, and no command that `cd`s into it) is left out and reported as
   `sessions_outside_repo`.
@@ -342,7 +358,12 @@ aggregate check also when it ran in a directory above (`make test` at the
 root after `cd backend && pytest`). The *same* command pairs with itself in
 the same directory, above it, or below it (red at the root, green in
 `web/`: "run it in `web/`"), never side by side: `cd frontend && make
-build` going green says nothing about `cd backend && make build`.
+build` going green says nothing about `cd backend && make build`. One
+failure is not about a place at all: a program that was not found. `cd
+src; pytest` answered with "not recognized" and `python -m pytest` passing
+from the root is the same tool started another way, and the advice names
+it ("Tell agents to use `python -m pytest`"); a tool of another family
+passing elsewhere (`cd web && npm test`) is still not a replacement.
 
 The same test decides three things: whether a command "worked instead"
 (`use-the-working-command`), whether a red run that goes green under
@@ -400,7 +421,14 @@ outside, a file tool pointed at a path outside) says nothing about this
 repository and produces no event. It is counted, so that the headline can
 be checked against the transcript: `totals.events_outside_repo` is the
 number of such calls (each call once; read-only inspection commands,
-interrupted calls and calls the harness never started are not in it). On a
+interrupted calls and calls the harness never started are not in it).
+When the scanned directory is one package of a larger git repository,
+`totals.events_elsewhere_in_repo` says how many of them acted inside that
+same repository (a sibling package, the monorepo's root): every place the
+call went to that is not the scanned directory lies in the enclosing
+repository or one of its worktrees. It is a subset of `events_outside_repo`
+and 0 when the scanned directory is the repository's root or git is not
+available. On a
 machine where most permission denials are for commands run elsewhere, this
 is where they went.
 

@@ -908,6 +908,23 @@ def _asked_for_missing(steps: Sequence[Step], output: str) -> tuple[Step | None,
     return None
 
 
+#: Where a raised traceback begins: the first frame under its header.
+_FIRST_FRAME_RE = re.compile(
+    r"(?m)^Traceback \(most recent call last\):\n(?:[ \t]*\n)*"
+    r'  File "(<string>|<stdin>)", line \d+'
+)
+_SNIPPET_KEYS = {"<string>": "python <inline>", "<stdin>": "python <stdin>"}
+
+
+def _snippet_raised(steps: Sequence[Step], output: str) -> Step | None:
+    """The one inline Python step of a line whose own code raised, if the output says so."""
+    frames = _FIRST_FRAME_RE.findall(output)
+    if not frames:
+        return None
+    ran = [s for s in steps if s.key == _SNIPPET_KEYS[frames[-1]]]
+    return ran[0] if len(ran) == 1 else None
+
+
 def failing_step(cmd: ParsedCommand, output: str) -> tuple[Step | None, bool]:
     """Which command of a chain failed, judged by what the output looks like.
 
@@ -932,6 +949,11 @@ def failing_step(cmd: ParsedCommand, output: str) -> tuple[Step | None, bool]:
         return primary, False  # a target nobody on this line asked for by name
     # Nothing in the output was printed by a step sent to /dev/null.
     heard = [s for s in candidates if not s.silenced]
+    # A Python traceback that starts in `<string>` or `<stdin>` was raised by the snippet
+    # on this line (`tool --json | python -c "..."`), whatever fed it or came after it.
+    raised = _snippet_raised(heard, output)
+    if raised is not None:
+        return raised, True
     # The runner names its target (`make: *** [Makefile:20: test] Error 1`) ...
     for step in named_steps(heard, output) or ():
         return step, True
@@ -1591,7 +1613,7 @@ _YOU_DID = (
     r"(?! (?:nothing|anything)\b)"
     r"|\byou (?:didn't|did not) (?:\w+ )?(?:run|read|follow|do|use|update|fix|check|add|listen"
     r"|test|change|remove|answer)\b(?! (?:nothing|anything)\b)"
-    r"|\byou (?:shouldn't|should not) have\b|\byou (?:weren't|were not) supposed\b"
+    r"|\byou (?:shouldn't|should not) have\b|\byou (?:weren't|were not|were) supposed\b"
     r"|\byou keep \w+ing\b"
 )
 _THING = (
@@ -1652,6 +1674,15 @@ _STILL = (
     r"|(?:failing|fails|broken|crashing|crashes) again\b"
 )
 
+#: How an outcome is reported as newly bad: "fails", "crashes", "doesn't compile".
+_FAILS = (
+    r"fails?|crash(?:es)?|breaks?|errors?(?: out)?|blows up|is broken|are broken"
+    r"|(?:doesn't|does not|don't|do not|won't|will not) "
+    r"(?:compile|build|start|run|pass|import|load|work)"
+)
+#: A file by name or path: ``src/app.py``, ``README.md``.
+_FILE_WORD = r"`?[\w./\\-]*\w\.[A-Za-z]\w{0,5}`?"
+
 #: Subjects that stand for the outcome of the agent's work in "the tests are still failing".
 #: A longer noun phrase ("the login page is still broken") more often describes a task.
 _RESULT_NOUN = (
@@ -1708,7 +1739,13 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
             rf"(?:{_NEVER_DO})\b",
             False,
         ),
-        ("again: …", r"^again\s*[:—-]+\s*\S", False),
+        (
+            # "Again, we use pnpm here not npm"; not "Again, thanks" or "Again, please run it"
+            "again: …",
+            r"^again\s*[:—-]+\s*\S"
+            r"|^again\s*,\s*(?:we (?:use|always|only)|use|i (?:said|asked|want(?:ed)?))\b",
+            False,
+        ),
         (
             # "same error", "I'm getting the exact same failure"; not "same error handling
             # as in util.py, please"
@@ -1804,6 +1841,13 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
             True,
         ),
         (
+            # "As I said before, the public names stay"
+            "as I said before",
+            r"\b(?:as|like) i (?:said|told you|mentioned|explained|asked|wrote)"
+            r" (?:before|earlier|already|above|previously)(?=\s*(?:[,.:;!—-]|$))",
+            True,
+        ),
+        (
             "not what I asked",
             r"\b(?:not|isn't|wasn't|ain't) what i (?:asked|wanted|meant|said)\b",
             True,
@@ -1875,6 +1919,53 @@ _INSTRUCTION_CUES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
             r"(?:in (?:the|this|these|those|here|our|my)\b|here\b)",
         ),
         ("can you not …", _OPEN + r"(?:can|could) you (?:please )?not \w+"),
+        (
+            # "Why are you using requests? We use httpx": asked of work in progress
+            "why are you …",
+            r"\bwhy are you (?:using|deleting|removing|changing|editing|touching|rewriting"
+            r"|adding|creating|skipping|ignoring|modifying|disabling|mocking|importing"
+            r"|installing|running|doing (?:that|this|it)|not (?:using|running))\b",
+        ),
+        (
+            # the rule of the house, with what was used instead: "we use pnpm here, not npm"
+            "we use X, not Y",
+            _OPEN + r"we (?:always |only )?use [\w./@-]+(?: [\w./@-]+){0,3}?,? (?:and )?not "
+            r"[\w./@-]+",
+        ),
+        (
+            # What the change did, said as it is found out: "the tests fail now", "it now
+            # crashes on startup", "this doesn't compile". Without "now" or a pronoun the
+            # same words describe a bug to work on ("the build fails on Windows").
+            "it fails now",
+            _OPEN
+            + r"(?:(?:and |but )?now (?:it|that|this|(?:the |my |our )?(?:"
+            + _RESULT_NOUN
+            + r"))"
+            r" (?:" + _FAILS + r")\b"
+            r"|(?:it|that|this|(?:the |my |our )?(?:"
+            + _RESULT_NOUN
+            + r")) now (?:"
+            + _FAILS
+            + r")\b"
+            r"|(?:it|that|this|(?:the |my |our )?(?:" + _RESULT_NOUN + r")) (?:" + _FAILS + r")"
+            r"(?: \w+){0,3}? now\b"
+            r"|(?:it|that|this) (?:doesn't|does not|won't|will not) "
+            r"(?:compile|build|start|run|pass|import|load)\b"
+            r"(?! (?:in|on|for|with|when|if|under|until|unless|without)\b))",
+        ),
+        (
+            # by file: "Revert src/app.py", "src/app.py is still failing"
+            "revert/still failing, by file",
+            rf"^(?:(?:please|pls|just|now|ok|okay|so)[, ]+)*{_UNDO} {_FILE_WORD}"
+            r"(?:[.!,]|$| (?:please|and|then|to how|to what)\b)"
+            rf"|\b(?:can|could|would|will) you (?:please |just )?{_UNDO} {_FILE_WORD}"
+            + "|"
+            + _OPEN
+            + _FILE_WORD
+            + r"(?:'s| is| are)? (?:"
+            + _STILL
+            + ")",
+        ),
         (
             "restore the old …",
             r"\brestore (?:(?:the|my|that|this) (?:old|original|previous|earlier|former)\b"
@@ -2102,6 +2193,12 @@ class DetectContext:
     #: The one directory of the repository with this name (``packages/web`` for ``web``),
     #: repo-relative; ``None`` if there is none or more than one.
     workspace_dir: Callable[[str], str | None] = lambda name: None
+    #: Repo files that subagents of a session changed between two moments (epoch
+    #: seconds): what a call that launched them (Task, Agent) did to the tree.
+    delegated: Callable[[str, float, float], list[str]] = lambda session, start, end: []
+    #: True if an absolute path lies in the git repository that the scanned directory
+    #: is a part of (always false when the scanned directory is the repository).
+    enclosing: Callable[[str], bool] = lambda absolute: False
 
 
 @dataclass
@@ -2373,6 +2470,7 @@ class _Detector:
         # Transcript lines of calls that were refused or failed while acting outside the
         # repository: seen, and deliberately not counted as this repository's friction.
         self.outside: list[int] = []
+        self.nearby: list[int] = []
         self._durations: dict[str, list[tuple[_Action, float]]] = {}
         #: Red runs taken off the record: (transcript line, seconds the run took, reason)
         self.dropped: list[tuple[int, float, str]] = []
@@ -2580,6 +2678,12 @@ class _Detector:
             placed = green_key.split(" ", 1)[0] in DIRECTORY_TOOLS or command_role(green_key)
             below = not there or here.startswith(there + "/")
             return above or below or not placed
+        family = tool_family(green_key)
+        failed = self.state.key_of.get(id(finding), "")
+        if "not_found" in finding.detail and family is not None and family == tool_family(failed):
+            # The program was not there at all: where the agent stood when it found
+            # another way to start the same tool (`python -m pytest`) is beside the point.
+            return True
         return above and (tool_family(green_key) is None or is_aggregate_check(green_key))
 
     def _elsewhere(self, step: Step | None, cwd: str | None) -> bool:
@@ -2894,7 +2998,7 @@ class _Detector:
             return
         op = action.call.op
         if self._acted_outside(action, result):
-            self.outside.append(result.line)
+            self._outside(action, result)
         if result.error == model.ERR_REJECTED:
             self._on_rejected(action, result)
         elif result.error == model.ERR_DENIED:
@@ -2911,6 +3015,28 @@ class _Detector:
             self._on_shell(action, result)
         elif op == model.OP_OTHER and not result.ok:
             self._on_tool_failure(action, result)
+
+    def _outside(self, action: _Action, result: Event) -> None:
+        """Count a call that went wrong outside the scanned directory, and where it was."""
+        self.outside.append(result.line)
+        call, resolver = action.call, self.ctx.resolver
+        places: list[str] = []
+        if call.op == model.OP_SHELL and call.command:
+            try:
+                steps = parse_command(call.command, is_windows_path(call.cwd) or None).steps
+            except Exception:
+                steps = ()
+            for step in steps:
+                here = self._where(step, call.cwd)
+                words = [w for w in (step.program, *step.args) if "/" in w or "\\" in w]
+                places.extend(p for p in (here, *(resolver.absolute(w, here) for w in words)) if p)
+        elif call.path:
+            places.extend(p for p in [resolver.absolute(call.path, call.cwd)] if p)
+        away = [place for place in places if not resolver.contains(place)]
+        # In the same git repository, next to the directory that was scanned (another
+        # package of a monorepo): every place it went to that is not ours is in there.
+        if away and all(self.ctx.enclosing(place) for place in away):
+            self.nearby.append(result.line)
 
     def _acted_outside(self, action: _Action, result: Event) -> bool:
         """Did a call that went wrong act on something outside the repository?"""
@@ -3858,7 +3984,7 @@ class _Detector:
             step, certain = red_step, True
             invocation = bool(setup_error)
         if self._elsewhere(step, call.cwd):
-            self.outside.append(result.line)
+            self._outside(action, result)
             return  # the step that failed ran, or only touched things, outside the repo
         if step is not None and step.key:
             key = step.key
@@ -4581,13 +4707,13 @@ class _Detector:
             # Name the step the human objected to (`rm`, `git push`), not the last one.
             step = objectionable_step(action.cmd, result.reason)
             if self._elsewhere(step, call.cwd):
-                self.outside.append(result.line)
+                self._outside(action, result)
                 return
             if step is not None and step.key:
                 targets = [Target(model.COMMAND, self._label(step.key, step, call.cwd))]
             written = self._written(step, call.cwd)
             if written is None:
-                self.outside.append(result.line)
+                self._outside(action, result)
                 return
             targets = [Target(model.FILE, written)] if written else targets
         tool = self._tool(call)
@@ -4633,13 +4759,13 @@ class _Detector:
                 )
                 targets = []
             if self._elsewhere(step, call.cwd):
-                self.outside.append(result.line)
+                self._outside(action, result)
                 return
             if step is not None and step.key:
                 targets = [Target(model.COMMAND, self._label(step.key, step, call.cwd))]
             written = self._written(step, call.cwd)
             if written is None:
-                self.outside.append(result.line)
+                self._outside(action, result)
                 return  # `cat > /tmp/notes <<EOF`: a write to a file outside the repo
             targets = [Target(model.FILE, written)] if written else targets
         by = {
@@ -4662,6 +4788,57 @@ class _Detector:
             interval=self._round_trip(action),
             detail={"variant": result.reason or "permission", "command": call.command or ""},
         )
+
+    def _shell_changed(self, action: _Action) -> list[str] | None:
+        """Repo files a successful shell edit names; ``None`` if the call is no such edit.
+
+        `sed -i s/a/b/ src/app.py`, `cat > src/app.py <<EOF`, `git checkout -- f`: a
+        change like any Edit, to the files on the command line. A formatter run over
+        the tree (`ruff format .`) changed files too, and names none: ``[]``.
+        """
+        cmd, result = action.cmd, action.result
+        command = action.call.command or ""
+        if cmd is None or result is None or not result.ok or not is_shell_edit(cmd, command):
+            return None
+        files: list[str] = []
+        for step in cmd.steps:
+            here = self._where(step, action.call.cwd)
+            for word in (*path_candidates(step.args), written_file(step), step.into):
+                rel = self.ctx.resolver.resolve(word, here) if word else None
+                if rel and rel not in files and self.ctx.is_known_file(rel):
+                    files.append(rel)
+        return files
+
+    def _turn_changes(self) -> tuple[list[str], list[str], bool]:
+        """Files the turn so far touched and changed (most recent first), by any means.
+
+        An Edit or Write, a shell command that rewrites files, and the edits of
+        subagents the agent launched in this turn all change files: a correction
+        that follows is about them just the same. The third value says that
+        something was changed without the transcript saying which files.
+        """
+        touched: list[str] = []
+        edited: list[str] = []
+        blind = False
+        for action in reversed(self.state.turn):
+            changed = action.call.op in (model.OP_EDIT, model.OP_WRITE)
+            files = [action.file] if action.file is not None else []
+            if action.call.op == model.OP_SHELL:
+                by_shell = self._shell_changed(action)
+                if by_shell is not None:
+                    files, changed = by_shell, True
+                    blind = blind or not by_shell
+            elif action.file is None and action.call.op == model.OP_OTHER:
+                span = _span(action)
+                if span is not None:
+                    files = self.ctx.delegated(self.stream.session_id, *span)
+                    changed = bool(files)
+            for rel in files:
+                if rel not in touched:
+                    touched.append(rel)
+                if changed and rel not in edited:
+                    edited.append(rel)
+        return touched, edited, blind
 
     def _turn_bounds(self) -> tuple[float | None, float | None]:
         turn = self.state.turn
@@ -4771,11 +4948,8 @@ class _Detector:
             # the agent did ("looks good, thanks. now commit"): they had seen enough of
             # it. A stopped server stays: it should not have been in the foreground.
             self._drop({id(stopped)})
-        before = frozenset(
-            a.file
-            for a in self.state.turn
-            if a.file and a.call.op in (model.OP_EDIT, model.OP_WRITE)
-        )
+        touched, edited, blind = self._turn_changes()
+        before = frozenset(edited)
         # An instruction that redirects the work just done ("don't use X here") is a
         # correction if the agent goes back to that work, and nothing if it does not.
         tentative = bool(instructed) and bool(before)
@@ -4788,15 +4962,6 @@ class _Detector:
                 matched = ", ".join(f'"{label}"' for label in softened)
                 self.state.softened = (event, before, matched)
             return
-        touched: list[str] = []  # most recent first
-        edited: list[str] = []
-        for action in reversed(self.state.turn):
-            if action.file is None:
-                continue
-            if action.file not in touched:
-                touched.append(action.file)
-            if action.call.op in (model.OP_EDIT, model.OP_WRITE) and action.file not in edited:
-                edited.append(action.file)
         named: list[str] = []
         for candidate in path_candidates(event.text[:CORRECTION_SCAN_CHARS].split()):
             rel = self.ctx.resolver.resolve(candidate, event.cwd)
@@ -4849,7 +5014,15 @@ class _Detector:
         ]
         if blamed:
             targets = [Target(model.FILE, rel) for rel in blamed[:CORRECTION_MAX_FILES]]
-            how = "names " + ", ".join(t.key for t in targets) + ", which it had not touched"
+            how = (
+                "names "
+                + ", ".join(t.key for t in targets)
+                + (
+                    ", which a command in the preceding turn may have changed"
+                    if blind
+                    else ", which it had not touched"
+                )
+            )
         elif named:
             targets = [Target(model.FILE, rel) for rel in named[:CORRECTION_MAX_FILES]]
             how = "names " + ", ".join(t.key for t in targets)
@@ -4863,7 +5036,22 @@ class _Detector:
             # correction for certain only if the agent then goes and changes that file.
             pinned = others[:CORRECTION_MAX_FILES]
             targets = [Target(model.FILE, rel, 1.0 / len(pinned)) for rel in pinned]
-            how = "names " + ", ".join(pinned) + ", which it had not changed"
+            how = (
+                "names "
+                + ", ".join(pinned)
+                + (
+                    # `ruff format .`, a script: something was changed, which files is not said
+                    ", which a command in the preceding turn may have changed"
+                    if blind
+                    else ", which it had not changed"
+                )
+            )
+        elif blind:
+            targets = []
+            how = (
+                "a command changed files in the preceding turn, which ones is not known, "
+                "so not attributed to a path"
+            )
         else:
             targets = []
             how = "no file edited in the preceding turn, so not attributed to a path"
@@ -4876,6 +5064,10 @@ class _Detector:
         stale = "long pause" in labels
         strong = confidence >= CORRECTION_STRONG or stale
         named_changed = [rel for rel in named if rel in changed]
+        # A formatter or a script ran and the human blames a file: whether the agent goes
+        # on to change that file decides, as for a file it had not gone near.
+        if blind and blamed and not changed:
+            pinned = blamed[:CORRECTION_MAX_FILES]
         corroborated = ""
         if not strong:
             note = "weaker cues only, no clear correction phrase"
@@ -4886,7 +5078,11 @@ class _Detector:
             note = "awaiting the agent's response"
         else:
             confidence = CORRECTION_PROBABLE
-            note = "not corroborated: no file was changed in the preceding turn"
+            note = (
+                "not corroborated: which files the preceding turn changed is not known"
+                if blind
+                else "not corroborated: no file was changed in the preceding turn"
+            )
         certain = confidence >= CORRECTION_STRONG
         finding = self._emit(
             USER_CORRECTION if certain else PROBABLE_CORRECTION,
@@ -4947,6 +5143,8 @@ class Detection:
     exposed_in: set[tuple[str, str, str]] = field(default_factory=set)
     #: Lines of calls that were refused or failed while acting outside the repository.
     outside: list[int] = field(default_factory=list)
+    #: Those of ``outside`` that acted elsewhere in the same git repository.
+    nearby: list[int] = field(default_factory=list)
 
 
 def detect_stream(stream: Stream, ctx: DetectContext) -> Detection:
@@ -4960,6 +5158,7 @@ def detect_stream(stream: Stream, ctx: DetectContext) -> Detection:
         detector.dropped,
         detector.exposed_in,
         sorted(set(detector.outside)),
+        sorted(set(detector.nearby)),
     )
 
 

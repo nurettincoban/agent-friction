@@ -36,6 +36,7 @@ from agent_friction.attribution import (
 from agent_friction.discovery import (
     claude_config_dirs,
     discover_repo_transcripts,
+    enclosing_repositories,
     expand_transcript_paths,
     repo_name,
     repo_roots,
@@ -894,6 +895,7 @@ class _Analysis:
         self.git_used = False
         self.dropped: list[tuple[int, float, str]] = []
         self.events_outside_repo = 0
+        self.events_elsewhere_in_repo = 0
         self._dirs_by_name: dict[str, list[str]] | None = None
         self.untimed_sessions_excluded = 0
         self.unreadable: list[tuple[Path, str]] = []
@@ -1128,6 +1130,43 @@ class _Analysis:
     def quote(self, text: str, limit: int) -> str:
         return redact.one_line(text, min(limit, max(self.options.excerpt_chars, 1)))
 
+    def _enclosing(self) -> Callable[[str], bool]:
+        """Is an absolute path in the git repository the scanned directory is part of?"""
+        tops = [to_posix(str(top)) for top in enclosing_repositories(self.repo)]
+
+        def inside(absolute: str) -> bool:
+            return any(absolute == top or absolute.startswith(top + "/") for top in tops)
+
+        return inside
+
+    def _delegated(self, streams: Sequence[Stream]) -> Callable[[str, float, float], list[str]]:
+        """Which repo files the subagents of a session changed between two moments.
+
+        A subagent's edits are in a stream of their own. For the agent that launched
+        it they are what its Task call did, and a correction that follows is about
+        them as much as about its own edits.
+        """
+        changes: dict[str, list[tuple[float, str]]] = {}
+        for stream in streams:
+            if not stream.sidechain:
+                continue
+            calls: dict[str, model.Event] = {}
+            for event in stream.events:
+                if event.kind == model.TOOL_CALL and event.op in (model.OP_EDIT, model.OP_WRITE):
+                    calls[event.call_id] = event
+                elif event.kind == model.TOOL_RESULT and event.ok and event.call_id in calls:
+                    call = calls.pop(event.call_id)
+                    when = event.ts or call.ts
+                    rel = self.resolver.resolve(call.path, call.cwd) if call.path else None
+                    if rel and when is not None:
+                        changes.setdefault(stream.session_id, []).append((when.timestamp(), rel))
+
+        def between(session: str, start: float, end: float) -> list[str]:
+            found = [rel for at, rel in changes.get(session, ()) if start <= at <= end]
+            return list(dict.fromkeys(found))
+
+        return between
+
     def display_path(self, path: Path | str) -> str:
         """Home shown as ``~`` and forward slashes on every platform."""
         return redact.redact_home(str(path)).replace("\\", "/")
@@ -1226,6 +1265,8 @@ class _Analysis:
             unit=self.unit,
             exists=lambda rel: self._disk_is_file(rel) is not None,
             workspace_dir=self.workspace_dir,
+            delegated=self._delegated(streams),
+            enclosing=self._enclosing(),
         )
         findings: list[Finding] = []
         dropped: list[tuple[int, float, str]] = []
@@ -1248,8 +1289,10 @@ class _Analysis:
                     skipped_events=full.skipped_events,
                     dropped=[d for d in full.dropped if d[0] in inside],
                     outside=[line for line in full.outside if line in inside],
+                    nearby=[line for line in full.nearby if line in inside],
                 )
             self.events_outside_repo += len(detection.outside)
+            self.events_elsewhere_in_repo += len(detection.nearby)
             findings.extend(detection.findings)
             dropped.extend(detection.dropped)
             source_key = str(stream.source)
@@ -1614,6 +1657,7 @@ class _Analysis:
                 # Calls that were refused or failed while acting outside the repository
                 # (`cd ../other && ...`, a file under /tmp): seen, and not counted.
                 "events_outside_repo": self.events_outside_repo,
+                "events_elsewhere_in_repo": self.events_elsewhere_in_repo,
             },
             "signals": [
                 {

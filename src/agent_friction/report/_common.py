@@ -193,10 +193,18 @@ def dropped_note(result: dict[str, Any]) -> str | None:
             f"~{fmt_minutes(minutes)} of run time)."
         )
     if outside > 0:
-        calls = plural(outside, "declined, denied, or failed call")
-        parts.append(
-            f"{'Also not' if parts else 'Not'} counted: {calls} that acted outside this repository."
-        )
+        nearby = min(outside, int(totals.get("events_elsewhere_in_repo", 0) or 0))
+        far = outside - nearby
+        places: list[str] = []
+        if nearby:
+            places.append(
+                f"{plural(nearby, 'declined, denied, or failed call')} that acted elsewhere in "
+                "the repository, outside the scanned directory"
+            )
+        if far:
+            what = "call" if nearby else "declined, denied, or failed call"
+            places.append(f"{plural(far, what)} that acted outside this repository")
+        parts.append(f"{'Also not' if parts else 'Not'} counted: {' and '.join(places)}.")
     untimed = int(totals.get("untimed_sessions_excluded", 0) or 0)
     if untimed > 0:
         parts.append(

@@ -4243,3 +4243,94 @@ def test_paths_may_be_given_as_strings(tmp_path: Path) -> None:
     assert analyze(AnalyzeOptions(**one))["commands"] == typed["commands"]
     relative: Any = {"repo": "shop", "transcripts": [file], "include_git": False}
     assert analyze(AnalyzeOptions(**relative))["totals"]["sessions"] >= 0  # no crash
+
+
+def _delegating(repo: Path, name: str, said: str, *, edits: bool) -> tuple[Session, Session]:
+    app = str(repo / "src" / "app.py")
+    main = Session(name, cwd=str(repo)).user("rename the helpers").tick(5)
+    side = Session(name, cwd=str(repo), sidechain=True)
+    side.now = main.now
+    side.user("rename the helpers")
+    if edits:
+        side.edit(app, "a", "b")
+    else:
+        side.read(app)
+    task = {"description": "rename", "prompt": "rename helpers", "subagent_type": "general"}
+    main.tool("Task", task, "done", took=120)
+    main.user(said).edit(app, "b", "a").user("thanks")
+    return main, side
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "No, you broke src/app.py. I told you not to change the public API, revert that",
+        "No, that's wrong. I told you not to change the public API, revert that",
+    ],
+)
+def test_what_a_subagent_changed_is_a_change_of_the_turn_that_launched_it(
+    tmp_path: Path, said: str
+) -> None:
+    def run(edits: bool) -> dict[str, Any]:
+        root = tmp_path / str(edits)
+        repo = root / "repo"
+        (repo / "src").mkdir(parents=True)
+        (repo / "src" / "app.py").write_text("a = 1\n", encoding="utf-8")
+        files = []
+        for index in range(3):
+            main, side = _delegating(repo, f"d{index}", said, edits=edits)
+            files.append(main.save(root / "t"))
+            files.append(side.save(root / "t" / main.session_id / "subagents", "agent-a1"))
+        return analyze(AnalyzeOptions(repo=repo, transcripts=files, include_git=False, now=NOW))
+
+    out = run(True)
+    assert out["totals"]["corrections"] == 3 and out["totals"]["probable_corrections"] == 0
+    (spot,) = out["hotspots"]
+    assert spot["path"] == "src/app.py" and "user-correction" in spot["signals"]
+    assert "had not touched" not in json.dumps(out)
+    # the subagent only read the file: nothing had been changed when the human spoke
+    assert run(False)["totals"]["corrections"] == 0
+
+
+def test_a_missing_program_names_the_way_that_worked_from_any_directory(tmp_path: Path) -> None:
+    missing = "'pytest' is not recognized as an internal or external command,\noperable program"
+
+    def sessions(after: str) -> list[Session]:
+        return [
+            Session(f"w{i}")
+            .user("run the tests")
+            .bash("cd src; pytest", missing, exit_code=1)
+            .bash(after, "3 passed in 1s")
+            for i in range(3)
+        ]
+
+    (entry,) = scan(tmp_path / "a", sessions("python -m pytest"))["commands"]
+    (advice,) = entry["recommendations"]
+    assert advice["id"] == "use-the-working-command"
+    assert advice["title"] == "Tell agents to use `python -m pytest`"
+    # another tool passing somewhere else says nothing about how to start pytest
+    (entry,) = scan(tmp_path / "b", sessions("cd web && npm test"))["commands"]
+    (advice,) = entry["recommendations"]
+    assert advice["id"] == "document-the-command" and "is not installed" in advice["title"]
+
+
+def test_calls_in_a_sibling_package_are_counted_apart(tmp_path: Path) -> None:
+    mono = tmp_path / "mono"
+    for package in ("web", "api"):
+        (mono / "packages" / package).mkdir(parents=True)
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+    subprocess.run(["git", "init", "-q", str(mono)], check=True, env=env)
+    web, api = mono / "packages" / "web", mono / "packages" / "api"
+    s = Session("s0", cwd=str(web)).user("go")
+    s.bash(f"cd {api} && make test", "boom", exit_code=2)  # next door, same repository
+    s.edit(f"{mono}/README.md", error=builders.EDIT_NOT_FOUND)  # above, same repository
+    s.bash("cd /srv/other && make test", "boom", exit_code=2)  # somewhere else entirely
+    s.bash("make test", "boom", exit_code=2)  # ours
+    totals = scan(tmp_path, [s], repo=web)["totals"]
+    assert totals["events_outside_repo"] == 3 and totals["events_elsewhere_in_repo"] == 2
+    assert totals["friction_events"] == 1
+    # scanned from the repository's root there is no "elsewhere in the repository"
+    whole = Session("s1", cwd=str(mono)).user("go")
+    whole.bash("cd /srv/other && make test", "boom", exit_code=2)
+    totals = scan(tmp_path / "w", [whole], repo=mono)["totals"]
+    assert totals["events_outside_repo"] == 1 and totals["events_elsewhere_in_repo"] == 0

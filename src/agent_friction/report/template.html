@@ -215,8 +215,14 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
       mins(t.dropped_minutes) + " of run time).");
   }
   if (Number(t.events_outside_repo) > 0) {
-    notCounted.push((notCounted.length ? "Also not" : "Not") + " counted: " +
-      plural(t.events_outside_repo, "declined, denied, or failed call") + " that acted outside this repository.");
+    var nearby = Math.min(Number(t.events_outside_repo), Number(t.events_elsewhere_in_repo) || 0);
+    var far = Number(t.events_outside_repo) - nearby;
+    var places = [];
+    if (nearby) places.push(plural(nearby, "declined, denied, or failed call") +
+      " that acted elsewhere in the repository, outside the scanned directory");
+    if (far) places.push(plural(far, nearby ? "call" : "declined, denied, or failed call") +
+      " that acted outside this repository");
+    notCounted.push((notCounted.length ? "Also not" : "Not") + " counted: " + places.join(" and ") + ".");
   }
   if (Number(t.untimed_sessions_excluded) > 0) {
     notCounted.push((notCounted.length ? "Also not" : "Not") + " counted: " +
