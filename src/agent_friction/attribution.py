@@ -1120,6 +1120,18 @@ def _pieces(command: str) -> list[tuple[list[str], str]]:
     return pieces
 
 
+def in_sequence(command: str) -> bool:
+    """Does ``command`` run commands one after another (``a; b``, ``a && b``)?
+
+    A pipeline alone (``a | tail``) does not: its output is one command's.
+    """
+    try:
+        pieces = _pieces(command)
+    except ValueError:
+        return False
+    return any(operator not in ("", "|", "|&") for _, operator in pieces[:-1])
+
+
 #: Programs that print a file given as an argument (``sed -n``, ``grep pattern file``).
 FILE_READERS = frozenset(
     {"cat", "head", "tail", "less", "more", "nl", "bat", "grep", "egrep", "fgrep", "rg", "sed"}

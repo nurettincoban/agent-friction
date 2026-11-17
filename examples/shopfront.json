@@ -621,7 +621,7 @@
       "path": "src/shopfront/checkout/service.py",
       "recommendations": [
         {
-          "detail": "A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: \"It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only.\" / \"No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.\"",
+          "detail": "A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: \"It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only.\" / \"No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.\" (The human also named `src/shopfront/payments/legacy.py`, which the agent had not touched.)",
           "documented_in": [],
           "id": "write-down-the-rule",
           "signals": [

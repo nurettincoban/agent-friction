@@ -439,14 +439,22 @@ class _Rules:
         # "Keeps repeating" is a claim about the same thing being said twice: it needs two
         # corrections that share wording. Two unrelated corrections are two one-offs.
         repeated = _share_wording([f.detail.get("quote", "") for f in found])
+        # Said while the agent worked on this file, about a file it had not touched: the
+        # words may name that other file, so the reader is told which.
+        named = _top([f.detail.get("also_named", "") for f in found])
+        here = (
+            "while it was working here"
+            if len(named) and all(f.detail.get("also_named") for f in found)
+            else "here"
+        )
         detail = (
-            f"A human corrected the agent here {_in_sessions(found)}. Put the rule in "
+            f"A human corrected the agent {here} {_in_sessions(found)}. Put the rule in "
             "AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read "
             "before the next attempt."
         )
         if not repeated:
             detail = (
-                "A human corrected the agent here "
+                f"A human corrected the agent {here} "
                 + ("once" if len(found) == 1 else _in_sessions(found))
                 + (", each time about something else" if _differ(found) else "")
                 + ". If what they said is a standing rule rather than a one-off, put it in "
@@ -462,6 +470,11 @@ class _Rules:
                     quotes.append(text)
             if quotes:
                 detail += " In their words: " + " / ".join(f'"{q}"' for q in quotes[:MAX_QUOTES])
+        if named:
+            detail += (
+                f" (The human also named {_and([code(name) for name, _ in named])}, which "
+                "the agent had not touched.)"
+            )
         self.add(
             "write-down-the-rule",
             "Write down the rule the human keeps repeating"

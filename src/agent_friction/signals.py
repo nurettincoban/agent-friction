@@ -29,6 +29,7 @@ from agent_friction.attribution import (
     command_role,
     denied_step,
     env_copy,
+    in_sequence,
     inner_key,
     is_aggregate_check,
     is_inline_code,
@@ -689,21 +690,32 @@ def _added_flags(failed: str, passed: str) -> str:
     return " ".join(rest)
 
 
-def _up_to_verdict(step: Step | None, output: str) -> str:
+def _up_to_verdict(step: Step | None, output: str, error: bool = False) -> str:
     """``output`` cut after the line that carries ``step``'s red verdict, if it has one.
 
     Excerpts keep the head and the tail of long output. On a line with several
-    commands the tail belongs to the last of them, which may have passed.
+    commands the tail belongs to the last of them, which may have passed. With
+    ``error`` (a line of several commands) a line that reads as a setup/invocation
+    error (`pytest: error: unrecognized arguments: -n0`) is what decided it, whatever a
+    later step printed after it: the output is cut there, unless the step's own
+    verdict came first.
     """
-    if step is None:
+    cut = len(output) + 1
+    if step is not None:
+        for name in (command_role(step.key), step.program):
+            signature = VERDICT_SIGNATURES.get(name or "")
+            match = signature[0].search(output) if signature is not None else None
+            if match is not None:
+                cut = match.end()
+                break
+    if error:
+        decided = [m for m in INVOCATION_ERROR_RE.finditer(output) if m.end() <= cut]
+        if decided:
+            cut = decided[-1].end()
+    if cut > len(output):
         return output
-    for name in (command_role(step.key), step.program):
-        signature = VERDICT_SIGNATURES.get(name or "")
-        match = signature[0].search(output) if signature is not None else None
-        if match is not None:
-            end = output.find("\n", match.end())
-            return output if end < 0 else output[:end]
-    return output
+    end = output.find("\n", cut)
+    return output if end < 0 else output[:end]
 
 
 def _candidates(cmd: ParsedCommand) -> list[Step]:
@@ -1781,6 +1793,14 @@ _INSTRUCTION_CUES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 #: ``[Image #1]``, ``[Pasted text #2 +14 lines]``: markers the harness puts where the
 #: human attached something.
 _ATTACHMENT_RE = re.compile(r"^(?:\s*\[(?:Image|Pasted text|File)[^\]\n]{0,40}\]\s*)+", re.I)
+#: Words that say a file was damaged: what follows is the file the complaint is about.
+_BLAME = (
+    r"\b(?:broke|breaks?|broken|breaking|messed up|screwed up|ruined|deleted|removed|overwrote"
+    r"|overwritten|clobbered|touched|changed|modified|reverted|regress(?:ed|ion)|bug in"
+    r"|wrong in|mistake in|error in)\b"
+)
+#: Checks that read the code without running it: any check passing after an edit will do.
+_STATIC_CHECKS = frozenset({"typecheck", "lint"})
 #: A fenced code block (closed or running to the end) and Markdown-quoted lines.
 _QUOTED_BLOCK_RE = re.compile(r"```.*?(?:```|\Z)|^[ \t]*>[^\n]*$", re.S | re.M)
 #: A reporting phrase and the quotation it introduces: "the reviewer's comment: 'No, I
@@ -2027,6 +2047,25 @@ def _resumed(action: _Action) -> float | None:
     return after
 
 
+def _awake(
+    interval: tuple[float, float] | None, gaps: Sequence[tuple[float, float]]
+) -> tuple[float, float] | None:
+    """``interval`` without the idle gaps it spans: what came before the first of them.
+
+    If nothing came before it (the interval starts at the gap), what came after.
+    """
+    if interval is None:
+        return None
+    start, end = interval
+    for idle_from, idle_to in gaps:
+        if idle_from >= end or idle_to <= start:
+            continue
+        if idle_from > start:
+            return (start, idle_from)
+        start = min(idle_to, end)
+    return (start, end)
+
+
 def _capped_back(start: float | None, end: float | None) -> tuple[float, float] | None:
     """Interval [start, end] limited to the last TIME_CAP_SECONDS before its end."""
     if start is None or end is None or end <= start:
@@ -2069,6 +2108,8 @@ class _Unconfirmed:
     #: Files the human named *instead* ("wrong file, the bug is in parser.py"): repo
     #: paths and bare file names. Going there next confirms the correction too.
     elsewhere: frozenset[str] = frozenset()
+    #: The human said which file it is about: going back elsewhere does not change that.
+    settled: bool = False
     redirected: bool = False
     followed: list[str] = field(default_factory=list)  # which of ``files`` it went back to
 
@@ -2129,6 +2170,7 @@ class _State:
     changes_at: dict[int, int] = field(default_factory=dict)  # ``changes`` per failure
     tests_run: dict[int, int] = field(default_factory=dict)  # tests a red run counted
     red_seen: set[str] = field(default_factory=set)  # keys and labels that ran red
+    turn_of: dict[int, int] = field(default_factory=dict)  # the turn a failure was seen in
     trips: dict[int, tuple[float, float]] = field(default_factory=dict)  # see ``_promote``
     key_of: dict[int, str] = field(default_factory=dict)  # command key per failure
     # failures for which another command stood in, per failed command
@@ -2519,7 +2561,37 @@ class _Detector:
         for finding in self.findings:
             if acted and finding.signal == COMMAND_FAILURE and finding.line == acted[-1]:
                 finding.detail["trailing"] = "1"
+        # Nobody was working while the laptop slept: no interval reaches across a silence
+        # of more than ``IDLE_GAP_SECONDS``, in the middle of a turn or anywhere else.
+        gaps = self._idle_gaps()
+        for finding in self.findings if gaps else ():
+            finding.interval = _awake(finding.interval, gaps)
+            finding.run = _awake(finding.run, gaps)
+            finding.intervals = tuple(
+                kept for kept in (_awake(i, gaps) for i in finding.intervals) if kept is not None
+            )
         return self.findings
+
+    def _idle_gaps(self) -> list[tuple[float, float]]:
+        """Silences in the stream longer than ``IDLE_GAP_SECONDS``, as ``(from, to)``.
+
+        The time between a call and its own result is the command running, however long.
+        """
+        gaps: list[tuple[float, float]] = []
+        before: Event | None = None
+        for event in self.stream.events:
+            now, then = _epoch(event), _epoch(before) if before is not None else None
+            if now is None:
+                continue
+            answered = (
+                before is not None
+                and before.kind == model.TOOL_CALL
+                and event.kind == model.TOOL_RESULT
+            )
+            if then is not None and now - then > IDLE_GAP_SECONDS and not answered:
+                gaps.append((then, now))
+            before = event
+        return gaps
 
     def _end_turn(self) -> None:
         """Judge what can only be judged once a turn is over."""
@@ -3644,7 +3716,12 @@ class _Detector:
             summary,
             targets,
             # In `a; b; c` the tail of the output is c's; show the step that failed.
-            excerpt=f"$ {call.command}\n{_up_to_verdict(red_step, result.output)}",
+            excerpt=f"$ {call.command}\n"
+            + _up_to_verdict(
+                red_step,
+                result.output,
+                error=in_sequence(call.command or ""),
+            ),
             weight=1.0 if invocation or environment else ORDINARY_FAILURE_WEIGHT,
             # An ordinary failure (a red test) is information, not lost time.
             interval=self._round_trip(action) if invocation or environment else None,
@@ -3654,6 +3731,7 @@ class _Detector:
         state.key_of[id(finding)] = key
         state.changes_at[id(finding)] = state.changes
         state.red_seen.update((key, shown(key)))
+        state.turn_of[id(finding)] = state.turns
         counted = tests_counted(result.output)
         if counted:
             state.tests_run[id(finding)] = counted
@@ -3825,6 +3903,28 @@ class _Detector:
                 # import, and the command that failed has still not been seen to work.
                 if failed_key == actual or not self._promote(finding):
                     fixed.add(id(finding))
+        # A type-check or lint run that was red, an edit, and then any check passing in
+        # the same turn (`npx tsc --noEmit`, edit, `npm test`): the agent verified its fix
+        # with another check. That is the development loop too. A real invocation error
+        # of the checker is not closed by something else passing.
+        if not exact and (command_role(actual) is not None or is_aggregate_check(actual)):
+            for failed_key in [
+                k for k in state.red_then_edited if command_role(k) in _STATIC_CHECKS
+            ]:
+                found = state.red_then_edited[failed_key]
+                closed = [
+                    f
+                    for f in found
+                    if f.detail.get("variant") == "ordinary"
+                    and state.turn_of.get(id(f)) == state.turns
+                ]
+                left = [f for f in found if not any(f is c for c in closed)]
+                if left:
+                    state.red_then_edited[failed_key] = left
+                else:
+                    del state.red_then_edited[failed_key]
+                    state.cycles.pop(failed_key, None)
+                fixed |= {id(f) for f in closed}
         # Green after nothing but commands, with no file edited: what was wrong was the
         # environment, and the command that put it right is worth writing down.
         for failed_key in [k for k in state.red_then_ran if closes(k)]:
@@ -4082,7 +4182,7 @@ class _Detector:
             return
         if pending.note:
             how = pending.how
-            if pending.followed:
+            if pending.followed and not pending.settled:
                 # The files the agent went back to are the ones the correction was about.
                 back = pending.followed[:CORRECTION_MAX_FILES]
                 finding.targets = [Target(model.FILE, rel, 1.0 / len(back)) for rel in back]
@@ -4334,7 +4434,32 @@ class _Detector:
             return
         targets: list[Target]
         edited_all = list(edited)
-        if named:
+        # A file of the repository the human names that the agent had not gone near.
+        # "You broke src/app/billing.py" is about that file, whatever the agent had been
+        # editing; "look at how util.py does it" is still about the work just done.
+        text = event.text[:CORRECTION_SCAN_CHARS]
+        others: list[str] = []
+        for candidate in path_candidates(text.split()) if not named else ():
+            rel = resolver.resolve(candidate, event.cwd)
+            if not rel or rel in touched or rel in others:
+                continue
+            if self.ctx.exists(rel) or self.ctx.is_known_file(rel):
+                others.append(rel)
+        wrong_place = _WRONG_PLACE_RE.search(event.text[:CORRECTION_HEAD_CHARS]) is not None
+        blamed = [
+            rel
+            for rel in others
+            if not wrong_place
+            and re.search(
+                _BLAME + r"[^.!?\n]{0,40}?" + re.escape(rel.rsplit("/", 1)[-1]) + r"(?![\w-])",
+                text,
+                re.I,
+            )
+        ]
+        if blamed:
+            targets = [Target(model.FILE, rel) for rel in blamed[:CORRECTION_MAX_FILES]]
+            how = "names " + ", ".join(t.key for t in targets) + ", which it had not touched"
+        elif named:
             targets = [Target(model.FILE, rel) for rel in named[:CORRECTION_MAX_FILES]]
             how = "names " + ", ".join(t.key for t in targets)
         elif edited:
@@ -4375,11 +4500,13 @@ class _Detector:
             detail={"confidence": f"{confidence:g}", **({"quote": event.text} if certain else {})},
         )
         self.state.corrected = frozenset(t.key for t in targets)
+        if others and not blamed and targets:
+            finding.detail["also_named"] = others[0]  # recommendations say so
         if corroborated:
             finding.detail["corroborated"] = corroborated
             self.state.rework = _Rework(finding, frozenset(named_changed))
         elif strong and changed:
-            about = frozenset(named_changed) or changed
+            about = frozenset(named_changed) or changed | frozenset(blamed)
             elsewhere: set[str] = set()
             if _WRONG_PLACE_RE.search(event.text[:CORRECTION_HEAD_CHARS]):
                 for candidate in path_candidates(event.text[:CORRECTION_SCAN_CHARS].split()):
@@ -4396,6 +4523,7 @@ class _Detector:
                 tentative=tentative,
                 fallback=fallback,
                 elsewhere=frozenset(elsewhere - set(touched)),
+                settled=bool(blamed),
             )
             self.state.rework = _Rework(finding, about)
 

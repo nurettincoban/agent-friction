@@ -73,10 +73,32 @@ def test_successful_edits_and_outside_repo_edits_are_not_misses(tmp_path: Path) 
 def test_time_estimate_is_capped(tmp_path: Path) -> None:
     s = Session().user("go")
     s.edit(A, error=builders.EDIT_NOT_FOUND)
-    s.tick(3600).edit(A)
+    s.tick(280).say("Let me look at the file again.")  # ten busy minutes, no silence
+    s.tick(280).edit(A)
     (miss,) = detect(s, tmp_path)
     assert miss.interval is not None
     assert miss.interval[1] - miss.interval[0] == signals.TIME_CAP_SECONDS
+
+
+def test_nobody_was_working_during_a_silence_inside_a_turn(tmp_path: Path) -> None:
+    # the laptop slept for four hours between the failure and the next call
+    s = Session().user("go")
+    s.edit(A, error=builders.EDIT_NOT_FOUND)
+    s.tick(4 * 3600).edit(A)
+    (miss,) = detect(s, tmp_path)
+    assert miss.interval is not None and miss.interval[1] - miss.interval[0] < 10
+    s = Session().user("go").bash("pytest", "bash: pytest: command not found", exit_code=127)
+    s.tick(4 * 3600).bash("python -m pytest", "3 passed")
+    (failure,) = detect(s, tmp_path)
+    assert failure.interval is not None and failure.interval[1] - failure.interval[0] < 10
+    s = Session().user("go").edit(A, "a", "b")
+    s.tick(4 * 3600).edit(A, "b", "a")
+    (revert,) = detect(s, tmp_path)
+    assert revert.interval is not None and revert.interval[1] - revert.interval[0] < 10
+    # a command that itself ran for ten minutes was not a silence
+    s = Session().user("go").bash("make build", "error: linker failed", exit_code=2, took=600)
+    (failure,) = detect(s.bash("make build", "ok"), tmp_path)
+    assert failure.run is not None and failure.run[1] - failure.run[0] >= 30
 
 
 def test_stale_edit_variants(tmp_path: Path) -> None:
@@ -4976,3 +4998,68 @@ def test_a_chain_of_git_commands_names_the_one_that_failed(tmp_path: Path) -> No
     s = Session().user("go").bash("git merge origin/main && git push", conflict, exit_code=1)
     (failure,) = detect(s, tmp_path)
     assert keys(failure) == [("command", "git merge")]
+
+
+def test_a_file_the_human_blames_gets_the_correction_not_the_one_being_edited(
+    tmp_path: Path,
+) -> None:
+    other = "/repo/src/b.py"
+    known = Session().user("go").read(other).user("ok, now a.py")  # b.py is a file of the repo
+    s = known.edit(A, "a", "b").user("No, you broke src/b.py").edit(A, "b", "c")
+    (found,) = by_signal(detect(s, tmp_path), signals.USER_CORRECTION)
+    assert keys(found) == [("file", "src/b.py")] and "also_named" not in found.detail
+    assert "names src/b.py, which it had not touched" in found.summary
+    # a file named for any other reason: still about the work just done, and noted
+    s = Session().user("go").read(other).user("ok, now a.py").edit(A, "a", "b")
+    s.user("No, look at how src/b.py does it").edit(A, "b", "c")
+    (found,) = by_signal(detect(s, tmp_path), signals.USER_CORRECTION)
+    assert keys(found) == [("file", "src/a.py")] and found.detail["also_named"] == "src/b.py"
+    # a path that is no file of the repository is nobody's
+    s = Session().user("go").edit(A, "a", "b").user("No, you broke src/nope.py").edit(A, "b", "c")
+    (found,) = by_signal(detect(s, tmp_path), signals.USER_CORRECTION)
+    assert keys(found) == [("file", "src/a.py")] and "also_named" not in found.detail
+
+
+TSC_RED = "src/a.ts(3,5): error TS2322: Type 'string' is not assignable.\nFound 1 error."
+
+
+def test_a_static_check_red_then_an_edit_and_any_green_check_is_normal_work(
+    tmp_path: Path,
+) -> None:
+    for red, output, green, passed in (
+        ("npx tsc --noEmit", TSC_RED, "npm test", "Tests: 5 passed"),
+        ("ruff check .", "a.py:1:1: F401 unused\nFound 1 error.", "pytest -q", "5 passed"),
+        ("mypy src", "a.py:3: error: bad type\nFound 1 error in 1 file", "make check", "ok"),
+    ):
+        s = Session().user("go").bash(red, output, exit_code=1).edit(A).bash(green, passed)
+        assert detect(s, tmp_path) == [], red
+        # without an edit nothing was fixed, and what passed says nothing about it
+        s = Session().user("go").bash(red, output, exit_code=1).bash(green, passed)
+        assert [f.signal for f in detect(s, tmp_path)] == [signals.COMMAND_FAILURE], red
+    # only a check closes it, only in the same turn, and only a static check is closed so
+    s = Session().user("go").bash("npx tsc --noEmit", TSC_RED, exit_code=2).edit(A)
+    assert len(detect(s.bash("node scripts/gen.js", "done"), tmp_path)) == 1
+    s = Session().user("go").bash("npx tsc --noEmit", TSC_RED, exit_code=2).edit(A)
+    assert len(detect(s.user("now run the tests").bash("npm test", "5 passed"), tmp_path)) == 1
+    s = Session().user("go").bash("pytest", "1 failed", exit_code=1).edit(A)
+    assert len(detect(s.bash("ruff check .", "All checks passed!"), tmp_path)) == 1
+    # a type checker that could not run at all is not fixed by the tests passing
+    s = Session().user("go").bash("npx tsc --noEmit", "sh: 1: tsc: not found", exit_code=127)
+    assert len(detect(s.edit(A).bash("npm test", "5 passed"), tmp_path)) == 1
+
+
+def test_the_excerpt_of_a_line_of_several_commands_ends_at_the_error(tmp_path: Path) -> None:
+    error = (
+        "ERROR: usage: pytest [options] [file_or_dir] [file_or_dir] [...]\n"
+        "pytest: error: unrecognized arguments: -n0\n"
+        "  inifile: /repo/pyproject.toml\n"
+    )
+    status = "".join(f" M src/m{i}.py\n" for i in range(40))
+    s = Session().user("go")
+    s.bash("pytest -q -n0 2>&1 | tail -5; git status --short | head -40", error + status)
+    (failure,) = detect(s, tmp_path)
+    assert failure.excerpt.endswith("pytest: error: unrecognized arguments: -n0")
+    # one command: its whole output is its own
+    s = Session().user("go").bash("pytest -q -n0", error + "extra", exit_code=4)
+    (failure,) = detect(s, tmp_path)
+    assert failure.excerpt.endswith("extra")

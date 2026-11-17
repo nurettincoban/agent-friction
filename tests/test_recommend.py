@@ -967,3 +967,20 @@ def test_a_small_line_count_is_not_cited_for_a_file_too_large_to_read() -> None:
     assert "Reads of this file were refused as too large" in str(rec["detail"])
     (rec,) = recommend.recommend(model.FILE, "a.py", found, FileFacts(True, 4200))
     assert "Reads of this file (4200 lines) were refused" in str(rec["detail"])
+
+
+def test_a_correction_that_names_an_untouched_file_says_so() -> None:
+    found = [
+        finding(
+            signals.USER_CORRECTION, f"s{i}", quote="No, do it like src/b.py", also_named="src/b.py"
+        )
+        for i in range(2)
+    ]
+    (rec,) = recommend.recommend(model.FILE, "src/a.py", found, None, quote)
+    assert "A human corrected the agent while it was working here 2 times" in str(rec["detail"])
+    assert str(rec["detail"]).endswith(
+        "(The human also named `src/b.py`, which the agent had not touched.)"
+    )
+    plain = [finding(signals.USER_CORRECTION, f"s{i}", quote="No, not like that") for i in (1, 2)]
+    (rec,) = recommend.recommend(model.FILE, "src/a.py", plain, None, quote)
+    assert "corrected the agent here" in str(rec["detail"]) and "also named" not in str(rec)

@@ -82,7 +82,7 @@ agent-friction sources                     # which transcripts it found
 ```
 
 By default it finds Claude Code sessions for the repo (its subdirectories, its git worktrees, and
-sessions started in a parent directory that worked inside it)
+sessions started in a parent directory that name it by its absolute path)
 under `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR`). Point it elsewhere with `--transcripts`.
 If the sessions were recorded where the repo lived at another path (a teammate's laptop, a CI
 runner, an old checkout), add `--repo-alias /that/path`.
@@ -197,8 +197,9 @@ double-counted that way; each minute is claimed once.
   penalized for being busy. Under 20 is an incident, 20-45 a pattern, above 45 a reliable
   struggle. Every score can be reproduced by hand from its `score_detail` in `-f json`.
 - **What is not counted.** Red-then-green test runs with a fix in between are normal work. Weak
-  signals on their own (re-reads, many edits, an empty search) stay in the incident band unless
-  the same pattern recurs across sessions; the headline says how many events are weak.
+  signals on their own (re-reads, many edits, an empty search) stay in the incident band; only a
+  search for the same thing that keeps coming back empty, or a command still red at the end of
+  session after session, is lifted out of it. The headline says how many events are weak.
 - **Episodes.** A long-running session (`claude --continue`) counts once for every time a human
   picked it up again after two hours or more of silence. Subagents belong to the episode of the
   agent that started them.

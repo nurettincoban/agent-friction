@@ -35,7 +35,8 @@ What to fix first
      "It's still failing for me on staging, and you used legacy_charge again in
      src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use
      PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is
-     being deleted next sprint."
+     being deleted next sprint." (The human also named `src/shopfront/payments/legacy.py`, which
+     the agent had not touched.)
   4. src/shopfront: Point agents to what they are searching for
      Agents searched under src/shopfront/ and found nothing 5 times in 2 sessions. They looked for
      `RefundPolicy` (2x), `**/*policy*.py`, `DiscountPolicy`. If the concept exists under another

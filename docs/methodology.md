@@ -428,6 +428,10 @@ score       = 100 x severity x recurrence x consistency
   command that failed 2 or more times in a session and was still red when
   the session ended, in 3 or more sessions (`RECURRING_RED_MIN_SESSIONS`).
   Those failures are no longer weak, and each claims its own run time.
+  Likewise a `search-miss` for the same pattern in 2+ episodes by agents
+  that wanted a hit is lifted out of the cap (see "What lifts it" under
+  `search-miss` in the [catalog](signals.md)); `edit-thrash` and `read-loop`
+  on their own stay capped however often they recur.
 - **share** is 1 except when one correction is split over several files.
 - **log2 per session** gives diminishing returns: a session contributes one
   more point each time its friction doubles, so one pathological session
@@ -560,7 +564,13 @@ more than 5 minutes after the call's result (`IDLE_GAP_SECONDS`), nobody was
 working in between: a closed laptop, a session resumed the next morning. Only
 the call itself is claimed then. This matters most for transcripts without
 agent messages (the generic format may hold tool calls only), where the next
-activity is the next tool call, however much later it came.
+activity is the next tool call, however much later it came. The same holds
+in the middle of a turn and for every other interval (a failure until the
+command that resolved it, an edit until its revert, the rework after a
+correction): no interval reaches across a silence of more than 5 minutes
+between two transcript events. What came before the silence is claimed, or,
+if the interval starts at it, what came after. The time between a call and
+its own result is the command running and is never a silence.
 
 **As soon as anything succeeds, the clock stops.** A failed edit followed by
 eight green test cycles on another file and, much later, an unrelated edit of

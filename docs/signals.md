@@ -342,8 +342,15 @@ message names (by path, or by bare file name if unambiguous). If it names
 none and the agent then went back to some of the files it had changed, the
 correction belongs to exactly those files. A probable correction is split
 evenly over the files edited in the preceding turn (the 5 most recent). If
-nothing was edited it stays unattributed (shown on no hotspot). A file the human mentions but the agent never
-touched is not blamed.
+nothing was edited it stays unattributed (shown on no hotspot). A file of
+the repository that the human names and the agent had not touched gets the
+correction only when the message says it was damaged ("you broke
+src/billing.py", "you deleted ...", "there is a bug in ..."; never with
+"wrong file"). Named for any other reason ("look at how util.py does it")
+it is not blamed: the correction stays with the work just done, the
+finding records it (`also_named`), and the recommendation reads "A human
+corrected the agent while it was working here ... (The human also named
+`src/util.py`, which the agent had not touched.)".
 
 **False positives (known):** corroboration is circumstantial. A message that
 only *sounds* like a correction and is followed by more work on the same file
@@ -1200,6 +1207,11 @@ command's" below.
   3. the runner's generic line (`npm ERR!`, `make: ***`, `error: could not
      compile`), for the first step it fits, as before.
 
+  The excerpt of such a line ends at the line that decided it: the red
+  step's own verdict, or before it a line that reads as a setup/invocation
+  error (`pytest: error: unrecognized arguments: -n0` in `pytest -n0 | tail
+  -5; git status --short | head`), not at whatever a later step printed.
+
   A step whose standard output and standard error both go to `/dev/null`
   (`>/dev/null 2>&1`, `&>/dev/null`, `>/dev/null 2>/dev/null`) printed none
   of the output and never gets a verdict from it: in `make examples
@@ -1239,7 +1251,13 @@ command's" below.
   change"](#retry-loop--retry-loop)) and then by a success of the same
   command, **or of another command doing the same job** (`pytest
   tests/test_a.py` red, edit, `make test` green), is dropped. That is the
-  development loop doing its job. A failure stays on the record when the
+  development loop doing its job. For a red **type-check or lint** run
+  (`npx tsc --noEmit`, `mypy`, `ruff check`, `eslint`) any check will do:
+  an edit and then a green test, lint, type-check or aggregate run in the
+  same turn (`npm test` after the edit) is the agent verifying its fix
+  another way, and the red run is dropped. Not for a checker that could not
+  run at all (a setup/invocation error), not across turns, and not for a
+  red test: lint passing says nothing about it. A failure stays on the record when the
   command goes green with nothing but looks and other checks in between
   (flaky, or fixed outside the transcript), never goes green in the session,
   or was part of a [retry loop](#retry-loop--retry-loop).

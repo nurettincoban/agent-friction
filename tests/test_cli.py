@@ -663,3 +663,21 @@ def test_show_lists_directories_when_a_command_ran_in_several(tmp_path: Path) ->
     scan.write_text(json.dumps(data), encoding="utf-8")
     code, out, _ = run("show", "npm test", "--from", str(scan))
     assert code == EXIT_OK and "packages/web/" in out
+
+
+def test_show_from_a_saved_scan_refuses_flags_it_cannot_honour(tmp_path: Path) -> None:
+    saved = tmp_path / "scan.json"
+    run("scan", *INPUT, "-o", str(saved))
+    target = json.loads(saved.read_text(encoding="utf-8"))["commands"][0]["path"]
+    code, out, err = run("show", target, "--from", str(saved), "--no-excerpts")
+    assert code == EXIT_USAGE and "scan --no-excerpts" in err and out == ""
+    for flag in (["--since", "7d"], ["-t", str(tmp_path / "nope")], ["--no-git"]):
+        code, _, err = run("show", target, "--from", str(saved), *flag)
+        assert code == EXIT_USAGE and "not valid with --from" in err, flag
+    code, out, _ = run("show", target, "--from", str(saved), "--max-evidence", "1", "-f", "json")
+    assert code == EXIT_OK
+    private = tmp_path / "private.json"
+    run("scan", *INPUT, "--no-excerpts", "-o", str(private))
+    hidden = json.loads(private.read_text(encoding="utf-8"))["commands"][0]["path"]
+    code, _, _ = run("show", hidden, "--from", str(private), "--no-excerpts")
+    assert code == EXIT_OK

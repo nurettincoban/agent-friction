@@ -229,7 +229,7 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
     g.add_argument(
         "--max-evidence",
         type=_positive_int,
-        default=5,
+        default=None,
         metavar="N",
         help="evidence items kept per hotspot (default 5; 20 for show)",
     )
@@ -417,7 +417,7 @@ def _analyze(args: argparse.Namespace, repo: Path, err: TextIO | None = None) ->
         until=args.until,
         include_git=not args.no_git,
         include_excerpts=not args.no_excerpts,
-        max_evidence=args.max_evidence,
+        max_evidence=args.max_evidence if args.max_evidence is not None else 5,
         repo_aliases=tuple(args.repo_alias),
         rework_window_days=args.rework_days,
         agent_commit_patterns=(
@@ -656,13 +656,47 @@ def _target_in_repo(target: str, repo: Path | None) -> str:
     return rel.as_posix() if rel.parts else target
 
 
+# Flags that choose what a scan reads; a saved scan (--from) was already made without them.
+_SCAN_ONLY = (
+    ("transcripts", "-t/--transcripts"),
+    ("since", "--since"),
+    ("until", "--until"),
+    ("no_git", "--no-git"),
+    ("repo_alias", "--repo-alias"),
+    ("agent_commit", "--agent-commit"),
+    ("bot_author", "--bot-author"),
+    ("allow_empty", "--allow-empty"),
+)
+
+
+def _check_from_json_flags(args: argparse.Namespace) -> None:
+    given = [flag for dest, flag in _SCAN_ONLY if getattr(args, dest, None)]
+    if getattr(args, "rework_days", 14) != 14:
+        given.append("--rework-days")
+    if given:
+        raise UsageError(
+            f"{', '.join(given)} {'is' if len(given) == 1 else 'are'} not valid with --from: "
+            "the saved scan was already made; pass them to `scan` instead"
+        )
+
+
 def _cmd_show(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     if not args.target.strip():
         raise UsageError("show needs a target: a file, a directory, or a command")
     if args.from_json is not None:
+        _check_from_json_flags(args)
         result = _load_json(args.from_json)
+        if args.no_excerpts and (result.get("settings") or {}).get("excerpts", True):
+            raise UsageError(
+                f"{args.from_json} was scanned with transcript text; --no-excerpts cannot remove "
+                "it afterwards. Make the saved scan with `scan --no-excerpts -f json`"
+            )
+        if args.max_evidence is not None:
+            for h in all_items(result):
+                h["evidence"] = list(h.get("evidence") or [])[: args.max_evidence]
     else:
-        args.max_evidence = max(args.max_evidence, 20)
+        if args.max_evidence is None:
+            args.max_evidence = 20
         result = _analyze(args, args.repo, stderr)
     output = None if args.output is None or str(args.output) == "-" else args.output
     color = output is None and args.format == "text" and _use_color(args.color, stdout)
