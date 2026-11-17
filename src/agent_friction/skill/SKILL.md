@@ -19,26 +19,28 @@ it yourself.
 ## 2. Look for an earlier scan first
 
 If `.agent-friction/` holds a `scan-*.json` from an earlier run, this is a follow-up:
-run a new scan (step 3), then
+run a new scan (step 3), then compare the newest earlier file with the new one:
 `agent-friction compare .agent-friction/<earlier>.json .agent-friction/<new>.json`
 and tell the user, in a few lines, what went down and what did not, before proposing
 anything new.
 
 ## 3. Scan
 
-From the repository root:
+The scan files quote transcript text. If `.agent-friction/` is not ignored by git, ask the
+user first whether to add it to `.gitignore`.
+
+Then, from the repository root (the time in the name keeps an earlier scan from the same
+day):
 
 ```sh
 mkdir -p .agent-friction
-agent-friction scan -f json -o .agent-friction/scan-$(date +%Y-%m-%d).json
-agent-friction scan --from .agent-friction/scan-$(date +%Y-%m-%d).json -f prompt
+scan=.agent-friction/scan-$(date +%Y-%m-%d-%H%M).json
+agent-friction scan -f json -o "$scan"
+agent-friction scan --from "$scan" -f prompt
 ```
 
 If the scan fails because no session touched the repository, show the user its message
 (it names `--repo-alias` and `--since` when they would help) and stop.
-
-If `.agent-friction/` is not ignored by git, ask the user whether to add it to
-`.gitignore`: the scan files quote transcript text.
 
 ## 4. Follow the task the prompt output gives you
 

@@ -180,7 +180,7 @@ footer a { color: var(--muted); }
   <header class="hero wrap">
     <span class="eyebrow">Open source · MIT · Alpha</span>
     <h1>Stop paying for the same agent mistake <em>twice</em></h1>
-    <p class="lede">agent-friction reads the transcripts your coding agent already leaves on disk, finds what keeps going wrong in this repository, and turns it into a short list of fixes, each with the evidence behind it. Fix them, and your agents waste fewer turns and tokens, finish sooner, and need fewer corrections from you.</p>
+    <p class="lede">agent-friction reads the transcripts your coding agent already leaves on disk, finds what keeps going wrong in this repository, and turns it into a short list of fixes, each with the evidence behind it. Each fix removes a round trip that kept coming back: fewer wasted turns and tokens, faster sessions, fewer corrections from you.</p>
     <div class="cta">
       <a class="btn primary" href="demo/">Open the live demo →</a>
       <a class="btn" href="https://github.com/nurettincoban/agent-friction">View on GitHub</a>
@@ -192,7 +192,7 @@ footer a { color: var(--muted); }
     <ul class="facts">
       <li>Runs locally, no network calls</li>
       <li>No model calls, same input gives the same report</li>
-      <li>No sessions yet? <code>agent-friction demo</code></li>
+      <li>No sessions yet? Run the same command with <code>demo</code> instead of <code>scan</code></li>
     </ul>
     <figure class="shot">
       <a href="demo/" aria-label="Open the interactive demo report">
@@ -208,12 +208,12 @@ footer a { color: var(--muted); }
 
   <section class="wrap" aria-labelledby="payoff">
     <h2 id="payoff">What fixing them gets you</h2>
-    <p class="section-lede">Every failed command, missed edit and retry is a round trip your agent pays for in tokens and minutes. The report counts them per file and command, with an estimate of the agent time each one cost, so you fix the expensive ones first.</p>
+    <p class="section-lede">Every failed command, missed edit and retry is a round trip your agent pays for in tokens and minutes. The report counts them per file and command, with an estimate of the agent time each one cost (time is estimated; tokens are not measured), so you can fix the costliest first.</p>
     <div class="grid4">
       <article class="card"><h3>Fewer wasted turns and tokens</h3><p>The agent stops trying what never works here: three failing <code>pytest</code> runs before <code>make test</code>, six missed edits to a generated file.</p></article>
-      <article class="card"><h3>Faster sessions</h3><p>It gets it right on the first try, because the line it needed is now in <code>AGENTS.md</code> or <code>CLAUDE.md</code>.</p></article>
+      <article class="card"><h3>Faster sessions</h3><p>It can get it right the first time, because the line it needed is now in <code>AGENTS.md</code> or <code>CLAUDE.md</code>.</p></article>
       <article class="card"><h3>Fewer corrections from you</h3><p>The rule you keep typing ("use <code>PaymentClient</code>") is written down once, where every future session reads it.</p></article>
-      <article class="card"><h3>Proof that it worked</h3><p><code>agent-friction compare</code> measures a later scan against the earlier one, file by file and command by command.</p></article>
+      <article class="card"><h3>A way to check it worked</h3><p><code>agent-friction compare</code> measures a later scan against the earlier one, file by file and command by command.</p></article>
     </div>
   </section>
 
@@ -298,7 +298,7 @@ agent-friction show pytest</pre>
         <tr><td>Method</td><td>A model summarizes a sample of your recent sessions</td><td>Documented rules over every session that touched the repo; no model, no network</td></tr>
         <tr><td>Evidence</td><td>Narrative with examples</td><td>Counts per file and command, each event traceable to a transcript line</td></tr>
         <tr><td>Same input, same output</td><td>No</td><td>Yes, so you can compare before and after</td></tr>
-        <tr><td>In our test, it also found</td><td>Prompting and verification habits, larger workflow ideas</td><td><code>pytest</code> vs <code>make test</code>, empty searches, 280 refusals by Claude Code's own <code>sleep</code> rule</td></tr>
+        <tr><td>Also covers, in our test</td><td>Prompting and verification habits, larger workflow ideas</td><td><code>pytest</code> vs <code>make test</code>, empty searches, 280 refusals by Claude Code's own <code>sleep</code> rule</td></tr>
       </tbody>
     </table>
   </section>

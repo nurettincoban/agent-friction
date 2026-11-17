@@ -105,17 +105,33 @@ def collect_recommendations(
     return strong or _first_recs(ranked, limit, thin=True)
 
 
+def is_agent_tool(rec: dict[str, Any]) -> bool:
+    """Advice about a rule of the agent tool itself (``origin: "agent-tool"``)."""
+    return rec.get("origin") == "agent-tool"
+
+
+def agent_tool_only(item: dict[str, Any]) -> bool:
+    """A hotspot whose actionable advice is all about the agent tool's own rules.
+
+    Claude Code refusing a foreground `sleep` is the same in every repository: such a
+    row is listed (the round trips cost time) but not counted against the repository.
+    """
+    recs = [r for r in item.get("recommendations") or [] if isinstance(r, dict)]
+    strong = [r for r in recs if not is_thin(r)]
+    return bool(strong) and all(is_agent_tool(r) for r in strong)
+
+
 def _first_recs(
     ranked: list[dict[str, Any]], limit: int, *, thin: bool
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-    out: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    """Each hotspot's first recommendation of the asked strength; advice about the
+    repository before advice about the agent tool's own rules."""
+    picked: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for hotspot in ranked:
         recs = [r for r in hotspot.get("recommendations", []) if isinstance(r, dict)]
-        pick = [r for r in recs if is_thin(r) == thin][:1]
-        out.extend((hotspot, rec) for rec in pick)
-        if len(out) >= limit:
-            break
-    return out
+        picked.extend((hotspot, rec) for rec in [r for r in recs if is_thin(r) == thin][:1])
+    picked.sort(key=lambda pair: is_agent_tool(pair[1]))
+    return picked[:limit]
 
 
 def thin_count(result: dict[str, Any]) -> int:
@@ -141,7 +157,8 @@ def thin_note(result: dict[str, Any], shown: list[tuple[dict[str, Any], dict[str
     verb, be = ("rests", "is") if n == 1 else ("rest", "are")
     return (
         f"{plural(n, 'more suggestion')} {verb} on fewer than {THIN_EVIDENCE_EVENTS} events "
-        f'each and {be} left out here (marked "thin evidence" under each item).'
+        f"each and {be} left out here. Each item's own details list them, marked "
+        '"thin evidence" (in the terminal: `agent-friction show <path>`).'
     )
 
 

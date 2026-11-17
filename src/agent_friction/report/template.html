@@ -295,11 +295,16 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     });
     function pick(thin) {
       var out = [];
-      for (var i = 0; i < ranked.length && out.length < 5; i++) {
+      for (var i = 0; i < ranked.length; i++) {
         var recs = (ranked[i].recommendations || []).filter(function (r) { return (r.evidence === "thin") === thin; });
-        if (recs.length) out.push([ranked[i], recs[0]]);
+        if (recs.length) out.push([ranked[i], recs[0], out.length]);
       }
-      return out;
+      // Advice about the repository first; a rule of the agent tool itself after it.
+      out.sort(function (a, b) {
+        var ta = a[1].origin === "agent-tool" ? 1 : 0, tb = b[1].origin === "agent-tool" ? 1 : 0;
+        return ta - tb || a[2] - b[2];
+      });
+      return out.slice(0, 5);
     }
     var shown = pick(false);
     if (!shown.length) shown = pick(true);
@@ -319,7 +324,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     document.getElementById("fixfirst-note").textContent = thinShown
       ? "Each of these rests on fewer than " + THIN + " events: a lead to look at, not yet a reason to change the repository."
       : left ? plural(left, "more suggestion") + " " + (left === 1 ? "rests" : "rest") + " on fewer than " + THIN + " events each and " +
-        (left === 1 ? "is" : "are") + " left out here (marked \"thin evidence\" under each item)." : "";
+        (left === 1 ? "is" : "are") + " left out here. Each item's own details list them, marked \"thin evidence\"." : "";
     document.getElementById("fixfirst").hidden = false;
   })();
 

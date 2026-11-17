@@ -57,14 +57,14 @@ plan before any code is written"), on verifying before claiming success, and on 
 | --- | --- | --- |
 | Sessions covered | 3 of 20 ("8 messages across 3 sessions (20 total)") | All 20 |
 | 280 refusals of `sleep` by Claude Code's own rule | Counted as "Other: 42" tool errors (the 3 sessions it read), not explained | **Ranked first**: "Built into the agent tool, not this repository", 280 refusals in 20 sessions, quotes what the refusal says to do instead (`run_in_background`, Monitor), says nothing in the repository needs to change |
-| Advice on waiting for the build | "use a single blocking wait, or a watch loop with a sleep interval": the form Claude Code refuses | Use what the refusal names; one line in AGENTS.md saves the round trips |
+| Advice on waiting for the build | `gh run watch <id> --exit-status` (sound), or "a watch loop with a sleep interval" (may run into the same rule) | Use what the refusal names; one line in AGENTS.md saves the round trips |
 | 2 declines of `sleep 60`, 3 stopped `ls` | Declines counted ("User Rejected: 2"); says no session shows "corrections, or interruptions", though each of the 3 it read has a stopped `ls` | Listed under their command, marked thin evidence, kept out of "What to fix first" |
 
 ## Cost and repeatability
 
 | | `/insights` | agent-friction |
 | --- | --- | --- |
-| Run time here | about 36 s (dataset 2) | 0.3 s (dataset 1), 0.6 s (dataset 2) |
+| Run time here (wall clock, one run) | about 36 s (dataset 2) | 0.3 s (dataset 1), 0.6 s (dataset 2) |
 | Model calls | Yes: it summarizes sessions with a model, which uses tokens | None. Pattern rules over the transcript, no network |
 | Same input, same output | No: model-written, worded differently on another run | Yes, byte for byte, which is what makes `compare` possible |
 | Sessions read | A sample of recent Claude Code sessions | Every session that touched the repository, from any agent in the [generic format](schema.md#generic-transcript-format) |

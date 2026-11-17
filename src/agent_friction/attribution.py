@@ -147,9 +147,9 @@ class PathResolver:
 
     def _disk_name(self, parents: Sequence[str], name: str) -> str | None:
         try:
-            # Compare against the directory listing, not ``exists()``: on a
-            # case-insensitive file system (macOS, Windows) ``exists()`` is true for
-            # any spelling, which would keep the transcript's casing.
+            # Compare against the directory listing, not ``exists()``: where the working
+            # tree is on a case-insensitive file system (Windows, and macOS by default)
+            # ``exists()`` is true for any spelling, which would keep the transcript's.
             names = [entry.name for entry in self.repo.joinpath(*parents).iterdir()]
             if name in names:
                 return name

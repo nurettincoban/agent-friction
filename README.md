@@ -18,16 +18,17 @@ they add up, and nothing tells you which ones.
 
 `agent-friction` reads the transcripts your agent already leaves on disk, finds what keeps going
 wrong **in this repository**, and gives you a short list of fixes, each with the evidence behind
-it. Fix those, and:
+it. Each fix removes a round trip that kept coming back:
 
-- **Agents waste fewer turns and tokens.** Every failed command, missed edit and retry is a round
-  trip you pay for. The report counts them per file and command, with an estimate of the agent
-  time each one cost, so you fix the expensive ones first.
-- **Sessions get faster.** The agent gets it right on the first try: `make test`, not three
-  failing `pytest` runs; the spec, not the generated file.
-- **You correct the agent less.** The rule you keep repeating moves into `AGENTS.md` or
+- **Fewer wasted turns and tokens.** Every failed command, missed edit and retry is a turn the
+  agent pays for. The report counts them per file and command, with an estimate of the agent
+  time each one cost (time is estimated; tokens are not measured), so you can fix the costliest
+  first.
+- **Faster sessions.** With the missing line written down, the agent can get it right the first
+  time: `make test`, not three failing `pytest` runs; the spec, not the generated file.
+- **Fewer corrections from you.** The rule you keep repeating moves into `AGENTS.md` or
   `CLAUDE.md`, where every future session reads it.
-- **You can check that it worked.** `agent-friction compare` measures a later scan against the
+- **A way to check that it worked.** `agent-friction compare` measures a later scan against the
   earlier one, file by file and command by command.
 
 ## Try it
@@ -37,7 +38,7 @@ uvx --from git+https://github.com/nurettincoban/agent-friction agent-friction sc
 ```
 
 Run it inside a repository where you have used Claude Code: it finds the sessions on its own.
-No sessions yet? `agent-friction demo` scans a bundled example. Requires Python 3.10+, nothing
+No sessions yet? `uvx --from git+https://github.com/nurettincoban/agent-friction agent-friction demo` scans a bundled example. Requires Python 3.10+, nothing
 else; to install it, `pipx install git+https://github.com/nurettincoban/agent-friction`.
 
 <a href="https://nurettincoban.github.io/agent-friction/demo/">
@@ -47,7 +48,7 @@ else; to install it, `pipx install git+https://github.com/nurettincoban/agent-fr
   </picture>
 </a>
 
-<sub>The HTML report (`agent-friction scan -o map.html`) for the bundled example. <a href="https://nurettincoban.github.io/agent-friction/demo/">Open it live</a>.</sub>
+<sub>The HTML report for the bundled example (`agent-friction demo -o demo.html`). <a href="https://nurettincoban.github.io/agent-friction/demo/">Open it live</a>.</sub>
 
 ## Apply the fixes
 
@@ -73,7 +74,7 @@ together. We [ran both on the same sessions](https://github.com/nurettincoban/ag
 | Method | A model summarizes a sample of your recent sessions | Documented rules over every session that touched the repo; no model, no network |
 | Evidence | Narrative with examples | Counts per file and command, each event traceable to a transcript line |
 | Same input, same output | No | Yes, so you can compare before and after |
-| In our test, it also found | Prompting and verification habits, larger workflow ideas | `pytest` vs `make test`, empty searches, 280 refusals by Claude Code's own `sleep` rule |
+| Also covers, in our test | Prompting and verification habits, larger workflow ideas | `pytest` vs `make test`, empty searches, 280 refusals by Claude Code's own `sleep` rule |
 
 ## How it works
 

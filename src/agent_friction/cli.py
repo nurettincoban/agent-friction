@@ -28,6 +28,7 @@ from agent_friction.report import (
     render_terminal,
 )
 from agent_friction.report._common import (
+    agent_tool_only,
     all_items,
     command_candidates,
     find_dir,
@@ -72,12 +73,18 @@ def _absolute_path(value: str) -> str:
 
 
 #: What Git Bash (MSYS) makes of a POSIX path it passes to a Windows program:
-#: ``/home/dev/shop`` arrives as ``C:/Program Files/Git/home/dev/shop``.
+#: ``/home/dev/shop`` arrives as ``C:/Program Files/Git/home/dev/shop``. Only the
+#: usual install roots: a drive root or Program Files, then Git or an MSYS2 directory.
 _MSYS_REWRITTEN_RE = re.compile(
-    r"^[A-Za-z]:/(?:[^/]+/)*?(?:Git|msys64|msys32|msys2|cygwin64|cygwin)/"
+    r"^[A-Za-z]:/(?:Program Files(?: \(x86\))?/)?(?:Git|msys64|msys32|msys2)/"
     r"(?P<rest>(?:home|tmp|mnt|srv|opt|var|usr|root|workspaces?|Users|data)(?:/.*)?)$",
     re.I,
 )
+
+
+def under_git_bash() -> bool:
+    """Running from Git Bash / MSYS2 on Windows, where arguments get rewritten."""
+    return os.name == "nt" and bool(os.environ.get("MSYSTEM"))
 
 
 def undo_msys_rewrite(value: str) -> str | None:
@@ -85,7 +92,7 @@ def undo_msys_rewrite(value: str) -> str | None:
 
     ``--repo-alias /home/dev/shop`` typed in Git Bash on Windows reaches us as
     ``C:/Program Files/Git/home/dev/shop``: a path under the Git installation, which
-    no session was ever recorded in.
+    no session was ever recorded in. Only called under Git Bash (``under_git_bash``).
     """
     match = _MSYS_REWRITTEN_RE.match(value)
     if match is None or Path(value).exists():
@@ -95,7 +102,7 @@ def undo_msys_rewrite(value: str) -> str | None:
 
 def _undo_msys_aliases(args: argparse.Namespace, err: TextIO) -> None:
     aliases = getattr(args, "repo_alias", None)
-    if not aliases:
+    if not aliases or not under_git_bash():
         return
     for i, value in enumerate(aliases):
         posix = undo_msys_rewrite(value)
@@ -783,7 +790,15 @@ def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         stderr.write(f"wrote {fmt} report to {args.output}\n")
 
     if args.fail_on is not None:
-        over = [h for h in all_items(result) if float(h.get("score", 0)) >= args.fail_on]
+        high = [h for h in all_items(result) if float(h.get("score", 0)) >= args.fail_on]
+        over = [h for h in high if not agent_tool_only(h)]
+        tool_rules = [h for h in high if agent_tool_only(h)]
+        if tool_rules:
+            names = ", ".join(str(h["path"]) for h in tool_rules[:5])
+            stderr.write(
+                f"agent-friction: not counted for --fail-on: {names} (refused by the agent "
+                "tool's own rules, not by anything in this repository)\n"
+            )
         if over:
             names = ", ".join(str(h["path"]) for h in over[:5])
             stderr.write(
