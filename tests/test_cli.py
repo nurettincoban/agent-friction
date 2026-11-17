@@ -95,11 +95,14 @@ def test_compare(tmp_path: Path) -> None:
     after.write_text(json.dumps(data), encoding="utf-8")
     code, out, _ = run("compare", "--allow-overlap", str(before), str(after))
     assert code == EXIT_OK and "Improved (1 target)" in out
-    code, out, _ = run(
+    code, out, err = run(
         "compare", "--allow-overlap", str(after), str(before), "-f", "json", "--fail-on-regression"
     )
     assert code == EXIT_GATE
     assert json.loads(out)["changes"][0]["status"] == "regressed"
+    path = data["hotspots"][0]["path"]
+    assert "--fail-on-regression: 1 target regressed or new" in err
+    assert f"{path} (regressed)" in err
 
 
 @pytest.mark.parametrize(

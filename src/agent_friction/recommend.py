@@ -720,6 +720,19 @@ class _Rules:
                 [signals.PERMISSION_DENIED],
             )
             return
+        automatic = sum(f.detail.get("variant") in ("classifier", "safety") for f in denied)
+        if automatic * 2 > len(denied):
+            self.add(
+                "allow-or-document-the-boundary",
+                "Tell agents this is refused, and what to do instead",
+                f"Agents tried {what} {_in_sessions(denied)} and were refused by the "
+                "harness's auto-mode classifier or a built-in safety check before anything "
+                "ran. A permission rule does not change that. Say in AGENTS.md that this is "
+                "not available to agents and what to do instead (a narrower command, or "
+                "stop and ask).",
+                [signals.PERMISSION_DENIED],
+            )
+            return
         by = "a hook" if hooks * 2 > len(denied) else "permission settings"
         self.add(
             "allow-or-document-the-boundary",

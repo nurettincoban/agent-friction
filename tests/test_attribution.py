@@ -663,3 +663,63 @@ def test_steps_know_when_their_output_went_nowhere() -> None:
     assert silenced("a 2>&1 >/dev/null") == [False]
     # redirections never become arguments
     assert parse_command("make a &>/dev/null").steps[0].args == ("a",)
+
+
+# ---- round 26 ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("command", "key", "role"),
+    [
+        ("uv run python scripts/seed.py --fast", "uv run python scripts/seed.py", None),
+        ("uv run python scripts/other.py", "uv run python scripts/other.py", None),
+        ("uv run flask db upgrade", "uv run flask db", None),
+        ("uv run alembic upgrade head", "uv run alembic upgrade", None),
+        ("bundle exec rails test test/models", "bundle exec rails test", "test"),
+        ("bundle exec rails db:migrate", "bundle exec rails db:migrate", None),
+        ("npx tsx scripts/a.ts", "npx tsx scripts/a.ts", None),
+        ("npx -p typescript tsc --noEmit", "npx tsc", "typecheck"),
+        ("pnpm exec vitest run", "pnpm exec vitest", "test"),
+        ("bunx prisma generate", "bunx prisma", None),
+        ("bun run scripts/a.ts", "bun run scripts/a.ts", None),
+        ("bun run build", "bun run build", "build"),  # a package script, not a launch
+        ("conda run -n dev pytest -q", "conda run pytest", "test"),
+        ("poetry run python manage.py test", "poetry run python manage.py test", "test"),
+        ("pipenv run python -m pytest", "pipenv run python -m pytest", "test"),
+        ("uv run --with rich --python 3.12 pytest", "uv run pytest", "test"),
+        ("uv run python -c 'print(1)'", "uv run python <inline>", None),
+        ("uvx ruff check .", "uvx ruff check", "lint"),
+        ("npm exec -- tsc -p .", "npm exec tsc", "typecheck"),
+        # not launches: the tool's own subcommands, and a launcher with nothing to run
+        ("uv pip install -e .", "uv pip install", None),
+        ("uv sync", "uv sync", None),
+        ("uv run", "uv run", None),
+        ("npm run build", "npm run build", "build"),
+        ("pnpm install", "pnpm install", None),
+    ],
+)
+def test_a_launcher_is_followed_by_the_key_of_what_it_runs(
+    command: str, key: str, role: str | None
+) -> None:
+    parsed = attribution.parse_command(command)
+    assert parsed.key == key and attribution.command_role(key) == role
+
+
+def test_launcher_split_and_replacement() -> None:
+    split, inner = attribution.launcher_split, attribution.inner_key
+    assert split("uv run python scripts/gen.py") == ("uv run", "python scripts/gen.py")
+    assert split("npx tsc") == ("npx", "tsc") and split("bun run scripts/a.ts")[0] == "bun run"
+    for plain in ("pytest", "uv sync", "uv run", "npx", "bun run build", "npm run build", ""):
+        assert split(plain) == ("", plain) and inner(plain) == plain
+    same = attribution.is_replacement
+    assert same("python scripts/gen.py", "uv run python scripts/gen.py")
+    assert same("python manage.py test", "poetry run python manage.py test")
+    assert same("alembic upgrade", "uv run alembic upgrade")  # setup, but the same command
+    assert same("uv run pytest", "poetry run pytest") and same(
+        "rails test", "bundle exec rails test"
+    )
+    # another script, another tool, or ad-hoc code through the same launcher is not it
+    assert not same("python scripts/gen.py", "uv run python scripts/seed.py")
+    assert not same("uv run flask db", "uv run alembic upgrade")
+    assert not same("python <inline>", "uv run python <inline>")
+    assert not same("alembic upgrade", "uv sync")

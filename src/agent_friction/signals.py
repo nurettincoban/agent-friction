@@ -29,6 +29,7 @@ from agent_friction.attribution import (
     command_role,
     denied_step,
     env_copy,
+    inner_key,
     is_aggregate_check,
     is_inline_code,
     is_replacement,
@@ -943,6 +944,9 @@ _SERVICE_DOWN_RE = re.compile(
     r"|could not connect to server|connection to server\b.{0,120}\bfailed"
     r"|Is the server running|Can't connect to (?:local )?(?:MySQL )?server"
     r"|No connection could be made|server closed the connection unexpectedly"
+    # `docker compose exec web pytest` with the service down
+    r"|(?m:^(?:Error[^\n]{0,40}: )?(?:service \"[^\"\n]+\" is not running"
+    r"|no such service: \S+|Container \S+ is not running))"
     # kubectl and other Go clients: the cluster or host did not answer
     r"|Unable to connect to the server"
     r"|dial tcp [^\n]*: (?:i/o timeout|connect: connection refused|connect: no route to host)"
@@ -1172,6 +1176,45 @@ def _unfound_program(output: str) -> str:
 #: go's ``--- FAIL: TestX``.
 FAILED_TEST_RE = re.compile(r"^(?:(?:FAILED|ERROR) ([\w./-]+::[\w.:\[\]-]+)|--- FAIL: (\w+))", re.M)
 MAX_FAILED_TESTS = 10
+#: jest and vitest: ``FAIL src/a.test.ts`` heads a red file; jest then names tests as
+#: ``● suite › test``, vitest on the line itself as ``FAIL src/a.test.ts > suite > test``.
+_JS_FAIL_FILE_RE = re.compile(
+    r"^\s*(?:FAIL|×|✗|❯)\s+(\S+\.[cm]?[jt]sx?)(?: > (.+?))?\s*(?:\d+ ?ms)?$"
+)
+_JEST_TEST_RE = re.compile(r"^\s*● (.+ › .+?)\s*$")
+
+
+def failed_tests(output: str) -> list[tuple[str, str]]:
+    """``(test, file it names or "")`` for each test a red run names, in order.
+
+    pytest's ``FAILED tests/test_a.py::test_x``, go's ``--- FAIL: TestX``, jest's
+    ``● cart › adds an item`` under ``FAIL src/cart.test.ts`` (named ``src/cart.test.ts
+    › cart › adds an item``) and vitest's ``FAIL src/cart.test.ts > cart > adds an
+    item``. A red jest file that names no test is named by itself.
+    """
+    found: list[tuple[str, str]] = []
+    for match in FAILED_TEST_RE.finditer(output):
+        name = match.group(1) or match.group(2)
+        found.append((name, name.split("::", 1)[0] if "::" in name else ""))
+    files: list[str] = []
+    named: set[str] = set()
+    current = ""
+    for line in output.splitlines():
+        head = _JS_FAIL_FILE_RE.match(line)
+        if head is not None:
+            current = head.group(1)
+            if current not in files:
+                files.append(current)
+            if head.group(2):
+                found.append((f"{current} > {head.group(2)}", current))
+                named.add(current)
+            continue
+        test = _JEST_TEST_RE.match(line)
+        if test is not None:
+            found.append((f"{current} › {test.group(1)}" if current else test.group(1), current))
+            named.add(current)
+    found.extend((path, path) for path in files if path not in named)
+    return list(dict.fromkeys(found))
 
 
 #: Praise, thanks and dismissals. A correction phrase *followed* by one of these is not a
@@ -3031,7 +3074,7 @@ class _Detector:
                     # the agent corrected itself. Nothing to document.
                     finding.detail["typo_of"] = shown(key)
                     finding.summary += f"; a mistyped `{shown(key)}`, which then ran"
-                elif is_setup_command(key):
+                elif is_setup_command(key) and inner_key(key) != inner_key(failed_key):
                     if id(finding) not in state.bound:
                         step_name = shown(setup_label(located) if located else key)
                         steps = state.setup_after.get(id(finding), "").split(" && ")
@@ -3199,10 +3242,9 @@ class _Detector:
             # Which tests were red: the same one, session after session, is a standing
             # failure, whatever each session was about.
             failed: list[tuple[str, str]] = []
-            names = [m.group(1) or m.group(2) for m in FAILED_TEST_RE.finditer(result.output)]
-            for test in dict.fromkeys(names):
-                rel = self.ctx.resolver.resolve(test.split("::", 1)[0], call.cwd) or ""
-                known = bool(rel) and "::" in test and self.ctx.is_known_file(rel)
+            for test, path in failed_tests(result.output):
+                rel = (self.ctx.resolver.resolve(path, call.cwd) or "") if path else ""
+                known = bool(rel) and self.ctx.is_known_file(rel)
                 failed.append((test, rel if known else ""))
             failed = failed[:MAX_FAILED_TESTS]
             if failed:
@@ -3638,7 +3680,12 @@ class _Detector:
             if written is None:
                 return  # `cat > /tmp/notes <<EOF`: a write to a file outside the repo
             targets = [Target(model.FILE, written)] if written else targets
-        by = {"hook": "a hook", "blocked": "the harness"}.get(result.reason, "permission settings")
+        by = {
+            "hook": "a hook",
+            "blocked": "the harness",
+            "classifier": "the auto-mode classifier",
+            "safety": "a built-in safety check",
+        }.get(result.reason, "permission settings")
         tool = self._tool(call)
         what = targets[0].key if targets else ""
         what = f"`{what}`" if targets and targets[0].kind == model.COMMAND else what

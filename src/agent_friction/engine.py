@@ -564,6 +564,10 @@ def list_transcripts(options: AnalyzeOptions) -> list[Path]:
 
 
 _FILE_OPS = (model.OP_READ, model.OP_EDIT, model.OP_WRITE)
+#: A command key with the directory it ran in: ``npm test (web/)``.
+_LOCATED_KEY_RE = re.compile(r"^(.+) \((.+)/\)$")
+#: Details of a command failure that hold another command's key (or its directory).
+_COMMAND_DETAILS = ("recovered_by", "fixed_by_setup", "works_with", "works_in", "typo_of")
 
 
 def _session_root(cwds: list[str], files: list[str], too_wide: Callable[[str], bool]) -> str:
@@ -900,9 +904,16 @@ class _Analysis:
         return "/".join(shown)
 
     def _public_target(self, kind: str, key: str) -> str:
-        # A command key names the directory it ran in (`npm test (web/)`). That the
-        # command ran there shows the directory existed: it is not a guess.
-        return key if kind == model.COMMAND else self.public_path(key)
+        if kind != model.COMMAND:
+            return self.public_path(key)
+        # A command key names the directory it was pointed at (`npm test (web/)`,
+        # also through `make -C`, `npm --prefix`, `pushd`). A command that failed
+        # proves nothing about that directory: it is shown only if it is there now
+        # or a file under it was really read or written.
+        located = _LOCATED_KEY_RE.match(key)
+        if located is None:
+            return key
+        return f"{located.group(1)} ({self.public_path(located.group(2))}/)"
 
     def _hide_guessed_paths(
         self, findings: Sequence[Finding], exposure: dict[tuple[str, str], set[str]]
@@ -914,6 +925,14 @@ class _Analysis:
                 if shown != target.key:
                     finding.summary = finding.summary.replace(target.key, shown)
                     finding.targets[index] = Target(target.kind, shown, target.share)
+            for name in _COMMAND_DETAILS:  # other commands the event names, as data
+                value = finding.detail.get(name)
+                if value and name == "works_in":
+                    finding.detail[name] = self.public_path(value.rstrip("/")) + "/"
+                elif value:
+                    finding.detail[name] = " && ".join(
+                        self._public_target(model.COMMAND, part) for part in value.split(" && ")
+                    )
         for kind, key in list(exposure):
             shown = self._public_target(kind, key)
             if shown != key:

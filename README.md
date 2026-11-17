@@ -175,12 +175,12 @@ double-counted that way; each minute is claimed once.
 | `edit-revert` | An edit undid an earlier edit in the same session |
 | `command-failure` | A command failed because of setup, invocation, or the environment (a service down, credentials, an unset variable); a red test the agent then fixes is not counted, one that passed only after a setup step is |
 | `no-convergence` | The agent kept editing and re-running the same check, and it never went green |
-| `edit-thrash` | One file edited many times in one session |
+| `edit-thrash` | One file edited 6 or more times in one turn while something kept failing |
 | `stale-edit` | An edit refused because the file changed or was never read |
 | `path-miss` | The agent read or edited a path that does not exist |
 | `search-miss` | A search in a file or directory came back empty |
 | `file-too-large` | The agent could not read a file because it is too large for its context |
-| `read-loop` | The same file re-read many times without being edited |
+| `read-loop` | The same part of a file read 3 or more times without being edited |
 
 ### Reading the report
 
@@ -226,6 +226,9 @@ Transcripts contain your code and sometimes your secrets, so:
 - Even with `--no-excerpts`, reports always show your repository's file paths, its directory
   name, and when sessions happened. Those are the map itself. A path the agent guessed that
   never existed becomes a hash too (`src/<path:3f9a1c>`), since it may name something private.
+- Session ids are taken from the transcript file name (a UUID for Claude Code), and are shown
+  even with `--no-excerpts`. If you pool transcripts under descriptive file names, rename them
+  before sharing a report.
 
 Redaction is pattern-based: it catches secrets that look like secrets, not an opaque password
 typed as a bare argument. Skim a report before you share it outside your team, or use

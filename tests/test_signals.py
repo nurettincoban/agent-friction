@@ -4291,3 +4291,97 @@ def test_a_refused_write_followed_by_a_push_is_about_the_write(
     named.tool("Bash", {"command": "cat > notes.md <<EOF\nhi\nEOF\ngit push"}, said, is_error=True)
     (found,) = detect(named, tmp_path)
     assert keys(found) == [("command", "git push")]
+
+
+# ---- round 26 ------------------------------------------------------------------------
+
+JEST = (
+    "FAIL src/cart.test.ts\n  ● cart › adds an item\n\n    expect(received).toBe(expected)\n"
+    "  ● cart › removes an item\n\nFAIL src/api.test.ts\n  ● Test suite failed to run\n\n"
+    "Tests:       2 failed, 5 passed, 7 total"
+)
+VITEST = (
+    " FAIL  src/cart.test.ts > cart > adds an item\nAssertionError: expected 1 to be 2\n"
+    " FAIL  src/cart.test.ts > cart > removes an item 12ms\n Test Files  1 failed (1)"
+)
+
+
+def test_failed_test_names_from_every_runner() -> None:
+    assert signals.failed_tests("FAILED tests/test_a.py::test_x - assert 1\n--- FAIL: TestY") == [
+        ("tests/test_a.py::test_x", "tests/test_a.py"),
+        ("TestY", ""),
+    ]
+    assert signals.failed_tests(JEST) == [
+        ("src/cart.test.ts › cart › adds an item", "src/cart.test.ts"),
+        ("src/cart.test.ts › cart › removes an item", "src/cart.test.ts"),
+        ("src/api.test.ts", "src/api.test.ts"),  # red as a whole: named by itself
+    ]
+    assert signals.failed_tests(VITEST) == [
+        ("src/cart.test.ts > cart > adds an item", "src/cart.test.ts"),
+        ("src/cart.test.ts > cart > removes an item", "src/cart.test.ts"),
+    ]
+    assert signals.failed_tests("PASS src/cart.test.ts\nTests: 7 passed") == []
+    assert signals.failed_tests("FAILURES in the log, FAIL is a word") == []
+
+
+def test_a_red_js_test_is_named_on_the_failure(tmp_path: Path) -> None:
+    s = Session().user("go").bash("npm test", JEST, exit_code=1).read(A)
+    (found,) = detect(s, tmp_path, known=("src/cart.test.ts",))
+    assert found.detail["failed_tests"].split("\n")[0] == "src/cart.test.ts › cart › adds an item"
+    assert found.detail["failed_test_files"].split("\n") == ["src/cart.test.ts"] * 2 + [""]
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        'service "web" is not running',
+        "no such service: web",
+        "Error response from daemon: Container 4f2a9c is not running",
+    ],
+)
+def test_a_compose_service_that_is_down_is_the_environment(tmp_path: Path, output: str) -> None:
+    s = Session().user("go").bash("docker compose exec web pytest", output, exit_code=1).read(A)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["variant"] == "environment" and found.detail["environment"] == "service"
+    # the same words from a test are that test's business
+    s = Session().user("go")
+    s.bash("pytest -q", f"E   AssertionError: {output}\n1 failed in 0.1s", exit_code=1).read(A)
+    assert all(f.detail.get("variant") != "environment" for f in detect(s, tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("said", "variant", "by"),
+    [
+        (
+            "Permission for this action was denied by the Claude Code auto mode classifier. "
+            "Reason: [Destructive or Unwanted Actions]. If you have other tasks, continue.",
+            "classifier",
+            "the auto-mode classifier",
+        ),
+        (
+            "Permission for this command was denied by a built-in Claude Code safety check, "
+            "not by the user. The check stops removals that can delete far more than intended.",
+            "safety",
+            "a built-in safety check",
+        ),
+        (DENIED_BY_SETTINGS, "permission", "permission settings"),
+        (
+            "Permission to use Bash with command rm -rf build has been denied.",
+            "permission",
+            "permission settings",
+        ),
+        # a later mention of the classifier is not the sentence that refuses
+        (
+            "Permission to use Bash has been denied.\nNote: the auto mode classifier is off.",
+            "permission",
+            "permission settings",
+        ),
+    ],
+)
+def test_who_refused_is_said_when_the_transcript_says_it(
+    tmp_path: Path, said: str, variant: str, by: str
+) -> None:
+    s = Session().user("go").tool("Bash", {"command": "rm -rf build"}, said, is_error=True)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.PERMISSION_DENIED and found.detail["variant"] == variant
+    assert found.summary == f"Bash on `rm` was denied by {by}; it did not run"

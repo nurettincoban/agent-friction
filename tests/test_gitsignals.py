@@ -384,3 +384,136 @@ def test_untracked_is_said_only_of_what_git_knows_not_to_track(repo: Repo, tmp_p
     plain = tmp_path / "plain"
     plain.mkdir()
     assert not gitsignals.is_untracked(plain, "dist/app.js")
+
+
+# ---- round 26 ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("subject", "routine"),
+    [
+        ("Bump 0.15.2", True),
+        ("Bump ecosystem-analyzer pin", True),
+        ("Update conformance suite commit hash", True),
+        ("[ty] Update typeshed reference", True),
+        ("chore(deps): bump serde from 1.0.1 to 1.0.2", True),
+        ("Release 1.4.0", True),
+        ("chore(release): 2.0.0", True),
+        ("v2.1.0", True),
+        ("Pin actions to full SHAs", True),
+        ("Vendor latest typeshed", True),
+        ("Upgrade the pinned Rust version", True),
+        ("Sync vendored typeshed stubs", True),
+        ("Prepare release notes for 0.9", True),
+        ("Update the parser to handle walrus targets", False),
+        ("Bump serde to fix the build the last bump broke", False),  # says it repairs
+        ("Fix the release workflow", False),
+        ("Rework pin handling in the resolver", False),
+        ("Add version check", False),
+    ],
+)
+def test_routine_subjects(subject: str, routine: bool) -> None:
+    from datetime import datetime, timezone
+
+    commit = gitsignals.Commit("a" * 40, datetime.now(timezone.utc), "D <d@x.test>", subject, False)
+    assert gitsignals.is_routine(commit) is routine
+
+
+def test_pin_only_hunks() -> None:
+    patch = (
+        "diff --git a/.github/workflows/ci.yaml b/.github/workflows/ci.yaml\n"
+        "--- a/.github/workflows/ci.yaml\n+++ b/.github/workflows/ci.yaml\n"
+        "@@ -10 +10 @@\n-          rev: 9f3c2ab41d\n+          rev: 51d07e1c22\n"
+        "@@ -20,2 +20,2 @@\n-  ruff==0.15.1\n-  uv: v0.9.0\n+  ruff==0.15.2\n+  uv: v0.9.1\n"
+        "@@ -30 +30 @@\n-  run: cargo test\n+  run: cargo nextest run\n"
+        "@@ -40 +40,2 @@\n-  rev: 1111111a\n+  rev: 2222222b\n+  extra: line\n"
+        "@@ -50 +50 @@\n-  timeout: 10\n+  timeout: 20\n"
+    )
+    assert gitsignals.pin_only_hunks(patch) == {
+        ".github/workflows/ci.yaml": ([(10, 11), (20, 22)], [(10, 11), (20, 22)])
+    }
+    assert gitsignals.pin_only_hunks("") == {}
+    # the next bump of a pin the agent had bumped is left out; anything else stays
+    assert gitsignals.without_pin_bumps([(10, 11)], [(10, 11)], [(10, 11)], [(10, 11)]) == []
+    assert gitsignals.without_pin_bumps([(10, 11)], [(10, 11)], [], [(10, 11)]) == [(10, 11)]
+    assert gitsignals.without_pin_bumps([(10, 11)], [(10, 11)], [(10, 11)], []) == [(10, 11)]
+    assert gitsignals.without_pin_bumps([(5, 6)], [(10, 11)], [(5, 6)], [(10, 11)]) == [(10, 11)]
+
+
+WORKFLOW = "name: ci\njobs:\n  eco:\n    env:\n      PIN: {pin}\n    steps:\n      - run: {run}\n"
+
+
+def test_a_ruff_like_history_of_pin_bumps_and_releases_is_not_rework(repo: Repo) -> None:
+    path = ".github/workflows/ecosystem.yaml"
+    files = {
+        path: WORKFLOW.format(pin="9f3c2ab41d07", run="cargo test"),
+        "Cargo.toml": 'version = "0.15.0"\n',
+    }
+    repo.commit(1, "initial", files)
+    agent = f"\n\n{CLAUDE}"
+    repo.commit(
+        2,
+        "Bump ecosystem-analyzer pin" + agent,
+        {path: WORKFLOW.format(pin="51d07e1c2280", run="cargo test")},
+    )
+    # the next bump, with a subject that says so
+    repo.commit(
+        3,
+        "Bump ecosystem-analyzer pin",
+        {path: WORKFLOW.format(pin="aa07e1c22811", run="cargo test")},
+    )
+    repo.commit(
+        4,
+        "Update conformance suite commit hash" + agent,
+        {path: WORKFLOW.format(pin="bb07e1c22822", run="cargo test")},
+    )
+    # ... and one whose subject says nothing: the hunk itself is only a hash
+    repo.commit(
+        5,
+        "ecosystem: newer analyzer",
+        {path: WORKFLOW.format(pin="cc07e1c22833", run="cargo test")},
+    )
+    repo.commit(6, "Set the version" + agent, {"Cargo.toml": 'version = "0.15.1"\n'})
+    repo.commit(7, "Bump 0.15.2", {"Cargo.toml": 'version = "0.15.2"\n'})
+    history = gitsignals.read_history(repo.path)
+    reader = gitsignals.HunkReader(repo.path)
+    assert gitsignals.find_rework(history.commits, hunks=reader) == []
+    # a human changing what the agent's pin bump did *not* only bump is still rework
+    repo.commit(
+        8,
+        "Rework the job" + agent,
+        {path: WORKFLOW.format(pin="dd07e1c22844", run="cargo nextest run")},
+    )
+    human = repo.commit(
+        9,
+        "ecosystem: plain cargo test again",
+        {path: WORKFLOW.format(pin="dd07e1c22844", run="cargo test")},
+    )
+    history = gitsignals.read_history(repo.path)
+    (found,) = gitsignals.find_rework(history.commits, hunks=gitsignals.HunkReader(repo.path))
+    assert found.detail["human_commit"] == human[:8] and found.targets[0].key == path
+
+
+def test_after_a_formatter_commit_line_overlap_no_longer_counts(repo: Repo) -> None:
+    repo.commit(1, "initial", {"a.py": BASE, "b.py": BASE})
+    by_agent = lines(BASE, l3="agent 3", l4="agent 4")
+    repo.commit(2, f"feat: agent work\n\n{CLAUDE}", {"a.py": by_agent, "b.py": by_agent})
+    formatted = lines(by_agent, l3="agent  3")
+    repo.commit(3, "style: run black", {"a.py": formatted})
+    # a human feature edit of the same line, after the formatter rewrote the file
+    repo.commit(4, "use the new client", {"a.py": lines(formatted, l3="human 3")})
+    # the file the formatter did not touch is compared as before
+    repo.commit(4, "use the new client there too", {"b.py": lines(by_agent, l3="human 3")})
+    history = gitsignals.read_history(repo.path)
+    found = gitsignals.find_rework(history.commits, hunks=gitsignals.HunkReader(repo.path))
+    assert [f.targets[0].key for f in found] == ["b.py"]
+    # ... but a commit that says it fixes the agent's work still counts
+    repo.commit(5, f"more\n\n{CLAUDE}", {"a.py": lines(formatted, l5="agent 5")})
+    repo.commit(6, "style: run black", {"a.py": lines(formatted, l5="agent  5")})
+    repo.commit(7, "fix: the agent's handler", {"a.py": lines(formatted, l5="human 5")})
+    history = gitsignals.read_history(repo.path)
+    found = gitsignals.find_rework(history.commits, hunks=gitsignals.HunkReader(repo.path))
+    assert [(f.targets[0].key, f.detail["variant"]) for f in found] == [
+        ("b.py", "overlap"),
+        ("a.py", "subject"),
+    ]

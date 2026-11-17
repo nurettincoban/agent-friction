@@ -326,6 +326,8 @@ _DENIED_RE = re.compile(
     re.I,
 )
 _HOOK_RE = re.compile(r"\bhook\b", re.I)
+_CLASSIFIER_RE = re.compile(r"\bdenied by the (?:Claude Code )?auto[- ]mode classifier\b", re.I)
+_SAFETY_CHECK_RE = re.compile(r"\bdenied by a built-in (?:Claude Code )?safety check\b", re.I)
 
 
 def denial(text: str) -> str | None:
@@ -336,7 +338,16 @@ def denial(text: str) -> str | None:
     match = _DENIED_RE.match(stripped)
     if match is None:
         return None
-    return "hook" if _HOOK_RE.search(match.group(0)) else "permission"
+    if _HOOK_RE.search(match.group(0)):
+        return "hook"
+    # Who refused, where the harness says so in the sentence that refuses: the auto-mode
+    # classifier and the built-in safety check are not something a permission rule changes.
+    said = stripped[: match.end() + 120].split("\n", 1)[0]
+    if _CLASSIFIER_RE.search(said):
+        return "classifier"
+    if _SAFETY_CHECK_RE.search(said):
+        return "safety"
+    return "permission"
 
 
 def exit_code(text: str) -> int | None:

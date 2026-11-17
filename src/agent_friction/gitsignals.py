@@ -323,6 +323,91 @@ def version_only_files(patch: str) -> frozenset[str]:
     )
 
 
+#: A version or a commit hash inside a line: ``0.15.2``, ``v1.4.0-rc1``, ``9f3c2ab``.
+_PIN_TOKEN_RE = re.compile(
+    r"\bv?\d+(?:\.\d+)+[\w.+-]*|\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b"
+    r"|\bsha(?:256|512)[:-][0-9A-Za-z+/=]{20,}"
+)
+
+
+def pin_only_hunks(patch: str) -> dict[str, tuple[list[Range], list[Range]]]:
+    """Per file: the hunks of a ``-U0`` patch that change nothing but a version or a hash.
+
+    Such a hunk removes as many lines as it adds, and each removed line equals the
+    added one in its place once versions (``1.4.0``) and hashes (7 to 40 hex
+    digits) are blanked: ``rev: 9f3c2ab`` -> ``rev: 51d07e1``, ``ruff==0.15.1`` ->
+    ``ruff==0.15.2``. The same shape as ``parse_hunks``.
+    """
+    files: dict[str, tuple[list[Range], list[Range]]] = {}
+    current: tuple[list[Range], list[Range]] | None = None
+    old_name = ""
+    header: tuple[Range, Range] | None = None
+    removed: list[str] = []
+    added: list[str] = []
+
+    def close() -> None:
+        if current is not None and header is not None and removed and len(removed) == len(added):
+            blank = [
+                (_PIN_TOKEN_RE.sub("\0", a), _PIN_TOKEN_RE.sub("\0", b))
+                for a, b in zip(removed, added, strict=True)
+            ]
+            if all(a == b and "\0" in a for a, b in blank):
+                current[0].append(header[0])
+                current[1].append(header[1])
+
+    for line in patch.splitlines():
+        if line.startswith("diff --git "):
+            close()
+            current, header = None, None
+        elif line.startswith("--- ") and header is None:
+            old_name = line[4:].strip()
+        elif line.startswith("+++ ") and header is None:
+            name = line[4:].strip()
+            name = old_name if name == "/dev/null" else name
+            current = files.setdefault(name[2:] if name[:2] in ("a/", "b/") else name, ([], []))
+        elif current is not None and line.startswith("@@"):
+            close()
+            match = _HUNK_RE.match(line)
+            header = None
+            if match:
+                old_start, new_start = int(match.group(1)), int(match.group(3))
+                old_len = int(match.group(2)) if match.group(2) is not None else 1
+                new_len = int(match.group(4)) if match.group(4) is not None else 1
+                header = ((old_start, old_start + old_len), (new_start, new_start + new_len))
+            removed, added = [], []
+        elif header is not None and line.startswith("-"):
+            removed.append(line[1:])
+        elif header is not None and line.startswith("+"):
+            added.append(line[1:])
+    close()
+    return {name: ranges for name, ranges in files.items() if ranges[0]}
+
+
+def _overlaps(a: Range, b: Range) -> bool:
+    return a[0] < b[1] and b[0] < a[1]
+
+
+def without_pin_bumps(
+    agent_new: Sequence[Range],
+    human_old: Sequence[Range],
+    agent_pins: Sequence[Range],
+    human_pins: Sequence[Range],
+) -> list[Range]:
+    """``human_old`` without the hunks that only move a pin the agent had only moved.
+
+    A human hunk is left out when it changes nothing but a version or hash and
+    every line of the agent's that it touches was itself such a change: the next
+    bump of a pin is the pin being bumped again, not the agent's work being redone.
+    """
+    kept: list[Range] = []
+    for old in human_old:
+        touched = [new for new in agent_new if _overlaps(new, old)]
+        routine = old in human_pins and touched and all(new in agent_pins for new in touched)
+        if not routine:
+            kept.append(old)
+    return kept
+
+
 class HunkReader:
     """Reads and caches the changed line ranges of single commits (``git show -U0``)."""
 
@@ -331,6 +416,12 @@ class HunkReader:
         self.calls = 0
         self._cache: dict[str, dict[str, tuple[list[Range], list[Range]]]] = {}
         self._bumps: dict[str, frozenset[str]] = {}
+        self._pins: dict[str, dict[str, tuple[list[Range], list[Range]]]] = {}
+
+    def pins(self, sha: str) -> dict[str, tuple[list[Range], list[Range]]]:
+        """Hunks of ``sha`` that change only a version or a hash (``pin_only_hunks``)."""
+        self(sha)
+        return self._pins.get(sha, {})
 
     def version_only(self, sha: str) -> frozenset[str]:
         """Files of ``sha`` in which only a version string changed (see above)."""
@@ -363,6 +454,7 @@ class HunkReader:
         if proc.returncode != 0:
             return {}
         self._bumps[sha] = version_only_files(proc.stdout)
+        self._pins[sha] = pin_only_hunks(proc.stdout)
         return parse_hunks(proc.stdout)
 
 
@@ -399,6 +491,36 @@ SWEEP_SUBJECT_RE = re.compile(
     r"|rename|bump|mass|bulk|sweep)\b",
     re.I,
 )
+
+
+#: Subjects of routine upkeep: a version bump, a release, a pin or vendored copy being
+#: moved along. Such a commit follows the previous bump, whoever made that one, and says
+#: nothing about its quality: "Bump 0.15.2", "Release 1.4.0", "Update conformance suite
+#: commit hash", "chore(deps): bump serde", "Pin ecosystem-analyzer", "v2.1.0".
+_CONVENTIONAL = r"(?:\[[^\]]*\]\s*)?(?:(?:chore|build|ci|deps?|release|meta)(?:\([^)]*\))?!?:\s*)?"
+ROUTINE_SUBJECT_RE = re.compile(
+    r"^\s*" + _CONVENTIONAL + r"(?:"
+    r"(?:bump|bumps|bumped|bumping|pin|pins|pinned|unpin|vendor|re-?vendor|release|releasing"
+    r"|prepare (?:for )?(?:the )?release|cut (?:a |the )?release)\b"
+    r"|(?:update|updates|updated|upgrade|upgrades|upgraded|sync|refresh|roll|advance|move)\b"
+    r".{0,80}\b(?:pins?|hash(?:es)?|references?|refs?|versions?|shas?|revisions?|revs?"
+    r"|lock ?files?|submodules?|changelog|vendored)\b"
+    r"|v?\d+\.\d+(?:\.\d+)?[\w.+-]*\s*$"
+    r")"
+    r"|^\s*(?:chore|build)\((?:release|deps(?:-dev)?)\)!?:",
+    re.I,
+)
+
+
+def is_routine(commit: Commit) -> bool:
+    """A human commit whose subject says it is upkeep (see ``ROUTINE_SUBJECT_RE``).
+
+    Not when the subject also says it fixes or reverts something: "Bump serde to
+    fix the build the last bump broke" is a repair.
+    """
+    if commit.is_agent or FIX_SUBJECT_RE.search(commit.subject):
+        return False
+    return ROUTINE_SUBJECT_RE.search(commit.subject) is not None
 
 
 #: Subjects that say a tool rewrote the files: a formatter or linter run, at any size.
@@ -449,23 +571,40 @@ def find_rework(
     """
     window = timedelta(days=window_days)
     last_touch: dict[str, Commit] = {}
-    candidates: list[tuple[Commit, Commit, str]] = []
+    reformatted: set[str] = set()  # files a formatter rewrote since their last agent commit
+    candidates: list[tuple[Commit, Commit, str, bool]] = []
     for commit in commits:
         if commit.is_bot or is_sweep(commit):
-            continue  # an auto-formatter, dependency bot or repo-wide reformat is no rework
+            # An auto-formatter, dependency bot or repo-wide reformat is no rework. But
+            # once a formatter has rewritten a file, line numbers no longer say whose
+            # lines a later commit changes.
+            if not commit.is_agent and MECHANICAL_SUBJECT_RE.search(commit.subject):
+                reformatted.update(commit.files)
+            continue
+        routine = is_routine(commit)
         for path in sorted(commit.files):
             previous = last_touch.get(path)
             last_touch[path] = commit
-            if previous is None or not previous.is_agent or commit.is_agent:
-                continue
+            if commit.is_agent:
+                reformatted.discard(path)
+            if previous is None or not previous.is_agent or commit.is_agent or routine:
+                continue  # upkeep (a bump, a release) follows the last bump: no rework
             if timedelta(0) <= commit.date - previous.date <= window:
-                candidates.append((previous, commit, path))
+                candidates.append((previous, commit, path, path in reformatted))
     findings: list[Finding] = []
-    for previous, commit, path in reversed(candidates):  # newest first: they get the patch budget
+    # newest first: they get the patch budget
+    for previous, commit, path, blurred in reversed(candidates):
         overlap = 0
-        if hunks is not None:
+        if hunks is not None and not blurred:
             agent_new = hunks(previous.sha).get(path, ([], []))[1]
             human_old = hunks(commit.sha).get(path, ([], []))[0]
+            if isinstance(hunks, HunkReader):
+                human_old = without_pin_bumps(
+                    agent_new,
+                    human_old,
+                    hunks.pins(previous.sha).get(path, ([], []))[1],
+                    hunks.pins(commit.sha).get(path, ([], []))[0],
+                )
             overlap = reworked_lines(agent_new, human_old)
         by_subject = bool(FIX_SUBJECT_RE.search(commit.subject))
         if not overlap and not by_subject:

@@ -693,6 +693,41 @@ auto-formatter that rewrites the agent's lines is not rework, and the human
 commit after it is still compared with the agent commit. Add your own with
 `--bot-author REGEX` (`bot_commit_patterns`; matched against `Name <email>`).
 
+**After a formatter, line numbers no longer say whose lines they are.** Once
+a commit whose subject says a tool rewrote the files (`style: run black`,
+"reformat", `MECHANICAL_SUBJECT_RE`) has touched a file, a later human
+commit on that file is no longer compared with the agent commit line by
+line: a feature edit of a reformatted line is not rework of the agent's
+work. Only a subject that says it fixes or reverts something still counts,
+until the next agent commit on the file.
+
+**Routine upkeep is not rework.** Two rules, because a pin that is bumped
+every week is bumped after whoever bumped it last:
+
+- *By subject* (`ROUTINE_SUBJECT_RE`, `is_routine`): a human commit whose
+  subject starts as a bump, pin, vendoring or release ("Bump 0.15.2", "Bump
+  ecosystem-analyzer pin", "Pin actions to full SHAs", "Vendor latest
+  typeshed", "Release 1.4.0", "Prepare release", `chore(release): ...`,
+  `chore(deps): ...`, a subject that is only a version such as `v2.1.0`),
+  or as an update of a pin, hash, reference, version, SHA, revision,
+  lockfile, submodule or changelog ("Update conformance suite commit hash",
+  "[ty] Update typeshed reference", "Upgrade the pinned Rust version") is
+  never rework, unless the subject also says it fixes or reverts something.
+  A leading `[scope]` or `chore:` / `build:` / `ci:` / `deps:` prefix is
+  skipped.
+- *By content* (`pin_only_hunks`, `without_pin_bumps`): whatever the
+  subject, a human hunk is left out of the comparison when it changes
+  nothing but a version (`0.15.1` -> `0.15.2`, `v1.4.0-rc1`) or a hash (7 to
+  40 hex digits, `sha256:...`), line for line, and every line of the
+  agent's that it touches was itself such a change. A human who changes
+  what the agent's commit changed *besides* the pin is still counted.
+
+*Missed by these rules (false positives that remain):* a bump described in
+other words ("ecosystem: newer analyzer") that also touches a line next to
+the pin; date stamps and build numbers without a dot. *False negatives:* a
+human quietly repairing something in a commit called "Bump x" is not
+counted.
+
 **Lockfiles and files with a generated name are set aside.** A human commit
 that changes `package-lock.json`, `Cargo.lock`, `*_pb2.py`, `*.min.js` or
 another file whose *name* only tools write, after an agent commit touched it,
@@ -972,7 +1007,11 @@ command's" below.
     connect to server`, `connection to server ... failed`, `Is the server
     running`, and what kubectl and other Go clients print when a cluster or
     host does not answer (`Unable to connect to the server`, `dial tcp ...:
-    i/o timeout`; named "the Kubernetes cluster"). Unlike other failed
+    i/o timeout`; named "the Kubernetes cluster"), and a compose service or
+    container that is down when something is to be run in it (`docker
+    compose exec web pytest` answering `service "web" is not running`, `no
+    such service: web`, `Container ... is not running`, at the start of a
+    line). Unlike other failed
     look-ups, an inspection command that cannot reach its service (`kubectl
     get pods`, `docker ps`) is recorded. The service is named only from a fixed vocabulary (by its
     default port or a word in the output: PostgreSQL, MySQL, Redis, MongoDB,
@@ -1168,8 +1207,16 @@ command's" below.
     between. The command key is the same both times, so nothing "replaced"
     it; what was missing is the activation, recorded as `fixed_by_setup`
     (`source .venv/bin/activate`) and named by `document-the-setup-step`. Not
-    when the failed line had the activation too. A wrapper (`uv run pytest`)
-    is another command and leads to `use-the-working-command` instead;
+    when the failed line had the activation too. A launcher is another
+    command and leads to `use-the-working-command` instead: `python
+    scripts/gen.py` that could not import a dependency and `uv run python
+    scripts/gen.py` that then passes, `python manage.py test` and `poetry
+    run python manage.py test`, `alembic upgrade head` and `uv run alembic
+    upgrade head`, `rails test` and `bundle exec rails test`. The key of a
+    launched command is the launcher followed by the key of what it runs
+    (methodology, Attribution), so the pair is recognised as the same
+    command, also where that command is a setup step, and never for two
+    different scripts or for ad-hoc code;
   - **any other command** (`./scripts/reset-db.sh`, `python tools/gen.py`,
     `make generate`): once, that is a coincidence or a one-off script, and
     the failure is dropped like the development loop (counted in
@@ -1196,7 +1243,12 @@ command's" below.
   those failures count in full, claim their run time, are attributed to the
   test file too if it exists, and lead to `say-if-it-is-known-broken` ("fix
   it, or mark it as a known failure and say so"). The test is named only
-  with excerpts: its name comes from command output.
+  with excerpts: its name comes from command output. Names are read from
+  pytest (`FAILED tests/test_a.py::test_x`), go (`--- FAIL: TestX`), jest
+  (`● cart › adds an item` under `FAIL src/cart.test.ts`, named
+  `src/cart.test.ts › cart › adds an item`) and vitest (`FAIL
+  src/cart.test.ts > cart > adds an item`); a red jest file that names no
+  test is named by itself (`failed_tests`).
   One condition more: at least one of those red runs must have come
   *before* the session changed any file (`after_edit` is not set on it).
   When every red run of the test follows the agent's own change in its
@@ -1339,8 +1391,10 @@ mention); setup errors are not, because the files are not the cause.
 reported red was not "replaced" by the next green one, unless the same pair
 recurs untouched in 3 or more sessions: the wrong runner, above), and only if a command
 *doing the same job* then succeeded (same
-role: test, build, lint, type-check or format; or a wrapper of the same tool,
-such as `uv run pytest` or `make test` for `pytest`) and the failing command
+role: test, build, lint, type-check or format, taken from the command a
+launcher runs: `bundle exec rails test` is a test; or the same command through
+a launcher, such as `uv run pytest` for `pytest` or `uv run python
+scripts/gen.py` for `python scripts/gen.py`) and the failing command
 did not succeed later in the session; `fixed_by_setup` if the same command
 succeeded after an install/setup command (`pip install`, `npm ci`, `uv sync`,
 `docker compose up`, ...) or with an environment activated in front of it.
@@ -1422,7 +1476,14 @@ has been denied"), a hook ("PreToolUse:Bash hook error: ..."), or a safety
 check ("Permission for this command was denied by ..."), or the harness
 refusing a command pattern outright ("Blocked: sleep 30 followed by: ...";
 variant `blocked`, with advice to document the alternative it suggests rather
-than to add an allow rule). The wording must
+than to add an allow rule). Who refused is said where the transcript says
+it: "denied by the auto-mode classifier" (variant `classifier`: "Permission
+for this action was denied by the Claude Code auto mode classifier") and
+"denied by a built-in safety check" (variant `safety`), each only when the
+sentence that refuses names it; otherwise "denied by permission settings" or
+"by a hook". For the first two the advice is to say that the action is not
+available and what to do instead: an allow rule does not change a classifier
+or a safety check. The wording must
 open the tool result, as the harness writes it; a program that *ran* and
 printed "permission denied" is a `command-failure`.
 

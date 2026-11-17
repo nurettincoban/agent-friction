@@ -806,3 +806,20 @@ def test_a_pointer_to_a_file_is_not_an_instruction_about_it(tmp_path: Path) -> N
     guide = Guidance(write(tmp_path / "g", {"AGENTS.md": "See src/schema_gen.py for style.\n"}))
     assert cited(guide.mentions([rel])) == ["AGENTS.md:1"]
     assert guide.mentions([rel], context="file") == []
+
+
+# ---- round 26 ------------------------------------------------------------------------
+
+
+def test_a_classifier_refusal_is_not_answered_with_an_allow_rule() -> None:
+    def denied(variant: str) -> list[Finding]:
+        return [finding(signals.PERMISSION_DENIED, f"s{i}", variant=variant) for i in range(3)]
+
+    (rec,) = recommend.recommend(model.COMMAND, "rm", denied("classifier"))
+    assert rec["title"] == "Tell agents this is refused, and what to do instead"
+    assert "A permission rule does not change that." in str(rec["detail"])
+    assert "allow rule" not in str(rec["detail"])
+    (rec,) = recommend.recommend(model.COMMAND, "rm", denied("safety"))
+    assert rec["title"] == "Tell agents this is refused, and what to do instead"
+    (rec,) = recommend.recommend(model.COMMAND, "rm", denied("permission"))
+    assert rec["title"] == "Allow it, or tell agents it is off limits"

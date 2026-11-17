@@ -209,8 +209,11 @@ anything beneath it. Commands are not in the tree.
 ### Forms of a command key
 
 A key is the program and the words that say what it does, without arguments:
-`pytest`, `npm test`, `make check`, `uv run pytest`, `git push`. Three
-additions:
+`pytest`, `npm test`, `make check`, `git push`. A command run through a
+launcher keeps the launcher in front of its own key: `uv run pytest`, `uv
+run python scripts/seed.py`, `bundle exec rails test`, `npx tsx
+scripts/a.ts`, `poetry run python manage.py test` (methodology, Attribution).
+Three additions:
 
 | Form | Meaning |
 | --- | --- |
@@ -219,8 +222,16 @@ additions:
 | `npm test (web/)` | A tool that works on the directory it is run in, run in a subdirectory of the repo: the repo-relative directory follows in parentheses, with a trailing slash. The suffix combines with the other two forms: `python <stdin> (web/)`, `python <inline> (tools/gen/)`. No suffix means the repo root. |
 
 Without excerpts (`key_mode: "pseudonymized"`), project-specific words of a
-key become hash placeholders (`make <target:37bd73>`); `<inline>`, `<stdin>`
-and the directory suffix, a repo path like any other, are kept as they are.
+key become hash placeholders (`make <target:37bd73>`); `<inline>` and
+`<stdin>` are kept as they are. The directory suffix is a repo path and is
+treated like one: it is shown if the directory exists now or a file under it
+was successfully read or written in the transcripts, and from the first
+component of which neither is true it becomes `<path:hash>` (`make build
+(<path:bcc85c>/)`). A command that was only *pointed at* a directory (`make
+-C`, `npm --prefix`, `cd X;`, `pushd X &&`) proves nothing about it, least of
+all when it failed. The same holds wherever such a key appears: `path`,
+`exposure.command`, summaries, recommendation titles, `replacement` and
+`setup`.
 Tool names in summaries are treated the same way: built-in tools (`Read`,
 `Edit`, `Bash`, `Grep`, `WebFetch`, `Task`, ... and the generic format's
 operation words) keep their names, any other name becomes `<tool:hash>`, and

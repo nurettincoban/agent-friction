@@ -579,7 +579,7 @@ def test_a_human_bumping_a_generated_file_is_not_rework(tmp_path: Path) -> None:
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True, env=env)
     for day in (1, 5):
         commit(day, "feat: use it\n\nCo-Authored-By: Claude <noreply@anthropic.com>", f"a{day}")
-        commit(day + 1, "chore: bump", f"h{day}")
+        commit(day + 1, "tidy up after it", f"h{day}")
     out = analyze(AnalyzeOptions(repo=repo, allow_no_transcripts=True, now=NOW))
     # lockfiles and compiled artefacts (by name) were regenerated, not repaired. They are
     # set aside, and the report says how many. A file that only *says* it is generated
@@ -1254,7 +1254,8 @@ def test_evidence_says_how_many_seconds_it_claims(tmp_path: Path) -> None:
 
 def test_packages_of_a_monorepo_get_their_own_command_rows(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
-    repo.mkdir()
+    for package in ("web", "api"):  # on disk: without excerpts only real directories are named
+        (repo / package).mkdir(parents=True)
     sessions = []
     for i in range(3):
         s = Session(f"m{i}", cwd=str(repo)).user("test it")
@@ -2746,3 +2747,55 @@ def test_too_little_of_a_signal_is_no_repository_level_item(tmp_path: Path) -> N
     assert out["recommendations"] == []
     schema = entry(out["hotspots"], SCHEMA)
     assert "edit-the-source-not-the-output" in [r["id"] for r in schema["recommendations"]]
+
+
+# ---- round 26 ------------------------------------------------------------------------------
+
+
+def test_a_directory_a_failed_command_was_pointed_at_is_not_shown_without_excerpts(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    (repo / "web").mkdir(parents=True)
+    (repo / "a.py").write_text("x\n")
+    files = []
+    for i in range(3):
+        s = Session(f"s{i}", cwd=str(repo)).user("go")
+        s.bash("make -C NOPE1 build", "make: *** NOPE1: No such file or directory.", exit_code=2)
+        s.bash("npm --prefix NOPE2 test", "npm error enoent no package.json", exit_code=254)
+        s.bash(
+            "(cd NOPE3; cargo test)", "error: could not find `Cargo.toml` in `/x`", exit_code=101
+        )
+        s.bash("pushd NOPE4 && go test ./...", "go: go.mod file not found", exit_code=1)
+        s.bash("npm --prefix web test", 'npm error Missing script: "test"', exit_code=1)
+        files.append(s.read(f"{repo}/a.py").save(tmp_path / "t" / f"s{i}"))
+    options = AnalyzeOptions(repo=repo, transcripts=files, include_git=False, now=NOW)
+    full = analyze(options)
+    assert "make build (NOPE1/)" in [row["path"] for row in full["commands"]]
+    bare = analyze(dataclasses.replace(options, include_excerpts=False))
+    text = json.dumps(bare)
+    assert "NOPE" not in text  # path, exposure, summaries, recommendation titles
+    paths = sorted(row["path"] for row in bare["commands"])
+    assert "npm test (web/)" in paths  # a directory that is there keeps its name
+    hidden = [p for p in paths if p != "npm test (web/)"]
+    assert len(hidden) == 4 and all(re.fullmatch(r".+ \(<path:\w{6}>/\)", p) for p in hidden)
+    assert sorted(bare["exposure"]["command"]) == paths
+    titles = [r["title"] for row in bare["commands"] for r in row["recommendations"]]
+    assert any(re.search(r"in `<path:\w{6}>/`", title) for title in titles)
+
+
+def test_a_command_through_a_launcher_is_the_working_command(tmp_path: Path) -> None:
+    missing = "Traceback (most recent call last):\nModuleNotFoundError: No module named 'requests'"
+
+    def build(s: Session) -> None:
+        s.bash("python scripts/gen.py", missing, exit_code=1).bash("ls", "x")
+        s.bash("uv run python scripts/gen.py", "ok")
+        s.bash("uv run python scripts/seed.py", "ok")
+
+    rows = _commands(tmp_path, build)
+    (row,) = [r for r in rows if r["recommendations"]]
+    (advice,) = row["recommendations"]
+    assert row["path"] == "python scripts/gen.py"
+    assert advice["id"] == "use-the-working-command"
+    assert advice["title"] == "Tell agents to use `uv run python scripts/gen.py`"
+    assert advice["replacement"] == "uv run python scripts/gen.py"

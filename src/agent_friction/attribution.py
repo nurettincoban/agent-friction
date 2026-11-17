@@ -694,6 +694,84 @@ def _sanitize(key: str) -> str:
     return " ".join(kept)
 
 
+#: Launchers: programs that run another command inside an environment. The key is the
+#: launcher followed by the key of what it runs, by the ordinary rules: ``uv run python
+#: scripts/seed.py``, ``bundle exec rails test``, ``npx tsx scripts/a.ts``. The value
+#: is the subcommand that launches (none for ``npx``, ``bunx``, ``uvx``).
+LAUNCHERS: dict[str, frozenset[str]] = {
+    "uv": frozenset({"run"}),
+    "poetry": frozenset({"run"}),
+    "pipenv": frozenset({"run"}),
+    "hatch": frozenset({"run"}),
+    "pdm": frozenset({"run"}),
+    "rye": frozenset({"run"}),
+    "conda": frozenset({"run"}),
+    "mamba": frozenset({"run"}),
+    "micromamba": frozenset({"run"}),
+    "bundle": frozenset({"exec"}),
+    "pnpm": frozenset({"exec", "dlx"}),
+    "yarn": frozenset({"exec", "dlx"}),
+    "npm": frozenset({"exec"}),
+    "bun": frozenset({"x", "run"}),
+    "npx": frozenset(),
+    "bunx": frozenset(),
+    "uvx": frozenset(),
+}
+#: Options of a launching subcommand that take a value (``uv run --with rich``).
+_LAUNCH_VALUE_OPTIONS = frozenset(
+    {"--with", "--with-editable", "--with-requirements", "--python", "-p", "--group"}
+    | {"--extra", "--only-group", "--no-group", "--package", "--env-file", "--index"}
+    | {"--default-index", "--index-url", "--extra-index-url", "--project", "--directory"}
+    | {"-n", "--name", "--prefix", "--cwd", "-C", "--filter", "-F", "--from", "--script"}
+    | {"-c", "--call", "-w", "--workspace"}
+)
+
+
+def _launched(base: str, rest: Sequence[str]) -> tuple[str, list[str]] | None:
+    """``(launcher, words of the command it runs)`` if ``base rest`` launches one."""
+    launching = LAUNCHERS.get(base)
+    if launching is None:
+        return None
+    rest = _skip_options(base, rest)
+    launcher = base
+    if launching:
+        if not rest or rest[0] not in launching:
+            return None
+        launcher, rest = f"{base} {rest[0]}", list(rest[1:])
+    inner = list(rest)
+    while inner and inner[0].startswith("-"):
+        option = inner.pop(0)
+        if option == "--":
+            break
+        if option in ("-c", "--call") and base in ("npx", "npm", "pnpm"):
+            return launcher, []  # `npx -c '<shell>'`: a script, not a command name
+        if option in _LAUNCH_VALUE_OPTIONS and inner and not inner[0].startswith("-"):
+            inner.pop(0)
+    if base == "bun" and launcher == "bun run" and not (inner and _looks_like_script(inner[0])):
+        return None  # `bun run build`: a package script, named as such
+    return launcher, inner
+
+
+def launcher_split(key: str) -> tuple[str, str]:
+    """``("uv run", "python scripts/seed.py")`` for a launched key; ``("", key)`` otherwise."""
+    words = key.split()
+    if not words or words[0] not in LAUNCHERS:
+        return "", key
+    launching = LAUNCHERS[words[0]]
+    if not launching:
+        return (words[0], " ".join(words[1:])) if len(words) > 1 else ("", key)
+    if len(words) > 2 and words[1] in launching:
+        if words[0] == "bun" and words[1] == "run" and not _looks_like_script(words[2]):
+            return "", key
+        return " ".join(words[:2]), " ".join(words[2:])
+    return "", key
+
+
+def inner_key(key: str) -> str:
+    """The command a launched key runs (``pytest`` for ``uv run pytest``), or ``key``."""
+    return launcher_split(key)[1]
+
+
 def _raw_key(words: Sequence[str]) -> str:
     if not words:
         return ""
@@ -702,6 +780,10 @@ def _raw_key(words: Sequence[str]) -> str:
         program = "python"  # python3, python3.12, pypy3 ... are one command
     rest = list(words[1:])
     base = program.rsplit("/", 1)[-1]
+    launched = _launched(base, rest) if "/" not in program else None
+    if launched is not None:
+        launcher, inner = launched
+        return f"{launcher} {_raw_key(inner)}".strip()
     if base in INTERPRETERS:
         if rest and rest[0] == "-m" and len(rest) > 1:
             return f"{program} -m {rest[1]}"
@@ -1189,8 +1271,12 @@ def _key_words(key: str) -> list[str]:
 
 
 def command_role(key: str) -> str | None:
-    """``test``, ``build``, ``lint``, ``typecheck`` or ``format``; ``None`` if unknown."""
-    for word in reversed(_key_words(key)):
+    """``test``, ``build``, ``lint``, ``typecheck`` or ``format``; ``None`` if unknown.
+
+    A launched command has the role of what it runs: ``bundle exec rails test`` is a
+    test, whatever ``bundle`` or ``rails`` are.
+    """
+    for word in reversed(_key_words(inner_key(key))):
         stem = word.rsplit(".", 1)[0] if _SCRIPT_RE.search(word) else word
         for role, names in ROLE_WORDS.items():
             if stem in names:
@@ -1238,7 +1324,13 @@ def is_replacement(failed: str, other: str) -> bool:
     (``uv run pytest`` for ``pytest``). Never for setup, version-control,
     housekeeping or inspection commands.
     """
-    if not failed or not other or failed == other or is_setup_command(other):
+    if not failed or not other or failed == other:
+        return False
+    # the same command through a launcher: `uv run python scripts/gen.py` for
+    # `python scripts/gen.py`, `poetry run alembic upgrade` for `alembic upgrade`
+    if inner_key(failed) == inner_key(other) and INLINE not in other and STDIN not in other:
+        return True
+    if is_setup_command(other):
         return False
     program = other.split()[0]
     if program in ("git", "gh", "glab") or program in HOUSEKEEPING_PROGRAMS | SETUP_PROGRAMS:

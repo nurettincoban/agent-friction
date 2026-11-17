@@ -789,11 +789,15 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         color = output is None and fmt in (None, "terminal") and _use_color(args.color, stdout)
         text = render_compare(before, after, changes, markdown=fmt == "markdown", color=color)
     _write(text, output, stdout)
-    if (
-        args.fail_on_regression
-        and not low_sample
-        and any(c.status in ("regressed", "new") for c in changes)
-    ):
+    tripped = [c for c in changes if c.status in ("regressed", "new")]
+    if args.fail_on_regression and not low_sample and tripped:
+        listed = ", ".join(f"{c.path} ({c.status})" for c in tripped[:5])
+        more = f" and {len(tripped) - 5} more" if len(tripped) > 5 else ""
+        print(
+            f"agent-friction: --fail-on-regression: {len(tripped)} "
+            f"target{'s' if len(tripped) != 1 else ''} regressed or new: {listed}{more}",
+            file=stderr,
+        )
         return EXIT_GATE
     return EXIT_OK
 

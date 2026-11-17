@@ -177,10 +177,24 @@ together, and so that the key can be shown even when excerpts are off:
      /repo commit` -> `git commit`, `pnpm --filter web test` -> `pnpm test`,
      `kubectl -n prod get pods` -> `kubectl get`, `uv run --group dev pytest`
      -> `uv run pytest`);
+   - a **launcher** runs another command inside an environment, and its key
+     is the launcher followed by the key of what it runs, by these same
+     rules (`LAUNCHERS`): `uv run`, `poetry run`, `pipenv run`, `hatch run`,
+     `pdm run`, `rye run`, `conda run` (and `mamba`, `micromamba`), `bundle
+     exec`, `npx`, `npm exec`, `pnpm exec` / `dlx`, `yarn exec` / `dlx`,
+     `bunx`, `bun x`, `uvx`, and `bun run <file>`. The launcher's own
+     options are skipped with their values (`uv run --with rich --python
+     3.12`, `conda run -n dev`, `npx -p typescript`). So `uv run python
+     scripts/seed.py` and `uv run flask db upgrade` are `uv run python
+     scripts/seed.py` and `uv run flask db`, not one `uv run python` /
+     `uv run flask` for everything; `bundle exec rails test` is `bundle exec
+     rails test`, `npx tsx scripts/a.ts` is `npx tsx scripts/a.ts`, `uv run
+     pytest -q` stays `uv run pytest`. A launched command has the role of
+     what it runs, and it can stand in for the same command run bare
+     (`is_replacement`);
    - one further word is kept only after a script runner or command group of
-     that tool (`CONTINUING_SUBCOMMANDS`: `npm run build`, `uv run pytest`,
-     `poetry run python -m pytest`, `bundle exec rspec`, `docker compose
-     up`, `gh pr create`), and `yarn workspace <name> <script>` keeps both
+     that tool (`CONTINUING_SUBCOMMANDS`: `npm run build`, `bun run build`,
+     `docker compose up`, `gh pr create`), and `yarn workspace <name> <script>` keeps both
      (the workspace name is project-specific and becomes a placeholder
      without excerpts);
    - **every other program is its executable name alone**: `./run s3cret` is
