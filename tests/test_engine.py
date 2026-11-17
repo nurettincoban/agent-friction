@@ -3376,7 +3376,8 @@ def _in_a_subdirectory(tmp_path: Path, count: int, red: str, edit: bool = False)
     [
         "E   ModuleNotFoundError: No module named 'app'\n1 error in 0.1s",
         "E   fixture 'client' not found\n1 error in 0.1s",
-        "FAILED tests/test_a.py::test_a - AssertionError: fixtures/data.json is empty\n1 failed",
+        # a failing test inside that directory is one the green run there ran too
+        "FAILED src/tests/test_a.py::test_a - AssertionError: data.json is empty\n1 failed",
     ],
 )
 def test_red_at_the_root_and_green_unchanged_in_a_subdirectory_says_where_to_run_it(
@@ -3398,6 +3399,108 @@ def test_red_at_the_root_and_green_unchanged_in_a_subdirectory_says_where_to_run
         "document-the-command" not in [r["id"] for r in row["recommendations"]]
         for row in out["commands"]
     )
+
+
+STANDING_RED = (
+    "FAILED tests/test_billing.py::test_total - AssertionError: 3 != 4\n1 failed, 40 passed in 2s"
+)
+JS_RED = " FAIL  src/billing/total.test.ts > total\nTests  1 failed | 40 passed (41)"
+
+
+@pytest.mark.parametrize(
+    ("red", "output", "green", "passed"),
+    [
+        ("make test", STANDING_RED, "pytest tests/test_core.py -q", "12 passed in 0.3s"),
+        ("npm test", JS_RED, "npx vitest run src/app/core.test.ts", "Tests  3 passed (3)"),
+        ("tox", STANDING_RED, "python -m pytest tests/test_core.py::test_new", "1 passed"),
+        ("pytest -q", STANDING_RED, "cd src/app && pytest -q", "12 passed in 0.3s"),
+        ("make test", STANDING_RED, "pytest -k core", "12 passed in 0.3s"),
+        # nothing on the line narrows it, but it ran a fraction of the tests
+        ("make test", STANDING_RED, "pytest", "12 passed in 0.3s"),
+    ],
+)
+def test_a_narrower_green_run_is_no_answer_to_a_standing_red_test(
+    tmp_path: Path, red: str, output: str, green: str, passed: str
+) -> None:
+    def build(s: Session) -> None:
+        s.bash(red, output, exit_code=1).bash(green, passed)
+
+    (row,) = _commands(tmp_path, build)
+    assert [r["id"] for r in row["recommendations"]] == ["say-if-it-is-known-broken"]
+    assert "use `" not in json.dumps(row) and "works_in" not in json.dumps(row)
+
+    # with a stash (or anything else that may change files) in between as well: the
+    # red run is not written off as "red, change, green"
+    def stashed(s: Session) -> None:
+        s.bash(red, output, exit_code=1).bash("git stash", "Saved working directory")
+        s.bash(green, passed)
+
+    out = scan(tmp_path / "stash", [stashed_session(i, stashed) for i in range(4)])
+    assert out["totals"]["dropped_red_runs"] == 0
+    (row,) = out["commands"]
+    assert [r["id"] for r in row["recommendations"]] == ["say-if-it-is-known-broken"]
+
+
+def stashed_session(index: int, build: Any) -> Session:
+    s = Session(f"s{index}", cwd="/repo").user("go")
+    build(s)
+    return s
+
+
+def test_a_runner_that_was_red_itself_is_not_the_one_to_use(tmp_path: Path) -> None:
+    def build(s: Session) -> None:
+        s.bash("make test", STANDING_RED, exit_code=2)
+        s.bash("pytest tests/test_billing.py", STANDING_RED, exit_code=1)
+        s.bash("pytest tests/test_core.py", "12 passed")
+
+    rows = _commands(tmp_path, build)
+    assert "use-the-working-command" not in [r["id"] for c in rows for r in c["recommendations"]]
+    assert entry(rows, "make test")["recommendations"][0]["id"] == "say-if-it-is-known-broken"
+
+
+def test_another_runner_that_ran_as_much_is_still_the_one_to_use(tmp_path: Path) -> None:
+    def build(s: Session) -> None:
+        s.bash("yarn test", "error Command failed.\n1 failed, 40 passed", exit_code=1)
+        s.bash("pnpm test", "41 passed")
+
+    (row,) = _commands(tmp_path / "all", build)
+    assert row["recommendations"][0]["title"] == "Tell agents to use `pnpm test`"
+
+    # a narrower run that ran the very test that failed covers it, too
+    def narrower(s: Session) -> None:
+        s.bash("make test", STANDING_RED, exit_code=2)
+        s.bash("pytest tests/test_billing.py -q", "3 passed")
+
+    (row,) = _commands(tmp_path / "narrow", narrower)
+    assert row["recommendations"][0]["title"] == "Tell agents to use `pytest`"
+
+    # and red, edit, green on that test is the development loop, as ever
+    def fixed(s: Session) -> None:
+        s.bash("make test", STANDING_RED, exit_code=2).edit("/repo/src/billing.py")
+        s.bash("pytest tests/test_billing.py -q", "3 passed")
+
+    assert _commands(tmp_path / "fixed", fixed) == []
+
+
+@pytest.mark.parametrize(
+    ("lines", "path"),
+    [
+        (("npm test --prefix packages/web", "npm --prefix packages/web test"), "npm test"),
+        (("pnpm test -C packages/web", "pnpm -C packages/web test"), "pnpm test"),
+        (("pnpm test --dir packages/web", "pnpm --dir=packages/web test"), "pnpm test"),
+    ],
+)
+def test_a_directory_option_keys_the_same_on_either_side_of_the_subcommand(
+    tmp_path: Path, lines: tuple[str, str], path: str
+) -> None:
+    repo = tmp_path / "repo"
+    (repo / "packages" / "web").mkdir(parents=True)
+    sessions = []
+    for i, line in enumerate(lines * 2):
+        s = Session(f"s{i}", cwd=str(repo)).user("go")
+        sessions.append(s.bash(line, "sh: 1: jest: not found", exit_code=127))
+    (row,) = scan(tmp_path / "t", sessions, repo)["commands"]
+    assert row["path"] == f"{path} (packages/web/)" and row["events"] == 4
 
 
 def test_go_outside_its_module_then_inside_it(tmp_path: Path) -> None:

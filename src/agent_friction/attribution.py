@@ -987,13 +987,17 @@ _DIR_OPTIONS: dict[str, frozenset[str]] = {
 }
 
 
+#: Tools that take that option after the subcommand as well (`npm test --prefix web`).
+_DIR_ANYWHERE = frozenset({"npm", "pnpm"})
+
+
 def _own_directory(program: str, args: Sequence[str]) -> list[str]:
     """The directory a tool was pointed at with ``-C dir`` / ``--prefix=dir``, if any."""
     options = _DIR_OPTIONS.get(program)
     if not options:
         return []
     for index, word in enumerate(args):
-        if not word.startswith("-"):
+        if word == "--" or (not word.startswith("-") and program not in _DIR_ANYWHERE):
             break  # options of the tool itself come before its subcommand
         name, eq, value = word.partition("=")
         if name in options:

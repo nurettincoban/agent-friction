@@ -1048,6 +1048,80 @@ def missing_target(output: str) -> tuple[str, str] | None:
     return None
 
 
+#: A green run that counted fewer than this share of the tests a red run counted ran a
+#: subset of them, whatever its command line says.
+SUBSET_PASS_SHARE = 0.5
+_TEST_COUNT_RE = re.compile(r"\b(\d+) (passed|failed|errors?|skipped|xfailed|xpassed)\b")
+#: Options that pick some of the tests: pytest, jest, vitest, go, cargo, dotnet, gradle.
+_SELECTING_OPTIONS = frozenset(
+    {"-k", "-m", "-t", "-run", "--run", "--filter", "--grep", "-g", "--testNamePattern"}
+    | {"--tests", "--lf", "--last-failed", "--ff", "--only", "--test", "--testPathPattern"}
+)
+_SWITCHES = frozenset(
+    {"-q", "-qq", "-x", "-v", "-vv", "-s", "-l", "--verbose", "--quiet", "--run", "--ci", "--"}
+    | {"--no-cov", "--no-header", "--exitfirst", "--silent", "--bail", "--watchAll=false"}
+)
+_SELECTED_PATH_RE = re.compile(
+    r"^(?:\./)?[\w@.-]+(?:/[\w@.+-]+)*(?:/|\.[A-Za-z]{1,5})?(?:::[^\s]+|:\d+)?$"
+)
+
+
+def tests_counted(output: str) -> int:
+    """How many tests a run's summary counts (passed, failed, errors), 0 if it has none."""
+    counts = [
+        int(n)
+        for n, what in _TEST_COUNT_RE.findall(output[-2000:])
+        if what in ("passed", "failed", "error", "errors")
+    ]
+    return sum(counts)
+
+
+def selection(line: str) -> tuple[frozenset[str], frozenset[str]]:
+    """What a test command line picks out: ``(paths and node ids, selecting options)``.
+
+    ``pytest tests/test_core.py -k total`` -> ``({"tests/test_core.py"}, {"-k"})``.
+    A bare word is a program, a target or a subcommand, never a selection.
+    """
+    paths: set[str] = set()
+    options: set[str] = set()
+    try:
+        steps = parse_command(line).steps
+    except Exception:  # an unreadable line selects nothing we can name
+        return frozenset(), frozenset()
+    # Only the steps that run tests select tests: `python scripts/patch.py && npm test`
+    # names a script, not a test file.
+    testing = [s for s in steps if command_role(s.key) == "test"] or steps
+    words: list[str] = []
+    for step in testing:
+        words += [";", step.program, *step.args]
+    previous = ""
+    for word in words:
+        name = word.split("=", 1)[0]
+        if name in _SELECTING_OPTIONS and not (
+            name == "-m" and _PYTHON_NAME_RE.match(previous.rsplit("/", 1)[-1])
+        ):
+            options.add(name)
+        elif (
+            previous != ";"
+            and not word.startswith("-")
+            # after an option that is not a plain switch the word is that option's value
+            and (not previous.startswith("-") or "=" in previous or previous in _SWITCHES)
+            and ("/" in word or "::" in word or re.search(r"\.[A-Za-z]{1,5}(?::\d+)?$", word))
+            and word.strip("./") not in ("", "...")
+            and _SELECTED_PATH_RE.match(word.removesuffix("/..."))
+        ):
+            paths.add(word.removeprefix("./"))
+        previous = word
+    return frozenset(paths), frozenset(options)
+
+
+def selects(selected: str, test: str) -> bool:
+    """Does the selection ``selected`` (a path or node id) include the test file ``test``?"""
+    path = selected.split("::", 1)[0].removesuffix("/...").rstrip("/")
+    path = re.sub(r":\d+$", "", path)
+    return test == path or test.startswith(path + "/") or test.endswith("/" + path)
+
+
 #: A silence this long after a call's result is nobody working (a closed laptop, an agent
 #: waiting to be resumed), whatever follows it: it is never part of a round trip.
 IDLE_GAP_SECONDS = TIME_CAP_SECONDS
@@ -1359,6 +1433,9 @@ _UNDO_OBJECT = (
     r"|(?:the|my) (?:last|previous|latest) (?:change|changes|edit|edits|commit|commits|one"
     r"|thing|step|two|three|few|\d+)"
     r"|the (?:change|changes|edit|edits|commit|commits))\b"
+    # "revert the commit abc123 from last week" is about old history, not the agent's work
+    r"(?!(?: [0-9a-f]{6,40})? (?:from|of) (?:last|yesterday|earlier|before|\d|an? |the other"
+    r"|the previous|(?:mon|tues|wednes|thurs|fri|satur|sun)day|(?:the )?\w+ release))"
 )
 #: The human asks for a change to be taken back: "revert src/app.py", "put it back".
 #: A message that adds to the job: "also ...", "and ...", "plus ...", "one more thing".
@@ -1469,9 +1546,10 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
             False,
         ),
         (
-            # "wrong. use pnpm" / "stop. use the other client"; not "Stop. Hammer time".
+            # "wrong. use pnpm" / "wrong file — it should go in util.py" / "stop. use the
+            # other client"; not "Stop. Hammer time", "Wrong version of node in CI".
             _STOP_LABEL,
-            r"^(?:wrong|incorrect)(?:[.!]*$|\s*[.,;:!—-]+\s+\S)"
+            rf"^(?:wrong|incorrect)(?: (?:{_THING}))?(?:[.!]*$|\s*[.,;:!—–-]+\s+\S)"
             r"|^stop(?:[.!]*$|\s*[.,;:!—-]+\s+(?:use|don't|do not|you|that|this|it\b|revert|undo"
             r"|wait|not |wrong|go back|put|leave|keep|read|look|check|ask|please|just)"
             # "stop editing the tests", not "Stop showing the banner after it is dismissed"
@@ -1961,6 +2039,8 @@ class _State:
     looped: set[int] = field(default_factory=set)  # failures that are part of a retry loop
     known_files: set[str] = field(default_factory=set)  # files read or changed so far
     changes_at: dict[int, int] = field(default_factory=dict)  # ``changes`` per failure
+    tests_run: dict[int, int] = field(default_factory=dict)  # tests a red run counted
+    red_seen: set[str] = field(default_factory=set)  # keys and labels that ran red
     trips: dict[int, tuple[float, float]] = field(default_factory=dict)  # see ``_promote``
     key_of: dict[int, str] = field(default_factory=dict)  # command key per failure
     # failures for which another command stood in, per failed command
@@ -3108,13 +3188,18 @@ class _Detector:
             # A step that printed its own passing summary ran green, whatever came after.
             for step_key, step_verdict in own.items():
                 if step_verdict == "green" and (step_key != key or not ok or unknown):
-                    self._went_green(step_key, line=action.call.command or "")
+                    self._went_green(step_key, line=action.call.command or "", output=result.output)
             if result.ok:
                 # ... and so did any check whose passing summary an exit-0 command shows
                 # (`make check` printing "All checks passed!" for an earlier red `ruff`).
                 for failed_key in [k for k in state.cycles if k != key]:
                     if key_verdict(failed_key, result.output) == "green":
-                        self._went_green(failed_key, by=key)
+                        self._went_green(
+                            failed_key,
+                            by=key,
+                            line=action.call.command or "",
+                            output=result.output,
+                        )
         if unknown and key in state.cycles:
             state.cycles[key].unknown = True
         if not cmd.inspection and result.error != model.ERR_INTERRUPTED and not unknown:
@@ -3167,6 +3252,7 @@ class _Detector:
                 exact=located is not None and is_setup_step(located),
                 line=action.call.command or "",
                 label=shown(key),
+                output=result.output,
             )
             # The command works after all, so nothing "replaced" it earlier in the session.
             for finding in state.replaced.pop(key, []):
@@ -3466,6 +3552,10 @@ class _Detector:
         finding.run = _capped(self._started(action), _epoch(result))
         state.key_of[id(finding)] = key
         state.changes_at[id(finding)] = state.changes
+        state.red_seen.update((key, shown(key)))
+        counted = tests_counted(result.output)
+        if counted:
+            state.tests_run[id(finding)] = counted
         if "own_module" in detail:
             trip = self._round_trip(action)
             if trip is not None:
@@ -3526,8 +3616,49 @@ class _Detector:
                 step, certain = named, True
         return step, certain
 
+    def _covered(self, finding: Finding, failed_key: str, line: str, output: str) -> bool:
+        """Did the green run ``line`` run what ``finding``'s red run ran?
+
+        `pytest tests/test_core.py` passing says nothing about the test that
+        `make test` showed red. A green run is narrower when its line selects
+        something the red line did not (a path, a node id, ``-k``, ``-m``, ``-t``,
+        ``--filter``, ...), or when it counted far fewer tests. A narrower run still
+        covers the failure if the red output named its failing tests and every one
+        of them lies inside the selection.
+        """
+        if command_role(failed_key) != "test" or finding.detail.get("variant") != "ordinary":
+            return True
+        red_paths, red_options = selection(finding.detail.get("command", ""))
+        paths, options = selection(line)
+        ran, passed = self.state.tests_run.get(id(finding)), tests_counted(output)
+        fewer = bool(ran and passed and passed < ran * SUBSET_PASS_SHARE)
+        if not (paths - red_paths) and not (options - red_options) and not fewer:
+            return True
+        if options - red_options or not paths:
+            return False
+        names = [n for n in finding.detail.get("failed_tests", "").split("\n") if n]
+        files = finding.detail.get("failed_test_files", "").split("\n")
+        if not names:
+            return False
+        for index, name in enumerate(names):
+            known = files[index] if index < len(files) else ""
+            where = [p for p in (known, name.split("::")[0] if "::" in name else "") if p]
+            if not any(
+                selects(path, there) and ("::" not in path or name.startswith(path))
+                for there in where
+                for path in paths
+            ):
+                return False
+        return True
+
     def _went_green(
-        self, key: str, exact: bool = False, by: str = "", line: str = "", label: str = ""
+        self,
+        key: str,
+        exact: bool = False,
+        by: str = "",
+        line: str = "",
+        label: str = "",
+        output: str = "",
     ) -> None:
         """``key`` ran green: close what a green run of it, or of its job, closes.
 
@@ -3548,13 +3679,22 @@ class _Detector:
                 return True
             return is_aggregate_check(key) and command_role(failed_key) is not None
 
+        def take(table: dict[str, list[Finding]], failed_key: str) -> list[Finding]:
+            """The failures of ``failed_key`` this green run answers; the others stay."""
+            found = table.pop(failed_key)
+            left = [f for f in found if not self._covered(f, failed_key, line, output)]
+            if left:
+                # A narrower selection passing closes nothing: the red run is still red.
+                table[failed_key] = left
+            return [f for f in found if not any(f is other for other in left)]
+
         for failed_key in [k for k in state.cycles if closes(k)]:
             del state.cycles[failed_key]
         # What went green was not waiting for a file to be created (test-first).
         state.missing = [m for m in state.missing if not closes(m[1])]
         fixed: set[int] = set()
         for failed_key in [k for k in state.red_then_edited if closes(k)]:
-            for finding in state.red_then_edited.pop(failed_key):
+            for finding in take(state.red_then_edited, failed_key):
                 if "push_rejected" in finding.detail:
                     # Rejected, pulled, pushed: no file was fixed, the branch was behind.
                     # Once is routine; whether it is a habit, the engine can tell.
@@ -3568,7 +3708,7 @@ class _Detector:
         # Green after nothing but commands, with no file edited: what was wrong was the
         # environment, and the command that put it right is worth writing down.
         for failed_key in [k for k in state.red_then_ran if closes(k)]:
-            for finding in state.red_then_ran.pop(failed_key):
+            for finding in take(state.red_then_ran, failed_key):
                 if "push_rejected" in finding.detail:
                     finding.detail["push_recovered"] = "1"
                     state.ran_after.pop(id(finding), None)
@@ -3598,7 +3738,7 @@ class _Detector:
                     fixed.add(id(finding))
         # Green with no change in between: those red runs stay on the record for good.
         for failed_key in [k for k in state.red if closes(k)]:
-            for finding in state.red.pop(failed_key):
+            for finding in take(state.red, failed_key):
                 if failed_key != actual:
                     # the package was there; another way of running the job found it
                     promoted = self._promote(finding)
@@ -3609,6 +3749,8 @@ class _Detector:
                         and is_replacement(failed_key, actual)
                         and not is_aggregate_check(actual)
                         and state.changes_at.get(id(finding)) == state.changes
+                        # a runner that was itself red in this session is no answer
+                        and actual not in state.red_seen
                     ):
                         # Another runner for the same job passes with nothing changed
                         # (`pnpm test` after a red `yarn test`): perhaps the wrong runner
@@ -3619,6 +3761,10 @@ class _Detector:
                     finding.detail.get("variant") == "ordinary"
                     and state.changes_at.get(id(finding)) == state.changes
                     and self._elsewhere_in_repo(finding, label)
+                    and label not in state.red_seen
+                    # failing tests the red run named outside that directory were not
+                    # run there: its green says nothing about them
+                    and self._failed_under(finding, label)
                 ):
                     # The same command, red where the agent first ran it and green in a
                     # subdirectory with nothing changed (`pytest`, then `cd src &&
@@ -3637,6 +3783,19 @@ class _Detector:
                     # it is, only its recurring across sessions can say (engine).
                     finding.detail["rerun_green"] = "1"
         self._drop(fixed, DROPPED_DEV_LOOP)
+
+    def _failed_under(self, finding: Finding, label: str) -> bool:
+        """Do the failing tests the red run named (if any) all lie in ``label``'s directory?"""
+        was = finding.targets[0].key if finding.targets else ""
+        directory = label[len(was) + 2 : -1]
+        names = [n for n in finding.detail.get("failed_tests", "").split("\n") if n]
+        files = finding.detail.get("failed_test_files", "").split("\n")
+        for index, name in enumerate(names):
+            known = files[index] if index < len(files) else ""
+            where = known or (name.split("::")[0] if "::" in name else "")
+            if not where.startswith(directory):
+                return False
+        return True
 
     @staticmethod
     def _elsewhere_in_repo(finding: Finding, label: str) -> bool:

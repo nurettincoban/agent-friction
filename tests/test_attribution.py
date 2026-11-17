@@ -443,6 +443,16 @@ def test_chdir_follows_cd_lexically(resolver: PathResolver) -> None:
         ("git -C ../other status", ("../other",)),
         ("make -C docs html", ("docs",)),
         ("npm --prefix web test", ("web",)),
+        # npm and pnpm take the option after the subcommand as well
+        ("npm test --prefix packages/web", ("packages/web",)),
+        ("npm run build --prefix=packages/web", ("packages/web",)),
+        ("pnpm -C packages/web test", ("packages/web",)),
+        ("pnpm test -C packages/web", ("packages/web",)),
+        ("pnpm test --dir packages/web", ("packages/web",)),
+        # ... but not after `--`: that belongs to the script
+        ("npm test -- --prefix x", ()),
+        # other tools only in front of the subcommand
+        ("git log -C HEAD", ()),
         # a workspace selector is not a directory change: see `workspace`
         ("pnpm --filter web test", ()),
         ("yarn workspace web test", ()),

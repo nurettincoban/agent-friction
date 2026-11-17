@@ -91,7 +91,10 @@ def _resolve_repo(args: argparse.Namespace, err: TextIO) -> None:
     cwd = Path.cwd()
     root = _find_repo_root(cwd)
     if root is not None and root != cwd:
-        err.write(f"agent-friction: using the repository root {root}\n")
+        err.write(
+            f"agent-friction: using the repository root {root} "
+            "(pass . to map only this directory)\n"
+        )
     elif root is None and getattr(args, "from_json", None) is None:
         err.write(
             f"agent-friction: note: {cwd} is not inside a git repository; mapping it as the "
@@ -171,8 +174,8 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
         "--since",
         type=parse_when,
         metavar="WHEN",
-        help="only events from WHEN on (30d, 2026-01-31; dates and times without a zone are UTC); "
-        "a session that straddles it is cut",
+        help="only events from WHEN on (30d, 2w, 12h, 3m = three months, or 2026-01-31; "
+        "dates and times without a zone are UTC); a session that straddles it is cut",
     )
     g.add_argument(
         "--until", type=parse_when, metavar="WHEN", help="only events before WHEN (same forms, UTC)"

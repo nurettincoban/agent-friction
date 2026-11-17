@@ -149,7 +149,10 @@ corroborated: ...").
     start of the message or of a clause, followed by "that | this | it | your
     ... | the last edit | the change", or alone ("Revert."); "can / could you
     undo that"; and "put it | that | them back". Not "revert the design doc to draft", "Undo support is
-    the next feature", "roll back the last migration when the check fails".
+    the next feature", "roll back the last migration when the check fails",
+    and not old history ("revert the commit abc123 from last week and reapply
+    it on core.py", "revert the changes from the previous release"): that is
+    an instruction, not a verdict on the agent's work.
 - **Verdicts on the work just done (strong wording, only when they open the
   message,** optionally after an interjection such as "hmm", "ugh", "ok",
   "no"**):**
@@ -166,7 +169,9 @@ corroborated: ...").
   - "Not quite", "not exactly", "not like that" (not "Not quite sure how auth
     works"; "almost, but ..." and "close, but ..." are not cues: they usually
     introduce one more request);
-  - "wrong." / "incorrect." followed by more text; "stop" followed by an
+  - "wrong." / "incorrect." followed by more text, also with the thing that
+    was wrong ("wrong file — it should go in util.py", "wrong branch. use
+    main"; not "Wrong version of node is installed in CI"); "stop" followed by an
     instruction or by something an agent does ("stop. use the other client",
     "stop editing the generated file", "stop guessing": a fixed list of verbs
     such as editing, changing, adding, removing, running, creating, using,
@@ -1335,7 +1340,28 @@ command's" below.
   (`RUNNER_MIN_SESSIONS`), the failing command is the wrong one for this
   repository: those failures get `recovered_by`, count in full, and lead to
   `use-the-working-command`. An aggregate target (`make check`) passing is
-  not a runner for the job.
+  not a runner for the job. Nor is a runner that went red itself earlier in
+  the session.
+- *A green run that ran less is no answer:* for a test command, the green
+  run has to have run what the red one ran. It did not when its line
+  **selects** something the red line lacks: a path or node id (`pytest
+  tests/test_core.py` after a red `make test`, `npx vitest run
+  src/app/core.test.ts` after `npm test`, `go test ./pkg/...` after `go test
+  ./...`) or a selecting option (`-k`, `-m`, `-t`, `-run`, `--filter`,
+  `--grep`, `--tests`, `--lf`, ...); or when its summary counts fewer than
+  half the tests of the red run's (`12 passed` after `1 failed, 40 passed`;
+  `SUBSET_PASS_SHARE`). The one exception: the red output named its failing
+  tests and every one of them lies inside the selection (`pytest
+  tests/test_billing.py` after `make test` showed `FAILED
+  tests/test_billing.py::test_total`). A narrower green run closes nothing:
+  it is not "another runner" (`green_as`), not "the same command in a
+  subdirectory" (`green_in`: also refused when the red output names a
+  failing test outside that directory, or when the command went red in that
+  directory too), and not the green end of red, edit, green either. The red
+  run stays on the record as an ordinary failure, so a test that is red
+  session after session while the agent works around it with narrower runs
+  is seen as that ([`say-if-it-is-known-broken`](methodology.md)), not as
+  advice to use the narrower command.
 - *The wrong directory:* an ordinary failure followed, with nothing changed
   in between, by a green run of **the same command in a subdirectory**
   (`pytest` red with `No module named 'app'`, a fixture that is not found or

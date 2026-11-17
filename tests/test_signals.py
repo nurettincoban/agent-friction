@@ -3400,6 +3400,89 @@ def test_another_runner_passing_untouched_is_remembered(tmp_path: Path) -> None:
         assert all("green_as" not in f.detail for f in detect(other, tmp_path))
 
 
+@pytest.mark.parametrize(
+    ("green", "passed"),
+    [
+        ("pytest tests/test_core.py -q", "12 passed"),
+        ("python -m pytest tests/test_core.py::test_new", "1 passed"),
+        ("pytest -k core", "12 passed"),
+        ("pytest -m 'not slow'", "40 passed"),
+        ("pytest --lf", "1 passed"),
+        ("pytest", "12 passed"),  # nothing selected, yet far fewer tests than the red run
+        ("pytest tests/unit/", "38 passed"),
+        ("pytest tests/test_billing.py::test_tax", "1 passed"),  # another test of that file
+    ],
+)
+def test_a_runner_that_ran_less_than_the_red_run_is_no_replacement(
+    tmp_path: Path, green: str, passed: str
+) -> None:
+    red = "FAILED tests/test_billing.py::test_total - AssertionError\n1 failed, 40 passed in 2s"
+    s = Session().user("go").bash("make test", red, exit_code=2).bash(green, passed)
+    (failure,) = detect(s, tmp_path)
+    assert "green_as" not in failure.detail and "rerun_green" not in failure.detail
+    # ... and it does not close the red run either: an edit and a narrower green later
+    # is not the development loop on a test that was never run again
+    s = Session().user("go").bash("make test", red, exit_code=2).edit(A).bash(green, passed)
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.COMMAND_FAILURE], green
+
+
+@pytest.mark.parametrize(
+    ("green", "passed"),
+    [
+        ("pytest", "41 passed"),
+        ("pytest -q", "41 passed"),
+        ("pytest -x", "41 passed"),
+        ("pytest", ""),  # no summary to count: nothing says it ran less
+        ("pytest tests/test_billing.py", "3 passed"),  # the failing test is in the selection
+        ("pytest tests/", "41 passed"),
+        ("pytest tests/test_billing.py::test_total", "1 passed"),
+    ],
+)
+def test_a_runner_that_ran_the_failing_test_is_a_replacement(
+    tmp_path: Path, green: str, passed: str
+) -> None:
+    red = "FAILED tests/test_billing.py::test_total - AssertionError\n1 failed, 40 passed in 2s"
+    s = Session().user("go").bash("make test", red, exit_code=2).bash(green, passed)
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["green_as"] == "pytest"
+    # and after an edit it closes the red run
+    s = Session().user("go").bash("make test", red, exit_code=2).edit(A).bash(green, passed)
+    assert detect(s, tmp_path) == [], green
+
+
+def test_a_runner_that_went_red_in_the_session_is_no_replacement(tmp_path: Path) -> None:
+    red = "FAILED tests/test_billing.py::test_total - AssertionError\n1 failed, 40 passed in 2s"
+    s = Session().user("go").bash("make test", red, exit_code=2)
+    s.bash("pytest", red, exit_code=1).bash("pytest", "41 passed")
+    assert all("green_as" not in f.detail for f in detect(s, tmp_path))
+
+
+def test_what_a_test_line_selects() -> None:
+    for line, paths, options in (
+        ("make test", [], []),
+        ("pytest -q", [], []),
+        ("pytest tests/test_core.py -q", ["tests/test_core.py"], []),
+        ("python -m pytest tests/test_core.py::test_new", ["tests/test_core.py::test_new"], []),
+        ("pytest -k total -m slow", [], ["-k", "-m"]),
+        ("pytest -c config/pytest.ini", [], []),  # an option's value is not a selection
+        ("cd src/app && pytest -q", [], []),
+        ("npx vitest run src/app/core.test.ts", ["src/app/core.test.ts"], []),
+        ("npm test -- src/a.test.ts", ["src/a.test.ts"], []),
+        ("go test ./...", [], []),
+        ("go test ./pkg/...", ["pkg/..."], []),
+        ("dotnet test --filter Billing", [], ["--filter"]),
+        ("python scripts/patch.py && npm test", [], []),  # only what the test step names
+        ("pytest tests/test_a.py | tail -3", ["tests/test_a.py"], []),
+    ):
+        assert signals.selection(line) == (frozenset(paths), frozenset(options)), line
+    assert signals.selects("tests/", "tests/test_a.py")
+    assert signals.selects("tests/test_a.py::test_x", "tests/test_a.py")
+    assert signals.selects("pkg/...", "pkg/billing/total_test.go")
+    assert not signals.selects("tests/test_core.py", "tests/test_billing.py")
+    assert signals.tests_counted("1 failed, 40 passed in 2s") == 41
+    assert signals.tests_counted("all good") == 0
+
+
 def test_a_test_file_that_does_not_exist_is_a_path_miss(tmp_path: Path) -> None:
     missing = "ERROR: file or directory not found: tests/test_new_feature.py\n\nno tests ran"
     s = Session().user("go").bash("pytest tests/test_new_feature.py", missing, exit_code=4)
@@ -4693,11 +4776,25 @@ def test_a_snippet_between_red_and_green_changes_nothing(tmp_path: Path) -> None
 
 
 def test_green_in_a_subdirectory_is_noted_only_when_nothing_changed(tmp_path: Path) -> None:
-    red = "FAILED tests/test_a.py::test_a - FileNotFoundError: data.json\n1 failed"
+    red = "FAILED src/tests/test_a.py::test_a - FileNotFoundError: data.json\n1 failed"
     s = Session().user("go").bash("pytest", red, exit_code=1)
     s.bash("cd src && pytest", "1 passed")
     (found,) = detect(s, tmp_path)
     assert found.detail["green_in"] == "src/" and "rerun_green" not in found.detail
+    # a failing test outside that directory was not run there
+    for output, passed in (
+        ("FAILED tests/test_a.py::test_a - AssertionError\n1 failed", "1 passed"),
+        ("E   ModuleNotFoundError: No module named 'app'\n1 error, 40 passed", "3 passed"),
+    ):
+        s = Session().user("go").bash("pytest", output, exit_code=1)
+        s.bash("cd src && pytest", passed)
+        (found,) = detect(s, tmp_path)
+        assert "green_in" not in found.detail, output
+    # nor is a directory where the command also went red an answer
+    s = Session().user("go").bash("pytest", "E   fixture 'db' not found\n1 error", exit_code=1)
+    s.bash("cd src && pytest", "E   fixture 'db' not found\n1 error", exit_code=1)
+    s.bash("cd src && pytest", "1 passed")
+    assert all("green_in" not in f.detail for f in detect(s, tmp_path))
     # green in the same place is a plain re-run
     s = Session().user("go").bash("pytest", red, exit_code=1).bash("pytest", "1 passed")
     (found,) = detect(s, tmp_path)
@@ -4736,3 +4833,24 @@ def test_an_interrupt_to_add_to_the_job_is_not_held_against_the_agent(tmp_path: 
     s = Session().user("release it").edit(A, "a", "b")
     s.interrupt()
     assert [f.signal for f in detect(s, tmp_path)] == [signals.USER_INTERRUPT]
+
+
+def test_wrong_thing_opens_a_correction_and_old_history_is_not_the_agents_work() -> None:
+    for said in (
+        "wrong file — it should go in util.py",
+        "wrong file - it should go in util.py",
+        "Wrong file, the bug is in parser.py",
+        "wrong branch. use main",
+        "revert the commit",
+        "revert the commit abc1234 you just made",
+        "revert the last commit",
+    ):
+        assert signals.correction_confidence(said)[0] == 1.0, said
+    for said in (
+        "Wrong version of node is installed in CI, fix it",
+        "The wrong file is opened when I click the link, fix that",
+        "revert the commit abc123 from last week and reapply on core.py",
+        "revert the changes from last sprint",
+        "Revert the commit from yesterday, it broke the importer",
+    ):
+        assert signals.correction_confidence(said)[0] < 1.0, said

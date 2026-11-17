@@ -173,6 +173,22 @@ _RULES: tuple[_Rule, ...] = (
         r"\1[REDACTED]",
     ),
     (
+        # sqlcmd, bcp, osql, isql, tsql: `-S server -U sa -P hunter2` (or `-Phunter2`)
+        "user-password-flag",
+        re.compile(
+            r"(\s-[US]\s*[^\s-]\S*[^\n|;&]*?\s-P\s*)(?!\[REDACTED)(\"[^\"\n]*\"|'[^'\n]*'|[^\s-]\S*)"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
+        # ... and the password given before the user
+        "password-user-flag",
+        re.compile(
+            r"(\s-P\s*)(?!\[REDACTED)(\"[^\"\n]*\"|'[^'\n]*'|[^\s-]\S*)(?=[^\n|;&]*?\s-U\s*[^\s-])"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
         "login-password-flag",
         re.compile(r"(\blogin\b[^\n|;&]*?\s(?:-p|--password)(?:\s+|=))(?!\[REDACTED)(\S+)"),
         r"\1[REDACTED]",
