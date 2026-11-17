@@ -65,7 +65,7 @@ def test_site_demo_is_the_generated_example() -> None:
 
 def test_site_sample_output_matches_the_generated_example() -> None:
     site = (ROOT / "docs" / "index.html").read_text(encoding="utf-8")
-    block = site.split("<pre>", 1)[1].split("</pre>", 1)[0]
+    block = re.split(r"<pre[^>]*>", site, maxsplit=1)[1].split("</pre>", 1)[0]
     text = re.sub(r"<[^>]+>", "", block).replace("&amp;", "&")
     example = (ROOT / "examples" / "shopfront.txt").read_text(encoding="utf-8")
     squashed_example = re.sub(r"\s+", " ", example)

@@ -99,7 +99,7 @@ backed by **evidence** you can trace to a transcript line.
 ```sh
 cd your-repo
 agent-friction scan                          # friction map in the terminal
-agent-friction scan --since 30d -o map.html   # interactive treemap, one file
+agent-friction scan --since 30d -o map.html  # interactive treemap, one file
 agent-friction scan -o friction.md           # Markdown for an issue or a PR
 agent-friction show src/api/client.py        # why one file scores high, with evidence
 agent-friction show "npm test"               # the same for a command, or a directory
