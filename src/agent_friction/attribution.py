@@ -1120,6 +1120,31 @@ def _pieces(command: str) -> list[tuple[list[str], str]]:
     return pieces
 
 
+_TEXT_PRINTERS = frozenset(
+    {"git log", "git show", "git diff", "git blame", "docker logs", "kubectl logs", "journalctl"}
+)
+
+
+def ends_looking(command: str) -> bool:
+    """Does the last pipeline of a line of several print other text (``...; git log -3``)?
+
+    What stands at the end of the output is then that step's: a traceback quoted in a
+    commit message or a log file is not the failure of the command before it.
+    """
+    try:
+        pieces = _pieces(command)
+    except (IndexError, ValueError, RecursionError):
+        return False
+    start = len(pieces) - 1
+    while start > 0 and pieces[start - 1][1] in ("|", "|&"):
+        start -= 1
+    if start <= 0:
+        return False
+    program, args = _program_of(pieces[start][0])
+    # only what prints text written elsewhere: `git status` or `ls` quote nothing
+    return program in FILE_READERS or _raw_key([program, *args]) in _TEXT_PRINTERS
+
+
 def in_sequence(command: str) -> bool:
     """Does ``command`` run commands one after another (``a; b``, ``a && b``)?
 

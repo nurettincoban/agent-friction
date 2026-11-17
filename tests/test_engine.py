@@ -3620,3 +3620,20 @@ def test_a_line_that_does_not_say_to_run_the_failing_command_is_no_conflict(
     assert rec.get("documented_as") == documented and rec["replacement"] == "pytest"
     if documented != "instruction":
         assert 'such as: "use `pytest`, not `make test`"' in rec["detail"]
+
+
+def test_a_headless_session_picked_up_after_a_long_silence_is_a_new_episode(
+    tmp_path: Path,
+) -> None:
+    from agent_friction.adapters import parse_transcript
+    from agent_friction.engine import episode_starts
+
+    headless = Session("h").user("run the nightly job").bash("make build", "ok")
+    headless.tick(17 * 3600).bash("make build", "ok")  # the container was restarted
+    (stream,) = parse_transcript(headless.save(tmp_path / "h")).streams
+    assert len(episode_starts([stream])["h"]) == 1
+    # a command that itself ran for hours is not a silence
+    slow = Session("l").user("train it").bash("make train", "done", took=5 * 3600)
+    slow.bash("make eval", "ok")
+    (stream,) = parse_transcript(slow.save(tmp_path / "l")).streams
+    assert episode_starts([stream]) == {}

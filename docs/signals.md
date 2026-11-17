@@ -919,7 +919,7 @@ The cases, in the order of the rules below:
 | Red, an edit, green (also by another command for the same job) | dropped (`dropped_red_runs`) | nothing | never |
 | Red, a setup step with no file edited, green | kept, `fixed_by_setup` | 1.0, until it passed | 2+ events: `document-the-setup-step` |
 | Failed, then passed untouched 3+ times, or a probe of a starting server | dropped (waiting) | nothing | never |
-| Read-only inspection (`ls`, `grep`, `git status`), a `cd` that failed, a time-boxed server start | not a failure (a failed `cd` is a `path-miss`) | nothing | never |
+| Read-only inspection (`ls`, `grep`, `git status`), a `cd` that failed, a time-boxed server start | not a failure (a failed `cd` is a `path-miss`). One exception: the shell could not find the inspection program itself (`rg: command not found`, also behind a pipe): that is a setup/invocation error with `not_found` like any other missing program, and if the agent then does the job with another tool (`grep` or `ag` after `rg`, `find` after `fd` or `tree`, `python3` or `node` after `jq`, `cat` after `bat`, `curl` after `wget` or `gh`), that tool is recorded as `works_as`. `rg` exiting 1 because nothing matched, `which rg`, `type rg` and `command -v rg` stay looks | nothing | never |
 
 Which step of a line is blamed, and how a status hidden behind a pipe is
 judged, is under "Which step printed it" and "The exit status may not be the
@@ -936,7 +936,12 @@ command's" below.
   of its line, as the tool prints it: a sentence that quotes the words
   further in is not one), npm's `Unsupported
   engine` / `EBADENGINE` (the wrong Node version is a setup problem),
-  `fatal: not a git repository`, `curl: (N) ...`, and install/build failures
+  `fatal: not a git repository`, `curl: (N) ...`, a launcher that could not
+  start its program (uv's `error: Failed to spawn: pytest`, poetry's
+  `Command not found: pytest`), a machine that is not set up for the job
+  (`ensurepip is not available`, npm's `code EPERM` / `EACCES` /
+  `SELF_SIGNED_CERT_IN_CHAIN`, git's `Author identity unknown` and `gpg
+  failed to sign the data`), and install/build failures
   (`npm error code ERESOLVE | ETARGET | ...`, `Failed to build ...`, `error:
   subprocess-exited-with-error`, `ERROR: Failed building wheel`, `No solution
   found when resolving dependencies`). The full list is
@@ -1026,7 +1031,11 @@ command's" below.
     the document's text and the command's output cannot be told apart, and a
     document about errors quotes them. `pytest > out.log 2>&1; tail out.log`
     prints what the run itself wrote and is judged as usual. An echoed
-    status (`; echo "exit $?"`) still counts;
+    status (`; echo "exit $?"`) still counts. Likewise a traceback at the
+    end of the output makes the command red only if the end is its own:
+    not when the last step of the line prints text written elsewhere
+    (`...; git log -1`, `git show`, `git diff`, `cat`/`tail`/`grep` of a
+    file, `docker logs`), where a commit message or a log may quote one;
   - **green** if it shows a passing summary (`N passed`, `Tests: N passed`,
     `ok pkg 0.1s`, `test result: ok`, `All checks passed`, `Success: no
     issues`, `Found 0 errors`, `Found N errors (N fixed, 0 remaining)`, `N

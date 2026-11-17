@@ -28,6 +28,7 @@ from agent_friction.attribution import (
     Step,
     command_role,
     denied_step,
+    ends_looking,
     env_copy,
     in_sequence,
     inner_key,
@@ -430,6 +431,17 @@ INVOCATION_ERROR_RE = re.compile(
     r"|(?:ERROR|error): (?:Could not find a version|No matching distribution|"
     r"externally-managed-environment).*"
     r"|go: (?:cannot find main module|go\.mod file not found).*"
+    # the launcher could not start what it was asked to run (uv, poetry)
+    r"|error: Failed to spawn: .*"
+    r"|Command not found: \S+"
+    # the machine is not set up for it: no venv support, no permission or trust for
+    # npm, no git identity or signing key
+    r"|.*\bensurepip is not\s+available\b.*"
+    r"|npm (?:ERR!|error) code (?:EPERM|EACCES|SELF_SIGNED_CERT_IN_CHAIN"
+    r"|UNABLE_TO_GET_ISSUER_CERT_LOCALLY|CERT_HAS_EXPIRED)\b.*"
+    r"|Author identity unknown"
+    r"|fatal: unable to auto-detect email address.*"
+    r"|error: gpg failed to sign the data.*"
     # dependencies could not be installed or built
     r"|" + _INSTALL_SHAPES +
     # the network was not there
@@ -763,7 +775,9 @@ def step_verdicts(cmd: ParsedCommand, output: str) -> dict[str, str]:
     return verdicts
 
 
-def output_verdict(output: str, first_party: Callable[[str], bool] | None = None) -> str | None:
+def output_verdict(
+    output: str, first_party: Callable[[str], bool] | None = None, traceback: bool = True
+) -> str | None:
     """``"red"``, ``"green"`` or ``None`` (cannot tell) for a command judged by its output.
 
     For command lines whose exit status belongs to something else (a trailing
@@ -775,7 +789,9 @@ def output_verdict(output: str, first_party: Callable[[str], bool] | None = None
         return "red"
     if own_module_missing(output, first_party):
         return "red"  # it did not run, whichever kind of failure that turns out to be
-    traceback = bool(lines) and "Traceback (most recent call last)" in output
+    # A traceback at the end is the judged command's own, unless the caller knows that
+    # the end of the output belongs to a later step that only looks at something.
+    traceback = traceback and bool(lines) and "Traceback (most recent call last)" in output
     if traceback and _TRACEBACK_END_RE.match(lines[-1].strip()):
         return "red"
     if GREEN_OUTPUT_RE.search(output):
@@ -1801,6 +1817,21 @@ _BLAME = (
 )
 #: Checks that read the code without running it: any check passing after an edit will do.
 _STATIC_CHECKS = frozenset({"typecheck", "lint"})
+#: What does the job of a tool that is not installed: what agents fall back to.
+_STAND_INS: dict[str, frozenset[str]] = {
+    "rg": frozenset({"grep", "egrep", "fgrep", "ag", "ack"}),
+    "ag": frozenset({"grep", "egrep", "rg"}),
+    "fd": frozenset({"find"}),
+    "fdfind": frozenset({"find", "fd"}),
+    "jq": frozenset({"python", "python3", "node"}),
+    "yq": frozenset({"python", "python3"}),
+    "tree": frozenset({"find", "ls"}),
+    "bat": frozenset({"cat"}),
+    "wget": frozenset({"curl"}),
+    "curl": frozenset({"wget"}),
+    "gh": frozenset({"curl", "git"}),
+}
+_NONE: frozenset[str] = frozenset()
 #: A fenced code block (closed or running to the end) and Markdown-quoted lines.
 _QUOTED_BLOCK_RE = re.compile(r"```.*?(?:```|\Z)|^[ \t]*>[^\n]*$", re.S | re.M)
 #: A reporting phrase and the quotation it introduces: "the reviewer's comment: 'No, I
@@ -3295,6 +3326,14 @@ class _Detector:
         verdict: str | None = None
         hidden = result.ok and cmd.masked and not cmd.inspection
         line = action.call.command or ""
+        # `rg foo | head` where the shell could not find `rg`: the pipe's status hides
+        # it, the shell's own words do not.
+        unfound = _unfound_program(result.output) if cmd.inspection else ""
+        no_tool = bool(unfound) and unfound in {
+            name for s in cmd.steps for name in (s.program, *s.wrappers)
+        }
+        if no_tool and result.ok and cmd.masked:
+            ok, hidden = False, True
         if (
             not result.ok
             and result.error == model.ERR_EXIT
@@ -3336,7 +3375,11 @@ class _Detector:
             verdict = "red" if red_step is not None else own.get(key)
             ok = verdict != "red"
         elif hidden:
-            verdict = None if quoted else output_verdict(result.output, self.ctx.first_party)
+            verdict = (
+                None
+                if quoted
+                else output_verdict(result.output, self.ctx.first_party, not ends_looking(line))
+            )
             # `cmd; echo "exit $?"`: the line says how its one command ended
             echoed = echoed_status(action.call.command or "", result.output)
             if echoed:
@@ -3419,6 +3462,19 @@ class _Detector:
             for finding in state.replaced.pop(key, []):
                 finding.detail.pop("recovered_by", None)
                 finding.detail.pop("green_as", None)
+            # A tool that was not installed, and then the same job done with what is
+            # there: `grep` after `rg: command not found`, `python3` after `jq`.
+            programs = {s.program for s in cmd.steps}
+            for entry in list(state.pending):
+                finding = entry[0]
+                stand_in = sorted(
+                    programs & _STAND_INS.get(finding.detail.get("not_found", ""), _NONE)
+                )
+                if stand_in and "works_as" not in finding.detail:
+                    finding.detail["works_as"] = stand_in[0]
+                    finding.detail["stand_in"] = "1"  # another tool, not another name
+                    self._recover(finding, action)
+                    state.pending.remove(entry)
             if cmd.inspection:
                 return
             waiting: list[tuple[Finding, str, int]] = []
@@ -3567,8 +3623,10 @@ class _Detector:
         if cmd.inspection:
             # Probing (ls, cat, git status, ...) is not friction, whatever it answers.
             # `docker ps` that cannot reach the daemon answered nothing, though.
+            # Nor did a tool that is not installed (`rg: command not found`): the agent
+            # has to find another way, every session, until somebody says which.
             down = environment_error(result.output)
-            if down is None or down[0] == ENV_VARIABLE or result.ok:
+            if not no_tool and (down is None or down[0] == ENV_VARIABLE or result.ok):
                 return
         if code == 1 and cmd.last_program in MATCH_FILTERS and cmd.last_program != cmd.program:
             return  # `... | grep x` with nothing matched

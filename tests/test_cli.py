@@ -335,6 +335,8 @@ def test_scan_from_a_subdirectory_uses_the_repo_root(
     _, _, err = run("sources", "-t", str(tmp_path / "none.jsonl"))
     assert f"using the repository root {tmp_path}" in err
     assert "pass . to map only this directory" in err
+    _, _, err = run("show", "pytest", "-t", str(tmp_path / "none.jsonl"))
+    assert "using the repository root" not in err
 
 
 def test_show_accepts_repo_positionally() -> None:

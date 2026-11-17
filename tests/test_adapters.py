@@ -687,3 +687,20 @@ def test_generic_exit_code_may_be_a_numeric_string(
     result = generic.parse_file(path).streams[0].events[1]
     assert result.ok is not failed and result.exit_code == status
     assert result.error == (model.ERR_EXIT if failed else "")
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Permission to read /repo/.env has been denied.", "permission"),
+        ("Permission to edit /repo/src/gen.py has been denied.", "permission"),
+        (
+            "<tool_use_error>Permission to write /repo/a b.txt has been denied.</tool_use_error>",
+            "permission",
+        ),
+        ("cat: /repo/.env: Permission denied", None),
+        ("deploy: Permission to read bucket has been denied", None),
+    ],
+)
+def test_a_deny_rule_on_a_file_tool_is_a_denial(text: str, expected: str | None) -> None:
+    assert common.denial(text) == expected

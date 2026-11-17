@@ -90,7 +90,8 @@ def _resolve_repo(args: argparse.Namespace, err: TextIO) -> None:
         return
     cwd = Path.cwd()
     root = _find_repo_root(cwd)
-    if root is not None and root != cwd:
+    if root is not None and root != cwd and getattr(args, "command", None) != "show":
+        # `show` is run again and again from wherever you are; the note is for maps.
         err.write(
             f"agent-friction: using the repository root {root} "
             "(pass . to map only this directory)\n"

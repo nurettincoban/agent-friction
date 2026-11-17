@@ -5063,3 +5063,103 @@ def test_the_excerpt_of_a_line_of_several_commands_ends_at_the_error(tmp_path: P
     s = Session().user("go").bash("pytest -q -n0", error + "extra", exit_code=4)
     (failure,) = detect(s, tmp_path)
     assert failure.excerpt.endswith("extra")
+
+
+def _not_found(program: str) -> str:
+    return f"/bin/bash: line 1: {program}: command not found"
+
+
+@pytest.mark.parametrize(
+    ("command", "program", "key"),
+    [
+        ("rg -n foo src", "rg", "rg"),
+        ("cat package.json | jq .scripts", "jq", "jq"),
+        ("gh pr list", "gh", "gh pr list"),
+        ("docker ps", "docker", "docker ps"),
+        ("tree -L 2", "tree", "tree"),
+        ("fd -e py", "fd", "fd"),
+        ("git status", "git", "git status"),
+    ],
+)
+def test_a_tool_that_is_not_installed_counts_even_for_looking_around(
+    tmp_path: Path, command: str, program: str, key: str
+) -> None:
+    s = Session().user("go").bash(command, _not_found(program), exit_code=127)
+    (failure,) = detect(s, tmp_path)
+    assert keys(failure) == [("command", key)]
+    assert failure.detail["variant"] == "invocation" and failure.detail["not_found"] == program
+    # behind a pipe, where the status is the pipe's, the shell's own words say it
+    s = Session().user("go").bash(f"{command} | head -5", _not_found(program))
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["not_found"] == program
+
+
+def test_looking_around_that_answers_no_is_still_not_friction(tmp_path: Path) -> None:
+    for command, output, code in (
+        ("rg -n foo src", "", 1),  # nothing matched
+        ("grep -rn foo src", "grep: src: No such file or directory", 2),
+        ("which rg", "", 1),
+        ("command -v rg || echo missing", "missing", 0),
+        ("type rg", "bash: type: rg: not found", 1),  # a question about rg, answered
+        ("cat notes.txt", "see 'rg: command not found' in the log", 0),
+        ("git status", "fatal: not a git repository", 128),
+    ):
+        s = Session().user("go").bash(command, output, exit_code=code)
+        assert detect(s, tmp_path) == [], command
+
+
+def test_the_tool_that_stood_in_for_a_missing_one_is_named(tmp_path: Path) -> None:
+    for command, program, then, stand_in in (
+        ("rg -n foo src", "rg", "grep -rn foo src", "grep"),
+        ("cat package.json | jq .scripts", "jq", "python3 -c 'print(1)'", "python3"),
+        ("fd -e py", "fd", "find . -name '*.py'", "find"),
+    ):
+        s = Session().user("go").bash(command, _not_found(program), exit_code=127)
+        (failure,) = detect(s.bash(then, "ok"), tmp_path)
+        assert failure.detail["works_as"] == stand_in and failure.detail["stand_in"] == "1"
+    # any other command passing is not the same job
+    s = Session().user("go").bash("rg -n foo src", _not_found("rg"), exit_code=127)
+    (failure,) = detect(s.bash("ls src", "a.py").bash("pytest", "1 passed"), tmp_path)
+    assert "works_as" not in failure.detail
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "code"),
+    [
+        ("uv run pytest", "error: Failed to spawn: `pytest`\n  Caused by: No such file", 2),
+        ("poetry run pytest", "Command not found: pytest", 1),
+        (
+            "python3 -m venv .venv",
+            "not created successfully because ensurepip is not\navailable.",
+            1,
+        ),
+        ("npm install", "npm error code EPERM\nnpm error syscall open", 1),
+        ("npm install", "npm ERR! code SELF_SIGNED_CERT_IN_CHAIN", 1),
+        ("git commit -m x", "Author identity unknown\n\n*** Please tell me who you are.", 128),
+        ("git commit -m x", "error: gpg failed to sign the data\nfatal: failed to write", 128),
+    ],
+)
+def test_a_machine_that_is_not_set_up_is_a_setup_error(
+    tmp_path: Path, command: str, output: str, code: int
+) -> None:
+    s = Session().user("go").bash(command, output, exit_code=code)
+    (failure,) = detect(s, tmp_path)
+    assert failure.detail["variant"] == "invocation", command
+
+
+def test_a_traceback_printed_by_a_later_look_is_not_the_commands(tmp_path: Path) -> None:
+    trace = (
+        'Traceback (most recent call last):\n  File "app.py", line 3, in <module>\nValueError: x'
+    )
+    s = Session().user("go")
+    s.bash("python scripts/gen.py | tail -3; git log -1 --format=%B", f"done\nFix crash\n\n{trace}")
+    assert detect(s, tmp_path) == []
+    s = Session().user("go").bash("make build | tail -2; cat logs/old.log", f"ok\n{trace}")
+    assert detect(s, tmp_path) == []
+    # its own traceback, or one before a step that quotes nothing, still counts
+    for command in (
+        "python scripts/gen.py 2>&1 | tail -5",
+        "python scripts/gen.py 2>&1 | tail -5; git status --short",
+    ):
+        s = Session().user("go").bash(command, trace)
+        assert len(detect(s, tmp_path)) == 1, command

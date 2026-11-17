@@ -964,6 +964,24 @@ class _Rules:
             )
         self.add("document-the-environment", title, detail, [signals.COMMAND_FAILURE])
 
+    def not_installed(self, key: str, invocation: list[Finding]) -> bool:
+        """Every failure was the shell not finding one and the same program."""
+        missing = {
+            f.detail.get("not_found_shown") or f.detail.get("not_found", "") for f in invocation
+        }
+        if len(missing) != 1 or "" in missing:
+            return False
+        (program,) = missing
+        self.add(
+            "document-the-command",
+            f"{code(program)} is not installed where agents run",
+            f"{_located(key)} failed {_in_sessions(invocation)} because {code(program)} is not "
+            "on the PATH where agents run. Install it there (a setup script, the container "
+            "image), or say in AGENTS.md that it is not available and what to use instead.",
+            [signals.COMMAND_FAILURE],
+        )
+        return True
+
     def _use_instead(self, better: str, worse: str, failures: Sequence[Finding]) -> Already:
         # A display key (`pnpm test (packages/web/)`) is nothing a file would say: the
         # command is looked for as it is typed, and the directory is said in words.
@@ -1030,8 +1048,14 @@ class _Rules:
                 "use-the-working-command",
                 f"Tell agents to use {code(name)}",
                 f"{code(key)} failed {_in_sessions(invocation)} because {code(old)} is not on "
-                f"the PATH here; {_times(count)} the same command then ran with {code(name)}. "
-                f'Add a line to AGENTS.md such as: "use {code(name)}, not {code(old)}".',
+                f"the PATH here; {_times(count)} "
+                + (
+                    f"the agent then did the job with {code(name)}. Install {code(old)} "
+                    "where agents run, or add"
+                    if any(f.detail.get("stand_in") for f in invocation)
+                    else f"the same command then ran with {code(name)}. Add"
+                )
+                + f' a line to AGENTS.md such as: "use {code(name)}, not {code(old)}".',
                 [signals.COMMAND_FAILURE],
                 self._use_instead(name, old, invocation),
             )
@@ -1133,7 +1157,9 @@ class _Rules:
             )
         elif len(environment) >= MIN_EVENTS:
             self.environment(key, environment)
-        elif len(invocation) >= MIN_EVENTS and self.no_such_target(key, invocation):
+        elif len(invocation) >= MIN_EVENTS and (
+            self.no_such_target(key, invocation) or self.not_installed(key, invocation)
+        ):
             pass
         elif len(invocation) >= MIN_EVENTS:
             detail = (
@@ -1310,7 +1336,8 @@ _EXCEPTION_LINE_RE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Warning)\b[
 
 def _error_line(finding: Finding) -> str:
     """The most telling line of a failed command's output: the last invocation-error line."""
-    lines = [ln.strip() for ln in finding.excerpt.splitlines() if ln.strip()]
+    # only a newline ends a line: U+2028 or a form feed inside a message does not
+    lines = [ln.strip() for ln in finding.excerpt.replace("\r", "").split("\n") if ln.strip()]
     # pytest prefixes the lines of an error with "E": the exception is what to quote
     lines = [_PYTEST_PREFIX_RE.sub("", ln) for ln in lines]
     for line in reversed(lines):

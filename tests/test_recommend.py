@@ -984,3 +984,44 @@ def test_a_correction_that_names_an_untouched_file_says_so() -> None:
     plain = [finding(signals.USER_CORRECTION, f"s{i}", quote="No, not like that") for i in (1, 2)]
     (rec,) = recommend.recommend(model.FILE, "src/a.py", plain, None, quote)
     assert "corrected the agent here" in str(rec["detail"]) and "also named" not in str(rec)
+
+
+def test_a_missing_tool_is_named_with_or_without_a_stand_in() -> None:
+    missing = [
+        finding(signals.COMMAND_FAILURE, f"s{i}", variant="invocation", not_found="gh")
+        for i in range(3)
+    ]
+    (rec,) = recommend.recommend(model.COMMAND, "gh pr list", missing)
+    assert rec["id"] == "document-the-command"
+    assert rec["title"] == "`gh` is not installed where agents run"
+    assert rec["detail"] == (
+        "`gh pr list` failed 3 times in 3 sessions because `gh` is not on the PATH where "
+        "agents run. Install it there (a setup script, the container image), or say in "
+        "AGENTS.md that it is not available and what to use instead."
+    )
+    swapped = [
+        finding(
+            signals.COMMAND_FAILURE,
+            f"s{i}",
+            variant="invocation",
+            not_found="rg",
+            works_as="grep",
+            stand_in="1",
+        )
+        for i in range(3)
+    ]
+    (rec,) = recommend.recommend(model.COMMAND, "rg", swapped)
+    assert rec["id"] == "use-the-working-command" and rec["title"] == "Tell agents to use `grep`"
+    assert "3 times the agent then did the job with `grep`. Install `rg` where agents run, or " in (
+        str(rec["detail"])
+    )
+    # other setup errors keep the general advice
+    other = [finding(signals.COMMAND_FAILURE, f"s{i}", variant="invocation") for i in range(3)]
+    (rec,) = recommend.recommend(model.COMMAND, "gh pr list", other)
+    assert rec["title"] == "Document how to run `gh pr list`"
+
+
+def test_only_a_newline_ends_a_line_of_output() -> None:
+    odd = finding(signals.COMMAND_FAILURE, variant="invocation")
+    odd.excerpt = "$ tool run\ntool: error: unknown option --x see the manual\x0cpage 2"
+    assert recommend._error_line(odd) == "tool: error: unknown option --x see the manual\x0cpage 2"

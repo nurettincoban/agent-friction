@@ -191,7 +191,8 @@ def read_error(exc: OSError) -> str:
     return "could not be read"
 
 
-#: A human prompt after this much silence starts a new episode of work in the session.
+#: A prompt (in a headless session: any activity) after this much silence starts a new
+#: episode of work in the session.
 EPISODE_IDLE_SECONDS = 2 * 3600.0
 
 
@@ -201,15 +202,28 @@ def episode_starts(streams: Sequence[Stream]) -> dict[str, list[float]]:
     A session id can live for days (``claude --continue``): ten tasks on ten days
     are ten independent occasions for the same friction, not one. A new episode
     starts at a human prompt that follows ``EPISODE_IDLE_SECONDS`` or more without
-    any event in the session. Subagent streams never start one: their prompts are
-    written by the agent that drives them, and they belong to its episode.
+    any event in the session. In a session nobody types into after its opening
+    prompt (a headless run resumed the next day, a container restarted) there is no
+    such prompt to go by: there the agent's next message or call after that much
+    silence starts one. A tool result never does: it is a long command finishing.
+    Subagent streams never start one either: they belong to the episode of the agent
+    that drives them.
     """
+    prompts: dict[str, int] = {}
+    for stream in streams:
+        if not stream.sidechain:
+            typed = sum(1 for e in stream.events if e.kind == model.USER_MESSAGE)
+            prompts[stream.session_id] = prompts.get(stream.session_id, 0) + typed
     by_session: dict[str, list[tuple[float, bool]]] = {}
     for stream in streams:
         marks = by_session.setdefault(stream.session_id, [])
+        headless = prompts.get(stream.session_id, 0) <= 1
         for event in stream.events:
             if event.ts is not None:
-                prompt = event.kind == model.USER_MESSAGE and not stream.sidechain
+                prompt = not stream.sidechain and (
+                    event.kind == model.USER_MESSAGE
+                    or (headless and event.kind != model.TOOL_RESULT)
+                )
                 marks.append((event.ts.timestamp(), prompt))
     starts: dict[str, list[float]] = {}
     for session, marks in by_session.items():

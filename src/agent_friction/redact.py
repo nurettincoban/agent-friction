@@ -80,7 +80,7 @@ _RULES: tuple[_Rule, ...] = (
     (
         "url-credentials",
         # also password-only: ``redis://:hunter2@host``
-        re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/:@]*:[^\s/@]+@"),
+        re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,30}://)[^\s/:@]*:[^\s/@]+@"),
         r"\1[REDACTED:credentials]@",
     ),
     (
@@ -97,7 +97,7 @@ _RULES: tuple[_Rule, ...] = (
         # `X-Api-Key: Tr0ub4dor&3`: a header value runs to the end of the line or the quote
         "header",
         re.compile(
-            rf"(?i)\b((?:(?:\w+-)+(?:{_SECRET_KEY_WORDS})(?:-\w+)*"  # a hyphenated name
+            rf"(?i)\b((?:(?:\w{{1,40}}-){{1,6}}(?:{_SECRET_KEY_WORDS})(?:-\w+)*"  # hyphenated
             rf"|(?:{_SECRET_KEY_WORDS})(?:-(?:key|token|secret|id|signature|value))+"
             r"|api-key|access-key|private-key)"
             r":[ \t]+)(?!\[REDACTED)([^\n\"']+)"
@@ -108,7 +108,7 @@ _RULES: tuple[_Rule, ...] = (
         # `PASSWORD='ab&cd ef'`, `"password": "ab cd"`: a quoted value ends at its quote
         "quoted-assignment",
         re.compile(
-            rf"(?i)\b([\w-]*(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"
+            rf"(?i)\b([\w-]{{0,60}}(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"
             r"[\"']?\s*[:=]\s*)([\"'])(?!\[REDACTED)[^\"'\n]{4,}\2"
         ),
         r"\1\2[REDACTED]\2",
@@ -117,7 +117,7 @@ _RULES: tuple[_Rule, ...] = (
         # `token: ab&cd`: only in `key=value&other=...` does `&` end the value
         "colon-assignment",
         re.compile(
-            rf"(?i)\b([\w-]*(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"
+            rf"(?i)\b([\w-]{{0,60}}(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"
             r"[\"']?\s*:\s*[\"']?)"
             r"(?!\[REDACTED)([^\s\"',;]{4,})"
         ),
@@ -126,7 +126,7 @@ _RULES: tuple[_Rule, ...] = (
     (
         "assignment",
         re.compile(
-            rf"(?i)\b([\w-]*(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"
+            rf"(?i)\b([\w-]{{0,60}}(?:{_SECRET_KEY_WORDS})(?:[_-](?:key|id|value|string|b64|base64|salt))?"
             r"[\"']?\s*[:=]\s*[\"']?)"
             r"(?!\[REDACTED)([^\s\"',;&]{4,})"
         ),
@@ -279,7 +279,10 @@ _RULES: tuple[_Rule, ...] = (
     (
         "email",
         # the host must end in a name, so ``root@10.0.0.1`` (an ssh target) is not an email
-        re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"),
+        re.compile(
+            r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*"
+            r"\.[A-Za-z]{2,}\b"
+        ),
         "[REDACTED:email]",
     ),
     (
@@ -391,9 +394,21 @@ def redact_home(text: str, home: Path | str | None = None) -> str:
     return text
 
 
+#: Longest run without whitespace that is still read; anything longer is replaced.
+MAX_TOKEN_CHARS = 4096
+_LONG_TOKEN_RE = re.compile(rf"\S{{{MAX_TOKEN_CHARS + 1},}}")
+
+
+def _long_token_sub(match: re.Match[str]) -> str:
+    return f"[REDACTED:{len(match.group(0))} characters]"
+
+
 def redact(text: str, home: Path | str | None = None) -> str:
     """Return ``text`` with secrets, emails and home directories masked."""
     text = strip_controls(text)
+    # An unbroken run of several kilobytes is a blob (base64, a minified bundle), never
+    # something to show, and the patterns below must not be made to chew through it.
+    text = _LONG_TOKEN_RE.sub(_long_token_sub, text)
     for _name, pattern, replacement in _RULES:
         text = pattern.sub(replacement, text)
     text = _HEX_RE.sub(_hex_sub, text)

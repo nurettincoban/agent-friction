@@ -310,3 +310,16 @@ def test_windows_home_with_forward_slashes_leaves_no_drive() -> None:
 )
 def test_a_capital_p_without_a_user_is_not_a_password(text: str) -> None:
     assert redact.redact(text) == text
+
+
+def test_a_blob_of_any_shape_is_replaced_not_chewed_through() -> None:
+    import time
+
+    started = time.monotonic()
+    for unit in ("a.b", "a-b", "a_b=", "a:b@", "A1/"):
+        assert redact.redact(unit * 20000) == f"[REDACTED:{len(unit) * 20000} characters]"
+        spaced = redact.redact(f"{unit} " * 5000)  # many short words are read as ever
+        assert spaced.startswith(f"{unit} {unit} ")
+    assert redact.redact("see " + "x" * 5000 + " end") == "see [REDACTED:5000 characters] end"
+    assert redact.redact("x" * 4096) == "x" * 4096
+    assert time.monotonic() - started < 5
