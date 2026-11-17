@@ -446,6 +446,10 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
         if f.signal == signals.COMMAND_FAILURE
         and "failed_tests" in f.detail
         and f.detail.get("variant") == "ordinary"
+        # A test that went green after a setup step was not left red: something in the
+        # session did make it pass, and that step is the advice (`fixed_by_setup`).
+        and "fixed_by_setup" not in f.detail
+        and "fixed_by_command" not in f.detail
     ]
     for finding in naming:
         for key in _command_keys(finding):

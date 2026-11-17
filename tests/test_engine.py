@@ -3349,7 +3349,10 @@ def test_an_ad_hoc_snippet_is_never_the_step_that_fixed_a_command(tmp_path: Path
         s.bash("pytest", "10 passed")
 
     (row,) = _commands(tmp_path / "script", script)
-    rec = next(r for r in row["recommendations"] if r["id"] == "document-the-setup-step")
+    # ... and that is the whole advice: a test that passes once the step has run is not
+    # "red session after session, and nothing made it pass"
+    (rec,) = row["recommendations"]
+    assert "session after session" not in json.dumps(row)
     assert rec["id"] == "document-the-setup-step" and rec["setup"] == "python scripts/seed.py"
 
 
@@ -3409,3 +3412,27 @@ def test_go_outside_its_module_then_inside_it(tmp_path: Path) -> None:
     rows = _commands(tmp_path, build, count=3)
     (rec,) = entry(rows, "go test")["recommendations"]
     assert rec["title"] == "Tell agents to run `go test` in `svc/`"
+
+
+def test_a_test_a_setup_step_turns_green_is_not_a_standing_failure(tmp_path: Path) -> None:
+    red = "FAILED tests/test_sync.py::test_pull - AssertionError: 3 != 4\n1 failed, 9 passed"
+
+    def fixed(s: Session) -> None:
+        s.bash("pytest", red, exit_code=1)
+        s.bash("docker compose up -d", "started")
+        s.bash("pytest", "10 passed")
+
+    (row,) = _commands(tmp_path, fixed)
+    assert [r["id"] for r in row["recommendations"]] == ["document-the-setup-step"]
+    assert all("session after session" not in e["summary"] for e in row["evidence"])
+
+    # the same test left red in every session is still a standing failure
+    def left_red(s: Session) -> None:
+        s.bash("pytest", red, exit_code=1).read("/repo/a.py")
+
+    (row,) = _commands(tmp_path / "red", left_red)
+    assert [r["id"] for r in row["recommendations"]] == ["say-if-it-is-known-broken"]
+    assert (
+        "`tests/test_sync.py::test_pull` is red session after session"
+        in (row["recommendations"][0]["title"])
+    )

@@ -1285,7 +1285,8 @@ command's" below.
   10). When the same test is red in 3 or more episodes of work
   (`STANDING_TEST_MIN_SESSIONS`) and none of them made it pass (a failure
   that an edit turned green is the development loop and is dropped as
-  always), it is a standing failure, not "a red test during development":
+  always; one that went green after a setup step is `fixed_by_setup`, and
+  the advice is that step, never both), it is a standing failure, not "a red test during development":
   those failures count in full, claim their run time, are attributed to the
   test file too if it exists, and lead to `say-if-it-is-known-broken` ("fix
   it, or mark it as a known failure and say so"). The test is named only
