@@ -443,16 +443,9 @@ def test_chdir_follows_cd_lexically(resolver: PathResolver) -> None:
         ("git -C ../other status", ("../other",)),
         ("make -C docs html", ("docs",)),
         ("npm --prefix web test", ("web",)),
-        ("pnpm --filter web test", ("web",)),
-        ("pnpm --filter=./web test", ("web",)),
-        ("pnpm -F packages/web test", ("packages/web",)),
-        ("yarn workspace web test", ("web",)),
-        # a scoped name, a pattern or a range does not say where the command runs
-        ("pnpm --filter @acme/web test", ()),
-        ("pnpm --filter web... test", ()),
-        ("pnpm --filter '!web' test", ()),
-        ("pnpm --filter '[main]' test", ()),
-        ("yarn workspace @acme/web test", ()),
+        # a workspace selector is not a directory change: see `workspace`
+        ("pnpm --filter web test", ()),
+        ("yarn workspace web test", ()),
         ("pnpm test", ()),
         ("uv --directory tools run pytest", ("tools",)),
         ("pytest -q", ()),
@@ -760,3 +753,88 @@ def test_launcher_split_and_replacement() -> None:
 )
 def test_windows_program_suffixes_are_not_part_of_the_key(command: str, key: str) -> None:
     assert attribution.normalize_command(command) == key
+
+
+@pytest.mark.parametrize(
+    ("command", "workspace"),
+    [
+        ("pnpm --filter web test", "web"),
+        ("pnpm --filter=./web test", "web"),
+        ("pnpm -F packages/web test", "packages/web"),
+        ("yarn workspace web test", "web"),
+        ("cd apps && pnpm --filter web test", "web"),
+        # a scoped name, a pattern or a range does not say where the command runs
+        ("pnpm --filter @acme/web test", ""),
+        ("pnpm --filter web... test", ""),
+        ("pnpm --filter '!web' test", ""),
+        ("pnpm --filter '[main]' test", ""),
+        ("yarn workspace @acme/web test", ""),
+        ("pnpm test", ""),
+        ("npm --prefix web test", ""),
+    ],
+)
+def test_steps_remember_the_workspace_they_were_pointed_at(command: str, workspace: str) -> None:
+    assert parse_command(command).steps[-1].workspace == workspace
+
+
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [
+        ("dotenv run -- pytest -q", "pytest"),
+        ("dotenv -e .env.test -- npm test", "npm test"),
+        ("doppler run -- npm test", "npm test"),
+        ("doppler run -p shop -c dev -- make test", "make test"),
+        ("op run --env-file=.env -- make test", "make test"),
+        ("direnv exec . pytest", "pytest"),
+        ("xvfb-run -a npm test", "npm test"),
+        ("xvfb-run --server-args '-screen 0 1x1x24' pytest", "pytest"),
+        ("script -q /dev/null pytest -x", "pytest"),
+        ("script -qc 'pytest -q' /dev/null", "pytest"),
+        # the same programs doing their own business keep their names
+        ("op item get deploy-key", "op"),
+        ("doppler secrets", "doppler"),
+        ("direnv allow", "direnv"),
+        ("script -q /dev/null", "script"),
+        ("dotenv", "dotenv"),
+    ],
+)
+def test_environment_launchers_are_keyed_on_what_they_start(command: str, key: str) -> None:
+    assert attribution.normalize_command(command) == key
+
+
+PEM = "-----BEGIN CERTIFICATE-----\nMIIBkTCB+wIJAL\nq83vEjRWeJA=\n-----END CERTIFICATE-----"
+
+
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [
+        (f'echo "{PEM}" > cert.pem', "echo"),
+        (f'deploy --cert "{PEM}" --name it\'s', "deploy"),  # a quote that never closes
+        (f"deploy --cert {PEM}", "deploy"),  # not quoted at all
+        (f"deploy --cert {PEM}\nmake test", "make test"),
+        (f"kubectl create secret generic tls --from-literal=crt='{PEM}'", "kubectl create"),
+        ("echo 'one\ntwo' && make test", "make test"),
+        ("make build\nmake test", "make test"),  # lines that are commands still are
+    ],
+)
+def test_a_key_never_comes_from_a_line_of_data(command: str, key: str) -> None:
+    assert attribution.normalize_command(command) == key
+    assert not any(step.key.startswith("-") for step in parse_command(command).steps)
+
+
+def test_under_a_windows_root_one_file_has_one_spelling(tmp_path: Path) -> None:
+    resolver = PathResolver(Path("/nowhere"), [r"C:\Users\Dev\Shop"])
+    first = resolver.resolve(r"C:\Users\Dev\Shop\SRC\App\util.py")
+    assert first == "SRC/App/util.py"  # not on disk here: the first spelling met
+    assert resolver.resolve(r"c:\users\dev\shop\src\app\util.py") == first
+    assert resolver.resolve(r"src\APP\other.py", r"C:\Users\Dev\Shop") == "SRC/App/other.py"
+    # where the repository is here, the working tree decides
+    (tmp_path / "src" / "app").mkdir(parents=True)
+    (tmp_path / "src" / "app" / "util.py").write_text("x\n")
+    here = PathResolver(tmp_path, [r"C:\Users\Dev\Shop"])
+    assert here.resolve(r"C:\Users\Dev\Shop\SRC\App\UTIL.py") == "src/app/util.py"
+    assert here.resolve(r"C:\Users\Dev\Shop\src\app\util.py") == "src/app/util.py"
+    # a POSIX root is case-sensitive, as its file system is
+    posix = PathResolver(Path("/repo"))
+    assert posix.resolve("/repo/SRC/a.py") == "SRC/a.py"
+    assert posix.resolve("/repo/src/a.py") == "src/a.py"

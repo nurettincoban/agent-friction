@@ -80,6 +80,7 @@ class PathResolver:
             roots.append("/")
         self.primary = roots[0]
         self._not_ours: set[str] = set()  # directories `adopt` has looked at and turned down
+        self._spellings: dict[str, str] = {}  # under a Windows root: one spelling per name
         self.drives = any(_DRIVE_RE.match(root) for root in roots)
         # Longest first so a worktree nested inside the repo wins over the repo.
         self.roots: tuple[str, ...] = tuple(sorted(roots, key=lambda r: (-len(r), r)))
@@ -124,8 +125,35 @@ class PathResolver:
             if here.startswith(prefix):
                 # A worktree kept inside the repository is the repository, also after
                 # it was merged and removed: `git worktree list` no longer knows it.
-                return _NESTED_WORKTREE_RE.sub("", absolute[len(prefix) :], count=1)
+                rel = _NESTED_WORKTREE_RE.sub("", absolute[len(prefix) :], count=1)
+                return self._one_spelling(rel) if fold else rel
         return None
+
+    def _one_spelling(self, rel: str) -> str:
+        """``rel`` as it is spelled on disk, or as it was first seen.
+
+        Under a Windows root ``SRC\\App\\util.py`` and ``src\\app\\util.py`` are one
+        file. Each name is given one spelling, directory by directory: the one the
+        working tree has, if the repository is here, and otherwise the first one met.
+        """
+        parts: list[str] = []
+        for part in rel.split("/"):
+            key = "/".join(parts).casefold() + "/" + part.casefold()
+            if key not in self._spellings:
+                self._spellings[key] = self._disk_name(parts, part) or part
+            parts.append(self._spellings[key])
+        return "/".join(parts)
+
+    def _disk_name(self, parents: Sequence[str], name: str) -> str | None:
+        try:
+            directory = self.repo.joinpath(*parents)
+            if (directory / name).exists():
+                return name
+            names = [entry.name for entry in directory.iterdir()]
+            same = [e for e in names if e.casefold() == name.casefold()]
+        except OSError:
+            return None
+        return same[0] if len(same) == 1 else None
 
     def chdir(self, cwd: str | None, moves: Iterable[str]) -> str | None:
         """Absolute directory after applying ``cd``-style ``moves`` to ``cwd``.
@@ -412,6 +440,10 @@ class Step:
     into: str = ""
     #: Wrappers stripped in front of the program, by base name (``time``, ``sudo``).
     wrappers: tuple[str, ...] = ()
+    #: The workspace package it was told to run in (``pnpm --filter web``, ``yarn
+    #: workspace web``), if the selector reads as a directory. Where that is on disk
+    #: (``web/``, ``packages/web/``) only the repository can say.
+    workspace: str = ""
 
 
 #: Programs that, with their output redirected into a file (or, for ``tee``, given one),
@@ -462,15 +494,22 @@ def _strip_heredocs(command: str) -> str:
     return "\n".join(out)
 
 
+#: An armored block (a certificate, a key) passed as an argument: data, never commands.
+_ARMOR_RE = re.compile(r"-----BEGIN [^-\n]*-----.*?(?:-----END [^-\n]*-----|\Z)", re.S)
+
+
 def _tokenize(command: str) -> list[str]:
-    text = _strip_heredocs(command).replace("\\\n", " ").replace("\n", " ; ")
-    lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
+    text = _ARMOR_RE.sub("ARMORED-DATA", _strip_heredocs(command))
+    lines = text.replace("\\\n", " ")
+    lexer = shlex.shlex(lines.replace("\n", " ; "), posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     lexer.commenters = ""
     try:
         return list(lexer)
     except ValueError:  # unbalanced quotes
-        return text.split()
+        # Where a quote opens and never closes, the lines after the first are most
+        # likely the rest of a multi-line argument: the command is on the first line.
+        return lines.split("\n", 1)[0].split()
 
 
 class _Segment(list[str]):
@@ -545,6 +584,9 @@ def _strip_prefixes(words: Sequence[str]) -> list[str]:
             out.pop(0)
         elif head == "command" and len(out) > 1 and out[1] in ("-v", "-V"):
             return ["command"]  # `command -v docker` asks whether docker exists
+        elif _unwrapped(head.rsplit("/", 1)[-1], out[1:]) is not None:
+            # `dotenv run -- pytest`, `xvfb-run npm test`: about the command they start
+            out = _unwrapped(head.rsplit("/", 1)[-1], out[1:]) or []
         elif head in WRAPPER_PROGRAMS or (
             _is_abs(head) and head.rsplit("/", 1)[-1] in WRAPPER_PROGRAMS
         ):
@@ -604,6 +646,62 @@ def _container_command(words: Sequence[str]) -> list[str]:
         rest = _skip_container_options(rest[1:])
         return rest[1:]  # after the service name
     return []
+
+
+#: Programs that start another command with something added to its environment (secrets,
+#: a virtual display, a pseudo-terminal): subcommand that does so (``""``: none needed),
+#: and the options of theirs that take a separate value.
+ENV_LAUNCHERS: dict[str, tuple[str, frozenset[str]]] = {
+    "dotenv": ("", frozenset({"-e", "-f", "--file", "-c", "-v", "-o"})),
+    "doppler": ("run", frozenset({"-p", "--project", "-c", "--config", "-t", "--token"})),
+    "op": ("run", frozenset({"--env-file", "--account", "--session"})),
+    "direnv": ("exec", frozenset()),
+    "xvfb-run": (
+        "",
+        frozenset({"-n", "-s", "-e", "-f", "-p", "-w", "--server-num", "--server-args"})
+        | {"--error-file", "--auth-file", "--wait"},
+    ),
+}
+
+
+def _unwrapped(program: str, rest: Sequence[str]) -> list[str] | None:
+    """The words of the command ``program rest`` starts, or ``None`` if it starts none."""
+    out = list(rest)
+    if program == "script":
+        # util-linux: `script -q -c 'pytest -q' /dev/null`; BSD: `script -q /dev/null pytest`
+        while out and out[0].startswith("-") and out[0] != "--":
+            option = out.pop(0)
+            if option.startswith("-") and not option.startswith("--") and "c" in option[1:]:
+                return _tokenize(out[0]) if out else None
+            if option == "--command":
+                return _tokenize(out[0]) if out else None
+        return out[1:] if len(out) > 1 else None
+    spec = ENV_LAUNCHERS.get(program)
+    if spec is None:
+        return None
+    subcommand, takes_value = spec
+
+    def options() -> None:
+        while out and out[0].startswith("-") and out[0] != "--":
+            option = out.pop(0)
+            if option in takes_value and out:
+                out.pop(0)
+
+    options()
+    if subcommand:
+        if not out or out[0] != subcommand:
+            return None  # `op item get`, `doppler secrets`: their own business
+        out.pop(0)
+        if program == "direnv":
+            if not out:
+                return None
+            out.pop(0)  # the directory whose environment is loaded
+    elif program == "dotenv" and out and out[0] == "run":
+        out.pop(0)
+    options()
+    if out and out[0] == "--":
+        out.pop(0)
+    return out or None
 
 
 def _strip_wrapper(wrapper: str, rest: list[str]) -> list[str]:
@@ -873,7 +971,7 @@ _DIR_OPTIONS: dict[str, frozenset[str]] = {
     "git": frozenset({"-C"}),
     "make": frozenset({"-C", "--directory"}),
     "npm": frozenset({"--prefix", "-C"}),
-    "pnpm": frozenset({"--dir", "-C", "--prefix", *_WORKSPACE_OPTIONS}),
+    "pnpm": frozenset({"--dir", "-C", "--prefix"}),
     "yarn": frozenset({"--cwd"}),
     "bun": frozenset({"--cwd"}),
     "uv": frozenset({"--directory", "--project"}),
@@ -894,9 +992,6 @@ def _own_directory(program: str, args: Sequence[str]) -> list[str]:
     options = _DIR_OPTIONS.get(program)
     if not options:
         return []
-    if program == "yarn" and len(args) > 2 and args[0] == "workspace":
-        there = _workspace_directory(args[1])
-        return [there] if there is not None else []
     for index, word in enumerate(args):
         if not word.startswith("-"):
             break  # options of the tool itself come before its subcommand
@@ -906,19 +1001,39 @@ def _own_directory(program: str, args: Sequence[str]) -> list[str]:
                 if index + 1 >= len(args):
                     return []
                 value = args[index + 1]
-            if name in _WORKSPACE_OPTIONS:
-                there = _workspace_directory(value)
-                return [there] if there is not None else []
             return [value]
     return []
+
+
+def _workspace(program: str, args: Sequence[str]) -> str:
+    """The package a step is run in: ``pnpm --filter web``, ``yarn workspace web``."""
+    if program == "yarn" and len(args) > 2 and args[0] == "workspace":
+        return _workspace_directory(args[1]) or ""
+    if program != "pnpm":
+        return ""
+    for index, word in enumerate(args):
+        if not word.startswith("-"):
+            break
+        name, eq, value = word.partition("=")
+        if name in _WORKSPACE_OPTIONS:
+            if not eq:
+                if index + 1 >= len(args):
+                    return ""
+                value = args[index + 1]
+            return _workspace_directory(value) or ""
+    return ""
+
+
+#: What no command word begins with.
+_NOT_A_COMMAND = frozenset("-=+,;:%^*?#@)]}")
 
 
 def _steps(command: str, depth: int = 0, moves: tuple[str, ...] = ()) -> list[Step]:
     steps: list[Step] = []
     for segment in _segments(_tokenize(command)):
         words = _strip_prefixes(segment)
-        if not words:
-            continue
+        if not words or words[0][:1] in _NOT_A_COMMAND:
+            continue  # `-----END`, `=value`: a line of data, not a command word
         program = _program_name(words[0]).rsplit("/", 1)[-1]
         if program in ("cd", "pushd"):
             target = next((w for w in words[1:] if not w.startswith("-") or w == "-"), "~")
@@ -956,6 +1071,7 @@ def _steps(command: str, depth: int = 0, moves: tuple[str, ...] = ()) -> list[St
                 silenced,
                 segment.into,
                 wrappers,
+                _workspace(program, words[1:]),
             )
         )
     return steps

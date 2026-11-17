@@ -397,7 +397,7 @@ def _note_removed_worktrees(repo: Path, err: TextIO) -> None:
 
 
 def _analyze(args: argparse.Namespace, repo: Path, err: TextIO | None = None) -> dict[str, Any]:
-    from agent_friction.engine import AnalyzeOptions, analyze
+    from agent_friction.engine import AnalyzeOptions, NoTranscriptsError, analyze
     from agent_friction.gitsignals import DEFAULT_AGENT_PATTERNS
 
     if not repo.is_dir():
@@ -426,7 +426,14 @@ def _analyze(args: argparse.Namespace, repo: Path, err: TextIO | None = None) ->
         # list; --top only trims the terminal and Markdown views.
         max_hotspots=None,
     )
-    result = analyze(options)
+    try:
+        result = analyze(options)
+    except NoTranscriptsError as exc:
+        if args.no_git:
+            raise
+        raise NoTranscriptsError(
+            f"{exc} For a map from the git history alone, run again with --allow-empty."
+        ) from None
     if err is not None and args.transcripts is None and not args.repo_alias:
         _note_removed_worktrees(repo, err)
     if int(result.get("totals", {}).get("sessions", 0)) == 0 and not args.allow_empty:

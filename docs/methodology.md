@@ -156,6 +156,18 @@ together, and so that the key can be shown even when excerpts are off:
    are stripped from each command, together
    with the wrapper's own options and their values (`WRAPPER_VALUE_OPTIONS`:
    `sudo -u alice pytest` -> `pytest`, `xargs -n 1 pytest` -> `pytest`).
+   Programs that start another command with something added to its
+   environment are looked through in the same way (`ENV_LAUNCHERS`): `dotenv
+   run -- pytest`, `dotenv -e .env -- npm test`, `doppler run -- npm test`,
+   `op run --env-file=.env -- make test`, `direnv exec . pytest`, `xvfb-run -a
+   npm test`, `script -q /dev/null pytest` and `script -qc 'pytest -q'
+   /dev/null` are about the command they start. Doing their own business
+   (`op item get`, `doppler secrets`, `direnv allow`) they keep their name.
+   A key never comes from data: an armored block passed as an argument
+   (`-----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----`) is one
+   opaque word however many lines it has, a word that begins with `-` or `=`
+   is never a command, and where a quote opens and never closes only the
+   first line is read (the rest is most likely the argument's other lines).
    One thing is remembered about the redirections: a command whose standard
    output and standard error both go to `/dev/null` is *silenced*, and
    nothing in the line's output is taken for its verdict.
@@ -206,9 +218,13 @@ together, and so that the key can be shown even when excerpts are off:
      `docker compose up`, `gh pr create`). A workspace selector that reads
      as a directory is where the command runs, not part of its name: `pnpm
      --filter web test`, `pnpm --filter=web test`, `pnpm -F web test` and
-     `yarn workspace web test` are `pnpm test` / `yarn test` run in `web/`,
-     keyed `pnpm test (web/)` exactly as `npm --prefix web test` is `npm test
-     (web/)`. A scoped package name (`@acme/web`), a pattern (`web...`,
+     `yarn workspace web test` are `pnpm test` / `yarn test` run in that
+     package. Where the package lives is asked of the repository: `web/` if
+     that directory exists (`pnpm test (web/)`, exactly as `npm --prefix web
+     test` is `npm test (web/)`); otherwise the one directory called `web`
+     up to three levels down, past hidden, third-party and build directories
+     (`pnpm test (packages/web/)`); and with none or several candidates no
+     directory at all (`pnpm test`): a package name is not a path. A scoped package name (`@acme/web`), a pattern (`web...`,
      `!web`) or a git range (`[main]`) does not say where: `--filter` is then
      dropped like any option, and `yarn workspace @acme/web <script>` keeps
      both words (the workspace name is project-specific and becomes a

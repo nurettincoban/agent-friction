@@ -27,6 +27,7 @@ from agent_friction.adapters import claude_code, parse_transcript
 from agent_friction.attribution import (
     PUBLIC_HASH_DIGITS,
     PathResolver,
+    is_inline_code,
     is_windows_path,
     public_key,
     public_tool,
@@ -315,6 +316,9 @@ SINGLE_SESSION_ADVICE_MIN_SCORE = 20.0
 HUMAN_STATED_RULES = frozenset({"write-down-the-rule", "state-the-boundary"})
 #: Evidence items listed for events that belong to no hotspot (``unattributed``).
 MAX_UNATTRIBUTED_EVIDENCE = 20
+#: How deep, and through how many directories, a workspace package is looked for by name.
+WORKSPACE_DEPTH = 3
+WORKSPACE_MAX_DIRS = 5000
 #: Existing make targets or package scripts listed next to "this target does not exist".
 MAX_KNOWN_TARGETS = 12
 MAX_TARGETS_FILE_BYTES = 512_000
@@ -361,6 +365,13 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
     Returns the findings that were dropped.
     """
     pairs: dict[tuple[str, str], set[str]] = {}
+    for finding in findings:
+        # An ad-hoc snippet (`python <inline>`) is a different program every time: it is
+        # never the step that fixes a command, however often "it" ran before a green run.
+        if is_inline_code(finding.detail.get("fixed_by_command", "")):
+            del finding.detail["fixed_by_command"]
+        if is_inline_code(finding.detail.get("fixed_by_setup", "")):
+            del finding.detail["fixed_by_setup"]
     pending = [f for f in findings if "fixed_by_command" in f.detail]
     for finding in pending:
         for key in _command_keys(finding):
@@ -401,6 +412,29 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
         finding.interval = finding.interval or finding.run
         finding.summary = finding.summary.replace(
             "ordinary failure", f"`{other}` then passed, with nothing changed"
+        )
+    # Red where the agent first ran it, green unchanged in a subdirectory (``green_in``):
+    # from ``RUNNER_MIN_SESSIONS`` sessions on, that is where the command has to be run.
+    places: dict[tuple[str, str], set[str]] = {}
+    moved = [f for f in findings if "green_in" in f.detail]
+    for finding in moved:
+        for key in _command_keys(finding):
+            places.setdefault((key, finding.detail["green_in"]), set()).add(finding.unit)
+    for finding in moved:
+        place = finding.detail.pop("green_in")
+        if finding.detail.get("variant") != "ordinary" or not any(
+            len(places.get((key, place), ())) >= RUNNER_MIN_SESSIONS
+            for key in _command_keys(finding)
+        ):
+            continue
+        finding.detail["works_in"] = place
+        finding.detail["variant"] = "invocation"
+        finding.detail.pop("own_module", None)
+        finding.targets = [t for t in finding.targets if t.kind == model.COMMAND]
+        finding.weight = 1.0
+        finding.interval = finding.interval or finding.run
+        finding.summary = finding.summary.replace(
+            "ordinary failure", f"it then passed unchanged in `{place}`"
         )
     # The same test red in ``STANDING_TEST_MIN_SESSIONS`` episodes or more, none of which
     # made it pass: a standing failure. It is no longer "a red test during development".
@@ -586,7 +620,14 @@ _FILE_OPS = (model.OP_READ, model.OP_EDIT, model.OP_WRITE)
 #: A command key with the directory it ran in: ``npm test (web/)``.
 _LOCATED_KEY_RE = re.compile(r"^(.+) \((.+)/\)$")
 #: Details of a command failure that hold another command's key (or its directory).
-_COMMAND_DETAILS = ("recovered_by", "fixed_by_setup", "works_with", "works_in", "typo_of")
+_COMMAND_DETAILS = (
+    "recovered_by",
+    "fixed_by_setup",
+    "works_with",
+    "works_in",
+    "green_in",
+    "typo_of",
+)
 
 
 def _session_root(cwds: list[str], files: list[str], too_wide: Callable[[str], bool]) -> str:
@@ -794,6 +835,7 @@ class _Analysis:
         self.git_used = False
         self.dropped: list[tuple[int, float, str]] = []
         self.events_outside_repo = 0
+        self._dirs_by_name: dict[str, list[str]] | None = None
         self.untimed_sessions_excluded = 0
         self.unreadable: list[tuple[Path, str]] = []
         self.third_party_events = 0
@@ -813,6 +855,42 @@ class _Analysis:
             except OSError:
                 self._is_file_cache[rel] = None
         return self._is_file_cache[rel]
+
+    def workspace_dir(self, name: str) -> str | None:
+        """The one directory called ``name`` in the repository (``packages/web``), if any.
+
+        Looked for ``WORKSPACE_DEPTH`` levels down, past hidden, third-party and build
+        directories. More than one match is no answer.
+        """
+        if self._dirs_by_name is None:
+            index: dict[str, list[str]] = {}
+            root = str(self.repo)
+            seen = 0
+            try:
+                for current, names, _ in os.walk(root):
+                    rel = os.path.relpath(current, root).replace(os.sep, "/")
+                    depth = 0 if rel == "." else rel.count("/") + 1
+                    names[:] = sorted(
+                        n
+                        for n in names
+                        if not n.startswith(".")
+                        and n not in THIRD_PARTY_DIRS
+                        and n not in BUILD_DIRS
+                        and depth < WORKSPACE_DEPTH
+                    )
+                    for child in names:
+                        index.setdefault(child, []).append(
+                            child if rel == "." else f"{rel}/{child}"
+                        )
+                    seen += len(names)
+                    if seen > WORKSPACE_MAX_DIRS:
+                        break
+            except OSError:
+                pass
+            self._dirs_by_name = index
+        found = self._dirs_by_name.get(name.rsplit("/", 1)[-1], [])
+        found = [rel for rel in found if rel == name or rel.endswith("/" + name)]
+        return found[0] if len(found) == 1 else None
 
     def first_party(self, top: str) -> bool:
         """Is ``top`` a top-level module or package of this repository?"""
@@ -950,7 +1028,7 @@ class _Analysis:
                     finding.targets[index] = Target(target.kind, shown, target.share)
             for name in _COMMAND_DETAILS:  # other commands the event names, as data
                 value = finding.detail.get(name)
-                if value and name == "works_in":
+                if value and name in ("works_in", "green_in"):
                     finding.detail[name] = self.public_path(value.rstrip("/")) + "/"
                 elif value:
                     finding.detail[name] = " && ".join(
@@ -1088,6 +1166,7 @@ class _Analysis:
             first_party=self.first_party,
             unit=self.unit,
             exists=lambda rel: self._disk_is_file(rel) is not None,
+            workspace_dir=self.workspace_dir,
         )
         findings: list[Finding] = []
         dropped: list[tuple[int, float, str]] = []

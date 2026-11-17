@@ -128,6 +128,9 @@ def test_no_transcripts_is_a_clean_error(tmp_path: Path, monkeypatch: pytest.Mon
     code, _, err = run("scan", str(tmp_path))
     assert code == EXIT_ERROR
     assert err.startswith("agent-friction: ") and "Traceback" not in err
+    assert "--allow-empty" in err
+    code, _, err = run("scan", str(tmp_path), "--no-git")
+    assert code == EXIT_ERROR and "--allow-empty" not in err
     code, _, err = run("sources", str(tmp_path))
     assert code == EXIT_ERROR and "No Claude Code transcripts found" in err
 

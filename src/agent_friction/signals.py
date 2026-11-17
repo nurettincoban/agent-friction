@@ -1361,6 +1361,18 @@ _UNDO_OBJECT = (
     r"|the (?:change|changes|edit|edits|commit|commits))\b"
 )
 #: The human asks for a change to be taken back: "revert src/app.py", "put it back".
+#: A message that adds to the job: "also ...", "and ...", "plus ...", "one more thing".
+_ADDITIVE_RE = re.compile(
+    r"\W*(?:oh[, ]+)?(?:also|and|plus|additionally|in addition|one more thing|btw|by the way"
+    r"|while you(?:'re| are) (?:at it|there))\b",
+    re.I,
+)
+#: ... unless it objects to something while doing so.
+_OBJECTION_RE = re.compile(
+    r"\b(?:no|not|don't|dont|do not|stop|wrong|instead|never|shouldn't|should not|wait|why"
+    r"|revert|undo|actually|rather)\b",
+    re.I,
+)
 _UNDO_ASKED_RE = re.compile(
     rf"\b{_UNDO}\b|\b(?:put|roll) (?:\S+ ){{1,4}}back\b|\brestore\b|\bgo back to\b", re.I
 )
@@ -1792,6 +1804,9 @@ class DetectContext:
     first_party: Callable[[str], bool] = lambda top: False
     #: The episode of work an event of a session belongs to (default: the session).
     unit: Callable[[str, datetime | None], str] = lambda session, ts: session
+    #: The one directory of the repository with this name (``packages/web`` for ``web``),
+    #: repo-relative; ``None`` if there is none or more than one.
+    workspace_dir: Callable[[str], str | None] = lambda name: None
 
 
 @dataclass
@@ -1988,6 +2003,7 @@ class _State:
     turn_shell_ok: bool | None = None
     turn_check_ok: bool | None = None  # ... and its last test/lint/build/aggregate command
     undo_asked: bool = False  # the prompt of this turn asks for an undo
+    interrupted: Finding | None = None  # the interrupt that ended the turn, if one did
     # files the prompt of this turn was read as a correction, or a probable one, about
     corrected: frozenset[str] = frozenset()
     added: list[str] = field(default_factory=list)  # text of the latest successful edits
@@ -2180,9 +2196,23 @@ class _Detector:
 
     def _where(self, step: Step | None, cwd: str | None) -> str | None:
         """Directory ``step`` runs in: ``cwd`` after its ``cd``s, as far as they can be followed."""
-        if step is None or not step.moves:
+        if step is None:
             return cwd
-        return self.ctx.resolver.chdir(cwd, step.moves) or cwd
+        here = (self.ctx.resolver.chdir(cwd, step.moves) or cwd) if step.moves else cwd
+        if step.workspace:
+            # `pnpm --filter web test`: in `web/` if that is a directory here, in the one
+            # workspace directory called `web` (`packages/web/`) if there is exactly one,
+            # and nowhere in particular otherwise.
+            resolver = self.ctx.resolver
+            base = resolver.resolve(here or ".", None) if here else ""
+            if base is not None:
+                direct = posixpath.join(base, step.workspace)
+                found = (
+                    direct if self.ctx.exists(direct) else self.ctx.workspace_dir(step.workspace)
+                )
+                if found:
+                    return posixpath.join(resolver.primary, found)
+        return here
 
     def _elsewhere(self, step: Step | None, cwd: str | None) -> bool:
         """Does ``step`` run, or only act, outside the repository?
@@ -2988,6 +3018,12 @@ class _Detector:
 
     def _possibly_changed(self, step: Step, cwd: str | None) -> None:
         """``step`` ran and may have changed something (see ``may_change_files``)."""
+        if is_inline_code(step.key):
+            # `python -c ...`, `node -e ...`, a heredoc: every such snippet has the same
+            # key and each one is different. One that writes files is an edit and was
+            # counted as one; any other changed nothing that a later session could
+            # repeat, so it is nobody's setup step.
+            return
         copied = env_copy(step)
         setup = copied is not None or is_setup_step(step)
         if not setup and not may_change_files(step.key):
@@ -3130,6 +3166,7 @@ class _Detector:
                 key,
                 exact=located is not None and is_setup_step(located),
                 line=action.call.command or "",
+                label=shown(key),
             )
             # The command works after all, so nothing "replaced" it earlier in the session.
             for finding in state.replaced.pop(key, []):
@@ -3489,7 +3526,9 @@ class _Detector:
                 step, certain = named, True
         return step, certain
 
-    def _went_green(self, key: str, exact: bool = False, by: str = "", line: str = "") -> None:
+    def _went_green(
+        self, key: str, exact: bool = False, by: str = "", line: str = "", label: str = ""
+    ) -> None:
         """``key`` ran green: close what a green run of it, or of its job, closes.
 
         red -> edit -> green is the development loop working, so those failures are
@@ -3578,6 +3617,16 @@ class _Detector:
                         state.replaced.setdefault(failed_key, []).append(finding)
                 elif (
                     finding.detail.get("variant") == "ordinary"
+                    and state.changes_at.get(id(finding)) == state.changes
+                    and self._elsewhere_in_repo(finding, label)
+                ):
+                    # The same command, red where the agent first ran it and green in a
+                    # subdirectory with nothing changed (`pytest`, then `cd src &&
+                    # pytest`): perhaps it has to be run there. Recurrence decides (engine).
+                    was = finding.targets[0].key
+                    finding.detail["green_in"] = label[len(was) + 2 : -1]
+                elif (
+                    finding.detail.get("variant") == "ordinary"
                     and command_role(failed_key) == "test"
                     # the same line again: a narrower selection passing (`pytest
                     # tests/test_cart.py` after a red `pytest`) says nothing about the
@@ -3588,6 +3637,12 @@ class _Detector:
                     # it is, only its recurring across sessions can say (engine).
                     finding.detail["rerun_green"] = "1"
         self._drop(fixed, DROPPED_DEV_LOOP)
+
+    @staticmethod
+    def _elsewhere_in_repo(finding: Finding, label: str) -> bool:
+        """Is ``label`` the failed command's own label plus a directory (``pytest (src/)``)?"""
+        was = finding.targets[0].key if finding.targets else ""
+        return bool(was and label != was and label.startswith(was + " (") and label.endswith(")"))
 
     def _promote(self, finding: Finding) -> bool:
         """An "own module not found" failure turned out to be about how the command is run."""
@@ -3919,6 +3974,7 @@ class _Detector:
             interval=_capped(_epoch(turn[-1].call), _epoch(event)),
             detail={"interrupted": stopped} if stopped else None,
         )
+        self.state.interrupted = self.findings[-1]
 
     def _on_prompt(self, event: Event) -> None:
         # Taking a change back because the human said to is following an instruction.
@@ -3932,6 +3988,19 @@ class _Detector:
         asked = _epoch(event)
         idle = asked - finished if asked is not None and finished is not None else None
         confidence, labels, softened, instructed = _judge(event.text, event.after_question, idle)
+        stopped, self.state.interrupted = self.state.interrupted, None
+        head = event.text[:CORRECTION_HEAD_CHARS]
+        if (
+            stopped is not None
+            and confidence <= 0
+            and not instructed
+            and not softened
+            and _ADDITIVE_RE.match(head)
+            and not _OBJECTION_RE.search(head)
+        ):
+            # "also bump the version": the human cut in to add to the job, not because
+            # the agent was going wrong. Nothing to hold against what it was doing.
+            self._drop({id(stopped)})
         before = frozenset(
             a.file
             for a in self.state.turn

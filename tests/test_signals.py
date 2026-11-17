@@ -4673,3 +4673,66 @@ def test_a_make_error_about_another_target_is_not_a_missing_target(tmp_path: Pat
     # `tst` inside another word is not the target that was asked for
     s = Session().user("go").bash("make tst-all", said, exit_code=2)
     assert "no_target" not in detect(s, tmp_path)[0].detail
+
+
+# ---- round 31 ------------------------------------------------------------------------------
+
+
+def test_a_snippet_between_red_and_green_changes_nothing(tmp_path: Path) -> None:
+    red = "FAILED tests/test_a.py::test_a - AssertionError\n1 failed"
+    s = Session().user("go").bash("pytest", red, exit_code=1)
+    s.bash("python -c 'print(1)'", "1").bash("pytest", "1 passed")
+    (found,) = detect(s, tmp_path)
+    assert "fixed_by_command" not in found.detail and "fixed_by_setup" not in found.detail
+    assert found.detail["rerun_green"] == "1"
+    # a command that may well have changed something is still remembered as a candidate
+    s = Session().user("go").bash("pytest", red, exit_code=1)
+    s.bash("python scripts/seed.py", "ok").bash("pytest", "1 passed")
+    (found,) = detect(s, tmp_path)
+    assert found.detail["fixed_by_command"] == "python scripts/seed.py"
+
+
+def test_green_in_a_subdirectory_is_noted_only_when_nothing_changed(tmp_path: Path) -> None:
+    red = "FAILED tests/test_a.py::test_a - FileNotFoundError: data.json\n1 failed"
+    s = Session().user("go").bash("pytest", red, exit_code=1)
+    s.bash("cd src && pytest", "1 passed")
+    (found,) = detect(s, tmp_path)
+    assert found.detail["green_in"] == "src/" and "rerun_green" not in found.detail
+    # green in the same place is a plain re-run
+    s = Session().user("go").bash("pytest", red, exit_code=1).bash("pytest", "1 passed")
+    (found,) = detect(s, tmp_path)
+    assert "green_in" not in found.detail and found.detail["rerun_green"] == "1"
+    # with an edit in between it is red, edit, green: dropped
+    s = Session().user("go").bash("pytest", red, exit_code=1).edit(A)
+    s.bash("cd src && pytest", "1 passed")
+    assert detect(s, tmp_path) == []
+
+
+def test_an_interrupt_to_add_to_the_job_is_not_held_against_the_agent(tmp_path: Path) -> None:
+    def session(said: str) -> Session:
+        s = Session().user("release it").edit(A, "a", "b").bash("make build", "ok")
+        s.interrupt()
+        return s.user(said)
+
+    for said in (
+        "also bump the version",
+        "Oh, and update the changelog too",
+        "plus add a test for it",
+        "One more thing: tag the release",
+        "While you're at it, fix the typo in the README",
+    ):
+        assert detect(session(said), tmp_path) == [], said
+    # anything that objects, redirects or says nothing of the kind keeps the interrupt
+    for said in (
+        "also, don't touch the lockfile",
+        "and stop running the build every time",
+        "No, wrong file",
+        "use the other branch",
+        "andes is the codename, keep going",
+    ):
+        kinds = [f.signal for f in detect(session(said), tmp_path)]
+        assert signals.USER_INTERRUPT in kinds, said
+    # an interrupt with nothing said after it stands
+    s = Session().user("release it").edit(A, "a", "b")
+    s.interrupt()
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.USER_INTERRUPT]

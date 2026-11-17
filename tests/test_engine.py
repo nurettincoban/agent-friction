@@ -3051,11 +3051,52 @@ def test_a_workspace_selector_puts_the_command_in_its_directory(tmp_path: Path) 
         s.bash("pip3 install nope", "ERROR: No matching distribution found", exit_code=1)
         s.bash("pip install nope", "ERROR: No matching distribution found", exit_code=1)
         sessions.append(s)
-    rows = {c["path"]: c["events"] for c in scan(tmp_path, sessions)["commands"]}
+    repo = tmp_path / "repo"
+    (repo / "web").mkdir(parents=True)
+    for s in sessions:
+        s.cwd = str(repo)
+    sessions = [_rebased(s, str(repo)) for s in sessions]
+    rows = {c["path"]: c["events"] for c in scan(tmp_path, sessions, repo)["commands"]}
     assert rows["pnpm test (web/)"] == 4 and rows["yarn test (web/)"] == 4
     assert rows["npm test (web/)"] == 4
     assert rows["pnpm test"] == 4  # the scoped name says nothing about a directory
     assert not [key for key in rows if "pip3" in key or "workspace" in key or "filter" in key]
+
+
+def _rebased(session: Session, root: str) -> Session:
+    """The same transcript, recorded in ``root`` instead of ``/repo``."""
+    session.lines = [line.replace('"/repo"', json.dumps(root)) for line in session.lines]
+    return session
+
+
+def test_a_workspace_name_is_a_directory_only_where_the_repository_has_one(
+    tmp_path: Path,
+) -> None:
+    def rows(repo: Path, where: Path) -> list[str]:
+        sessions = []
+        for i in range(2):
+            s = Session(f"s{i}", cwd=str(repo)).user("go")
+            s.bash(
+                "pnpm --filter web test", "ERR_PNPM_NO_SCRIPT  Missing script: test", exit_code=1
+            )
+            sessions.append(s)
+        return [c["path"] for c in scan(where, sessions, repo)["commands"]]
+
+    nested = tmp_path / "nested"
+    (nested / "packages" / "web").mkdir(parents=True)
+    (nested / "node_modules" / "web").mkdir(parents=True)  # not the repository's own
+    assert rows(nested, tmp_path / "a") == ["pnpm test (packages/web/)"]
+    direct = tmp_path / "direct"
+    (direct / "web").mkdir(parents=True)
+    (direct / "packages" / "web").mkdir(parents=True)
+    assert rows(direct, tmp_path / "b") == ["pnpm test (web/)"]  # the directory itself wins
+    twice = tmp_path / "twice"
+    (twice / "packages" / "web").mkdir(parents=True)
+    (twice / "apps" / "web").mkdir(parents=True)
+    assert rows(twice, tmp_path / "c") == ["pnpm test"]  # two candidates: no answer
+    none = tmp_path / "none"
+    none.mkdir()
+    assert rows(none, tmp_path / "d") == ["pnpm test"]  # the package is called web, no more
 
 
 # ---- round 30 ------------------------------------------------------------------------------
@@ -3278,3 +3319,93 @@ def test_a_hidden_command_name_is_not_offered_for_documentation(tmp_path: Path) 
     assert [r["title"] for r in row["recommendations"]] == [
         "Document how to run this command (its name is hidden without excerpts)"
     ]
+
+
+# ---- round 31 ------------------------------------------------------------------------------
+
+
+def test_an_ad_hoc_snippet_is_never_the_step_that_fixed_a_command(tmp_path: Path) -> None:
+    red = "FAILED tests/test_sync.py::test_pull - AssertionError: 3 != 4\n1 failed, 9 passed"
+
+    def snippets(s: Session) -> None:
+        number = s.session_id[-1]
+        s.bash("pytest", red, exit_code=1)
+        s.bash(f"python -c 'import os; print(os.getcwd(), {number})'", "/repo")
+        s.bash(f"python3 - <<'EOF'\nimport sys\nprint(sys.version, {number})\nEOF", "3.12")
+        s.bash(f"node -e 'console.log({number})'", number)
+        s.bash("pytest", "10 passed")
+
+    (row,) = _commands(tmp_path, snippets)
+    text = json.dumps(row)
+    assert "<inline>" not in text and "<stdin>" not in text
+    assert "document-the-setup-step" not in [r["id"] for r in row["recommendations"]]
+    # nothing was changed in between, so the test went green untouched: that is flakiness
+    assert [r["id"] for r in row["recommendations"]] == ["fix-the-flaky-test"]
+
+    # a real script, the same one every time, is still a setup step under another name
+    def script(s: Session) -> None:
+        s.bash("pytest", red, exit_code=1)
+        s.bash("python scripts/seed.py", "seeded")
+        s.bash("pytest", "10 passed")
+
+    (row,) = _commands(tmp_path / "script", script)
+    rec = next(r for r in row["recommendations"] if r["id"] == "document-the-setup-step")
+    assert rec["id"] == "document-the-setup-step" and rec["setup"] == "python scripts/seed.py"
+
+
+def _in_a_subdirectory(tmp_path: Path, count: int, red: str, edit: bool = False) -> Any:
+    repo = tmp_path / "repo"
+    (repo / "src" / "app").mkdir(parents=True, exist_ok=True)
+    (repo / "src" / "app" / "__init__.py").write_text("")
+    sessions = []
+    for i in range(count):
+        s = Session(f"s{i}", cwd=str(repo)).user("go")
+        s.bash("pytest", red, exit_code=2)
+        if edit:
+            s.edit(f"{repo}/src/app/__init__.py", "a", "b")
+        s.bash("cd src && pytest -q", "5 passed in 0.2s")
+        sessions.append(s)
+    return scan(tmp_path / f"t{count}{edit}", sessions, repo)
+
+
+@pytest.mark.parametrize(
+    "red",
+    [
+        "E   ModuleNotFoundError: No module named 'app'\n1 error in 0.1s",
+        "E   fixture 'client' not found\n1 error in 0.1s",
+        "FAILED tests/test_a.py::test_a - AssertionError: fixtures/data.json is empty\n1 failed",
+    ],
+)
+def test_red_at_the_root_and_green_unchanged_in_a_subdirectory_says_where_to_run_it(
+    tmp_path: Path, red: str
+) -> None:
+    out = _in_a_subdirectory(tmp_path, 3, red)
+    row = entry(out["commands"], "pytest")
+    assert row["score"] > scoring.WEAK_ONLY_SCORE_CAP
+    (rec,) = row["recommendations"]
+    assert rec["id"] == "document-the-command"
+    assert rec["title"] == "Tell agents to run `pytest` in `src/`"
+    assert "3 times it then worked in `src/`" in rec["detail"]
+    # twice is not yet a habit of the repository
+    row = entry(_in_a_subdirectory(tmp_path, 2, red)["commands"], "pytest")
+    assert "document-the-command" not in [r["id"] for r in row["recommendations"]]
+    # and with an edit in between, the edit is what made it pass
+    out = _in_a_subdirectory(tmp_path, 3, red, edit=True)
+    assert all(
+        "document-the-command" not in [r["id"] for r in row["recommendations"]]
+        for row in out["commands"]
+    )
+
+
+def test_go_outside_its_module_then_inside_it(tmp_path: Path) -> None:
+    def build(s: Session) -> None:
+        s.bash(
+            "go test ./...",
+            "go: directory prefix . does not contain main module or its selected dependencies",
+            exit_code=1,
+        )
+        s.bash("cd svc && go test ./...", "ok  \tshop/svc\t0.2s")
+
+    rows = _commands(tmp_path, build, count=3)
+    (rec,) = entry(rows, "go test")["recommendations"]
+    assert rec["title"] == "Tell agents to run `go test` in `svc/`"

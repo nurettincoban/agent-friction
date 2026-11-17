@@ -325,11 +325,11 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
         c.style.left = r.x + "px"; c.style.top = r.y + "px"; c.style.width = r.w + "px"; c.style.height = r.h + "px";
         c.style.background = nest ? "var(--panel)" : heat(r.n.score);
         var label = (r.n.path || r.n.name) + (isDir ? "/" : "");
-        c.title = label + " · score " + Number(r.n.score).toFixed(1) + " · ~" + mins(r.n.est_minutes_lost) + " lost";
+        c.title = label + " · score " + Number(r.n.score).toFixed(1) + " · " + lostPhrase(r.n.est_minutes_lost);
         c.setAttribute("aria-label", c.title);
         if (r.w > 46 && r.h > 18) {
           c.appendChild(el("div", { class: "n" }, r.n.name + (isDir ? "/" : "")));
-          if (!nest && r.h > 38) c.appendChild(el("div", { class: "s" }, Number(r.n.score).toFixed(0) + " · " + mins(r.n.est_minutes_lost)));
+          if (!nest && r.h > 38) c.appendChild(el("div", { class: "s" }, Number(r.n.score).toFixed(0) + " · " + (Number(r.n.est_minutes_lost) > 0 ? mins(r.n.est_minutes_lost) : "n/a")));
         }
         function activate(e) {
           if (e) e.stopPropagation();

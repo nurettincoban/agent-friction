@@ -641,8 +641,16 @@ attributed to the command, with a share of 0.3, which gives it a light row
 under "commands" and the advice to say when it should be run and what to run
 instead.
 
-**False positives:** people also interrupt to add information or because they
-ran out of time.
+*An interrupt to add to the job is not recorded.* When the human's next
+message begins by adding something ("also bump the version", "and update the
+changelog", "plus ...", "one more thing", "while you're at it", "btw") and
+neither reads as a correction or redirect nor contains a word of objection
+in its first 200 characters (no, not, don't, stop, wrong, instead, never,
+wait, why, revert, undo, actually, rather), they cut in to extend the task,
+not because the agent was going wrong. The interrupt is dropped.
+
+**False positives:** people also interrupt because they ran out of time, or
+to add information in other words than those above.
 
 ## `human-rework` — Human rework (git)
 
@@ -1255,6 +1263,13 @@ command's" below.
     same other command in **two or more sessions** is a setup step under a
     name we did not know: those failures are kept with `fixed_by_setup`,
     exactly as above;
+  - **ad-hoc code** (`python -c ...`, `node -e ...`, a heredoc fed to an
+    interpreter: keys `python <inline>`, `python <stdin>`) is never the fix
+    either. Every snippet has the same key and each one is different, so
+    "the same command" across sessions would be an accident of naming. A
+    snippet that writes files is an edit and counts as one; any other is
+    treated as if nothing had run: the red run stays what it was, and a
+    test that then passes untouched is judged by the flaky rule;
   - **version control** (`git`, `gh`) is never the fix: the failure is
     dropped.
 
@@ -1320,6 +1335,17 @@ command's" below.
   repository: those failures get `recovered_by`, count in full, and lead to
   `use-the-working-command`. An aggregate target (`make check`) passing is
   not a runner for the job.
+- *The wrong directory:* an ordinary failure followed, with nothing changed
+  in between, by a green run of **the same command in a subdirectory**
+  (`pytest` red with `No module named 'app'`, a fixture that is not found or
+  a data file that is missing, then `cd src && pytest -q` green; `go test
+  ./...` outside its module, then `cd svc && go test ./...`) is at first
+  ordinary as well (`green_in`). When the same command and directory recur
+  in 3 or more episodes of work (`RUNNER_MIN_SESSIONS`), where it is run is
+  what was wrong: those failures become setup/invocation errors with
+  `works_in`, count in full, and lead to "Tell agents to run `pytest` in
+  `src/`" (`document-the-command`). With an edit or any other change
+  between the two runs it is red, change, green, and dropped.
 - *A flag that made it work:* a setup/invocation failure followed, with no
   file changed, by the same command line plus up to three options (`npm
   install --legacy-peer-deps` after `npm install` failed with `ERESOLVE`) is
