@@ -5216,3 +5216,50 @@ def test_what_counts_as_the_same_invocation() -> None:
     assert looked_at("mytool dump | head -3") == {"mytool"}
     assert looked_at("npm install 2>&1 | tail -3; mytool sync") == {"npm"}
     assert looked_at("mytool sync && pytest") == frozenset()
+
+
+def test_coloured_output_is_classified_like_plain_output(tmp_path: Path) -> None:
+    # the summary line is split by colour codes: "\x1b[31m1 failed\x1b[0m"
+    red = "\x1b[31m\x1b[1m1 failed\x1b[0m\x1b[31m in 0.1s\x1b[0m"
+    (found,) = detect(Session().user("go").bash("pytest --color=yes | tail -1", red), tmp_path)
+    assert found.signal == signals.COMMAND_FAILURE and found.detail["status"] == "hidden"
+    green = "\x1b[32m\x1b[1m5 passed\x1b[0m\x1b[32m in 0.2s\x1b[0m"
+    s = Session().user("go").bash("pytest", "1 failed in 0.1s", exit_code=1)
+    s.edit(A).bash("pytest --color=yes 2>&1 | tail -1", green)
+    assert detect(s, tmp_path) == []
+    spawn = (
+        "\x1b[1m\x1b[31merror\x1b[39m\x1b[0m: Failed to spawn: `pytest`\n  Caused by: No such file"
+    )
+    (found,) = detect(Session().user("go").bash("uv run pytest", spawn, exit_code=2), tmp_path)
+    assert found.detail["variant"] == "invocation"
+
+
+def test_a_silent_rerun_of_a_static_check_after_an_edit_closes_the_red(tmp_path: Path) -> None:
+    error = "src/a.ts(3,5): error TS2322: Type 'string' is not assignable to type 'number'."
+    s = Session().user("go").edit("/repo/src/a.ts").bash("npx tsc --noEmit | head", error)
+    s.edit("/repo/src/a.ts", "x", "y").bash("npx tsc --noEmit | head", "")
+    assert detect(s, tmp_path) == []
+    # a test runner always says something: silence through a pipe is no verdict
+    s = Session().user("go").bash("pytest", "1 failed in 0.1s", exit_code=1)
+    s.edit(A).bash("pytest 2>&1 | tail -1", "")
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.COMMAND_FAILURE]
+    # nothing changed in between: the type error is still there for all anyone knows
+    s = Session().user("go").bash("npx tsc --noEmit | head", error)
+    s.bash("npx tsc --noEmit | head", "")
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.COMMAND_FAILURE]
+
+
+def test_a_push_without_an_upstream_has_its_own_wording(tmp_path: Path) -> None:
+    output = "fatal: The current branch feat has no upstream branch.\nTo push the current ..."
+    s = Session().user("go").bash("git push", output, exit_code=128)
+    s.bash("git push --set-upstream origin feat", "branch 'feat' set up to track 'origin/feat'.")
+    (found,) = detect(s, tmp_path)
+    assert found.detail["no_upstream"] == "1" and found.detail["push_recovered"] == "1"
+    assert found.detail["variant"] == "ordinary" and scoring.is_weak(found)
+    assert "the branch had no upstream to push to" in found.summary
+    found.detail["no_upstream"] = "recurring"
+    assert not scoring.is_weak(found)
+    # a plain `git push` that then goes through was not put right with -u
+    s = Session().user("go").bash("git push", output, exit_code=128).bash("git push", "ok")
+    (found,) = detect(s, tmp_path)
+    assert "push_recovered" not in found.detail

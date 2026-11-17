@@ -161,7 +161,14 @@ def digest(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8", "replace"), usedforsecurity=False).hexdigest()[:16]
 
 
+#: Colour and style sequences (`ESC [ ... m`), which split the words that are matched on.
+_SGR_RE = re.compile(r"\x1b\[[0-9;:]*m")
+
+
 def clip_output(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
+    """Tool output as it is stored: without colour codes, long output cut in the middle."""
+    if "\x1b" in text:
+        text = _SGR_RE.sub("", text)
     if len(text) <= limit:
         return text
     head = limit // 4

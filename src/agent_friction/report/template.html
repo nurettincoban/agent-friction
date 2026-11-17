@@ -158,6 +158,15 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     if (text !== undefined && text !== null) e.textContent = String(text);
     return e;
   }
+  // Recommendation text marks commands and paths as `code`: show them as code, not backticks.
+  function rich(tag, text) {
+    var e = el(tag), parts = String(text || "").split(/(`[^`\n]+`)/);
+    parts.forEach(function (p) {
+      if (p.length > 2 && p.charAt(0) === "`" && p.charAt(p.length - 1) === "`") e.appendChild(el("code", null, p.slice(1, -1)));
+      else if (p) e.appendChild(document.createTextNode(p));
+    });
+    return e;
+  }
   function gone(h) {
     var f = h && h.kind === "file" ? h.file : null;
     if (!f || f.exists !== false) return "";
@@ -197,7 +206,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     (w.start || w.end ? String(w.start || "…").slice(0, 10) + " → " + String(w.end || "…").slice(0, 10) + " · " : "") +
     "generated " + utc(R.generated_at);
   (R.recommendations || []).forEach(function (r) {
-    var box = el("div", { class: "rec sub" }); box.appendChild(el("b", null, r.title)); box.appendChild(el("span", null, r.detail));
+    var box = el("div", { class: "rec sub" }); box.appendChild(rich("b", r.title)); box.appendChild(rich("span", r.detail));
     document.getElementById("stats").insertAdjacentElement("afterend", box);
   });
   var notCounted = [];
@@ -242,7 +251,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     if ((h.recommendations || []).length) {
       detail.appendChild(el("h2", null, "What to change"));
       h.recommendations.forEach(function (r) {
-        var d = el("div", { class: "rec" }); d.appendChild(el("b", null, r.title)); d.appendChild(el("span", null, r.detail)); detail.appendChild(d);
+        var d = el("div", { class: "rec" }); d.appendChild(rich("b", r.title)); d.appendChild(rich("span", r.detail)); detail.appendChild(d);
       });
     }
     if ((h.evidence || []).length) {

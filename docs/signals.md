@@ -1004,6 +1004,10 @@ command's" below.
 - *"command not found" names its program:* if the shell says which program
   it could not find and that program is a step or pipeline stage of the line
   (`cat x | jqq . | sort`), the event is keyed to that stage.
+- *Colour codes are removed first.* Tool output is stored without ANSI
+  colour and style sequences (`ESC[31m`, `ESC[0m`, ...), so `pytest
+  --color=yes`, `uv` and `cargo` are read like their plain output: a summary
+  line or an "error:" prefix split by colour codes is still recognised.
 - *An exit status that is not the command's own is no verdict.* In `pytest
   2>&1 | tail -5` the shell reports the status of `tail`; in `make test; echo
   done` that of `echo`; `pytest || true` always succeeds. When the command a
@@ -1181,7 +1185,12 @@ command's" below.
   And when the command is a server or a watcher (`npm run dev`, `uvicorn`,
   `tsc -w`, `jest --watch`, ...; `DEV_SERVER_RE`, `--watch` / `-w`): it never
   exits by itself, so the time box ending it is the plan, whatever it had
-  logged. For any other command with output that is not such a banner, with
+  logged. A watcher that was killed (`npm test -- --watch` ending with exit
+  130, 137 or 143, cut off by the harness's time limit, or ended without a
+  word) is the same thing without the time box: how it was ended says
+  nothing about the tests, so it is not a red run and cannot be the red half
+  of a flaky pair. One whose output shows a red result is judged like any
+  other run. For any other command with output that is not such a banner, with
   another exit status, or without `timeout` in front, it is judged like any
   other run. (An invocation error in the output is always a failure.)
 - *A `cd` that failed:* in `cd missing-dir && npm test`, when the shell
@@ -1269,7 +1278,18 @@ command's" below.
   same turn (`npm test` after the edit) is the agent verifying its fix
   another way, and the red run is dropped. Not for a checker that could not
   run at all (a setup/invocation error), not across turns, and not for a
-  red test: lint passing says nothing about it. A failure stays on the record when the
+  red test: lint passing says nothing about it. A **filtered re-run that
+  prints nothing** closes the loop as well, when something was changed since
+  the red run: the same command through a filter that selects only failure
+  lines (`pytest | grep -E "^FAILED|^E  "`, `... | rg 'error|panicked'`;
+  `grep` exits 1 for "nothing matched") has no failures left to show, and a
+  type checker or linter that is silent when clean (`npx tsc --noEmit |
+  head`) has nothing to say. The earlier red run is dropped
+  (`totals.dropped_red_runs`). Not when nothing was changed in between
+  (silence then proves nothing and the red run stays), not for a filter that
+  asks for passes or for both (`grep passed`, `grep -E "passed|failed"`,
+  `grep -v`, `grep -c`), and not for a test runner behind `tail` or `head`,
+  which always prints something when it ran. A failure stays on the record when the
   command goes green with nothing but looks and other checks in between
   (flaky, or fixed outside the transcript), never goes green in the session,
   or was part of a [retry loop](#retry-loop--retry-loop).
@@ -1403,6 +1423,13 @@ command's" below.
   fixed, the branch was behind. Below 3 episodes such a push is not
   reported at all (it is in `totals.dropped_red_runs`). A push refused for want of
   credentials is an `auth` failure as above.
+- *A first push without an upstream:* `git push` answering "The current
+  branch ... has no upstream branch", followed by `git push --set-upstream
+  ...` (or `-u`) going through, is handled the same way (detail
+  `no_upstream`, wording "the branch had no upstream to push to"): dropped
+  below 3 episodes, and from 3 on a habit that gets `push-with-upstream`
+  ("push a new branch with `git push -u origin HEAD`, or set
+  `push.autoSetupRemote` where agents run"). No time is claimed.
 - *A program that is only there by its path:* `zebractl: command not found`
   followed by `./bin/zebractl ...` succeeding records `works_as:
   ./bin/zebractl`, and the advice is "use `./bin/zebractl`, not `zebractl`"
@@ -1535,6 +1562,17 @@ command's" below.
   run on a script outside it (`python3 /tmp/x/repro.py`). A `cd` that
   cannot be followed (`cd -`, `cd "$DIR"`) changes nothing. The same applies
   to declined and denied commands.
+  "Ran outside the repo" is about whose failure it is, not about what the
+  command may have done. A script that lives elsewhere but was run with the
+  working directory inside the repo (`python /tmp/sp/p1.py`, `uv run python
+  /tmp/p.py`, `python ~/bin/fix.py`, also as one step of a `;` chain that
+  writes the script first) can patch the repo's files like any in-repo
+  script, so it counts as "may have changed something" for everything that
+  asks whether anything changed between a red and a green run: red, such a
+  script, green is the development loop, not a flaky test, and a retry loop
+  is broken by it. Only a step that really ran somewhere else (`cd /tmp/sp &&
+  python p1.py`) and looks (`cat /tmp/sp/p1.py`) leave "nothing changed"
+  standing.
 - *... and commands that go into the repository are:* the same rule in the
   other direction. A session started in a parent directory (`~`, a monorepo
   root) whose command is `cd repo && make build` or `cd /abs/repo && make

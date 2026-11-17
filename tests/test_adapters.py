@@ -704,3 +704,15 @@ def test_generic_exit_code_may_be_a_numeric_string(
 )
 def test_a_deny_rule_on_a_file_tool_is_a_denial(text: str, expected: str | None) -> None:
     assert common.denial(text) == expected
+
+
+def test_colour_codes_are_stripped_from_tool_output(tmp_path: Path) -> None:
+    coloured = (
+        "\x1b[1m\x1b[31mFAILED\x1b[0m tests/test_a.py::test_x\n\x1b[31m1 failed\x1b[0m in 0.1s"
+    )
+    s = Session().user("go").bash("pytest --color=yes 2>&1 | tail -3", coloured)
+    parsed = parse_transcript(s.save(tmp_path))
+    outputs = [e.output for st in parsed.streams for e in st.events if e.output]
+    assert outputs == ["FAILED tests/test_a.py::test_x\n1 failed in 0.1s"]
+    assert common.clip_output("plain \x1b[38;5;196mred\x1b[m text") == "plain red text"
+    assert common.clip_output("no codes here") == "no codes here"

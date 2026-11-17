@@ -3749,3 +3749,212 @@ def test_a_title_or_a_sentence_does_not_document_a_setup_step(
     assert ("is documented, yet agents start without it" in rec["title"]) == (
         documented == "instruction"
     )
+
+
+_RED_RUN = "FAILED tests/test_a.py::test_x - AssertionError\n1 failed, 40 passed in 2s"
+
+
+@pytest.mark.parametrize(
+    "fix",
+    [
+        "python /tmp/sp/p1.py",
+        "uv run python /tmp/sp/p1.py",
+        "python ~/bin/fix.py",
+        "sed -i s/a/b/ src/a.py",
+    ],
+)
+def test_a_fix_applied_by_a_script_outside_the_repo_is_a_change(tmp_path: Path, fix: str) -> None:
+    def build(s: Session) -> None:
+        s.bash("pytest", _RED_RUN, exit_code=1).bash(fix, "patched").bash("pytest", "41 passed")
+
+    out = scan(tmp_path, [_built(build, i) for i in range(4)])
+    assert out["commands"] == [] and out["totals"]["dropped_red_runs"] == 4
+
+
+def test_a_script_written_and_run_in_one_chain_is_a_change(tmp_path: Path) -> None:
+    chain = "cat > /tmp/p.py <<E\nprint(1)\nE\nuv run python /tmp/p.py; pytest | tail -3"
+    sessions = []
+    for i in range(4):
+        s = Session(f"s{i}", cwd="/repo").user("go")
+        s.bash("pytest", _RED_RUN, exit_code=1).bash(chain, "patched\n41 passed in 2s")
+        sessions.append(s)
+    out = scan(tmp_path, sessions)
+    assert out["commands"] == [] and out["totals"]["dropped_red_runs"] == 4
+
+
+@pytest.mark.parametrize(
+    "between",
+    [
+        "cd /tmp/sp && python p1.py",  # run somewhere else: this repository was not its subject
+        "cat /tmp/sp/p1.py",  # a look changes nothing
+        "git status",
+    ],
+)
+def test_what_changes_nothing_leaves_a_rerun_flaky(tmp_path: Path, between: str) -> None:
+    (row,) = _commands(
+        tmp_path,
+        lambda s: (
+            s.bash("pytest", _RED_RUN, exit_code=1).bash(between, "x").bash("pytest", "41 passed")
+        ),
+    )
+    assert [r["id"] for r in row["recommendations"]] == ["fix-the-flaky-test"]
+
+
+@pytest.mark.parametrize(
+    ("command", "red", "edited"),
+    [
+        (
+            'uv run pytest -q 2>&1 | grep -E "^FAILED|^E  "',
+            "FAILED tests/test_a.py::test_x - AssertionError",
+            "/repo/src/a.py",
+        ),
+        (
+            "npx tsc --noEmit | head",
+            "src/a.ts(3,5): error TS2322: Type 'string' is not assignable to type 'number'.",
+            "/repo/src/a.ts",
+        ),
+    ],
+)
+def test_a_filtered_rerun_that_prints_nothing_after_a_change_is_green(
+    tmp_path: Path, command: str, red: str, edited: str
+) -> None:
+    code = 1 if "grep" in command else 0
+
+    def fixed(s: Session) -> None:
+        s.edit(edited).bash(command, red).edit(edited, "x", "y").bash(command, "", exit_code=code)
+
+    sessions = []
+    for i in range(4):
+        s = Session(f"s{i}", cwd="/repo").user("go")
+        fixed(s)
+        sessions.append(s)
+    out = scan(tmp_path, sessions)
+    assert out["commands"] == [] and out["totals"]["dropped_red_runs"] == 4
+
+    # nothing was changed in between: silence proves nothing, the red run stays
+    (row,) = _commands(
+        tmp_path / "unchanged", lambda s: s.bash(command, red).bash(command, "", exit_code=code)
+    )
+    assert row["events"] == 4
+
+
+def test_a_filter_for_passes_that_prints_nothing_is_not_green(tmp_path: Path) -> None:
+    # `grep passed` with no match says nothing passed
+    command = "pytest -q 2>&1 | grep passed"
+    (row,) = _commands(
+        tmp_path,
+        lambda s: (
+            s.bash("pytest -q", _RED_RUN, exit_code=1)
+            .edit("/repo/src/a.py")
+            .bash(command, "", exit_code=1)
+        ),
+    )
+    assert row["events"] == 4
+
+
+def _ordinary_next_to_one_error(s: Session, error: bool) -> None:
+    if error:
+        s.bash(
+            "uv run pytest -q",
+            "error: Failed to spawn: `pytest`\n  Caused by: No such file or directory (os error 2)",
+            exit_code=2,
+        )
+    s.edit("/repo/src/a.py", f"a{s.session_id}", "b")
+    s.bash("uv run pytest -q", _RED_RUN.replace("test_x", f"test_{s.session_id}"), exit_code=1)
+    s.user("leave it, thanks")
+
+
+def test_ordinary_failures_do_not_lift_a_row_past_its_real_evidence(tmp_path: Path) -> None:
+    def sessions(error_in: int) -> list[Session]:
+        made = []
+        for i in range(4):
+            s = Session(f"s{i}", cwd="/repo").user("go")
+            _ordinary_next_to_one_error(s, i < error_in)
+            made.append(s)
+        return made
+
+    (alone,) = scan(
+        tmp_path / "alone",
+        sessions(1)[:1]
+        + [
+            Session(f"q{i}", cwd="/repo").user("go").bash("uv run pytest -q", "41 passed")
+            for i in range(3)
+        ],
+    )["commands"]
+    (row,) = scan(tmp_path / "mixed", sessions(1))["commands"]
+    assert row["events"] == 5 and row["sessions"] == 4
+    # one real error in one session: the four red test runs corroborate nothing
+    assert row["confidence"] == "low" == alone["confidence"]
+    assert alone["score"] < row["score"] <= scoring.WEAK_ONLY_SCORE_CAP
+    detail = row["score_detail"]
+    assert detail["ordinary_limited"] is True and detail["capped"] is False
+    assert "4 of the events are ordinary failures" in row["why"]
+    assert "in sessions with nothing else they cannot lift the score past 19" in row["why"]
+    # ... and ordinary failures alone stay a capped lead
+    (weak,) = scan(tmp_path / "weak", sessions(0))["commands"]
+    assert weak["score_detail"]["capped"] and not weak["score_detail"]["ordinary_limited"]
+    assert weak["score"] <= scoring.WEAK_ONLY_SCORE_CAP and weak["confidence"] == "low"
+    # the real error in every session is a pattern, with or without the red runs
+    (real,) = scan(tmp_path / "real", sessions(4))["commands"]
+    assert real["confidence"] == "medium" and real["score"] > scoring.WEAK_ONLY_SCORE_CAP
+    assert real["score_detail"]["ordinary_limited"] is False  # every session has both
+    assert "ordinary failures" not in real["why"]
+
+
+@pytest.mark.parametrize(
+    ("code", "output"),
+    [(137, "Watching for file changes..."), (143, ""), (1, "")],
+)
+def test_a_watcher_that_was_killed_is_not_a_red_run(tmp_path: Path, code: int, output: str) -> None:
+    rows = _commands(
+        tmp_path,
+        lambda s: s.bash("npm test -- --watch", output, exit_code=code).bash(
+            "npm test", "Tests: 4 passed, 4 total"
+        ),
+    )
+    assert rows == []
+    # a watcher that showed a red test, and a green run with nothing changed, is a flaky pair
+    (row,) = _commands(
+        tmp_path / "red",
+        lambda s: s.bash(
+            "npm test -- --watch", "Tests: 1 failed, 3 passed, 4 total", exit_code=143
+        ).bash("npm test", "Tests: 4 passed, 4 total"),
+    )
+    assert [r["id"] for r in row["recommendations"]] == ["fix-the-flaky-test"]
+    # ... and the same status from a run that is no watcher is a failure like any other
+    (row,) = _commands(tmp_path / "plain", lambda s: s.bash("npm test", "", exit_code=137))
+    assert row["events"] == 4
+
+
+_NO_UPSTREAM = (
+    "fatal: The current branch feat has no upstream branch.\n"
+    "To push the current branch and set the remote as upstream, use\n\n"
+    "    git push --set-upstream origin feat\n"
+)
+
+
+@pytest.mark.parametrize(
+    "again", ["git push --set-upstream origin feat", "git push -u origin HEAD"]
+)
+def test_pushing_without_an_upstream_session_after_session_gets_advice(
+    tmp_path: Path, again: str
+) -> None:
+    def build(s: Session) -> None:
+        s.bash("git push", _NO_UPSTREAM, exit_code=128).bash(again, "branch 'feat' set up")
+
+    (row,) = _commands(tmp_path, build, count=3)
+    (advice,) = row["recommendations"]
+    assert advice["id"] == "push-with-upstream"
+    assert advice["title"] == "Tell agents to push a new branch with `git push -u origin HEAD`"
+    assert "failed 3 times in 3 sessions because the branch had no upstream" in advice["detail"]
+    assert "the branch had no upstream to push to" in row["evidence"][0]["summary"]
+    assert row["est_minutes_lost"] == 0
+    # twice is how new branches go: not reported
+    out = scan(tmp_path / "twice", [_built(build, i) for i in range(2)])
+    assert out["commands"] == [] and out["totals"]["dropped_red_runs"] == 2
+
+
+def _built(build: Any, i: int) -> Session:
+    s = Session(f"s{i}", cwd="/repo").user("go")
+    build(s)
+    return s

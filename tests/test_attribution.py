@@ -874,3 +874,23 @@ def test_a_shell_running_code_or_nothing_is_not_a_script() -> None:
 @pytest.mark.parametrize("command", ["[[ -f x ]]", "[ -f x ]", "test -f x", "[[ -d a && -f b ]]"])
 def test_a_shell_test_is_inspection(command: str) -> None:
     assert parse_command(command).inspection
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('pytest -q 2>&1 | grep -E "^FAILED|^E  "', True),
+        ("pytest | grep FAILED", True),
+        ("npx tsc --noEmit | grep -i error", True),
+        ("cargo test 2>&1 | rg 'panicked|FAILED'", True),
+        ("pytest | grep passed", False),  # nothing matched: nothing passed
+        ('pytest | grep -E "passed|failed"', False),  # the summary either way
+        ("pytest | grep -v FAILED", False),  # everything but the failures
+        ("pytest | grep -c FAILED", False),  # prints a count, never nothing
+        ("pytest | tail -3", False),
+        ("pytest", False),
+        ("grep -rn FAILED logs/", False),  # reading a log, no run behind the pipe
+    ],
+)
+def test_selects_failures(command: str, expected: bool) -> None:
+    assert attribution.selects_failures(command) is expected

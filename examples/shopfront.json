@@ -82,6 +82,7 @@
         "consistency": 0.88,
         "intensity": 7.503,
         "mean_session_points": 1.876,
+        "ordinary_limited": false,
         "recurrence": 0.774,
         "sessions": [
           {
@@ -158,6 +159,7 @@
         "consistency": 0.7,
         "intensity": 1.807,
         "mean_session_points": 1.807,
+        "ordinary_limited": false,
         "recurrence": 0.333,
         "sessions": [
           {
@@ -206,6 +208,7 @@
         "consistency": 0.7,
         "intensity": 1.585,
         "mean_session_points": 1.585,
+        "ordinary_limited": false,
         "recurrence": 0.333,
         "sessions": [
           {
@@ -254,6 +257,7 @@
         "consistency": 0.7,
         "intensity": 1.585,
         "mean_session_points": 1.585,
+        "ordinary_limited": false,
         "recurrence": 0.333,
         "sessions": [
           {
@@ -353,6 +357,7 @@
         "consistency": 0.8,
         "intensity": 3.585,
         "mean_session_points": 1.792,
+        "ordinary_limited": false,
         "recurrence": 0.528,
         "sessions": [
           {
@@ -509,6 +514,7 @@
         "consistency": 0.88,
         "intensity": 10.782,
         "mean_session_points": 2.696,
+        "ordinary_limited": false,
         "recurrence": 0.774,
         "sessions": [
           {
@@ -636,6 +642,7 @@
         "consistency": 0.85,
         "intensity": 6.217,
         "mean_session_points": 2.072,
+        "ordinary_limited": false,
         "recurrence": 0.667,
         "sessions": [
           {
@@ -705,6 +712,7 @@
         "consistency": 0.7,
         "intensity": 1.0,
         "mean_session_points": 1.0,
+        "ordinary_limited": false,
         "recurrence": 0.333,
         "sessions": [
           {
@@ -759,6 +767,7 @@
         "consistency": 0.6,
         "intensity": 1.0,
         "mean_session_points": 1.0,
+        "ordinary_limited": false,
         "recurrence": 0.333,
         "sessions": [
           {
@@ -813,6 +822,7 @@
         "consistency": 0.7,
         "intensity": 0.678,
         "mean_session_points": 0.678,
+        "ordinary_limited": false,
         "recurrence": 0.333,
         "sessions": [
           {

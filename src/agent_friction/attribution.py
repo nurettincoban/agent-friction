@@ -1148,6 +1148,32 @@ def ends_looking(command: str) -> bool:
     return program in FILE_READERS or _raw_key([program, *args]) in _TEXT_PRINTERS
 
 
+_FAILURE_WORD_RE = re.compile(r"fail|error|\^E\b|\bE {2,}|✗|✘|×|traceback|exception|warn", re.I)
+_SUCCESS_WORD_RE = re.compile(r"pass|\bok\b|success|✓|✔|\bdone\b|\d+ tests?\b|summary", re.I)
+
+
+def selects_failures(command: str) -> bool:
+    """Does the line end in a filter that lets only failure lines through?
+
+    ``pytest | grep -E "^FAILED|^E  "``: no output then means no failure. A pattern
+    that would also show a passing summary (``grep -E "passed|failed"``) printing
+    nothing means that nothing ran, which proves nothing.
+    """
+    try:
+        pieces = _pieces(command)
+    except (IndexError, ValueError, RecursionError):
+        return False
+    if len(pieces) < 2 or pieces[-2][1] not in ("|", "|&"):
+        return False
+    program, args = _program_of(pieces[-1][0])
+    if program not in ("grep", "egrep", "fgrep", "rg"):
+        return False
+    if any(a in ("-v", "--invert-match", "-c", "--count", "-L") for a in args):
+        return False
+    pattern = next((a for a in args if not a.startswith("-")), "")
+    return bool(_FAILURE_WORD_RE.search(pattern)) and not _SUCCESS_WORD_RE.search(pattern)
+
+
 def in_sequence(command: str) -> bool:
     """Does ``command`` run commands one after another (``a; b``, ``a && b``)?
 

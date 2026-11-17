@@ -179,7 +179,10 @@ def render_terminal(
     if sessions:
         who = plural(sessions, "session")
     else:
-        who = "git history only, no agent sessions" if git_on else "no agent sessions"
+        windowed = bool(window.get("since") or window.get("until"))
+        who = "no agent sessions in this time window" if windowed else "no agent sessions"
+        if git_on:
+            who = f"git history only, {who}"
     out.append(
         st.dim(
             f"{who}"

@@ -438,6 +438,17 @@ score       = 100 x severity x recurrence x consistency
   that wanted a hit is lifted out of the cap (see "What lifts it" under
   `search-miss` in the [catalog](signals.md)); `edit-thrash` and `read-loop`
   on their own stay capped however often they recur.
+- **Ordinary failures next to real evidence.** When a target has both, an
+  ordinary `command-failure` counts in full only in an episode that has
+  other evidence on that target too. Episodes that contain nothing but
+  ordinary failures cannot lift the score past the same **19**: the score is
+  the smaller of the plain formula and `max(19, the formula without those
+  episodes' events)`, and `score_detail.ordinary_limited` is true when that
+  made a difference (the factors in `score_detail` are then those of the
+  plain formula, and `score` is lower than their product). One invocation
+  error plus eight red test runs in other sessions is one invocation error,
+  not a command that fails everywhere. The `why` sentence of such a row
+  says how many of its events are ordinary failures.
 - **share** is 1 except when one correction is split over several files.
 - **log2 per session** gives diminishing returns: a session contributes one
   more point each time its friction doubles, so one pathological session
@@ -639,6 +650,11 @@ when `max_evidence` hides some events).
 | `medium` | 2 or more distinct sessions |
 | `low` | a single session, **or** a target whose score is capped because all its evidence is weak (see Score), in however many sessions |
 
+Ordinary command failures never count towards confidence: on a target that
+also has other evidence, the sessions and signal types counted are those of
+the other evidence. A real error in one session with red test runs in three
+more is "low".
+
 A signal that is computed from other events is not a second kind of evidence
 next to them: `retry-loop` and `no-convergence` are derived from
 `command-failure`, so a command with them has one signal type (`DERIVED_SIGNALS`).
@@ -698,6 +714,7 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `say-if-it-is-known-broken` | A command lifted out of the weak class because it stays red: it failed 2+ times and was still red at the end, in 3+ sessions (and there is no `no-convergence` event on it): "`npm run e2e` keeps ending red": say that it is known to be broken and what to run instead, or fix it. Also: the same test named as failed in 3+ sessions, none of which made it pass, and at least once before the session had changed any file ("`tests/test_legacy.py::test_old` is red session after session": fix it, or mark it as a known failure and say so); this form is given once: on the test file's row where the failure is attributed to a file of the repository, and on the command's row only for a test that has no such file |
 | `fix-the-flaky-test` | A test command failed and then passed on a plain re-run, with nothing changed in between, in 3+ sessions (variant `flaky`): "`npm test` looks flaky": fix or quarantine the flaky test, and say in AGENTS.md that a red run should be re-run once before anything is changed |
 | `pull-before-pushing` | `git push` was rejected as non-fast-forward (the remote branch had commits the local one lacked) in 3+ sessions: "tell agents to bring the branch up to date before `git push`": say in AGENTS.md to fetch and rebase (or merge) before pushing, and whether a force-push is ever acceptable. No time is claimed |
+| `push-with-upstream` | `git push` failed with "has no upstream branch" and went through with `--set-upstream` / `-u` in 3+ sessions: "tell agents to push a new branch with `git push -u origin HEAD`", or set `push.autoSetupRemote` where agents run. No time is claimed |
 | `file-is-gone` | a file hotspot whose file is not in the working tree **and** whose last commit in git deleted or renamed it (`file.removed_at`; needs git). Replaces every rule about what the file is like (`edit-the-source-not-the-output`, `split-or-anchor-large-file`, `make-edits-land`, `document-what-rewrites-this-file`, `path-agents-expect`, `add-a-fast-check`, `state-the-constraint`, `add-a-pointer`, `summarize-this-file`): "This file was renamed to `src/client.ts`" or "This file is no longer in the tree", with the date of that commit and `--since <date>` to leave the history out. What a human said (`write-down-the-rule`, `state-the-boundary`, ...) is kept below it. A path git never tracked, or a scan without git, is not "gone": nothing is known, and nothing changes |
 | `note-the-background-rate` | repository-level only (top-level `recommendations`, never on a hotspot): `edit-miss` or `stale-edit` with 5+ events in 3+ files and 3+ sessions. States the rate per file visit and names the files clearly above it (see "The repository's base rate"). Mentions a rewriting command only when misses followed one |
 

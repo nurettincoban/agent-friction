@@ -407,6 +407,21 @@ def _note_removed_worktrees(repo: Path, err: TextIO) -> None:
         )
 
 
+def _is_shallow(repo: Path) -> bool:
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--is-shallow-repository"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and proc.stdout.strip() == "true"
+
+
 def _analyze(args: argparse.Namespace, repo: Path, err: TextIO | None = None) -> dict[str, Any]:
     from agent_friction.engine import AnalyzeOptions, NoTranscriptsError, analyze
     from agent_friction.gitsignals import DEFAULT_AGENT_PATTERNS
@@ -447,6 +462,11 @@ def _analyze(args: argparse.Namespace, repo: Path, err: TextIO | None = None) ->
         ) from None
     if err is not None and args.transcripts is None and not args.repo_alias:
         _note_removed_worktrees(repo, err)
+    if err is not None and not args.no_git and _is_shallow(repo):
+        err.write(
+            "agent-friction: note: this is a shallow clone, so the git history (human rework "
+            "of agent commits) is cut short; run `git fetch --unshallow` for the full map\n"
+        )
     if int(result.get("totals", {}).get("sessions", 0)) == 0 and not args.allow_empty:
         from agent_friction.engine import session_directories
 

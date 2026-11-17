@@ -499,22 +499,30 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
             )
     # A push turned down because the remote had moved on: routine once, and a habit worth
     # a line of guidance from ``RECURRING_RED_MIN_SESSIONS`` sessions on.
-    pushes: dict[str, set[str]] = {}
-    turned_down = [f for f in findings if "push_rejected" in f.detail]
-    for finding in turned_down:
-        for key in _command_keys(finding):
-            pushes.setdefault(key, set()).add(finding.unit)
-    for finding in turned_down:
-        if any(
-            len(pushes.get(key, ())) >= RECURRING_RED_MIN_SESSIONS for key in _command_keys(finding)
-        ):
-            finding.detail["push_rejected"] = "recurring"
-    # ... and one that was put right by pulling, and is no habit, was the loop working.
-    dropped: list[Finding] = [
-        f
-        for f in turned_down
-        if f.detail.get("push_rejected") != "recurring" and "push_recovered" in f.detail
-    ]
+    # So is a first push of a new branch without `-u`, put right with `--set-upstream`.
+    dropped: list[Finding] = []
+    for habit in ("push_rejected", "no_upstream"):
+        pushes: dict[str, set[str]] = {}
+        turned_down = [
+            f
+            for f in findings
+            if habit in f.detail and (habit == "push_rejected" or "push_recovered" in f.detail)
+        ]
+        for finding in turned_down:
+            for key in _command_keys(finding):
+                pushes.setdefault(key, set()).add(finding.unit)
+        for finding in turned_down:
+            if any(
+                len(pushes.get(key, ())) >= RECURRING_RED_MIN_SESSIONS
+                for key in _command_keys(finding)
+            ):
+                finding.detail[habit] = "recurring"
+        # ... and one that was put right at once, and is no habit, was the loop working.
+        dropped += [
+            f
+            for f in turned_down
+            if f.detail.get(habit) != "recurring" and "push_recovered" in f.detail
+        ]
     for finding in pending:
         fix = finding.detail.pop("fixed_by_command")
         recurs = any(
@@ -609,17 +617,34 @@ def _is_git(finding: Finding) -> bool:
     return finding.signal == signals.HUMAN_REWORK
 
 
+def _beside_ordinary(items: Sequence[Item]) -> list[Item]:
+    """The evidence left when ordinary command failures are set aside (all of it if none)."""
+    return [(f, share) for f, share in items if not scoring.is_ordinary_failure(f)]
+
+
 def _score(items: Sequence[Item], exposed: set[str]) -> scoring.Score:
     """Score a target. Git evidence may raise a score, never lower it.
 
     A rework finding adds a friction "session" (the agent commit) that can pull
     the mean down, so the score from transcripts alone is the floor.
+
+    Ordinary command failures count in full only in episodes that have other
+    evidence too. In episodes of their own they may lift the score no further than
+    the cap for weak evidence: eight red test runs in other sessions next to one
+    real error are one real error.
     """
     sessions = exposed | {f.unit for f, _ in items}
     full = scoring.score_items(items, len(sessions))
     if scoring.weak_only(f for f, _ in items):
         # Nothing but signals that also accompany productive work: a lead, never an alarm.
         return dataclasses.replace(full, score=min(full.score, scoring.WEAK_ONLY_SCORE_CAP))
+    rest = _beside_ordinary(items)
+    if len(rest) < len(items):
+        beside = {f.unit for f, _ in rest}
+        kept = [(f, share) for f, share in items if f.unit in beside]
+        ceiling = max(scoring.score_items(kept, len(sessions)).score, scoring.WEAK_ONLY_SCORE_CAP)
+        if full.score > ceiling:
+            full = dataclasses.replace(full, score=ceiling)
     transcript_items = [(f, share) for f, share in items if not _is_git(f)]
     if len(transcript_items) == len(items) or not transcript_items:
         return full
@@ -1638,8 +1663,19 @@ class _Analysis:
         exposed = len(friction | self.sessions_of(self.exposure.get((kind, key), set())))
         level = scoring.confidence((s.session_id for s in result.sessions), signal_counts)
         capped = scoring.weak_only(found)
+        rest = [f for f, _ in _beside_ordinary(items)]
+        ordinary = len(found) - len(rest)
         if capped:
             level = "low"  # evidence that is routine on its own is a lead, never a pattern
+        elif ordinary:
+            # ... and next to real evidence it corroborates nothing: the sessions and the
+            # kinds of evidence that count are those of the rest
+            level = scoring.confidence({f.unit for f in rest}, {f.signal for f in rest})
+        limited = (
+            not capped
+            and ordinary > 0
+            and result.score < scoring.score_items(items, result.exposure_sessions).score
+        )
         return {
             "path": key,
             "kind": kind,
@@ -1662,11 +1698,13 @@ class _Analysis:
                 commits,
                 capped=capped,
                 episodes=len(units) - commits,
+                ordinary=ordinary if limited else 0,
             ),
             "recommendations": [],
             "evidence": [],
             "score_detail": {
                 "capped": capped,
+                "ordinary_limited": limited,
                 "severity": result.severity,
                 "recurrence": result.recurrence,
                 "consistency": result.consistency,

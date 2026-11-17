@@ -691,3 +691,16 @@ def test_argument_errors_lead_with_the_message(capsys: pytest.CaptureFixture[str
     err = capsys.readouterr().err
     assert err.startswith("agent-friction scan: error: argument --top")
     assert "usage:" not in err and "--help" in err
+
+
+def test_a_shallow_clone_is_noted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import agent_friction.cli as cli
+
+    monkeypatch.setattr(cli, "_is_shallow", lambda repo: True)
+    with_git = [a for a in INPUT if a != "--no-git"]
+    _, _, err = run("scan", *with_git)
+    assert "shallow clone" in err
+    _, _, err = run("scan", *INPUT)
+    assert "shallow clone" not in err
+    monkeypatch.undo()
+    assert cli._is_shallow(tmp_path / "missing") is False

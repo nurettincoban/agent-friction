@@ -111,6 +111,7 @@ RULE_IDS: tuple[str, ...] = (
     "say-if-it-is-known-broken",
     "fix-the-flaky-test",
     "pull-before-pushing",
+    "push-with-upstream",
     "file-is-gone",
     "note-the-background-rate",
 )
@@ -281,6 +282,7 @@ DOCUMENTABLE: frozenset[str] = frozenset(
         "document-the-command",
         "make-the-failure-actionable",
         "pull-before-pushing",
+        "push-with-upstream",
         "run-it-in-the-background",
         "give-it-more-time",
         "explain-the-failing-check",
@@ -1231,6 +1233,17 @@ class _Rules:
                 "had commits the local one lacked (non-fast-forward). Say in AGENTS.md to "
                 "fetch and rebase (or merge) before pushing, and whether a force-push is ever "
                 "acceptable.",
+                [signals.COMMAND_FAILURE],
+            )
+        unset = [f for f in failures if f.detail.get("no_upstream") == "recurring"]
+        if unset:
+            self.add(
+                "push-with-upstream",
+                f"Tell agents to push a new branch with {code('git push -u origin HEAD')}",
+                f"{code(key)} failed {_in_sessions(unset)} because the branch had no upstream, "
+                "and went through once the agent added `--set-upstream`. Say in AGENTS.md to "
+                "push a new branch with `git push -u origin HEAD`, or set "
+                "`git config push.autoSetupRemote true` where agents run.",
                 [signals.COMMAND_FAILURE],
             )
         flaky = self.get(signals.COMMAND_FAILURE, "flaky")

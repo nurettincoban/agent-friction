@@ -48,6 +48,7 @@ from agent_friction.attribution import (
     path_candidates,
     prints_another_file,
     same_invocation,
+    selects_failures,
     setup_label,
     status_is_last_steps,
     written_file,
@@ -1359,6 +1360,10 @@ def _same_job_other_manager(failed_key: str, key: str, unfound: str) -> bool:
 
 
 #: A command told to watch for changes (`tsc -w`, `jest --watch`, `vitest watch`).
+_NO_UPSTREAM_RE = re.compile(r"has no upstream branch")
+_SET_UPSTREAM_RE = re.compile(r"\s(?:-u|--set-upstream)(?=\s|=|$)")
+#: Exit statuses of a process that was ended from outside: SIGINT, SIGKILL, SIGTERM.
+_KILLED_EXIT_CODES = frozenset({130, 137, 143})
 _WATCH_RE = re.compile(r"\s(?:--watch(?:All)?|-w|watch)(?:\s|=|$)")
 #: "bash: pnpm: command not found" and its variants: the program a shell could not find.
 #: Also cmd.exe ("'x' is not recognized as an internal or external command") and
@@ -2036,6 +2041,9 @@ class _Action:
     file: str | None = None  # repo-relative path for read/edit/write
     cmd: ParsedCommand | None = None  # shell calls made inside the repo
     next_any: float | None = None  # time of the next transcript event after the call
+    #: A shell call that is not this repository's command (a script that lives outside
+    #: it) but was run with the shell standing inside it: it may have changed files here.
+    ran_here: bool = False
 
 
 def _span(action: _Action) -> tuple[float, float] | None:
@@ -2509,6 +2517,12 @@ class _Detector:
                 if not parsed.inspection:
                     label = self._label(parsed.key, primary, event.cwd)
                     self._see(model.COMMAND, label, event)
+            elif inside and parsed.key and not parsed.inspection:
+                # `python /tmp/fix.py` run in the repo: not a command of the repository,
+                # so nothing is attributed to it, but what it did, it did here.
+                action.ran_here = any(
+                    may_change_files(s.key) and not is_setup_step(s) for s in _candidates(parsed)
+                )
         elif event.op == model.OP_SEARCH:
             scope = _scope(event, self.ctx)
             if scope is not None:
@@ -3242,6 +3256,11 @@ class _Detector:
     def _on_shell(self, action: _Action, result: Event) -> None:
         cmd = action.cmd
         if cmd is None:
+            if action.ran_here and result.ok and not result.background:
+                # A script from outside the repo, run inside it: nobody knows what it
+                # changed. A red run before it and a green one after are not "nothing
+                # changed in between"; it gets no credit by name either.
+                self._on_change(certain=False)
             return
         if result.background:
             # Launched in the background: this only says that it started. Neither red nor
@@ -3279,6 +3298,26 @@ class _Detector:
         for step in after:
             self._possibly_changed(step, action.call.cwd, looked)
 
+    def _silent_rerun(self, key: str, line: str, output: str) -> None:
+        """``key`` ran again behind a filter and printed nothing: after a change, that is
+        the red run before the change having been fixed.
+
+        Only for red runs that a change followed. With nothing changed, silence proves
+        nothing, and it never makes a test "pass on a re-run".
+        """
+        state = self.state
+        if _said_anything(output) or key in state.red:
+            return
+        closed: set[int] = set()
+        for table in (state.red_then_edited, state.red_then_ran):
+            for finding in table.pop(key, []):
+                state.ran_after.pop(id(finding), None)
+                if id(finding) not in state.looped and "push_rejected" not in finding.detail:
+                    closed.add(id(finding))
+        if closed:
+            state.cycles.pop(key, None)
+        self._drop(closed, DROPPED_DEV_LOOP)
+
     def _just_imported(self, result: Event) -> bool:
         """Is the module a failure reports missing one that a recent edit imports?"""
         missing = missing_name(_QUOTED_LINE_RE.sub("", result.output)) or missing_name(
@@ -3301,6 +3340,11 @@ class _Detector:
             # key and each one is different. One that writes files is an edit and was
             # counted as one; any other changed nothing that a later session could
             # repeat, so it is nobody's setup step.
+            return
+        if self._elsewhere(step, cwd) and not is_setup_step(step):
+            # a script that lives outside the repository: it may have changed something
+            # here, and it is nothing anyone could be told to run
+            self._on_change(certain=False)
             return
         copied = env_copy(step)
         setup = copied is not None or is_setup_step(step)
@@ -3429,6 +3473,11 @@ class _Detector:
                 state.ok_commands += 1
                 self._shell_undo(action)
             if unknown:
+                # ... except a type checker or linter re-run that says nothing at all
+                # through its pipe (`npx tsc --noEmit | head` after an edit): those are
+                # silent when clean, so no news is the fix having worked
+                if command_role(key) in _STATIC_CHECKS:
+                    self._silent_rerun(key, action.call.command or "", result.output)
                 return  # unknown outcome: it closes nothing and recovers nothing
             # The very same command line failed repeatedly and now passes, and nothing was
             # changed or installed in between: the agent was waiting for something (CI, a
@@ -3628,6 +3677,19 @@ class _Detector:
             # itself that ran out without a word (`timeout 5 nc -l 8080`) did what it was
             # asked to: the command was cut off, it did not fail.
             return
+        if (
+            _WATCH_RE.search(action.call.command or "")
+            and (
+                result.exit_code in _KILLED_EXIT_CODES
+                or HARNESS_TIMEOUT_RE.match(result.output) is not None
+                or not _said_anything(result.output)
+            )
+            and key_verdict(key, result.output) != "red"
+            and not INVOCATION_ERROR_RE.search(result.output)
+        ):
+            # `npm test -- --watch` that was killed, or cut off without a word: a watcher
+            # never ends by itself, so how it was ended says nothing about the tests
+            return
         code = None if hidden else result.exit_code
         if hidden and not several:
             code = echoed_status(action.call.command or "", result.output) or None
@@ -3640,7 +3702,11 @@ class _Detector:
             if not no_tool and (down is None or down[0] == ENV_VARIABLE or result.ok):
                 return
         if code == 1 and cmd.last_program in MATCH_FILTERS and cmd.last_program != cmd.program:
-            return  # `... | grep x` with nothing matched
+            # `... | grep x` with nothing matched. Where x asks for failures only (`pytest
+            # | grep -E "^FAILED|^E "`), nothing matched is the run having none.
+            if selects_failures(action.call.command or ""):
+                self._silent_rerun(key, action.call.command or "", result.output)
+            return
         call = action.call
         timed_out = HARNESS_TIMEOUT_RE.match(result.output) is not None
         if result.harness_error and code is None and not timed_out:
@@ -3721,6 +3787,9 @@ class _Detector:
         pushed = key == "git push" and PUSH_REJECTED_RE.search(result.output) is not None
         if pushed and environment is None and not invocation:
             kind = "the remote branch had commits the local one lacked"
+        unset = key == "git push" and _NO_UPSTREAM_RE.search(result.output) is not None
+        if unset and environment is None and not invocation:
+            kind = "the branch had no upstream to push to"
         summary = f"`{shown(key)}` failed ({status}; {kind})"
         if not certain:
             summary = (
@@ -3746,6 +3815,8 @@ class _Detector:
             detail["own_module"] = "1"
         if pushed and environment is None and not invocation:
             detail["push_rejected"] = "1"
+        if unset and environment is None and not invocation:
+            detail["no_upstream"] = "1"
         if environment is not None:
             detail["variant"] = "environment"
             detail["environment"] = environment[0]
@@ -4051,6 +4122,12 @@ class _Detector:
         # Green with no change in between: those red runs stay on the record for good.
         for failed_key in [k for k in state.red if closes(k)]:
             for finding in take(state.red, failed_key):
+                if "no_upstream" in finding.detail and failed_key == actual:
+                    # `git push`, "has no upstream branch", `git push --set-upstream ...`:
+                    # once is nothing; whether it is a habit, the engine can tell.
+                    if _SET_UPSTREAM_RE.search(line):
+                        finding.detail["push_recovered"] = "1"
+                    continue
                 if (
                     line
                     and (is_snippet(failed_key) or command_role(failed_key) is None)
