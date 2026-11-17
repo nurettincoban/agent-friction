@@ -85,6 +85,13 @@ jobs:
           "$bin/agent-friction" demo -o "$RUNNER_TEMP/demo.html"
           grep -q "schema_gen.py" "$RUNNER_TEMP/demo.html"
           "$bin/agent-friction" install-skill --print | grep -q "name: agent-friction-fix"
+      - name: Run the Claude Code plugin's launcher without installing anything
+        env:
+          MSYS_NO_PATHCONV: "1"
+        run: |
+          sh plugin/agent-friction --version
+          (cd "$RUNNER_TEMP" && sh "$OLDPWD/plugin/agent-friction" demo -o plugin-demo.html)
+          grep -q "schema_gen.py" "$RUNNER_TEMP/plugin-demo.html"
       - if: runner.os == 'Linux'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "agent-friction",
+  "version": "0.1.0",
+  "description": "Find where coding agents keep losing time in a repository (failing commands, missed edits, human corrections), fix the causes with your approval, and measure whether the fix worked. Reads Claude Code transcripts locally; needs Python 3.10+.",
+  "author": { "name": "Nurettin Coban" },
+  "homepage": "https://nurettincoban.github.io/agent-friction/",
+  "repository": "https://github.com/nurettincoban/agent-friction",
+  "license": "MIT",
+  "keywords": ["agents", "claude-code", "developer-experience", "agents-md", "claude-md"],
+  "skills": "./plugin/skills/"
+}

@@ -13,3 +13,7 @@
 - Never add a real transcript to the repo, even redacted.
 - Any change to a signal or the scoring updates `docs/signals.md` or `docs/methodology.md`
   in the same change, with positive and negative tests.
+- The Claude Code plugin lives in `.claude-plugin/` and `plugin/skills/`. Its skills run the
+  bundled copy through `sh "${CLAUDE_PLUGIN_ROOT}/plugin/agent-friction"`, never a bare
+  `agent-friction`. Keep `plugin.json`'s `version` equal to `__version__`;
+  `tests/test_plugin.py` checks this and that every command in a skill parses.

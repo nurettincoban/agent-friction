@@ -878,3 +878,96 @@ def test_the_agent_tools_own_rules_are_reported_apart_and_counted_nowhere(tmp_pa
     assert "## Nothing to change yet" in prompt
     html = run("scan", *argv, "-f", "html")[1]
     assert 'id="agenttool"' in html
+
+
+# ---- --since with a saved scan ---------------------------------------------------------
+
+
+def test_since_a_saved_scan_reads_only_what_came_after_it(tmp_path: Path) -> None:
+    before, after = tmp_path / "before.json", tmp_path / "after.json"
+    assert run("scan", *INPUT, "--until", "2026-11-05", "-o", str(before))[0] == EXIT_OK
+    assert run("scan", *INPUT, "--since", str(before), "-o", str(after))[0] == EXIT_OK
+    last = json.loads(before.read_text(encoding="utf-8"))["window"]["last_event"]
+    first = json.loads(after.read_text(encoding="utf-8"))["window"]["first_event"]
+    assert first > last
+    # No session on both sides, so compare needs no --allow-overlap.
+    code, out, err = run("compare", str(before), str(after), "--color", "never")
+    assert code == EXIT_OK, err
+    assert "overlap" not in err
+    assert "schema_gen.py" in out
+    # Nothing came after the later scan.
+    code, _, err = run("scan", *INPUT, "--since", str(after))
+    assert code == EXIT_ERROR
+    assert "no agent session touched" in err
+
+
+def test_since_a_saved_scan_that_is_missing_or_empty_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run("scan", *INPUT, "--since", str(tmp_path / "nope.json"))[0] == EXIT_USAGE
+    assert "can't read the saved scan" in capsys.readouterr().err
+    empty = tmp_path / "empty.json"
+    empty.write_text('{"window": {}}', encoding="utf-8")
+    assert run("scan", *INPUT, "--since", str(empty))[0] == EXIT_USAGE
+    assert "not a saved scan with events" in capsys.readouterr().err
+    listed = tmp_path / "list.json"
+    listed.write_text("[]", encoding="utf-8")
+    assert run("scan", *INPUT, "--since", str(listed))[0] == EXIT_USAGE
+    # Anything not ending in .json is still a time.
+    assert run("scan", *INPUT, "--since", "2026-11-05", "--color", "never")[0] == EXIT_OK
+
+
+def test_since_a_saved_scan_reads_what_it_read_the_way_it_read_it(tmp_path: Path) -> None:
+    before, after = tmp_path / "before.json", tmp_path / "after.json"
+    assert run("scan", *INPUT, "--until", "2026-11-05", "-o", str(before))[0] == EXIT_OK
+    inputs = json.loads(before.read_text(encoding="utf-8"))["settings"]["inputs"]
+    assert inputs["repo_alias"] == ["/home/dev/shopfront"]
+    assert inputs["transcripts"][0].endswith("fixtures/transcripts")
+    # Only the repository and the saved scan: the rest comes from the saved scan.
+    code, _, err = run("scan", INPUT[0], "--since", str(before), "-o", str(after))
+    assert code == EXIT_OK, err
+    assert "as in the saved scan: --transcripts" in err
+    assert "--repo-alias /home/dev/shopfront --no-git" in err
+    assert json.loads(after.read_text(encoding="utf-8"))["totals"]["sessions"] > 0
+    code, _, err = run("compare", str(before), str(after))
+    assert code == EXIT_OK, err
+    assert "git history" not in err
+
+
+def test_a_scan_without_excerpts_records_no_paths_but_passes_the_mode_on(tmp_path: Path) -> None:
+    before, after = tmp_path / "before.json", tmp_path / "after.json"
+    assert (
+        run("scan", *INPUT, "--no-excerpts", "--until", "2026-11-05", "-o", str(before))[0]
+        == EXIT_OK
+    )
+    inputs = json.loads(before.read_text(encoding="utf-8"))["settings"]["inputs"]
+    assert inputs == {"transcripts": True, "repo_alias": True}  # that they were given, no paths
+    code, _, err = run("scan", INPUT[0], "--since", str(before))
+    assert code == EXIT_USAGE
+    assert "pass --transcripts again" in err
+    code, _, err = run("scan", *INPUT, "--since", str(before), "-o", str(after))
+    assert code == EXIT_OK, err
+    assert "as in the saved scan: --no-excerpts" in err
+    assert json.loads(after.read_text(encoding="utf-8"))["settings"]["key_mode"] == "pseudonymized"
+    assert run("compare", str(before), str(after))[0] == EXIT_OK
+
+
+def test_compare_notes_git_history_on_one_side_only(tmp_path: Path) -> None:
+    before, after = tmp_path / "before.json", tmp_path / "after.json"
+    assert run("scan", *INPUT, "--until", "2026-11-05", "-o", str(before))[0] == EXIT_OK
+    saved = json.loads(before.read_text(encoding="utf-8"))
+    assert run("scan", *INPUT, "--since", "2026-11-05", "-o", str(after))[0] == EXIT_OK
+    saved["settings"]["git"] = True
+    before.write_text(json.dumps(saved), encoding="utf-8")
+    code, _, err = run("compare", str(before), str(after))
+    assert code == EXIT_OK
+    assert "only the before scan read git history" in err
+
+
+def test_show_reads_what_a_saved_scan_read(tmp_path: Path) -> None:
+    before = tmp_path / "before.json"
+    assert run("scan", *INPUT, "--until", "2026-11-05", "-o", str(before))[0] == EXIT_OK
+    code, out, err = run("show", "pytest", INPUT[0], "--since", str(before), "--color", "never")
+    assert "pytest" in out
+    assert code == EXIT_OK, err
+    assert "as in the saved scan" in err
