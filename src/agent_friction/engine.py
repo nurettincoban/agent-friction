@@ -888,6 +888,8 @@ class _Analysis:
         #: The repository's name: the main worktree's, also when scanned from a linked one.
         self.name = repo_name(self.repo)
         self.roots = roots
+        #: Calls the agent tool refused by its own rules (``scoring.is_agent_tool_rule``).
+        self.tool_rules: list[Finding] = []
         self.resolver = PathResolver(
             self.repo, [*roots[1:], str(options.repo), *options.repo_aliases]
         )
@@ -1399,8 +1401,13 @@ class _Analysis:
             dropped.append((one_off.line, max(0.0, high - low), signals.DROPPED_ONE_OFF))
         self.dropped = dropped
         _unclaim_single_session_stretches(findings)
+        # The agent tool's own rules are the same in every repository: reported apart,
+        # counted nowhere else (scores, totals, the map, comparisons).
+        self.tool_rules = [f for f in findings if scoring.is_agent_tool_rule(f)]
+        findings = [f for f in findings if not scoring.is_agent_tool_rule(f)]
         findings.sort(key=_finding_order)
-        for index, finding in enumerate(findings):
+        self.tool_rules.sort(key=_finding_order)
+        for index, finding in enumerate([*findings, *self.tool_rules]):
             finding.fid = index
         for finding in findings:  # friction implies exposure, whatever the detector saw
             for target in finding.targets:
@@ -1676,6 +1683,10 @@ class _Analysis:
                 # (`cd ../other && ...`, a file under /tmp): seen, and not counted.
                 "events_outside_repo": self.events_outside_repo,
                 "events_elsewhere_in_repo": self.events_elsewhere_in_repo,
+                # Calls the agent tool refused by its own rules: listed under
+                # ``agent_tool``, in none of the counts above.
+                "agent_tool_events": len(self.tool_rules),
+                "agent_tool_minutes": scoring.lost_minutes(self.tool_rules),
             },
             "signals": [
                 {
@@ -1718,7 +1729,34 @@ class _Analysis:
                     [f for f in findings if not f.targets], MAX_UNATTRIBUTED_EVIDENCE
                 )
             ],
+            "agent_tool": self._agent_tool_rules(),
         }
+
+    def _agent_tool_rules(self) -> list[dict[str, Any]]:
+        """The agent tool's own refusals, per command: what agents tried, how often,
+        and what the refusal says to do instead. Not friction of this repository."""
+        groups: dict[str, list[Finding]] = {}
+        for finding in self.tool_rules:
+            target = next((t for t in finding.targets if t.kind == model.COMMAND), None)
+            key = self.clean(target.key) if target is not None else ""
+            groups.setdefault(key, []).append(finding)
+        quote = self.quote if self.options.include_excerpts else None
+        ordered = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+        return [
+            {
+                "command": key or None,
+                "events": len(found),
+                "sessions": len({f.session_id for f in found}),
+                "est_minutes_lost": scoring.lost_minutes(found),
+                "recommendations": recommend.recommend(model.COMMAND, key, found, quote=quote)
+                if key
+                else [],
+                "evidence": [
+                    self._evidence(f) for f in _pick_evidence(found, self.options.max_evidence)
+                ],
+            }
+            for key, found in ordered
+        ]
 
     def _entry(self, kind: str, key: str, items: Sequence[Item]) -> dict[str, Any]:
         """The cheap part of a hotspot (everything needed for ranking)."""

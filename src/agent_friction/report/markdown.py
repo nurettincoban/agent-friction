@@ -6,6 +6,8 @@ import re
 from typing import Any
 
 from agent_friction.report._common import (
+    AGENT_TOOL_HEADING,
+    agent_tool_rules,
     collect_recommendations,
     dropped_note,
     events_phrase,
@@ -57,6 +59,16 @@ def _table(items: list[dict[str, Any]], label: str) -> list[str]:
 def _events(rec: dict[str, Any]) -> str:
     n = rec.get("events")
     return plural(n, "event") if isinstance(n, int) else "few events"
+
+
+def _agent_tool_section(result: dict[str, Any]) -> list[str]:
+    rows = agent_tool_rules(result)
+    if not rows:
+        return []
+    out = [f"## {AGENT_TOOL_HEADING}", ""]
+    for heading, text in rows:
+        out.append(f"- **{_html_escape(heading)}.** {_html_escape(text)}")
+    return [*out, ""]
 
 
 def _details(h: dict[str, Any], titles: dict[str, str]) -> list[str]:
@@ -177,6 +189,7 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
             out += ["No hotspot: no file, directory, or command collected friction.", ""]
         else:
             out += ["No recurring friction found.", ""]
+        out += _agent_tool_section(result)
         out += _unattributed(result)
         out += _repo_section(result)
         note = dropped_note(result)
@@ -198,6 +211,7 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
     note = dropped_note(result)
     if note:
         out += [f"_{note}_", ""]
+    out += _agent_tool_section(result)
     out += _repo_section(result)
 
     if hotspots:

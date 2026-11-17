@@ -1,4 +1,5 @@
 {
+  "agent_tool": [],
   "commands": [
     {
       "agent_commits": 0,
@@ -1063,6 +1064,8 @@
   },
   "tool_failures": [],
   "totals": {
+    "agent_tool_events": 0,
+    "agent_tool_minutes": 0.0,
     "commands_affected": 4,
     "corrections": 4,
     "directories_affected": 1,

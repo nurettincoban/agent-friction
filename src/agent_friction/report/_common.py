@@ -110,17 +110,6 @@ def is_agent_tool(rec: dict[str, Any]) -> bool:
     return rec.get("origin") == "agent-tool"
 
 
-def agent_tool_only(item: dict[str, Any]) -> bool:
-    """A hotspot whose actionable advice is all about the agent tool's own rules.
-
-    Claude Code refusing a foreground `sleep` is the same in every repository: such a
-    row is listed (the round trips cost time) but not counted against the repository.
-    """
-    recs = [r for r in item.get("recommendations") or [] if isinstance(r, dict)]
-    strong = [r for r in recs if not is_thin(r)]
-    return bool(strong) and all(is_agent_tool(r) for r in strong)
-
-
 def _first_recs(
     ranked: list[dict[str, Any]], limit: int, *, thin: bool
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
@@ -144,16 +133,8 @@ def thin_count(result: dict[str, Any]) -> int:
     )
 
 
-AGENT_TOOL_NOTE = (
-    "Only the agent tool's own rules came up: nothing in this repository needs fixing. "
-    "A line in AGENTS.md naming what the refusal suggests saves the round trips."
-)
-
-
 def thin_note(result: dict[str, Any], shown: list[tuple[dict[str, Any], dict[str, Any]]]) -> str:
     """The line under "What to fix first" about advice left out for thin evidence."""
-    if shown and all(is_agent_tool(rec) for _, rec in shown):
-        return AGENT_TOOL_NOTE
     if any(is_thin(rec) for _, rec in shown):
         return (
             f"Each of these rests on fewer than {THIN_EVIDENCE_EVENTS} events: a lead to "
@@ -168,6 +149,36 @@ def thin_note(result: dict[str, Any], shown: list[tuple[dict[str, Any], dict[str
         f"each and {be} left out here. Each item's own details list them, marked "
         '"thin evidence" (in the terminal: `agent-friction show <path>`).'
     )
+
+
+def agent_tool_rules(result: dict[str, Any]) -> list[tuple[str, str]]:
+    """(heading, text) for each command the agent tool refused by its own rules.
+
+    Reported apart from the hotspots: a rule of the agent tool (Claude Code refusing a
+    foreground `sleep`) is the same in every repository, so it counts in no score.
+    """
+    out: list[tuple[str, str]] = []
+    for row in result.get("agent_tool") or []:
+        if not isinstance(row, dict):
+            continue
+        command = row.get("command") or "a call"
+        minutes = float(row.get("est_minutes_lost", 0) or 0)
+        lost = f", ~{fmt_minutes(minutes)} of agent time" if minutes > 0 else ""
+        heading = (
+            f"{command}: refused {plural(int(row.get('events', 0) or 0), 'time')} in "
+            f"{plural(int(row.get('sessions', 0) or 0), 'session')}{lost}"
+        )
+        recs = [r for r in row.get("recommendations") or [] if isinstance(r, dict)]
+        text = (
+            str(recs[0].get("detail", ""))
+            if recs
+            else ("Refused by a rule of the agent tool itself, not by anything in this repository.")
+        )
+        out.append((heading, text))
+    return out
+
+
+AGENT_TOOL_HEADING = "The agent tool's own rules (not counted above)"
 
 
 def all_items(result: dict[str, Any]) -> list[dict[str, Any]]:

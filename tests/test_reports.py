@@ -452,7 +452,7 @@ def test_prompt_fences_hold_backticks_in_excerpts() -> None:
 
 def test_advice_about_the_agent_tool_comes_after_advice_about_the_repo() -> None:
     from agent_friction.report import render_prompt
-    from agent_friction.report._common import agent_tool_only, all_items
+    from agent_friction.report._common import all_items
 
     r = sample_result()
     top = next(h for h in all_items(r) if h["path"] == "src/shop/generated/schema.py")
@@ -460,18 +460,5 @@ def test_advice_about_the_agent_tool_comes_after_advice_about_the_repo() -> None
         rec["origin"] = "agent-tool"
     recs = collect_recommendations(r)
     assert recs[-1][0] is top and recs[0][0] is not top
-    assert agent_tool_only(top) and not agent_tool_only(recs[0][0])
     text = render_prompt(r)
     assert text.index("`pytest`") < text.index("`src/shop/generated/schema.py`")
-
-
-def test_when_only_the_agent_tools_rules_came_up_the_list_says_so() -> None:
-    from agent_friction.report._common import AGENT_TOOL_NOTE, all_items, thin_note
-
-    r = sample_result()
-    for item in all_items(r):
-        for rec in item.get("recommendations", []):
-            rec["origin"] = "agent-tool"
-    recs = collect_recommendations(r)
-    assert thin_note(r, recs) == AGENT_TOOL_NOTE
-    assert AGENT_TOOL_NOTE.split(":")[0] in render_terminal(r)

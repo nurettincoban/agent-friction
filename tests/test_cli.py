@@ -839,7 +839,7 @@ def test_install_skill_defaults_to_the_home_directory(
     assert (tmp_path / ".claude" / "skills" / "agent-friction-fix" / "SKILL.md").is_file()
 
 
-def test_fail_on_does_not_count_the_agent_tools_own_rules(tmp_path: Path) -> None:
+def test_the_agent_tools_own_rules_are_reported_apart_and_counted_nowhere(tmp_path: Path) -> None:
     from tests.builders import Session
 
     blocked = "Blocked: sleep {n} followed by: gh run view. To wait for a condition, use Monitor"
@@ -859,6 +859,22 @@ def test_fail_on_does_not_count_the_agent_tools_own_rules(tmp_path: Path) -> Non
     repo.mkdir()
     argv = [str(repo), "--transcripts", str(transcripts), "--repo-alias", "/repo", "--no-git"]
     code, out, err = run("scan", *argv, "--color", "never", "--fail-on", "10")
-    assert "Built into the agent tool, not this repository" in out
-    assert code == EXIT_OK
-    assert "not counted for --fail-on: sleep" in err
+    assert code == EXIT_OK and "sleep" not in err
+    assert "The agent tool's own rules (not counted above)" in out
+    assert "sleep: refused 30 times in 6 sessions" in out
+    assert "Built into" not in out  # the explanation, not a title among the fixes
+    assert "Commands that keep failing" not in out
+    code, out, _ = run("scan", *argv, "-f", "json")
+    data = json.loads(out)
+    assert data["commands"] == [] and data["totals"]["friction_events"] == 0
+    assert data["totals"]["agent_tool_events"] == 30
+    (row,) = data["agent_tool"]
+    assert (row["command"], row["events"], row["sessions"]) == ("sleep", 30, 6)
+    assert row["recommendations"][0]["origin"] == "agent-tool"
+    md = run("scan", *argv, "-f", "markdown")[1]
+    assert "## The agent tool's own rules (not counted above)" in md
+    prompt = run("scan", *argv, "-f", "prompt")[1]
+    assert "## Optional: the agent tool's own rules" in prompt
+    assert "## Nothing to change yet" in prompt
+    html = run("scan", *argv, "-f", "html")[1]
+    assert 'id="agenttool"' in html

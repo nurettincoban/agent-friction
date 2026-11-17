@@ -86,7 +86,7 @@ together. We [ran both on the same sessions](https://github.com/nurettincoban/ag
   ([methodology](https://github.com/nurettincoban/agent-friction/blob/main/docs/methodology.md)).
 - **Honest about evidence.** Advice resting on fewer than 5 events is marked "thin evidence" and
   kept out of "What to fix first". A rule of the agent tool itself (like Claude Code refusing a
-  foreground `sleep`) is reported as that, not as a problem in your repository. It reads your
+  foreground `sleep`) is reported apart and counts in no score: it is not your repository's. It reads your
   `AGENTS.md`, `CLAUDE.md` and settings first, and says when the advice is already written down.
 
 ## Privacy

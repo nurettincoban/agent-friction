@@ -56,7 +56,7 @@ plan before any code is written"), on verifying before claiming success, and on 
 | | `/insights` | agent-friction |
 | --- | --- | --- |
 | Sessions covered | 3 of 20 ("8 messages across 3 sessions (20 total)") | All 20 |
-| 280 refusals of `sleep` by Claude Code's own rule | Counted as "Other: 42" tool errors (the 3 sessions it read), not explained | **Ranked first**: "Built into the agent tool, not this repository", 280 refusals in 20 sessions, quotes what the refusal says to do instead (`run_in_background`, Monitor), says nothing in the repository needs to change |
+| 280 refusals of `sleep` by Claude Code's own rule | Counted as "Other: 42" tool errors (the 3 sessions it read), not explained | **Reported apart**, under "The agent tool's own rules (not counted above)": 280 refusals in 20 sessions, ~9m of agent time, what the refusal says to do instead (`run_in_background`, Monitor), and that nothing in the repository needs to change. Counted in no score or total |
 | Advice on waiting for the build | `gh run watch <id> --exit-status` (sound), or "a watch loop with a sleep interval" (may run into the same rule) | Use what the refusal names; one line in AGENTS.md saves the round trips |
 | 2 declines of `sleep 60`, 3 stopped `ls` | Declines counted ("User Rejected: 2"); says no session shows "corrections, or interruptions", though each of the 3 it read has a stopped `ls` | Listed under their command, marked thin evidence, kept out of "What to fix first" |
 

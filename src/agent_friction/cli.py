@@ -28,7 +28,6 @@ from agent_friction.report import (
     render_terminal,
 )
 from agent_friction.report._common import (
-    agent_tool_only,
     all_items,
     command_candidates,
     find_dir,
@@ -790,15 +789,7 @@ def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         stderr.write(f"wrote {fmt} report to {args.output}\n")
 
     if args.fail_on is not None:
-        high = [h for h in all_items(result) if float(h.get("score", 0)) >= args.fail_on]
-        over = [h for h in high if not agent_tool_only(h)]
-        tool_rules = [h for h in high if agent_tool_only(h)]
-        if tool_rules:
-            names = ", ".join(str(h["path"]) for h in tool_rules[:5])
-            stderr.write(
-                f"agent-friction: not counted for --fail-on: {names} (refused by the agent "
-                "tool's own rules, not by anything in this repository)\n"
-            )
+        over = [h for h in all_items(result) if float(h.get("score", 0)) >= args.fail_on]
         if over:
             names = ", ".join(str(h["path"]) for h in over[:5])
             stderr.write(

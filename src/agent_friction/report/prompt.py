@@ -13,6 +13,7 @@ import re
 from typing import Any
 
 from agent_friction.report._common import (
+    agent_tool_rules,
     all_items,
     fmt_minutes,
     is_agent_tool,
@@ -158,6 +159,19 @@ def render_prompt(result: dict[str, Any]) -> str:
                 str(rec.get("detail", "")).strip(),
                 "",
             ]
+    tool_rules = agent_tool_rules(result)
+    if tool_rules:
+        out += [
+            "## Optional: the agent tool's own rules",
+            "",
+            "The agent tool refused these by a rule of its own. Nothing in the repository "
+            "causes them and nothing needs fixing; a line in the instruction file naming "
+            "what the refusal says to do instead would save the round trips. Propose it "
+            "only as an option.",
+            "",
+            *(f"- **{heading}.** {text}" for heading, text in tool_rules),
+            "",
+        ]
     if n == 0:
         out += [
             "## Nothing to change yet",

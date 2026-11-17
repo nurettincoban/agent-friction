@@ -101,9 +101,9 @@ input[type=search] { width: 100%; max-width: 320px; padding: 6px 10px; border: 1
   aside { max-height: none; overflow: visible; position: static; }
   .layout { grid-template-columns: 1fr; }
 }
-#fixfirst ol { padding-left: 22px; margin: 0; }
-#fixfirst li { margin: 0 0 10px; line-height: 1.45; }
-#fixfirst li > span { display: block; color: var(--muted); }
+#fixfirst ol, #agenttool ul { padding-left: 22px; margin: 0; }
+#fixfirst li, #agenttool li { margin: 0 0 10px; line-height: 1.45; }
+#fixfirst li > span, #agenttool li > span { display: block; color: var(--muted); }
 .linkbtn { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; text-decoration: underline; }
 .thin { color: var(--muted); font-style: italic; font-weight: normal; }
 footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
@@ -119,6 +119,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
 <main>
   <div class="stats" id="stats"></div>
   <section id="fixfirst" hidden><h2>What to fix first</h2><ol id="fixfirst-list"></ol><p class="sub" id="fixfirst-note"></p></section>
+  <section id="agenttool" hidden><h2>The agent tool's own rules (not counted above)</h2><ul id="agenttool-list"></ul></section>
   <h2>Where agents struggle</h2>
   <div class="controls">
     <div class="seg" role="group" aria-label="Map shows">
@@ -320,15 +321,28 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
       list.appendChild(li);
     });
     var thinShown = shown.some(function (p) { return p[1].evidence === "thin"; }), left = 0;
-    var toolOnly = shown.every(function (p) { return p[1].origin === "agent-tool"; });
     items.forEach(function (h) { (h.recommendations || []).forEach(function (r) { if (r.evidence === "thin") left++; }); });
-    document.getElementById("fixfirst-note").textContent = toolOnly
-      ? "Only the agent tool's own rules came up: nothing in this repository needs fixing. A line in AGENTS.md naming what the refusal suggests saves the round trips."
-      : thinShown
+    document.getElementById("fixfirst-note").textContent = thinShown
       ? "Each of these rests on fewer than " + THIN + " events: a lead to look at, not yet a reason to change the repository."
       : left ? plural(left, "more suggestion") + " " + (left === 1 ? "rests" : "rest") + " on fewer than " + THIN + " events each and " +
         (left === 1 ? "is" : "are") + " left out here. Each item's own details list them, marked \"thin evidence\"." : "";
     document.getElementById("fixfirst").hidden = false;
+  })();
+
+  // Refusals by the agent tool's own rules: the same in every repository, counted nowhere.
+  (function () {
+    var rows = R.agent_tool || [];
+    if (!rows.length) return;
+    var list = document.getElementById("agenttool-list");
+    rows.forEach(function (row) {
+      var li = el("li"), mins_ = Number(row.est_minutes_lost) || 0;
+      li.appendChild(el("b", { class: "mono" }, (row.command || "a call") + ": refused " + plural(row.events, "time") +
+        " in " + plural(row.sessions, "session") + (mins_ > 0 ? ", ~" + mins(mins_) + " of agent time" : "")));
+      var recs = row.recommendations || [];
+      li.appendChild(rich("span", recs.length ? recs[0].detail : "Refused by a rule of the agent tool itself, not by anything in this repository."));
+      list.appendChild(li);
+    });
+    document.getElementById("agenttool").hidden = false;
   })();
 
   function showDir(n) {

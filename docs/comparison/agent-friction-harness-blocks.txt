@@ -1,21 +1,31 @@
 agent-friction · repo
-20 sessions · 565 tool calls · 285 friction events · ~10m lost · 0 human corrections · 2026-11-02 → 2026-11-21
+20 sessions · 565 tool calls · 5 friction events · ~18s lost · 0 human corrections · 2026-11-02 → 2026-11-21
 
 What to fix first
-  1. sleep: Built into the agent tool, not this repository: agents keep trying `sleep`
+  1. ls: Say when agents should run `ls` (thin evidence)
+     Humans stopped `ls` while it was running 3 times in 3 sessions. If it takes too long or
+     should not be run here, say so in AGENTS.md together with what to run instead (a narrower or
+     faster command).
+  2. sleep: State the boundary (thin evidence)
+     A human declined the agent's action 2 times in 2 sessions. State the boundary explicitly
+     (what must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a
+     permission rule.
+  Each of these rests on fewer than 5 events: a lead to look at, not yet a reason to change the
+  repository.
+
+The agent tool's own rules (not counted above)
+  sleep: refused 280 times in 20 sessions, ~9m of agent time
      Agents tried `sleep` 280 times in 20 sessions in a form the agent tool itself refuses to run:
      a built-in rule of the harness (Claude Code), not a hook, a permission setting or anything in
      this repository. Its message says what to do instead: "To wait for a condition, use Monitor
      with an until-loop. To wait for a command you started, use run_in_background: true." Nothing
      in the repository needs to change. If the round trips cost too much, one line in AGENTS.md
      (or CLAUDE.md) with that alternative makes the first attempt the right one.
-  Only the agent tool's own rules came up: nothing in this repository needs fixing. A line in
-  AGENTS.md naming what the refusal suggests saves the round trips.
 
 Commands that keep failing
   score            command                                sess events    lost  top signals
-  █████████▎  92.2 sleep                                    20    282      9m  ● permission-denied×280, tool-rejected×2
   ██▍         23.6 ls                                        3      3     18s  ◐ user-interrupt×3
+  █▊          16.9 sleep                                     2      2     n/a  ◐ tool-rejected×2
 
 ● high ◐ medium ○ low confidence · drill in: agent-friction show <path> · full map: --format html -o map.html
 Per-row time can overlap (one stall can involve a file and a command); n/a means the evidence carries no time estimate; the total counts each minute once.

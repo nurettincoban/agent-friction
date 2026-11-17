@@ -39,8 +39,8 @@ All notable changes to this project are documented here. The format follows
 - Recommendations carry `events`; advice on fewer than 5 events is marked `"evidence": "thin"`
   and kept out of "What to fix first" while there is other advice. Refusals by the agent tool's
   own rules (Claude Code's `Blocked: sleep ...`, the auto-mode classifier) are reported as such,
-  with what the refusal says to do instead, carry `origin: "agent-tool"`, come after advice about
-  the repository, and do not trip `--fail-on`.
+  with what the refusal says to do instead, in a section of their own ("The agent tool's own
+  rules", `agent_tool` in the JSON), and count in no hotspot, score, total, gate or comparison.
 - "What to fix first" leads the terminal, Markdown and HTML reports. The headline counts strong
   events and names weak ones beside them ("22 friction events (+11 weak)").
 - Git Bash on Windows: a `--repo-alias` that Git Bash rewrote (`C:/Program Files/Git/home/...`)

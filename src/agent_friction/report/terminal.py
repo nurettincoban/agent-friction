@@ -6,6 +6,8 @@ import textwrap
 from typing import Any
 
 from agent_friction.report._common import (
+    AGENT_TOOL_HEADING,
+    agent_tool_rules,
     all_items,
     collect_recommendations,
     dropped_note,
@@ -187,6 +189,18 @@ def _events(rec: dict[str, Any]) -> str:
     return plural(n, "event") if isinstance(n, int) else "few events"
 
 
+def _agent_tool_rows(result: dict[str, Any], st: Style, width: int) -> list[str]:
+    rows = agent_tool_rules(result)
+    if not rows:
+        return []
+    out = [st.bold(AGENT_TOOL_HEADING)]
+    for heading, text in rows:
+        out.append(f"  {st.cyan(heading)}")
+        out.extend(st.dim(f"     {line}") for line in textwrap.wrap(text, width=max(40, width - 7)))
+    out.append("")
+    return out
+
+
 def _fix_first(result: dict[str, Any], st: Style, width: int) -> list[str]:
     """ "What to fix first": the answer, ahead of the tables it is drawn from."""
     recs = collect_recommendations(result, limit=5)
@@ -262,14 +276,17 @@ def render_terminal(
                 st.green(f"No recurring friction found in {plural(calls, 'tool call')}.")
                 + (st.dim(" That is a small sample; check again later.") if calls < 50 else "")
             )
+        out.append("")
+        out.extend(_agent_tool_rows(result, st, width))
         out.extend(_unattributed_rows(result, st, width))
         out.extend(_repo_rows(result, st, width))
         note = dropped_note(result)
         if note:
             out.append(st.dim(note))
-        return "\n".join(out) + "\n"
+        return "\n".join(out).rstrip("\n") + "\n"
 
     out.extend(_fix_first(result, st, width))
+    out.extend(_agent_tool_rows(result, st, width))
     if hotspots:
         out.append(st.bold("Files where agents struggle"))
         out.extend(_hotspot_rows(hotspots, st, titles, width))
