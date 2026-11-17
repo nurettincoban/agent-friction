@@ -74,6 +74,8 @@ together. We [ran both on the same sessions](https://github.com/nurettincoban/ag
 | Method | A model summarizes a sample of your recent sessions | Documented rules over every session that touched the repo; no model, no network |
 | Evidence | Narrative with examples | Counts per file and command, each event traceable to a transcript line |
 | Same input, same output | No | Yes, so you can compare before and after |
+| The fix | CLAUDE.md sections, hooks and skills to copy | Lines and deny rules to paste, each deny rule replayed against your sessions |
+| In our test (2 synthetic datasets we built, 3 runs of `/insights` each) | 11 of 18 points on planted problems in every run; read 4 of 5 and 3 of 20 sessions | 18 of 18; read every session |
 | Also covers, in our test | Prompting and verification habits, larger workflow ideas | `pytest` vs `make test`, empty searches, 280 refusals by Claude Code's own `sleep` rule |
 
 ## How it works
