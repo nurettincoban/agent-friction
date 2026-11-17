@@ -7,6 +7,8 @@ from typing import Any
 
 from agent_friction.report._common import (
     AGENT_TOOL_HEADING,
+    PASTE_HEADING,
+    PASTE_NOTE,
     agent_tool_rules,
     all_items,
     collect_recommendations,
@@ -18,6 +20,8 @@ from agent_friction.report._common import (
     grouped_unattributed,
     headline_lost,
     is_thin,
+    paste_deny,
+    paste_lines,
     plural,
     repo_recommendations,
     signal_titles,
@@ -221,6 +225,31 @@ def _fix_first(result: dict[str, Any], st: Style, width: int) -> list[str]:
     return out
 
 
+def _paste(result: dict[str, Any], st: Style, width: int) -> list[str]:
+    """ "Ready to paste": the lines and rules the advice names, filled in."""
+    lines = paste_lines(result)
+    deny = paste_deny(result)
+    if not lines and not deny:
+        return []
+    out = [st.bold(PASTE_HEADING)]
+    out.extend(st.dim(f"  {line}") for line in textwrap.wrap(PASTE_NOTE, width=max(40, width - 2)))
+    if lines:
+        out.append("  AGENTS.md (or CLAUDE.md):")
+        for line in lines:
+            wrapped = textwrap.wrap(line, width=max(40, width - 6), subsequent_indent="  ")
+            out.extend(f"    {part}" for part in wrapped)
+    if deny:
+        out.append('  .claude/settings.json, under "permissions" -> "deny":')
+        for rule, what in deny:
+            out.append(f'    "{rule}"')
+            out.extend(
+                st.dim(f"      {part}")
+                for part in textwrap.wrap(f"replayed: {what}", width=max(40, width - 6))
+            )
+    out.append("")
+    return out
+
+
 def render_terminal(
     result: dict[str, Any], *, color: bool = False, top: int = 10, width: int = 100
 ) -> str:
@@ -286,6 +315,7 @@ def render_terminal(
         return "\n".join(out).rstrip("\n") + "\n"
 
     out.extend(_fix_first(result, st, width))
+    out.extend(_paste(result, st, width))
     out.extend(_agent_tool_rows(result, st, width))
     if hotspots:
         out.append(st.bold("Files where agents struggle"))

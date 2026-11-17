@@ -29,6 +29,7 @@ from agent_friction.attribution import (
     PathResolver,
     is_inline_code,
     is_windows_path,
+    parse_command,
     public_key,
     public_tool,
     to_posix,
@@ -42,8 +43,9 @@ from agent_friction.discovery import (
     repo_roots,
 )
 from agent_friction.errors import AgentFrictionError, BadTranscriptError, NoTranscriptsError
-from agent_friction.guidance import Guidance, deny_rules, rule_denies
+from agent_friction.guidance import Guidance, deny_rules, parse_deny_rule, rule_denies
 from agent_friction.model import Finding, ParsedFile, Stream, Target
+from agent_friction.report._common import paste_candidates
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -1414,7 +1416,72 @@ class _Analysis:
                 self._expose(exposure, target.kind, target.key, finding.unit)
         self.exposure = exposure
         self.repo_advice = self._baselines(findings)
-        return self._emit(streams, findings, sources)
+        result = self._emit(streams, findings, sources)
+        result["paste"] = self._paste(result, streams)
+        return result
+
+    def _paste(self, result: dict[str, Any], streams: Sequence[Stream]) -> dict[str, Any]:
+        """The fixes as text to paste: the AGENTS.md lines and the permission rules the
+        advice names, strongest first. Each deny rule is replayed against every call in
+        these sessions, so that what it would have refused is a count, not a guess."""
+        lines: list[dict[str, Any]] = []
+        deny: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item, rec in paste_candidates(result):
+            line = str(rec.get("agents_md") or "")
+            if line and line not in seen:
+                seen.add(line)
+                lines.append({"line": line, "target": item.get("path"), "rule": rec.get("id")})
+            rule = str(rec.get("deny") or "")
+            if rule and rule not in seen:
+                seen.add(rule)
+                deny.append(
+                    {"rule": rule, "target": item.get("path"), **self._replay(rule, streams)}
+                )
+        return {"agents_md": lines, "deny": deny}
+
+    def _replay(self, rule: str, streams: Sequence[Stream]) -> dict[str, Any]:
+        """What ``rule`` would have refused in these sessions: calls, sessions, and which
+        files or commands (``refused_targets``). Sessions of agents the rule does not
+        govern (anything but Claude Code) are counted apart."""
+        rules = parse_deny_rule(rule)
+        calls = 0
+        sessions: set[str] = set()
+        targets: Counter[str] = Counter()
+        other_agents: set[str] = set()
+        for stream in streams:
+            for event in stream.events:
+                if event.kind != model.TOOL_CALL or event.derived:
+                    continue
+                rel = self.resolver.resolve(event.path, event.cwd) if event.path else None
+                command = event.command or ""
+                lines = [command]
+                if command:
+                    lines += [
+                        " ".join([step.program, *step.args])
+                        for step in parse_command(command).steps
+                    ]
+                if not rule_denies(rules, event.tool or "", lines, rel or ""):
+                    continue
+                if stream.kind != claude_code.KIND:
+                    other_agents.add(stream.session_id)
+                    continue
+                calls += 1
+                sessions.add(stream.session_id)
+                step = next(
+                    (one for one in lines[1:] if rule_denies(rules, event.tool or "", [one])),
+                    command,
+                )
+                targets[rel or step[:80] or event.tool] += 1
+        return {
+            "would_refuse": calls,
+            "sessions": len(sessions),
+            "refused_targets": [
+                {"target": key, "calls": n}
+                for key, n in sorted(targets.items(), key=lambda kv: (-kv[1], kv[0]))
+            ],
+            "other_agent_sessions": len(other_agents),
+        }
 
     def _baselines(self, findings: Sequence[Finding]) -> list[dict[str, object]]:
         """Mark mechanical events that are no more than the repository's background rate.

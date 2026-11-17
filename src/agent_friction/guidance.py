@@ -431,6 +431,14 @@ def deny_rules(repo: Path | None) -> list[tuple[str, str]]:
     return rules
 
 
+def parse_deny_rule(rule: str) -> list[tuple[str, str]]:
+    """One ``permissions.deny`` rule as :func:`deny_rules` returns it (``[]`` if malformed)."""
+    match = _DENY_RULE_RE.match(rule)
+    if match is None:
+        return []
+    return [(match.group(1).lower(), (match.group(2) or "").strip())]
+
+
 def _glob(pattern: str) -> re.Pattern[str]:
     """A settings path pattern as a regex: ``**`` crosses directories, ``*`` does not."""
     out = ""

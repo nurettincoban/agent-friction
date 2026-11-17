@@ -132,6 +132,7 @@ def parse_file(path: Path, seen: dict[str, str] | None = None) -> ParsedFile:
     streams: dict[tuple[str, bool], Stream] = {}
     parsed = ParsedFile(path=path, kind=KIND, streams=[])
     asking: dict[tuple[str, bool], bool] = {}
+    claimed: dict[tuple[str, bool], bool] = {}  # ... and did it just say it was done?
     with model.open_transcript(path) as handle:
         for number, raw in enumerate(handle, 1):
             raw = raw.strip()
@@ -160,6 +161,7 @@ def parse_file(path: Path, seen: dict[str, str] | None = None) -> ParsedFile:
                 text = obj.get("text")
                 key = (str(session), obj.get("subagent") is True)
                 asking[key] = isinstance(text, str) and common.asks_question(text)
+                claimed[key] = isinstance(text, str) and common.claims_done(text)
                 if key in streams:  # the time only: the agent was active
                     marker = Event(kind=model.AGENT_MESSAGE, line=number)
                     marker.ts = common.parse_ts(obj.get("ts"))
@@ -177,7 +179,9 @@ def parse_file(path: Path, seen: dict[str, str] | None = None) -> ParsedFile:
                 streams[key] = Stream(session_id=key[0], source=path, kind=KIND, sidechain=key[1])
             if event.kind == model.USER_MESSAGE:
                 event.after_question = asking.pop(key, False)
+                event.after_claim = claimed.pop(key, False)
             elif event.kind == model.TOOL_CALL:
+                claimed.pop(key, None)
                 if common.QUESTION_TOOL_RE.search(event.tool):
                     asking[key] = True
                 else:

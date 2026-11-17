@@ -2376,6 +2376,54 @@ def _scope(call: Event, ctx: DetectContext) -> str | None:
     return base
 
 
+#: A name in code shape, as a human types it in a correction: ``legacy_charge``,
+#: ``PaymentClient``, ``PaymentClient.charge()``. Not part of a path.
+_CODE_NAME_RE = re.compile(
+    r"(?<![\w./\\-])`?([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)(?:\(\))?`?(?![\w/\\-])"
+)
+#: ... which only counts with a mark of code: an underscore inside, a lower-to-upper
+#: turn (``camelCase``, ``PaymentClient``), or a call's parentheses.
+_CODE_SHAPE_RE = re.compile(r"[A-Za-z0-9]_[A-Za-z0-9]|[a-z0-9][A-Z]|\.[a-z]")
+#: What the human says to use instead: "use X", "X only", "X is what we use".
+_USE_INSTEAD_RE = re.compile(
+    r"\b(?:use|using|via|call)\s+`?([A-Za-z_][\w.]*)(?:\(\))?`?"
+    r"|`?([A-Za-z_][\w.]*)(?:\(\))?`?\s+(?:only\b|is what we use|instead\b)",
+    re.I,
+)
+#: A human reporting that the result does not work ("still failing", "doesn't work").
+_REPORTS_FAILURE_RE = re.compile(
+    r"\bstill\s+(?:fail(?:s|ing)?|broken|crash(?:es|ing)?|errors?|(?:does ?n[o']t|is ?n[o']t)\b)"
+    r"|\b(?:does ?n[o']t|did ?n[o']t|is ?n[o']t|not)\s+work(?:ing)?\b"
+    r"|\b(?:is|it's|it is) broken\b|\bfails? (?:on|in|for) (?:staging|prod|ci|my|me)\b",
+    re.I,
+)
+
+
+def code_names(text: str) -> list[str]:
+    """Names in code shape a human wrote (in order, once each)."""
+    out: list[str] = []
+    for match in _CODE_NAME_RE.finditer(text):
+        name = match.group(1)
+        shaped = _CODE_SHAPE_RE.search(name) or match.group(0).rstrip("`").endswith("()")
+        if shaped and len(name) >= 4 and name not in out:
+            out.append(name)
+    return out
+
+
+def use_instead(text: str, ruled_out: str) -> str:
+    """The name in code shape the human says to use instead, or ``""``."""
+    for match in _USE_INSTEAD_RE.finditer(text):
+        name = (match.group(1) or match.group(2) or "").rstrip(".")
+        if name and name != ruled_out and name in code_names(text):
+            return name
+    return ""
+
+
+def reports_failure(text: str) -> bool:
+    """Does the human say the result still does not work?"""
+    return _REPORTS_FAILURE_RE.search(text) is not None
+
+
 @dataclass
 class _Unconfirmed:
     """A correction whose wording is clear but whose effect is not yet seen."""
@@ -4995,6 +5043,36 @@ class _Detector:
                     files.append(rel)
         return files
 
+    def _added_names(self, text: str) -> tuple[str, set[str]]:
+        """The first name in code shape in ``text`` that an edit or write of this turn
+        put into a file (and was not there before), and the files it went into."""
+        for name in code_names(text):
+            pattern = re.compile(r"(?<![\w.])" + re.escape(name) + r"(?!\w)")
+            files = {
+                action.file
+                for action in self.state.turn
+                if action.file is not None
+                and action.call.op in (model.OP_EDIT, model.OP_WRITE)
+                and (action.result is None or action.result.ok)
+                and pattern.search(action.call.new_text)
+                and not pattern.search(action.call.old_text)
+            }
+            if files:
+                return name, files
+        return "", set()
+
+    def _last_green_check(self) -> str:
+        """The command key of the turn's last shell command that succeeded, if any."""
+        for action in reversed(self.state.turn):
+            if (
+                action.cmd is not None
+                and action.result is not None
+                and action.result.ok
+                and action.call.op == model.OP_SHELL
+            ):
+                return self.ctx.command_key(action.cmd.key)
+        return ""
+
     def _turn_changes(self) -> tuple[list[str], list[str], bool]:
         """Files the turn so far touched and changed (most recent first), by any means.
 
@@ -5135,6 +5213,11 @@ class _Detector:
             # it. A stopped server stays: it should not have been in the foreground.
             self._drop({id(stopped)})
         touched, edited, blind = self._turn_changes()
+        # A name the human writes that the agent had just put into a file ("you used
+        # legacy_charge again"): the message is about that code, in those files.
+        ruled_out, added_in = self._added_names(event.text[:CORRECTION_SCAN_CHARS])
+        if added_in and confidence > 0:
+            edited = [rel for rel in edited if rel in added_in] or edited
         before = frozenset(edited)
         # An instruction that redirects the work just done ("don't use X here") is a
         # correction if the agent goes back to that work, and nothing if it does not.
@@ -5143,6 +5226,13 @@ class _Detector:
         if tentative:
             fallback = ", ".join(f'"{label}"' for label in labels)
             confidence, labels = CORRECTION_STRONG, instructed
+        elif added_in and before and 0 < confidence < CORRECTION_STRONG:
+            # Weaker cues only ("actually X is deprecated"), but about code the agent had
+            # just written: a correction if the agent goes back and changes it.
+            tentative = True
+            fallback = ", ".join(f'"{label}"' for label in labels)
+            confidence = CORRECTION_STRONG
+            labels = [*labels, "names code the agent had just added"]
         if confidence <= 0:
             if softened and before:
                 matched = ", ".join(f'"{label}"' for label in softened)
@@ -5280,6 +5370,17 @@ class _Detector:
             detail={"confidence": f"{confidence:g}", **({"quote": event.text} if certain else {})},
         )
         self.state.corrected = frozenset(t.key for t in targets)
+        if ruled_out:
+            finding.detail["ruled_out"] = ruled_out
+        instead = use_instead(event.text[:CORRECTION_SCAN_CHARS], ruled_out)
+        if instead:
+            finding.detail["use_instead"] = instead
+        if event.after_claim and reports_failure(head):
+            # The agent had just said it was done; the human says it does not work.
+            finding.detail["claimed_done"] = "1"
+            check = self._last_green_check()
+            if check:
+                finding.detail["checked_with"] = check
         if others and not blamed and not pinned and targets:
             finding.detail["also_named"] = others[0]  # recommendations say so
         if corroborated:

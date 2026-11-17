@@ -114,8 +114,9 @@ def test_sources_and_totals(result: dict[str, Any]) -> None:
     assert (generic["kind"], generic["sessions"]) == ("generic", 1)
     totals = result["totals"]
     assert totals["sessions"] == 6  # the subagent transcript belongs to its parent session
-    # four corroborated corrections; "Actually legacy_charge() is deprecated ..." is only probable
-    assert (totals["corrections"], totals["probable_corrections"]) == (4, 1)
+    # five corroborated corrections: "Actually legacy_charge() is deprecated ..." has only
+    # weaker cues, but names code the agent had just added and the agent then changed it
+    assert (totals["corrections"], totals["probable_corrections"]) == (5, 0)
     assert all(source["skipped_events"] == 0 for source in result["sources"])
     assert totals["files_affected"] == len(result["hotspots"]) == 5
     assert totals["est_minutes_lost"] > 0
@@ -131,12 +132,15 @@ def test_story_generated_schema_is_the_top_file(result: dict[str, Any]) -> None:
         "generated": True,
         "removed_at": None,
         "renamed_to": None,
+        # named by its header
+        "source": "api/openapi.yaml",
+        "regenerate": "make codegen",
     }
     recs = {r["id"]: r["detail"] for r in top["recommendations"]}
     assert list(recs)[:2] == ["edit-the-source-not-the-output", "split-or-anchor-large-file"]
     assert "stop hand-editing src/shopfront/api/schema_gen.py" in recs["write-down-the-rule"]
     assert top["why"].startswith(
-        "12 friction events in all 4 sessions that touched it (6 edit misses, 2 user corrections"
+        "11 friction events in all 4 sessions that touched it (6 edit misses, 2 user corrections"
     )
     assert (top["exposure_sessions"], top["friction_rate"]) == (4, 1.0)
     detail = top["score_detail"]
@@ -149,15 +153,29 @@ def test_story_deprecated_api_corrections_land_on_the_service(result: dict[str, 
     service = entry(result["hotspots"], SERVICE)
     assert service["sessions"] == 3 and service["confidence"] == "high"
     assert service["signals"] == {
-        "user-correction": 2,
+        # one in each session: gift-message, partial-refunds, discount-codes
+        "user-correction": 3,
         # the second revert answers "you used legacy_charge again": the correction is the
         # event, and taking the change back is not counted next to it
         "edit-revert": 1,
         "edit-thrash": 1,
-        "probable-correction": 1,
     }
     rule = next(r for r in service["recommendations"] if r["id"] == "write-down-the-rule")
     assert "I told you: PaymentClient only" in rule["detail"]
+    assert "3 times in 3 sessions" in rule["detail"]
+    # the rule itself, across the sessions: what to use, and the name ruled out
+    assert (
+        "The rule, as they put it: use `PaymentClient` (said in 3 sessions), not "
+        "`legacy_charge` (said in 2 sessions)." in rule["detail"]
+    )
+    assert rule["agents_md"] == (f"in `{SERVICE}`: use `PaymentClient`, not `legacy_charge`.")
+    # "Discount codes work and all tests pass." / "It's still failing for me on staging"
+    verify = next(r for r in service["recommendations"] if r["id"] == "say-how-to-verify")
+    assert verify["events"] == 1 and "evidence" not in verify
+    assert "The last check it ran and saw pass was `make test`" in verify["detail"]
+    # the gift-message correction is about the code it added to the service only
+    schema = entry(result["hotspots"], SCHEMA)
+    assert "probable-correction" not in schema["signals"]
     quotes = [e["excerpt"] for e in service["evidence"] if e["signal"] == "user-correction"]
     assert any("legacy_charge" in q for q in quotes)
     # legacy.py is named by the human but was never touched by the agent: not a hotspot
@@ -372,16 +390,14 @@ def test_healthy_tdd_sessions_produce_no_hotspots(tmp_path: Path) -> None:
 def test_only_unambiguous_corrections_are_quoted(result: dict[str, Any]) -> None:
     text = json.dumps([h["recommendations"] for h in result["hotspots"]])
     assert "I told you: PaymentClient only" in text
-    # the "probable" correction (two weaker cues) counts, but is not put in anyone's mouth
-    assert "Actually legacy_charge() is deprecated" not in text
-    probable = [
+    # weaker cues only, corroborated by the agent changing the code it names: quoted
+    assert "Actually legacy_charge() is deprecated" in text
+    assert not [
         e
         for h in story(max_evidence=50)["hotspots"]
         for e in h["evidence"]
-        if e["signal"] == "probable-correction" and "confidence 0.4" in e["summary"]
+        if e["signal"] == "probable-correction"
     ]
-    assert probable and all(e["excerpt"] is None for e in probable)
-    assert "Actually legacy_charge" not in json.dumps(story(max_evidence=50))
 
 
 def test_windows_transcripts_resolve_on_any_platform(tmp_path: Path) -> None:
@@ -4420,7 +4436,7 @@ def test_a_hook_the_agent_gets_around_or_stalls_on_is_not_a_guardrail_hit(tmp_pa
 
 
 def test_a_deny_rule_on_a_file_that_holds_is_a_guardrail(tmp_path: Path) -> None:
-    rule = {"permissions": {"deny": ["Edit(src/gen/**)"]}}
+    rule = {"permissions": {"deny": ["Edit(/src/gen/**)"]}}
 
     def refused(s: Session, repo: str) -> None:
         change = {"file_path": f"{repo}/src/gen/schema.py", "old_string": "x", "new_string": "y"}

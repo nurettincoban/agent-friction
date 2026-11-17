@@ -12,6 +12,13 @@ from functools import cache
 from importlib.resources import files
 from typing import Any
 
+from agent_friction.report._common import (
+    PASTE_NOTE,
+    paste_deny,
+    paste_lines,
+    paste_settings_json,
+)
+
 
 def _embed_json(result: dict[str, Any]) -> str:
     """JSON that is safe inside a <script> element (no early ``</script>`` close)."""
@@ -32,4 +39,14 @@ def _template() -> str:
 
 def render_html(result: dict[str, Any]) -> str:
     """Render a self-contained interactive HTML friction map."""
-    return _template().replace("__DATA__", _embed_json(result))
+    # The "Ready to paste" text, made by the same code as the other formats.
+    shown = {
+        **result,
+        "paste_text": {
+            "note": PASTE_NOTE,
+            "agents_md": "\n".join(paste_lines(result)),
+            "settings": paste_settings_json(result),
+            "replay": [f"{rule}: replayed, {what}." for rule, what in paste_deny(result)],
+        },
+    }
+    return _template().replace("__DATA__", _embed_json(shown))

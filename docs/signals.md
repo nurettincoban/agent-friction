@@ -293,7 +293,24 @@ corroborated: ...").
     file, and the agent's next edit is to that file ("No, wrong file — the
     bug is in parser.py", then an edit of `src/parser.py`): a correction
     (`corroborated: redirected`) attributed to the file it had been editing.
-    Without the agent going to the file named it stays probable. Not cues: "don't forget ...", "don't worry", "don't commit
+    Without the agent going to the file named it stays probable. And one
+    more: a message with only weaker cues ("Actually `legacy_charge()` is
+    deprecated, `PaymentClient.charge()` is what we use instead") that names,
+    in code shape (an underscore inside, a lower-to-upper turn such as
+    `PaymentClient`, a dotted name or `()`), something an edit or write of the
+    turn before had just added to a file (in its new text, not its old):
+    that is about that code. It is attributed only to the files the name went
+    into, and if the agent then changes one of them again it is a correction
+    (`corroborated: followed`); if not, it stays the probable correction its
+    cues give. Any correction that names such code carries it as
+    `ruled_out`, and what the human said to use instead ("use X", "X only",
+    "X is what we use") as `use_instead`: the recommendation states the rule
+    with them. When the agent's last words before the message said the work
+    was done or passing ("all tests pass", "it works now"; only that one bit
+    of the agent's prose is kept) and the human reports it still does not
+    work ("still failing", "doesn't work", "is broken"), the correction
+    carries `claimed_done`, and `checked_with` names the last shell command of
+    the turn that succeeded. Not cues: "don't forget ...", "don't worry", "don't commit
     yet", "use the factory instead" (may be the next step), "use tabs instead
     of spaces", "No tests are needed here", anything after praise, a
     dismissal, self-blame or "next task:", and an answer to a question the

@@ -129,6 +129,23 @@ def asks_question(text: str) -> bool:
     return any(_OFFER_RE.search(q) is not None and _CLOSER_RE.search(q) is None for q in questions)
 
 
+#: Agent prose that reports the work finished or passing.
+_CLAIM_RE = re.compile(
+    r"\b(?:all (?:the )?tests? (?:now )?pass(?:es|ed|ing)?|tests? (?:now )?pass(?:es|ed)?"
+    r"|(?:it|this|that|everything|they) (?:now )?works?\b|(?:now )?works? now"
+    r"|(?:is|are|it's) (?:now )?(?:done|working|fixed|complete)\b|should (?:now )?work\b"
+    r"|^\W*(?:done|fixed|implemented)\b)",
+    re.I | re.M,
+)
+
+
+def claims_done(text: str) -> bool:
+    """Does agent prose, in its last paragraph, say the work is done or passing?
+    Only this one bit is kept of the text."""
+    paragraphs = [p for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+    return bool(paragraphs) and _CLAIM_RE.search(paragraphs[-1]) is not None
+
+
 def edit_pairs(
     pairs: list[tuple[str, str]],
 ) -> tuple[tuple[tuple[str, str], ...], frozenset[tuple[str, str]]]:

@@ -17,22 +17,28 @@ looks like, every command, how to apply the fixes, Windows notes, privacy and li
 ```console
 $ agent-friction demo
 agent-friction · shopfront
-6 sessions · 74 tool calls · 22 friction events (+11 weak) · ~9m lost · 4 human corrections · 2026-10-26 → 2026-11-12
+6 sessions · 74 tool calls · 23 friction events (+10 weak) · ~9m lost · 5 human corrections · 2026-10-26 → 2026-11-12
 
 What to fix first
   1. src/shopfront/api/schema_gen.py: Generated file: point agents at its source
-     ...agents ran into trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md
-     which source to change and which command regenerates it...
+     ...agents ran into trouble editing it directly 7 times in 4 sessions. Its header names the fix...
   2. pytest: Tell agents to use `make test`
      `pytest` failed 7 times in 4 sessions; 5 times the agent then got the same job done with
      `make test`, and `pytest` did not work later in those sessions.
   3. src/shopfront/checkout/service.py: Write down the rule the human keeps repeating
-     ...In their words: "No, I said use PaymentClient, not the legacy module. [...]"
+     A human corrected the agent here 3 times in 3 sessions...
+
+Ready to paste
+  AGENTS.md (or CLAUDE.md):
+    - Use `make test`, not `pytest`.
+    - In `src/shopfront/checkout/service.py`: use `PaymentClient`, not `legacy_charge`.
+  .claude/settings.json, under "permissions" -> "deny":
+    "Edit(/src/shopfront/api/schema_gen.py)"
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals
-  █████▋      56.8 src/shopfront/api/schema_gen.py           4     12      4m  ● edit-miss×6, user-correction×2
-  ████▎       42.4 src/shopfront/checkout/service.py         3      5      2m  ● user-correction×2, edit-revert×1
+  █████▋      56.4 src/shopfront/api/schema_gen.py           4     11      4m  ● edit-miss×6, user-correction×2
+  ████▋       46.5 src/shopfront/checkout/service.py         3      5      2m  ● user-correction×3, edit-revert×1
 ```
 
 That output is real, abridged to its top rows: `agent-friction demo` scans the synthetic sessions in [`tests/fixtures`](https://github.com/nurettincoban/agent-friction/tree/main/tests/fixtures).

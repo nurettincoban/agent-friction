@@ -123,6 +123,31 @@ def _first_recs(
     return picked[:limit]
 
 
+def paste_candidates(result: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Advice that names text to paste (``agents_md``, ``deny``), strongest item first:
+    not on thin evidence, not already written down or contradicted there, and not about
+    the agent tool's own rules."""
+    ranked = sorted(
+        all_items(result),
+        key=lambda h: (
+            h.get("confidence") == "low",
+            -float(h.get("score", 0)),
+            h.get("kind", ""),
+            h.get("path", ""),
+        ),
+    )
+    return [
+        (hotspot, rec)
+        for hotspot in ranked
+        for rec in hotspot.get("recommendations", [])
+        if isinstance(rec, dict)
+        and (rec.get("agents_md") or rec.get("deny"))
+        and not is_thin(rec)
+        and not is_agent_tool(rec)
+        and rec.get("documented_as") not in ("instruction", "conflict")
+    ]
+
+
 def thin_count(result: dict[str, Any]) -> int:
     """Pieces of advice anywhere in the result that rest on thin evidence."""
     return sum(
@@ -317,3 +342,62 @@ def unattributed_heading(result: dict[str, Any]) -> str | None:
     count = max(count, len(items))
     shown = f", {len(items)} shown" if 0 < len(items) < count else ""
     return f"Not tied to a file or command ({plural(count, 'event')}{shown})"
+
+
+PASTE_HEADING = "Ready to paste"
+PASTE_NOTE = (
+    "The lines the advice above names, filled in from the evidence. Check each against "
+    "the repository before you commit it; nothing here has been applied."
+)
+
+
+def paste_lines(result: dict[str, Any]) -> list[str]:
+    """The AGENTS.md / CLAUDE.md lines to paste, as Markdown list items."""
+    paste = result.get("paste") or {}
+    out: list[str] = []
+    for item in paste.get("agents_md") or []:
+        line = str(item.get("line", "")).strip() if isinstance(item, dict) else ""
+        if line:
+            out.append("- " + line[:1].upper() + line[1:])
+    return out
+
+
+def paste_deny(result: dict[str, Any]) -> list[tuple[str, str]]:
+    """(rule, what replaying it over these sessions shows) for each deny rule to paste."""
+    paste = result.get("paste") or {}
+    out: list[tuple[str, str]] = []
+    for item in paste.get("deny") or []:
+        if not isinstance(item, dict) or not item.get("rule"):
+            continue
+        calls = int(item.get("would_refuse", 0) or 0)
+        targets = [t for t in item.get("refused_targets") or [] if isinstance(t, dict)]
+        if calls:
+            what = f"would have refused {plural(calls, 'call')} in " + plural(
+                int(item.get("sessions", 0) or 0), "session"
+            )
+            if len(targets) == 1:
+                what += f", all on {targets[0].get('target')}"
+            elif targets:
+                what += ", on " + ", ".join(
+                    f"{t.get('target')} ({t.get('calls')})" for t in targets[:3]
+                )
+        else:
+            what = "refuses no call these sessions made"
+        others = int(item.get("other_agent_sessions", 0) or 0)
+        if others:
+            what += (
+                f"; Claude Code settings do not cover the {plural(others, 'session')} of "
+                "another agent that also did this"
+            )
+        out.append((str(item["rule"]), what))
+    return out
+
+
+def paste_settings_json(result: dict[str, Any]) -> str:
+    """The deny rules as a ``.claude/settings.json`` fragment, or ``""``."""
+    import json
+
+    rules = [rule for rule, _ in paste_deny(result)]
+    if not rules:
+        return ""
+    return json.dumps({"permissions": {"deny": rules}}, indent=2)

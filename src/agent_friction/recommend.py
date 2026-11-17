@@ -8,6 +8,7 @@ it. Rules and thresholds are listed in docs/methodology.md.
 
 from __future__ import annotations
 
+import posixpath
 import re
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
@@ -38,6 +39,7 @@ FACT_BACKED_RULES = frozenset(
         "edit-the-source-not-the-output",
         "document-what-rewrites-this-file",
         "write-down-the-rule",
+        "say-how-to-verify",
         "name-the-missing-target",
         "file-is-gone",
         "note-the-background-rate",
@@ -87,6 +89,43 @@ GENERATED_BY_NAME = "name"
 GENERATED_BY_DIRECTORY = "directory"
 
 
+#: In a generated-file header, the file it is generated from: ``from api/openapi.yaml``,
+#: ``source: proto/user.proto``. A path-shaped token (a slash or an extension).
+_GENERATED_SOURCE_RE = re.compile(
+    _COMMENT + r"[^\n]*?\b(?:generated (?:by \S+ )?from|source:)\s+`?"
+    r"([\w.@-]*(?:/[\w.@-]+)+|[\w@-]+\.[A-Za-z][\w]*)`?",
+    re.I | re.M,
+)
+#: ... and the command that regenerates it, in backticks after "run", "regenerate with",
+#: "to regenerate": ``# Run `make codegen` to regenerate.``
+_GENERATED_COMMAND_RE = re.compile(
+    _COMMENT + r"[^\n]*?\b(?:run|re-?generated? (?:it )?(?:with|by running|using)|"
+    r"generated (?:by|with)(?: running)?|regenerate:?)\s+`([^`\n]{2,80})`",
+    re.I | re.M,
+)
+
+
+#: ... or on a comment line of its own under "To update, run:" (pip-compile's header).
+_GENERATED_COMMAND_BELOW_RE = re.compile(
+    _COMMENT + r"(?:to (?:update|regenerate)(?: (?:it|this file))?,? run|"
+    r"by the following command):?\s*\n"
+    r"(?:\s*(?:#|//|--|;)\s*\n)*\s*(?:#|//|--|;)\s+(\S[^\n]{1,80}?)\s*$",
+    re.I | re.M,
+)
+
+
+def generated_origin(head: str) -> tuple[str, str]:
+    """What a generated-file header says it comes from: ``(source, command)``, each
+    ``""`` when the header does not say. Only the first lines are read."""
+    top = "\n".join(head.splitlines()[:GENERATED_HEAD_LINES])
+    source = _GENERATED_SOURCE_RE.search(top)
+    command = _GENERATED_COMMAND_RE.search(top) or _GENERATED_COMMAND_BELOW_RE.search(top)
+    return (
+        source.group(1).rstrip(".,;:") if source else "",
+        command.group(1).strip() if command else "",
+    )
+
+
 def generated_header(rel: str, head: str) -> str:
     """The generated-file header among the first lines of ``head``, or ``""``."""
     top = "\n".join(head.splitlines()[:GENERATED_HEAD_LINES])
@@ -108,6 +147,7 @@ RULE_IDS: tuple[str, ...] = (
     "document-what-rewrites-this-file",
     "path-agents-expect",
     "write-down-the-rule",
+    "say-how-to-verify",
     "state-the-boundary",
     "allow-or-document-the-boundary",
     "the-guardrail-works",
@@ -161,6 +201,10 @@ class FileFacts:
     #: or renamed it, and what it was renamed to (repo-relative), if it was renamed.
     removed_at: str | None = None
     renamed_to: str | None = None
+    #: What its generated-file header names: the file it is generated from (repo-relative,
+    #: only if that file exists) and the command that regenerates it.
+    source: str = ""
+    regenerate: str = ""
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -169,6 +213,8 @@ class FileFacts:
             "generated": self.generated,
             "removed_at": self.removed_at,
             "renamed_to": self.renamed_to,
+            **({"source": self.source} if self.source else {}),
+            **({"regenerate": self.regenerate} if self.regenerate else {}),
         }
 
 
@@ -202,8 +248,36 @@ def file_facts(repo: Path, rel: str, untracked: bool = False) -> FileFacts:
     lines = data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
     head = data[:GENERATED_HEAD_BYTES].decode("utf-8", "replace")
     if generated_header(rel, head):
-        return FileFacts(True, lines, True, "a generated-file header", GENERATED_BY_HEADER)
+        source, command = generated_origin(head)
+        if source and not _source_exists(repo, rel, source):
+            source = ""
+        elif source:
+            source = _source_exists(repo, rel, source)
+        return FileFacts(
+            True,
+            lines,
+            True,
+            "a generated-file header",
+            GENERATED_BY_HEADER,
+            source=source,
+            regenerate=command,
+        )
     return FileFacts(True, lines, bool(by), reason, by)
+
+
+def _source_exists(repo: Path, rel: str, source: str) -> str:
+    """``source`` as a repo-relative path of a file that exists: taken from the root, then
+    from the generated file's directory; ``""`` if neither is a file."""
+    for base in ("", rel.rsplit("/", 1)[0] if "/" in rel else ""):
+        candidate = posixpath.normpath(posixpath.join(base, source.removeprefix("./")))
+        if candidate.startswith("..") or candidate == rel:
+            continue
+        try:
+            if (repo / candidate).is_file():
+                return candidate
+        except OSError:
+            continue
+    return ""
 
 
 _IN_DIRECTORY_RE = re.compile(r"^(.+) \((.+/)\)$")
@@ -241,6 +315,55 @@ def _typed(key: str, place: str) -> str:
     if match is not None and match.group(2) == place:
         return code(match.group(1))
     return _located(key)
+
+
+#: A human's reason for declining that forbids, rather than defers ("not now").
+_FORBIDS_RE = re.compile(
+    r"\b(?:never|don'?t|do not|must not|mustn'?t|not allowed|forbidden|no one|nobody)\b", re.I
+)
+
+
+def _declined_step(command: str, subjects: Sequence[str]) -> str:
+    """The step of a declined command line that the command hotspot is about:
+    ``rm -rf migrations/versions`` of ``rm -rf migrations/versions && alembic ...``."""
+    for step in re.split(r"\s*(?:&&|\|\||;|\|)\s*", command.strip()):
+        words = step.split()
+        if words and any(words[0] == s.split()[0] for s in subjects if s) and len(step) <= 120:
+            return step
+    return ""
+
+
+def _root_name(name: str) -> str:
+    """``PaymentClient`` for ``PaymentClient.charge``: a class and its method are one rule."""
+    root = name.split(".", 1)[0]
+    return root if root[:1].isupper() else name
+
+
+def _n_sessions_of(
+    found: Sequence[Finding],
+    key: str,
+    value: str,
+    norm: Callable[[str], str] = str,
+) -> str:
+    """ "said in 3 sessions": how many sessions' corrections carry ``key == value``."""
+    sessions = {f.session_id for f in found if norm(f.detail.get(key, "")) == value}
+    return f"said in {_n(len(sessions), 'session')}"
+
+
+def generated_line(rel: str, facts: FileFacts) -> str:
+    """The AGENTS.md line for a generated file, filled in from what its header says."""
+    line = f"{code(rel)} is generated"
+    if facts.source:
+        line += f" from {code(facts.source)}"
+    line += ": never edit it by hand"
+    steps = []
+    if facts.source:
+        steps.append(f"change {code(facts.source)}")
+    if facts.regenerate:
+        steps.append(f"run {code(facts.regenerate)}")
+    if steps:
+        line += "; " + " and ".join(steps) + (" to regenerate it" if facts.regenerate else "")
+    return line + "."
 
 
 def _agents_line(place: str, sentence: str) -> str:
@@ -371,6 +494,8 @@ class _Rules:
         self.subjects = list(subjects)
         self.near = near
         self.subject_name = subject_name
+        #: The hotspot's file (``""`` for a command or a directory).
+        self.key = ""
         self.by_signal: dict[str, list[Finding]] = {}
         for finding in findings:
             if finding.detail.get(scoring.WITHIN_BASELINE) == "1":
@@ -395,6 +520,7 @@ class _Rules:
         against: tuple[str, str, str, str, str] | None = None,
         events: int | None = None,
         stated: bool = False,
+        paste: Mapping[str, str] | None = None,
         **named: str,
     ) -> None:
         """Record a recommendation, in its "already documented" form where that applies.
@@ -482,6 +608,8 @@ class _Rules:
                 **({"documented_as": documented} if documented else {}),
                 # what the advice names, as data: `replacement`, `setup` (command keys)
                 **named,
+                # text to paste (`agents_md`, `deny`), unless written down already
+                **(dict(paste) if paste and documented not in ("instruction", "conflict") else {}),
             }
         )
 
@@ -534,6 +662,38 @@ class _Rules:
                 f" (The human also named {_and([code(name) for name, _ in named])}, which "
                 "the agent had not touched.)"
             )
+        paste: dict[str, str] = {}
+        if self.quote is not None:
+            # What the human ruled out (a name the agent had just written) and what they
+            # said to use: the rule itself, in its own words, across sessions.
+            out = _top([f.detail.get("ruled_out", "") for f in found], 1)
+            # `PaymentClient.charge()` and `PaymentClient` are one rule: the class
+            use = _top([_root_name(f.detail.get("use_instead", "")) for f in found], 1)
+            q = self.quote
+            if out or use:
+                parts = []
+                if use:
+                    parts.append(
+                        f"use {code(q(use[0][0], QUOTE_CHARS))}"
+                        + (f" ({_n_sessions_of(found, 'use_instead', use[0][0], _root_name)})")
+                    )
+                if out:
+                    parts.append(
+                        f"not {code(q(out[0][0], QUOTE_CHARS))}"
+                        + (f" ({_n_sessions_of(found, 'ruled_out', out[0][0])})")
+                    )
+                detail += " The rule, as they put it: " + ", ".join(parts) + "."
+                line = ", ".join(
+                    [
+                        *([f"use {code(q(use[0][0], QUOTE_CHARS))}"] if use else []),
+                        *(
+                            [("not " if use else "do not use ") + code(q(out[0][0], QUOTE_CHARS))]
+                            if out
+                            else []
+                        ),
+                    ]
+                )
+                paste["agents_md"] = f"in {code(self.key)}: {line}." if self.key else f"{line}."
         self.add(
             "write-down-the-rule",
             "Write down the rule the human keeps repeating"
@@ -546,6 +706,48 @@ class _Rules:
             detail,
             [signals.USER_CORRECTION],
             self._rule_written(found, said),
+            paste=paste,
+        )
+        self._claimed_done(found)
+
+    def _claimed_done(self, found: Sequence[Finding]) -> None:
+        """The agent said the work was done; the human then found it does not work."""
+        claimed = [f for f in found if f.detail.get("claimed_done")]
+        if not claimed:
+            return
+        checks = _top([f.detail.get("checked_with", "") for f in claimed], 1)
+        check = (
+            f" The last check it ran and saw pass was {code(checks[0][0])}: it did not "
+            "cover what broke."
+            if checks and self.quote is not None
+            else ""
+        )
+        where = "work here" if self.key else "this work"
+        self.add(
+            "say-how-to-verify",
+            "Say how to check work here before calling it done",
+            f"The agent said the work was done {_times(len(claimed))} "
+            f"({_n(_sessions(claimed), 'session')}), and the human then found it does not "
+            f"work.{check} Say in AGENTS.md how to check {where} before reporting it done "
+            "(the command, the environment it must pass in, what to compare), and have the "
+            "agent say what it did not verify.",
+            [signals.USER_CORRECTION],
+            events=len(claimed),
+            stated=True,
+            paste=(
+                {
+                    "agents_md": (f"in {code(self.key)}: " if self.key else "")
+                    + "before saying the work is done, check it the way a human will "
+                    + (
+                        f"(passing {code(checks[0][0])} was not enough here)"
+                        if checks
+                        else "(say how)"
+                    )
+                    + ", and say what you did not verify."
+                }
+                if self.quote is not None
+                else {}
+            ),
         )
 
     def _rule_written(self, found: Sequence[Finding], said: str) -> Already | None:
@@ -599,7 +801,25 @@ class _Rules:
             [signals.TOOL_REJECTED],
             events=len(found),
             stated=bool(reasons),
+            paste=self._boundary_paste(found),
         )
+
+    def _boundary_paste(self, found: Sequence[Finding]) -> dict[str, str]:
+        """The line and the deny rule for a declined command, ready to paste: only where a
+        human said why in words that forbid it ("never delete ..."), and only with
+        excerpts on (the line quotes them)."""
+        if self.quote is None:
+            return {}
+        for finding in found:
+            reason = finding.detail.get("reason", "")
+            step = _declined_step(finding.detail.get("command", ""), self.subjects)
+            if step and _FORBIDS_RE.search(reason):
+                said = self.quote(reason.strip().rstrip("."), QUOTE_CHARS)
+                return {
+                    "agents_md": f"never run {code(step)}: {said}.",
+                    "deny": f"Bash({step}:*)",
+                }
+        return {}
 
     def interrupts(self) -> None:
         found = self.get(signals.USER_INTERRUPT)
@@ -723,9 +943,14 @@ class _Rules:
                     "it carries no generated-file header, so check)"
                 )
                 + f", yet agents ran into trouble editing it directly {_in_sessions(involved)}. "
-                + ("Say" if sure else "If it is, say")
-                + " in AGENTS.md which source to change and which command regenerates it, and "
-                "consider denying direct edits to it.",
+                + (
+                    f"Its header names the fix: say in AGENTS.md "
+                    f'"{generated_line(self.key, facts)}", and deny direct edits to it.'
+                    if sure and (facts.source or facts.regenerate)
+                    else ("Say" if sure else "If it is, say")
+                    + " in AGENTS.md which source to change and which command regenerates it, "
+                    "and consider denying direct edits to it."
+                ),
                 [f.signal for f in involved],
                 (
                     self.subjects,
@@ -737,6 +962,16 @@ class _Rules:
                     "direct edits with a permission rule, or add a pre-edit hook that names "
                     "the source to change and the command that regenerates the file. (If "
                     "that line is newer than these sessions, give it time first.)",
+                ),
+                paste=(
+                    {
+                        "agents_md": generated_line(self.key, facts),
+                        "deny": f"Edit(/{self.key})",
+                        **({"source": facts.source} if facts.source else {}),
+                        **({"regenerate": facts.regenerate} if facts.regenerate else {}),
+                    }
+                    if sure and self.key
+                    else {}
                 ),
             )
         if len(misses) >= MIN_EVENTS and large and facts is not None:
@@ -1273,6 +1508,8 @@ class _Rules:
                 [signals.COMMAND_FAILURE],
                 self._use_instead(best, key, slow),
                 replacement=best,
+                agents_md=_agents_line(_place(key), "use " + _typed(best, _place(key)))
+                + f", not {code(_bare(key))}.",
             )
             return True
         if watching:
@@ -1376,6 +1613,7 @@ class _Rules:
                 + f' a line to AGENTS.md such as: "use {code(name)}, not {code(old)}".',
                 [signals.COMMAND_FAILURE],
                 self._use_instead(name, old, invocation),
+                agents_md=f"use {code(name)}, not {code(old)}.",
             )
         elif forms and forms[0][1] >= MIN_EVENTS:
             form, count = forms[0]
@@ -1395,6 +1633,7 @@ class _Rules:
                 ),
                 [signals.COMMAND_FAILURE],
                 self._use_instead(form, key, invocation),
+                agents_md=_agents_line(_place(key), "use " + _typed(form, _place(key))) + ".",
             )
         elif places and places[0][1] >= MIN_EVENTS:
             place, count = places[0]
@@ -1405,6 +1644,7 @@ class _Rules:
                 f"{_times(count)} it then worked in {code(place)}. Add a line to AGENTS.md "
                 f'such as: "run {code(key)} from {code(place)}".',
                 [signals.COMMAND_FAILURE],
+                agents_md=f"run {code(key)} from {code(place)}.",
             )
         elif fixes and fixes[0][1] >= MIN_EVENTS:
             # Only a command doing the same job counts (see signals: is_replacement), and
@@ -1438,6 +1678,10 @@ class _Rules:
                     "change that line.",
                 ),
                 replacement=fix,
+                agents_md=_agents_line(
+                    _place(key), f"use {_typed(fix, _place(key))}, not {_typed(key, _place(key))}"
+                )
+                + ".",
             )
         elif setups:
             setup, count = setups[0]
@@ -1472,6 +1716,7 @@ class _Rules:
                     "these sessions, give it time first.)",
                 ),
                 setup=" && ".join(steps),
+                agents_md=_agents_line(place, line) + ".",
             )
         elif len(environment) >= MIN_EVENTS:
             self.environment(key, environment)
@@ -1828,6 +2073,7 @@ def recommend(
         base = located.group(1) if located else key
         subjects, near, name = [base], (located.group(2) if located else ""), code(base)
     rules = _Rules(findings, quote, shares or {}, guidance, subjects, near, name, known_targets)
+    rules.key = key if kind == model.FILE else ""
     if held:
         # Nothing but weak evidence, some of it a guardrail that held: that much is said.
         rules.guardrail("to change this file" if kind == model.FILE else code(key))

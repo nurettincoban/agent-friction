@@ -70,6 +70,8 @@ aside h3 { margin: 0 0 4px; font-size: 14px; word-break: break-all; }
 .ev blockquote { margin: 4px 0 0; padding: 6px 8px; background: var(--chip); border-radius: 6px;
   white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
 .rec { margin: 6px 0; } .rec b { display: block; }
+.paste { margin: 4px 0 12px; padding: 8px 10px; background: var(--chip); border-radius: 6px;
+  white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
 table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line);
   border-radius: 10px; overflow: hidden; }
 th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
@@ -119,6 +121,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
 <main>
   <div class="stats" id="stats"></div>
   <section id="fixfirst" hidden><h2>What to fix first</h2><ol id="fixfirst-list"></ol><p class="sub" id="fixfirst-note"></p></section>
+  <section id="paste" hidden><h2>Ready to paste</h2><p class="sub" id="paste-note"></p><div id="paste-body"></div></section>
   <section id="agenttool" hidden><h2>The agent tool's own rules (not counted above)</h2><ul id="agenttool-list"></ul></section>
   <h2>Where agents struggle</h2>
   <div class="controls">
@@ -327,6 +330,26 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
       : left ? plural(left, "more suggestion") + " " + (left === 1 ? "rests" : "rest") + " on fewer than " + THIN + " events each and " +
         (left === 1 ? "is" : "are") + " left out here. Each item's own details list them, marked \"thin evidence\"." : "";
     document.getElementById("fixfirst").hidden = false;
+  })();
+
+  // Ready to paste: text made by report/_common.py (paste_lines, paste_settings_json).
+  (function () {
+    var p = R.paste_text || {};
+    if (!p.agents_md && !p.settings) return;
+    var body = document.getElementById("paste-body");
+    document.getElementById("paste-note").textContent = p.note || "";
+    if (p.agents_md) {
+      body.appendChild(el("div", { class: "sub" }, "AGENTS.md (or CLAUDE.md):"));
+      body.appendChild(el("pre", { class: "paste" }, p.agents_md));
+    }
+    if (p.settings) {
+      body.appendChild(el("div", { class: "sub" }, ".claude/settings.json (merge into what is there):"));
+      body.appendChild(el("pre", { class: "paste" }, p.settings));
+      var ul = el("ul");
+      (p.replay || []).forEach(function (line) { ul.appendChild(el("li", null, line)); });
+      body.appendChild(ul);
+    }
+    document.getElementById("paste").hidden = false;
   })();
 
   // Refusals by the agent tool's own rules: the same in every repository, counted nowhere.
