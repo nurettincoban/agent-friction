@@ -504,3 +504,69 @@ def test_the_generic_format_keeps_the_claim_only_until_a_tool_call(tmp_path: Pat
         (stream,) = parse_transcript(path).streams
         last = [e for e in stream.events if e.kind == "user_message"][-1]
         assert last.after_claim is claimed
+
+
+# ---- what the second review found ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "name"),
+    [
+        ("No, don't call legacy_charge, use PaymentClient.", "PaymentClient"),
+        ("Stop using legacy_charge, use PaymentClient instead.", "PaymentClient"),
+        ("Don't use legacy_charge. PaymentClient only.", "PaymentClient"),
+        ("You used legacy_charge instead of PaymentClient again.", ""),
+        ("Why are you using legacy_charge?", ""),
+        ("Use `PaymentClient` instead of legacy_charge()", "PaymentClient"),
+    ],
+)
+def test_the_name_to_use_is_not_the_one_the_sentence_forbids(text: str, name: str) -> None:
+    assert signals.use_instead(text, "") == name
+
+
+def test_a_wrapped_step_gets_no_deny_rule() -> None:
+    quote = lambda text, n: text  # noqa: E731
+    for command in ("sudo rm -rf /var/data", "bash -c 'rm -rf /var/data'", "env X=1 rm -rf /d"):
+        (rec,) = recommend.recommend("command", "rm", [_declined("never", command)], None, quote)
+        assert "deny" not in rec, command
+
+
+def test_the_replay_counts_only_typed_calls_and_redacts_them(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    token = "ghp_" + "a1B2" * 9
+    for name in ("s1", "s2"):
+        s = Session(name, cwd=str(repo)).user("ship it")
+        s.reject("Bash", {"command": "git push --force"}, "never force push, it is forbidden")
+        s.save(tmp_path / "t")
+    s = Session("s3", cwd=str(repo)).user("ship it")
+    s.bash(f"git push --force https://bot:{token}@github.com/o/r.git")
+    s.bash("sudo git push --force")
+    s.save(tmp_path / "t")
+    result = analyze(AnalyzeOptions(repo=repo, transcripts=[tmp_path / "t"], include_git=False))
+    rules = {deny["rule"]: deny for deny in result["paste"]["deny"]}
+    deny = rules["Bash(git push --force:*)"]
+    # the two declined calls, and the push with a token; not the one behind sudo
+    assert deny["would_refuse"] == 3
+    assert token not in json.dumps(result)
+    assert token not in render_markdown(result) and token not in render_terminal(result)
+
+
+def test_a_regenerate_command_must_say_it_regenerates() -> None:
+    assert generated_origin("# DO NOT EDIT\n# To run the tests, run `pytest tests/gen`\n") == (
+        "",
+        "",
+    )
+    assert generated_origin("# DO NOT EDIT\n# Don't run `rm -rf gen/` to regenerate\n") == ("", "")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Here's how this works: the handler reads the queue.",
+        "I'll finish that work tomorrow.",
+        "Should work now, though I couldn't run the e2e suite.",
+    ],
+)
+def test_more_words_that_are_not_claims(text: str) -> None:
+    assert not common.claims_done(text)

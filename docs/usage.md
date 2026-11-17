@@ -41,7 +41,7 @@ Files where agents struggle
   ████▋       46.5 src/shopfront/checkout/service.py         3      5      2m  ● user-correction×3, edit-revert×1
 ```
 
-That output is real, abridged to its top rows: `agent-friction demo` scans the synthetic sessions in [`tests/fixtures`](https://github.com/nurettincoban/agent-friction/tree/main/tests/fixtures).
+That output is real, abridged: `agent-friction demo` scans the synthetic sessions in [`tests/fixtures`](https://github.com/nurettincoban/agent-friction/tree/main/tests/fixtures).
 See the full example as [Markdown](https://github.com/nurettincoban/agent-friction/blob/main/examples/shopfront.md), [JSON](https://github.com/nurettincoban/agent-friction/blob/main/examples/shopfront.json),
 or [interactive HTML](https://nurettincoban.github.io/agent-friction/demo/).
 

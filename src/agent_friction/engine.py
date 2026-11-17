@@ -29,7 +29,6 @@ from agent_friction.attribution import (
     PathResolver,
     is_inline_code,
     is_windows_path,
-    parse_command,
     public_key,
     public_tool,
     to_posix,
@@ -43,7 +42,13 @@ from agent_friction.discovery import (
     repo_roots,
 )
 from agent_friction.errors import AgentFrictionError, BadTranscriptError, NoTranscriptsError
-from agent_friction.guidance import Guidance, deny_rules, parse_deny_rule, rule_denies
+from agent_friction.guidance import (
+    Guidance,
+    deny_rules,
+    parse_deny_rule,
+    rule_denies,
+    typed_pieces,
+)
 from agent_friction.model import Finding, ParsedFile, Stream, Target
 from agent_friction.report._common import paste_candidates
 
@@ -1455,12 +1460,9 @@ class _Analysis:
                     continue
                 rel = self.resolver.resolve(event.path, event.cwd) if event.path else None
                 command = event.command or ""
-                lines = [command]
-                if command:
-                    lines += [
-                        " ".join([step.program, *step.args])
-                        for step in parse_command(command).steps
-                    ]
+                # As Claude Code matches a Bash rule: the line and its typed parts,
+                # wrappers kept, so nothing is counted that the rule would let through.
+                lines = [command, *typed_pieces(command)] if command else [command]
                 if not rule_denies(rules, event.tool or "", lines, rel or ""):
                     continue
                 if stream.kind != claude_code.KIND:
@@ -1472,7 +1474,7 @@ class _Analysis:
                     (one for one in lines[1:] if rule_denies(rules, event.tool or "", [one])),
                     command,
                 )
-                targets[rel or step[:80] or event.tool] += 1
+                targets[rel or redact.redact(step)[:80] or event.tool] += 1
         return {
             "would_refuse": calls,
             "sessions": len(sessions),

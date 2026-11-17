@@ -112,7 +112,7 @@ Planted items S1 to S6, H1 and H2; S7 is coverage and decoys are scored as false
 | | `/insights` (per run) | agent-friction |
 | --- | --- | --- |
 | Score, out of 16 | 11 / 11 / 11 | 16 |
-| Items with a fix that works as given (7 expect one: S1 to S6, H1) | 3 / 3 / 3 (S1, S2, S6), plus a sound command for H1 next to a doubtful one | 7 (S4's is generic) |
+| Items with a fix that works as given (7 expect one: S1 to S6, H1) | 4 / 4 / 4 (S1, S2, S6, H1); H1's sound command sits next to a doubtful one | 7 (S4's is generic) |
 | Decoys raised as problems | 0 of 3 | 0 of 3 |
 | Statements the sessions contradict | several in every run (listed above) | none found |
 

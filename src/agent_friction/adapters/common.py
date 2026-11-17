@@ -132,13 +132,17 @@ def asks_question(text: str) -> bool:
 #: Agent prose that reports the work finished or passing.
 _CLAIM_RE = re.compile(
     r"\b(?:all (?:the )?tests? (?:now )?pass(?:es|ed|ing)?|tests? (?:now )?pass(?:es|ed)?"
-    r"|(?:it|this|that|everything|they) (?:now )?works?\b|(?:now )?works? now"
+    r"|(?:it|this|that|everything|they) (?:now )?works?(?=\s*(?:[.!]|$|now\b))|works? now"
     r"|(?:is|are|it's) (?:now )?(?:done|working|fixed|complete)\b|should (?:now )?work\b"
     r"|^\W*(?:done|fixed|implemented)\s*(?:[.!:]|$))",
     re.I | re.M,
 )
-#: ... unless the same paragraph also reports a problem or asks something.
-_HEDGED_RE = re.compile(r"\b(?:fail\w*|error\w*|broken|but|however|except)\b|\?", re.I)
+#: ... unless the same paragraph also reports a problem, a gap ("couldn't run"), or asks something.
+_HEDGED_RE = re.compile(
+    r"\b(?:fail\w*|error\w*|broken|but|however|except|though|although|not|untested"
+    r"|\w+n't|cannot|unable|tomorrow|later)\b|\?",
+    re.I,
+)
 
 
 def claims_done(text: str) -> bool:

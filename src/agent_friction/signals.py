@@ -2435,13 +2435,38 @@ def code_names(text: str) -> list[str]:
     return out
 
 
+#: Words just before "use X" that turn it around: "don't use X", "why are you using X".
+_NEGATED_BEFORE_RE = re.compile(
+    r"\b(?:don'?t|do not|never|stop|quit|avoid|why|no more|not|instead of|rather than"
+    r"|without)\b(?:\W+\w+){0,2}\W*$",
+    re.I,
+)
+#: "X instead of Y" names the one that was wrongly used first.
+_INSTEAD_OF_RE = re.compile(r"\s*of\b", re.I)
+
+
 def use_instead(text: str, ruled_out: str) -> str:
-    """The name in code shape the human says to use instead, or ``""``."""
+    """The name in code shape the human says to use instead, or ``""``.
+
+    A name the sentence turns around ("don't use X", "you used X instead of Y") is
+    skipped, and the last name left wins: people tend to end on what to do.
+    """
+    names = code_names(text)
+    found = ""
     for match in _USE_INSTEAD_RE.finditer(text):
         name = (match.group(1) or match.group(2) or "").rstrip(".")
-        if name and name != ruled_out and name in code_names(text):
-            return name
-    return ""
+        if not name or name == ruled_out or name not in names:
+            continue
+        clause = re.split(r"[,.;:!?\n]", text[max(0, match.start() - 40) : match.start()])[-1]
+        if _NEGATED_BEFORE_RE.search(clause):
+            continue
+        instead_of = match.group(0).lower().endswith("instead") and _INSTEAD_OF_RE.match(
+            text, match.end()
+        )
+        if match.group(2) and instead_of:
+            continue
+        found = name
+    return found
 
 
 def reports_failure(text: str) -> bool:
