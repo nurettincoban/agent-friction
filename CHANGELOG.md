@@ -33,5 +33,7 @@ All notable changes to this project are documented here. The format follows
   pseudonymizes project-specific command, tool and path names.
 - JSON output, `schema_version: 1`, documented field by field in `docs/schema.md`. The Python
   API is `agent_friction.analyze(AnalyzeOptions(...))`.
+- Project website at https://nurettincoban.github.io/agent-friction/ (served from `docs/`),
+  with the example report as a live demo. `make examples` regenerates the demo too.
 
 [0.1.0]: https://github.com/nurettincoban/agent-friction/commits/main

@@ -4,6 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/nurettincoban/agent-friction/blob/main/LICENSE)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
+[![Live demo](https://img.shields.io/badge/live_demo-open-b4462b.svg)](https://nurettincoban.github.io/agent-friction/demo/)
 
 **Find the places in your codebase where coding agents keep getting stuck, and get the receipts.**
 
@@ -15,7 +16,17 @@ Each one is small. Together they are where your agent time goes, and nobody writ
 recurring failures, pins them to files, directories, and commands, and tells you what to change,
 with the evidence quoted so you can check it yourself.
 
-![Interactive friction map of the example repository](docs/assets/friction-map.png)
+**[Website](https://nurettincoban.github.io/agent-friction/)** · **[Live demo](https://nurettincoban.github.io/agent-friction/demo/)** · [Quick start](#quick-start) ·
+[What it detects](#what-it-detects) · [Privacy](#privacy) · [Methodology](https://github.com/nurettincoban/agent-friction/blob/main/docs/methodology.md)
+
+<a href="https://nurettincoban.github.io/agent-friction/demo/">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/nurettincoban/agent-friction/main/docs/assets/friction-map-dark.png">
+    <img src="https://raw.githubusercontent.com/nurettincoban/agent-friction/main/docs/assets/friction-map.png" width="100%" alt="The interactive HTML report for the example repository: a treemap of files sized by time lost, with the generated file schema_gen.py as the largest, darkest tile and a side panel explaining its score and what to change.">
+  </picture>
+</a>
+
+<sub>The HTML report for the sample repository. <a href="https://nurettincoban.github.io/agent-friction/demo/">Open it live</a>: one self-contained file, nothing loaded from the network.</sub>
 
 ```console
 $ agent-friction scan
@@ -43,7 +54,7 @@ What to fix first
 
 That output is real, abridged to its top rows: it comes from the synthetic sessions in [`tests/fixtures`](https://github.com/nurettincoban/agent-friction/tree/main/tests/fixtures).
 See the full example as [Markdown](https://github.com/nurettincoban/agent-friction/blob/main/examples/shopfront.md), [JSON](https://github.com/nurettincoban/agent-friction/blob/main/examples/shopfront.json),
-or [interactive HTML](https://github.com/nurettincoban/agent-friction/blob/main/examples/shopfront.html) (download it and open it in a browser).
+or [interactive HTML](https://nurettincoban.github.io/agent-friction/demo/).
 
 ## Why this exists
 
@@ -59,15 +70,25 @@ has go unanswered:
 across sessions** (one bad session is noise, the same failure in five sessions is a pattern), and
 backed by **evidence** you can trace to a transcript line.
 
-## Install
+## Quick start
 
 Requires Python 3.10+. No dependencies. Not on PyPI yet, so install from GitHub:
 
 ```sh
 pipx install git+https://github.com/nurettincoban/agent-friction
-# or run it without installing:
+cd your-repo
+agent-friction scan
+```
+
+Or try it without installing anything:
+
+```sh
 uvx --from git+https://github.com/nurettincoban/agent-friction agent-friction scan
 ```
+
+If you have used Claude Code in that repository, that is all: it finds the sessions on its own.
+Start with the "What to fix first" list, then run `agent-friction show <path>` on any line to
+see the evidence behind it.
 
 ## Use
 

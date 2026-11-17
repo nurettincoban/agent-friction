@@ -1,7 +1,8 @@
 """Regenerate examples/ from the synthetic fixture story (run via `make examples`).
 
-CI runs this and fails if examples/ changes, so the published example always
-matches what the current code produces.
+CI runs this and fails if examples/ or docs/demo/ changes, so the published
+example (and the live demo on the project site) always matches what the
+current code produces.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from agent_friction.report import render_html, render_json, render_markdown, ren
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "tests" / "fixtures"
 OUT = ROOT / "examples"
+DEMO = ROOT / "docs" / "demo" / "index.html"
 
 
 def walk(node: Any) -> Iterator[dict[str, Any]]:
@@ -51,9 +53,13 @@ def main() -> None:
     OUT.mkdir(exist_ok=True)
     (OUT / "shopfront.json").write_text(render_json(result), encoding="utf-8")
     (OUT / "shopfront.md").write_text(render_markdown(result), encoding="utf-8")
-    (OUT / "shopfront.html").write_text(render_html(result), encoding="utf-8")
+    html = render_html(result)
+    (OUT / "shopfront.html").write_text(html, encoding="utf-8")
+    DEMO.parent.mkdir(parents=True, exist_ok=True)
+    DEMO.write_text(html, encoding="utf-8")
     (OUT / "shopfront.txt").write_text(render_terminal(result), encoding="utf-8")
-    print(f"wrote {OUT.relative_to(ROOT)}/shopfront.{{json,md,html,txt}}")
+    written = f"{OUT.relative_to(ROOT)}/shopfront.{{json,md,html,txt}}"
+    print(f"wrote {written} and {DEMO.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":

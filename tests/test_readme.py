@@ -55,3 +55,22 @@ def test_intra_repo_links_resolve() -> None:
             if anchor and resolved.suffix == ".md":
                 anchors = _anchors(resolved.read_text(encoding="utf-8"))
                 assert anchor in anchors, f"{doc.name}: missing anchor #{anchor} in {path}"
+
+
+def test_site_demo_is_the_generated_example() -> None:
+    demo = (ROOT / "docs" / "demo" / "index.html").read_text(encoding="utf-8")
+    example = (ROOT / "examples" / "shopfront.html").read_text(encoding="utf-8")
+    assert demo == example, "docs/demo/index.html is stale: run `make examples`"
+
+
+def test_site_sample_output_matches_the_generated_example() -> None:
+    site = (ROOT / "docs" / "index.html").read_text(encoding="utf-8")
+    block = site.split("<pre>", 1)[1].split("</pre>", 1)[0]
+    text = re.sub(r"<[^>]+>", "", block).replace("&amp;", "&")
+    example = (ROOT / "examples" / "shopfront.txt").read_text(encoding="utf-8")
+    squashed_example = re.sub(r"\s+", " ", example)
+    for line in text.splitlines():
+        squashed = re.sub(r"\s+", " ", line).strip()
+        if not squashed or squashed.startswith("$ "):
+            continue
+        assert squashed in squashed_example, f"site sample line not in the example: {line!r}"
