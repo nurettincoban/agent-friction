@@ -204,6 +204,8 @@ def agent_tool_rules(result: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 AGENT_TOOL_HEADING = "The agent tool's own rules (not counted above)"
+#: The heading of "What to fix first" when nothing there rests on enough events.
+LEADS_HEADING = "Nothing to fix yet: leads to watch"
 
 
 def all_items(result: dict[str, Any]) -> list[dict[str, Any]]:

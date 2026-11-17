@@ -7,6 +7,7 @@ from typing import Any
 
 from agent_friction.report._common import (
     AGENT_TOOL_HEADING,
+    LEADS_HEADING,
     PASTE_HEADING,
     PASTE_NOTE,
     agent_tool_rules,
@@ -210,10 +211,12 @@ def _fix_first(result: dict[str, Any], st: Style, width: int) -> list[str]:
     recs = collect_recommendations(result, limit=5)
     if not recs:
         return []
-    out = [st.bold("What to fix first")]
+    leads = all(is_thin(rec) for _, rec in recs)
+    out = [st.bold(LEADS_HEADING if leads else "What to fix first")]
     for i, (h, rec) in enumerate(recs, 1):
         thin = st.yellow(" (thin evidence)") if is_thin(rec) else ""
-        out.append(f"  {i}. {st.cyan(str(h.get('path')))}: {rec.get('title', '')}{thin}")
+        mark = "-" if leads else f"{i}."
+        out.append(f"  {mark} {st.cyan(str(h.get('path')))}: {rec.get('title', '')}{thin}")
         detail = str(rec.get("detail", "")).strip()
         if detail:
             for line in textwrap.wrap(detail, width=max(40, width - 7)):

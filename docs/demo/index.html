@@ -120,7 +120,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
 </header>
 <main>
   <div class="stats" id="stats"></div>
-  <section id="fixfirst" hidden><h2>What to fix first</h2><ol id="fixfirst-list"></ol><p class="sub" id="fixfirst-note"></p></section>
+  <section id="fixfirst" hidden><h2 id="fixfirst-h">What to fix first</h2><ol id="fixfirst-list"></ol><p class="sub" id="fixfirst-note"></p></section>
   <section id="paste" hidden><h2>Ready to paste</h2><p class="sub" id="paste-note"></p><div id="paste-body"></div></section>
   <section id="agenttool" hidden><h2>The agent tool's own rules (not counted above)</h2><ul id="agenttool-list"></ul></section>
   <h2>Where agents struggle</h2>
@@ -311,7 +311,12 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
       return out.slice(0, 5);
     }
     var shown = pick(false);
-    if (!shown.length) shown = pick(true);
+    if (!shown.length) {
+      shown = pick(true);
+      // Same wording as LEADS_HEADING in report/_common.py: nothing here is a fix yet.
+      document.getElementById("fixfirst-h").textContent = "Nothing to fix yet: leads to watch";
+      document.getElementById("fixfirst-list").style.listStyle = "disc";
+    }
     if (!shown.length) return;
     var list = document.getElementById("fixfirst-list");
     shown.forEach(function (pair) {

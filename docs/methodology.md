@@ -783,8 +783,9 @@ on; for the permission rules, the refusals it counts). With fewer than 5
 (`THIN_EVIDENCE_EVENTS`) it is marked `"evidence": "thin"`: it is still listed
 under its target, after the target's other advice, with "(thin evidence: 3
 events)", but it is left out of "What to fix first" while there is any other
-advice (with none other, the list shows it and says each item is a lead, not a
-reason to change the repository), and `scan -f prompt` never lists it as
+advice (with none other, the list shows it, unnumbered, under "Nothing to fix
+yet: leads to watch", and says each item is a lead, not a reason to change the
+repository), and `scan -f prompt` never lists it as
 something to act on (it goes under "Not enough evidence yet"). Three interruptions of `ls` over hundreds of
 runs are not a reason to change AGENTS.md. Never thin: advice grounded in a
 fact about the repository or in a human's own words, whatever the count

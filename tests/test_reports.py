@@ -407,7 +407,13 @@ def test_with_only_thin_advice_it_is_shown_and_says_so() -> None:
     recs = collect_recommendations(r)
     assert recs and all(rec["evidence"] == "thin" for _, rec in recs)
     assert thin_note(r, recs).startswith("Each of these rests on fewer than 5 events")
-    assert "(thin evidence)" in render_terminal(r)
+    text = render_terminal(r)
+    assert "(thin evidence)" in text
+    # nothing there is a fix: not "What to fix first", and not numbered
+    assert "Nothing to fix yet: leads to watch" in text and "What to fix first" not in text
+    assert "  1. " not in text.split("Nothing to fix yet")[1].split("\n\n")[0]
+    md = render_markdown(r)
+    assert "## Nothing to fix yet: leads to watch" in md and "\n1. `" not in md
 
 
 def test_what_to_fix_first_leads_every_report() -> None:

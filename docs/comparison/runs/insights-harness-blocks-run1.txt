@@ -1,0 +1,232 @@
+Claude Code Insights
+
+8 messages across 3 sessions (20 total) | 2026-11-02 to 2026-11-04
+
+At a Glance
+What's working: You've found a clean, low-effort use for Claude: handing off the tedious job of babysitting builds with a short, one-line request. You've come back to this same routine on several days, which suggests it's becoming a natural part of your workflow and freeing your attention for other work while builds run. Impressive Things You Did →
+What's hindering you: On Claude's side, it checked the build status over and over every few seconds instead of using a single command that waits for the build to finish. It also never ended with a clear verdict, so none of the sessions show whether the build passed or failed. On your side, the request is the same each time but gets re-typed with no saved definition of what to watch, how long to wait, or what 'done' should look like, so Claude improvises the approach every time. Where Things Go Wrong →
+Quick wins to try: Turn your repeated request into a custom skill like /watch-build that uses a blocking or watch-mode command (for example, your CI CLI's watch flag) and always ends with a pass/fail summary plus the key error lines. Pair it with a hook that notifies you when the task finishes, so you can walk away completely. You can also run the skill in headless mode from a script so it doesn't tie up an interactive session. Features to Try →
+Ambitious workflows: As models get more capable, 'watch the build' can become 'watch, diagnose, and fix.' Claude could read failure logs, find the root cause, push a fix, and repeat until the build is green or it hits a real blocker. Further out, a hook-triggered headless run after every push could keep a running health log of flaky tests and slow steps, with parallel agents triaging each failing CI job at the same time. Start preparing by defining clear success criteria and permissions now, so handing over that loop is an easy next step. On the Horizon →
+What You Work On
+How You Use CC
+Impressive Things
+Where Things Go Wrong
+Features to Try
+New Usage Patterns
+On the Horizon
+Team Feedback
+8
+MESSAGES
++0/-0
+LINES
+0
+FILES
+3
+DAYS
+2.7
+MSGS/DAY
+What You Work On
+Build Monitoring
+~3 sessions
+In all three sessions (Nov 2-4, 2026), the user asked Claude to watch a build. Each time, Claude polled the build status with about 30 Bash commands over roughly 4 minutes. None of the transcripts show the build result or any user feedback, so it's unclear whether the builds passed or whether the monitoring helped. The data contains no other distinct project areas, so this is the only area listed rather than the 4-5 requested.
+WHAT YOU WANTED
+Monitor Build
+2
+Build Monitoring
+1
+TOP TOOLS USED
+Bash
+89
+LANGUAGES
+
+No data
+
+SESSION TYPES
+Single Task
+3
+How You Use Claude Code
+
+Your usage across these three sessions is narrow and delegation-heavy: each time, you handed Claude one short instruction, essentially "watch the build," and let it run. With only 8 messages across 3 sessions, you gave minimal upfront specification. You didn't define success criteria, a polling interval, or what to do if the build failed. Claude filled the gap with about 30 Bash calls per session over roughly 4 minutes, repeatedly checking build status.
+
+You let Claude run without interrupting. The transcripts show no mid-session corrections, no redirection, and no follow-up feedback. That suggests you treat Claude as a background monitor: you start a watch task and turn your attention elsewhere instead of steering. The flip side is that none of the sessions record an outcome. We can't see whether the builds passed, whether Claude reported back clearly, or whether you acted on the result. All three outcomes are unclear from the transcripts, and no commits were made.
+
+The pattern repeated almost identically on three days, November 2 to 4, so this is a routine, ritualized use case rather than exploration. You could get more value by adding a little structure to the prompt. For example: "watch the build, poll every 30s, summarize failures with the relevant log lines, and suggest a fix if it breaks." That would turn ~30 opaque polling calls into a clear, actionable report and make each session's result visible.
+
+Key pattern: You use Claude as a hands-off build watcher, giving one terse "watch the build" instruction and letting it poll via Bash without steering or recorded follow-up.
+USER RESPONSE TIME DISTRIBUTION
+2-10s
+3
+10-30s
+2
+30s-1m
+0
+1-2m
+0
+2-5m
+0
+5-15m
+0
+>15m
+0
+Median: 6.0s • Average: 11.6s
+MULTI-CLAUDING (PARALLEL SESSIONS)
+
+No parallel session usage detected. You typically work with one Claude Code session at a time.
+
+USER MESSAGES BY TIME OF DAY
+PT (UTC-8)
+ET (UTC-5)
+London (UTC)
+CET (UTC+1)
+Tokyo (UTC+9)
+Custom offset...
+Morning (6-12)
+8
+Afternoon (12-18)
+0
+Evening (18-24)
+0
+Night (0-6)
+0
+TOOL ERRORS ENCOUNTERED
+Other
+42
+User Rejected
+2
+Impressive Things You Did
+
+Across 3 short sessions from November 2–4, 2026, you used Claude Code for one job: watching builds. The transcripts don't show build results or your reactions, so these observations are limited to how you set up and delegated the work.
+
+Delegating Build Watching
+You handed off the tedious job of watching builds instead of refreshing logs yourself. In each session Claude ran about 30 Bash polling commands over roughly 4 minutes, all from a single short request. That frees you to stay on other work while the build runs.
+Minimal, Efficient Prompting
+You sent only 8 messages across 3 sessions, yet those requests drove 89 Bash calls. A short instruction like 'watch the build' was enough for Claude to start and continue monitoring. Your sessions show little back-and-forth or re-explaining.
+Consistent, Repeatable Routine
+You used the same build-monitoring approach on three different days, and each session followed the same pattern of about 4 minutes and about 30 commands. That consistency suggests it's becoming a reliable part of your workflow. Next, consider asking Claude to end each session with a clear pass/fail summary, since none of the transcripts captured the final build result.
+WHAT HELPED MOST (CLAUDE'S CAPABILITIES)
+
+No data
+
+OUTCOMES
+Unclear
+3
+Where Things Go Wrong
+
+All three of your sessions followed one pattern: you asked Claude to watch a build, Claude polled it with about 30 Bash calls over roughly 4 minutes, and none of the transcripts show a result, so this data can only point to likely friction rather than confirm it.
+
+Build outcomes never recorded
+None of your three sessions shows whether the build passed or failed, so there's no record of what the monitoring found. You could ask Claude to finish every watch task with an explicit pass/fail summary and the relevant error lines.
+In your 2026-11-02 session, Claude made about 29 Bash calls over 4 minutes, but the transcript ends without saying whether the build succeeded.
+All three sessions are classified 'unclear_from_transcript', so neither you nor this report can tell whether the watching was useful.
+High-frequency polling instead of a blocking wait
+About 30 Bash calls in 4 minutes per session (89 total) suggests Claude checked status every few seconds instead of using one command that waits for the build to finish. You could ask Claude to use a single blocking or watch-style command, such as a CI CLI's watch mode or a loop with sleep, to cut tool-call volume and noise.
+One session made roughly 30 separate Bash calls just to monitor a single build.
+All 89 of your tool calls across the three sessions were Bash, which points to repeated status checks rather than one long-running wait.
+Repeating a task without capturing it as a workflow
+You asked for the same 'watch the build' task in three sessions over three days, with no saved instructions about what to watch or what to report. A short CLAUDE.md note or a reusable command could fix the target, the polling interval, the timeout and the reporting format.
+You started build-monitoring sessions on 2026-11-02, again later, and again by 2026-11-04, and each time Claude rebuilt its approach from scratch.
+No user instructions were recorded, so Claude had no guidance on which build to watch, how long to wait, or what to report.
+PRIMARY FRICTION TYPES
+
+No data
+
+INFERRED SATISFACTION (MODEL-ESTIMATED)
+
+No data
+
+Existing CC Features to Try
+Suggested CLAUDE.md Additions
+
+Just copy this into Claude Code to add it to your CLAUDE.md.
+
+Copy All Checked
+## Build Monitoring
+When asked to watch or monitor a build, use one blocking command that waits until the build finishes, such as `gh run watch --exit-status`, `kubectl rollout status`, or a single `until` loop with `sleep 30`. Do not poll with many separate short Bash calls. When the build finishes, always report the final status (pass/fail), the duration, and, on failure, the first relevant error lines from the log.
+Copy
+In all 3 sessions you asked Claude to 'watch the build', and each time it made about 30 separate Bash calls over 4 minutes, but none of the transcripts show the build result.
+Always end a monitoring task with a one-line summary in this format: `BUILD <PASSED|FAILED> — <job/run id> — <duration> — <next step>`.
+Copy
+All 3 sessions ended with the outcome 'unclear_from_transcript', so the build result never got clearly reported.
+
+Just copy this into Claude Code and it'll set it up for you.
+
+Custom Skills
+Turn your repeated 'watch the build' request into a single /watch-build command with a fixed polling strategy and report format.
+Why for you: You made the same request in all 3 sessions. A skill would give you consistent, low-noise monitoring and a clear pass/fail result every time.
+mkdir -p .claude/skills/watch-build && cat > .claude/skills/watch-build/SKILL.md <<'EOF'
+---
+name: watch-build
+description: Monitor the current CI build until it completes and report the result
+---
+1. Identify the latest run for the current branch (e.g. `gh run list --branch $(git branch --show-current) --limit 1`).
+2. Wait for it with ONE blocking command: `gh run watch <id> --exit-status --interval 30`.
+3. On failure, run `gh run view <id> --log-failed | tail -50` and summarize the root cause.
+4. Finish with: BUILD <PASSED|FAILED> — <id> — <duration> — <suggested next step>.
+EOF
+Copy
+Headless Mode
+Run build monitoring non-interactively from a script so it doesn't take up an interactive session.
+Why for you: Watching a build mostly means waiting. A background headless run can watch the build and only alert you, or diagnose the failure, when it finishes.
+claude -p "Watch the latest CI run for this branch with 'gh run watch --exit-status'. If it fails, summarize the failing step and likely cause." --allowedTools "Bash" > build-report.txt &
+Copy
+Hooks
+Automatically get a notification when Claude finishes a long task such as watching a build.
+Why for you: Each of your sessions involved about 4 minutes of waiting. A Stop hook can notify you when monitoring ends so you don't have to check back.
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "notify-send 'Claude Code' 'Task finished — check build result' || osascript -e 'display notification \"Task finished\" with title \"Claude Code\"'" }
+        ]
+      }
+    ]
+  }
+}
+Copy
+New Ways to Use Claude Code
+
+Just copy this into Claude Code and it'll walk you through it.
+
+Replace polling loops with a blocking wait
+Ask Claude to wait on the build with a single command instead of polling about 30 times.
+All three sessions show about 89 Bash calls in total for three 4-minute builds. That is noisy, uses up context, and makes the final result easy to miss. Commands like `gh run watch --exit-status` or `until` loops with sleeps finish in one call and return a clear exit code. This also leaves a clean transcript showing whether the build passed.
+PASTE INTO CLAUDE CODE:
+Watch the latest CI build for this branch using a single blocking command (e.g. `gh run watch <id> --exit-status`), not repeated polling. When it finishes, tell me PASSED or FAILED, and if it failed, show the failing step and the relevant log lines.
+Copy
+Turn 'watch' into 'watch and fix'
+Go beyond monitoring by asking Claude to diagnose, and optionally fix, failures in the same request.
+Your sessions recorded no commits and no clear outcome, so the monitoring likely didn't lead to any action. If you tell Claude what to do on failure, the waiting time produces something useful. For example, it can read the failed logs, find the cause, and propose a patch. This turns a passive 4-minute wait into a step toward a green build.
+PASTE INTO CLAUDE CODE:
+Watch the current build until it completes. If it fails, fetch the failed job logs, identify the root cause, propose a minimal fix, and ask me before applying it.
+Copy
+Define the expected end state up front
+State what 'done' looks like so every session ends with a clear result.
+All 3 sessions were rated 'unclear_from_transcript' because nothing marked the end. A short, required final summary makes outcomes clear for you and for future usage analysis. This is especially useful when you work on other things while the build runs.
+PASTE INTO CLAUDE CODE:
+Monitor the build and finish with exactly one line: BUILD <PASSED|FAILED> — <run id> — <duration> — <next step>. Don't send intermediate status updates unless something fails.
+Copy
+On the Horizon
+
+AI-assisted development is shifting from Claude polling a build on request to Claude owning the whole build-test-fix loop and returning clear, verified outcomes.
+
+Self-Healing Build Watcher With Auto-Fixes
+Instead of polling a build with roughly 30 Bash calls and stopping without a verdict, Claude can watch the build to completion, read any failure logs, find the root cause, and push a fix. It can repeat this loop until the build is green or it hits a clear blocker. Every session would end with a definitive outcome and a summary of what changed.
+Getting started: Give Claude the build command or CI status command (for example, `gh run watch` or `gh run view --log-failed`). Ask it to loop on failures and use backoff sleeps instead of rapid polling.
+PASTE INTO CLAUDE CODE:
+Watch the current build until it finishes. Use backoff polling: wait 30s, then 60s, then 120s between checks, and never make more than 15 status checks. When it finishes, report clearly: PASSED or FAILED, with duration. If it FAILED: 1) pull the failing logs (e.g. `gh run view --log-failed`), 2) identify the root cause and quote the key error lines, 3) make the minimal code fix, 4) re-run the relevant build or test step locally to verify, 5) repeat up to 3 times. End with a summary table listing each attempt, the error, the fix applied, and the result. Do not stop without an explicit final verdict.
+Copy
+Parallel Agents Triage Multi-Job Failures
+When a CI pipeline has several jobs (lint, unit tests, integration tests, builds for different platforms), Claude can start parallel sub-agents, one per failing job. Each agent investigates and drafts a fix on its own, then a coordinating agent merges the results and checks for conflicts. Triage that used to happen one job at a time finishes in a single pass.
+Getting started: Use Claude Code's Task/sub-agent tool to run one investigator per failing CI job. Have it use git worktrees so the fixes don't collide.
+PASTE INTO CLAUDE CODE:
+List all jobs in the latest CI run and their status. For each failed job, launch a separate sub-agent with these instructions: fetch that job's logs, find the root cause, and propose a minimal fix in its own git worktree, verified by re-running only that job's command locally. After all sub-agents finish, combine their fixes into one branch and resolve any conflicts. Then run the full local test suite. Report a per-job breakdown with the root cause, the fix, and whether the fix was verified. Finally, give an overall go/no-go recommendation for pushing.
+Copy
+Build Health Hook With Persistent Reporting
+Build monitoring can run automatically instead of starting from a manual 'watch the build' request each time. A hook or headless Claude run could trigger after every push, record results, and keep a running log of flaky tests, slow steps, and recurring errors. Over time, Claude could propose structural fixes such as caching, splitting tests, or quarantining flaky tests, based on real trend data.
+Getting started: Use Claude Code hooks (e.g., PostToolUse on git push) or headless mode (`claude -p`) in a script or CI step. Have it append results to a BUILD_HEALTH.md file and reference that file from CLAUDE.md.
+PASTE INTO CLAUDE CODE:
+Set up automated build health tracking for this repo. 1) Write a script that runs headless Claude (`claude -p`) after each push. The script should wait for the CI run to finish, then append an entry to BUILD_HEALTH.md with: timestamp, commit SHA, pass/fail, total duration, the slowest 3 steps, and any failing tests. 2) Configure a Claude Code hook so the script triggers automatically after `git push`. 3) Add a note to CLAUDE.md telling future sessions to read BUILD_HEALTH.md before working on build issues. 4) Analyze any existing CI history now and seed the file with it. Then suggest the top 3 improvements to build speed or reliability, and support each one with evidence from that history.
+Copy
+"Three times, the user asked Claude to 'watch the build.' Each time Claude checked on it about 30 times in 4 minutes, like a nervous parent at a school play, and we never learn how any of the builds turned out."
+Nov 2–4, 2026, across 3 nearly identical sessions totaling 89 Bash calls. The transcripts show neither a build result nor any user reaction, so all three cliffhangers remain unresolved.

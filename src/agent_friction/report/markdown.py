@@ -7,6 +7,7 @@ from typing import Any
 
 from agent_friction.report._common import (
     AGENT_TOOL_HEADING,
+    LEADS_HEADING,
     PASTE_HEADING,
     PASTE_NOTE,
     agent_tool_rules,
@@ -228,12 +229,14 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
         return "\n".join(out)
     recs = collect_recommendations(result, limit=5)
     if recs:
-        out += ["## What to fix first", ""]
+        leads = all(is_thin(rec) for _, rec in recs)
+        out += [f"## {LEADS_HEADING if leads else 'What to fix first'}", ""]
         for i, (h, rec) in enumerate(recs, 1):
             title = _html_escape(str(rec.get("title", "")))
             detail = _html_escape(str(rec.get("detail", "")))
             thin = " _(thin evidence)_" if is_thin(rec) else ""
-            out.append(f"{i}. {_code(h.get('path'))}: **{title}**{thin} {detail}")
+            mark = "-" if leads else f"{i}."
+            out.append(f"{mark} {_code(h.get('path'))}: **{title}**{thin} {detail}")
         out.append("")
         said = thin_note(result, recs)
         if said:

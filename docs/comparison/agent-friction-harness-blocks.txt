@@ -1,12 +1,12 @@
 agent-friction · repo
 20 sessions · 565 tool calls · 5 friction events · ~18s lost · 0 human corrections · 2026-11-02 → 2026-11-21
 
-What to fix first
-  1. ls: Say when agents should run `ls` (thin evidence)
+Nothing to fix yet: leads to watch
+  - ls: Say when agents should run `ls` (thin evidence)
      Humans stopped `ls` while it was running 3 times in 3 sessions. If it takes too long or
      should not be run here, say so in AGENTS.md together with what to run instead (a narrower or
      faster command).
-  2. sleep: State the boundary (thin evidence)
+  - sleep: State the boundary (thin evidence)
      A human declined the agent's action 2 times in 2 sessions. State the boundary explicitly
      (what must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a
      permission rule.
