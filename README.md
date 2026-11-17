@@ -1,4 +1,7 @@
-# agent-friction
+<h1>
+  <img src="https://raw.githubusercontent.com/nurettincoban/agent-friction/main/docs/assets/logo.svg" width="40" height="40" alt="" align="top">
+  agent-friction
+</h1>
 
 [![CI](https://github.com/nurettincoban/agent-friction/actions/workflows/ci.yml/badge.svg)](https://github.com/nurettincoban/agent-friction/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/nurettincoban/agent-friction/blob/main/LICENSE)
