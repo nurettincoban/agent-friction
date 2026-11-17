@@ -716,3 +716,165 @@ def test_columns_narrows_the_terminal_table(monkeypatch: pytest.MonkeyPatch) -> 
     assert _term_width(None, io.StringIO()) == 40
     monkeypatch.delenv("COLUMNS")
     assert _term_width(None, io.StringIO()) == 100
+
+
+# ---- Git Bash path conversion ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("given", "meant"),
+    [
+        ("C:/Program Files/Git/home/dev/shop", "/home/dev/shop"),
+        ("C:/msys64/home/me/x", "/home/me/x"),
+        ("c:/program files/git/Users/me/code", "/Users/me/code"),
+    ],
+)
+def test_a_path_git_bash_rewrote_is_recognized(given: str, meant: str) -> None:
+    from agent_friction.cli import undo_msys_rewrite
+
+    assert undo_msys_rewrite(given) == meant
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        "/home/dev/shop",
+        r"C:\Users\Dev\Shop",
+        "C:/Users/Dev/Shop",
+        "C:/Program Files/Git",
+        "D:/work/git/data/proj",  # a checkout under a directory that happens to be "git"
+        "D:/Tools/Git/tmp/repo",  # not a usual install root
+    ],
+)
+def test_ordinary_paths_are_left_alone(given: str) -> None:
+    from agent_friction.cli import undo_msys_rewrite
+
+    assert undo_msys_rewrite(given) is None
+
+
+def test_scan_undoes_a_git_bash_rewrite_and_says_how_to_stop_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_friction import cli
+
+    rewritten = "C:/Program Files/Git/home/dev/shopfront"
+    argv = [rewritten if a == "/home/dev/shopfront" else a for a in INPUT]
+    # elsewhere than Git Bash, a path is taken as given
+    monkeypatch.setattr(cli, "under_git_bash", lambda: False)
+    code, _, err = run("scan", *argv, "--color", "never")
+    assert code == EXIT_ERROR and "Git Bash" not in err
+    monkeypatch.setattr(cli, "under_git_bash", lambda: True)
+    code, out, err = run("scan", *argv, "--color", "never")
+    assert code == EXIT_OK and "schema_gen.py" in out
+    assert "Git Bash rewrote --repo-alias /home/dev/shopfront" in err
+    assert "MSYS_NO_PATHCONV=1" in err
+
+
+def test_no_session_hint_names_where_the_sessions_ran(tmp_path: Path) -> None:
+    code, _, err = run(
+        "scan",
+        str(tmp_path),
+        "--transcripts",
+        str(FIXTURES / "transcripts"),
+        "--repo-alias",
+        "/somewhere/else",
+        "--no-git",
+    )
+    assert code == EXIT_ERROR
+    assert "pass --repo-alias /home/dev/shopfront" in err
+
+
+# ---- demo, prompt, skill ---------------------------------------------------------------
+
+
+def test_demo_needs_no_input(tmp_path: Path) -> None:
+    code, out, err = run("demo", "--color", "never")
+    assert code == EXIT_OK and "schema_gen.py" in out and "make test" in out
+    assert "agent-friction demo -o demo.html" in err
+    target = tmp_path / "demo.html"
+    code, _, err = run("demo", "-o", str(target))
+    assert code == EXIT_OK and "<html" in target.read_text(encoding="utf-8")
+    assert "bundled demo" not in err
+
+
+def test_scan_from_a_saved_result_renders_the_prompt(tmp_path: Path) -> None:
+    saved = tmp_path / "scan.json"
+    assert run("scan", *INPUT, "-f", "json", "-o", str(saved))[0] == EXIT_OK
+    code, out, _ = run("scan", "--from", str(saved), "-f", "prompt", str(FIXTURES / "shopfront"))
+    assert code == EXIT_OK
+    assert out.startswith("# Reduce agent friction in shopfront")
+    assert "make test" in out
+    code, _, err = run("scan", "--from", str(saved), "--since", "30d", str(tmp_path))
+    assert code == EXIT_USAGE and "not valid with --from" in err
+
+
+def test_install_skill(tmp_path: Path) -> None:
+    from agent_friction.cli import SKILL_NAME, skill_text
+
+    text = skill_text()
+    assert text.startswith("---\nname: agent-friction-fix\n")
+    assert "-f prompt" in text and "approv" in text
+    code, out, _ = run("install-skill", "--print")
+    assert code == EXIT_OK and out == text
+    code, _, err = run("install-skill", "--project", str(tmp_path))
+    target = tmp_path / ".claude" / "skills" / SKILL_NAME / "SKILL.md"
+    assert code == EXIT_OK and target.read_text(encoding="utf-8") == text
+    assert f"/{SKILL_NAME}" in err
+    assert run("install-skill", "--project", str(tmp_path))[0] == EXIT_OK  # up to date
+    target.write_text("mine\n", encoding="utf-8")
+    code, _, err = run("install-skill", "--project", str(tmp_path))
+    assert code == EXIT_ERROR and "--force" in err
+    assert target.read_text(encoding="utf-8") == "mine\n"
+    assert run("install-skill", "--project", str(tmp_path), "--force")[0] == EXIT_OK
+    assert target.read_text(encoding="utf-8") == text
+    code, _, err = run("install-skill", "--project", str(tmp_path / "nope"))
+    assert code == EXIT_ERROR and "not a directory" in err
+
+
+def test_install_skill_defaults_to_the_home_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    assert run("install-skill")[0] == EXIT_OK
+    assert (tmp_path / ".claude" / "skills" / "agent-friction-fix" / "SKILL.md").is_file()
+
+
+def test_the_agent_tools_own_rules_are_reported_apart_and_counted_nowhere(tmp_path: Path) -> None:
+    from tests.builders import Session
+
+    blocked = "Blocked: sleep {n} followed by: gh run view. To wait for a condition, use Monitor"
+    transcripts = tmp_path / "t"
+    for i in range(6):
+        s = Session(f"s{i}", "/repo").user("watch the build")
+        for k in range(5):
+            s.tool(
+                "Bash",
+                {"command": f"sleep {30 + k}; gh run view"},
+                blocked.format(n=30 + k),
+                is_error=True,
+            )
+            s.bash("gh run view", "in progress")
+        s.save(transcripts)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    argv = [str(repo), "--transcripts", str(transcripts), "--repo-alias", "/repo", "--no-git"]
+    code, out, err = run("scan", *argv, "--color", "never", "--fail-on", "10")
+    assert code == EXIT_OK and "sleep" not in err
+    assert "The agent tool's own rules (not counted above)" in out
+    assert "sleep: refused 30 times in 6 sessions" in out
+    assert "Built into" not in out  # the explanation, not a title among the fixes
+    assert "Commands that keep failing" not in out
+    code, out, _ = run("scan", *argv, "-f", "json")
+    data = json.loads(out)
+    assert data["commands"] == [] and data["totals"]["friction_events"] == 0
+    assert data["totals"]["agent_tool_events"] == 30
+    (row,) = data["agent_tool"]
+    assert (row["command"], row["events"], row["sessions"]) == ("sleep", 30, 6)
+    assert row["recommendations"][0]["origin"] == "agent-tool"
+    md = run("scan", *argv, "-f", "markdown")[1]
+    assert "## The agent tool's own rules (not counted above)" in md
+    prompt = run("scan", *argv, "-f", "prompt")[1]
+    assert "## Optional: the agent tool's own rules" in prompt
+    assert "## Nothing to change yet" in prompt
+    html = run("scan", *argv, "-f", "html")[1]
+    assert 'id="agenttool"' in html

@@ -426,6 +426,22 @@ def is_guardrail_hit(finding: Finding) -> bool:
     return finding.signal == PERMISSION_DENIED and finding.detail.get("guardrail") == "1"
 
 
+#: Who refused a call when it was the agent tool's own rule, not anything of the
+#: repository: Claude Code's built-in blocks, its auto-mode classifier, its safety check.
+AGENT_TOOL_VARIANTS = frozenset({"blocked", "classifier", "safety"})
+
+
+def is_agent_tool_rule(finding: Finding) -> bool:
+    """A call the agent tool itself refused by a rule of its own (``Blocked: sleep 30``).
+
+    Such a rule is the same in every repository: these events are reported apart
+    (``agent_tool`` in the result) and count in no score, total or comparison.
+    """
+    return (
+        finding.signal == PERMISSION_DENIED and finding.detail.get("variant") in AGENT_TOOL_VARIANTS
+    )
+
+
 def is_hook_habit(finding: Finding) -> bool:
     """A commit that a pre-commit hook stopped to rewrite files, session after session."""
     return finding.signal == COMMAND_FAILURE and finding.detail.get("hook_rewrote") == "recurring"

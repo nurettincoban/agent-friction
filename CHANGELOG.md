@@ -28,6 +28,24 @@ All notable changes to this project are documented here. The format follows
 - `agent-friction compare`: before/after comparison per exposed session, with `replaced`, `enforced`,
   `resolved`, `inactive` and `too-little-data` verdicts, and a `--fail-on-regression` gate.
 - `agent-friction sources`: list the transcripts that would be analysed, and why any were not.
+- `agent-friction demo`: scan the bundled example repository and its sessions, with nothing to
+  set up (`make demo` writes `demo.html`).
+- `scan -f prompt`: the recommendations as a task for any coding agent, with the evidence behind
+  each item and rules to check each claim and wait for approval. `scan --from saved.json`
+  renders a saved scan in any format.
+- `agent-friction install-skill`: a Claude Code skill (`/agent-friction-fix`) that scans,
+  proposes each fix with its evidence, applies only what you approve, and compares against the
+  last scan next time.
+- Recommendations carry `events`; advice on fewer than 5 events is marked `"evidence": "thin"`
+  and kept out of "What to fix first" while there is other advice. Refusals by the agent tool's
+  own rules (Claude Code's `Blocked: sleep ...`, the auto-mode classifier) are reported as such,
+  with what the refusal says to do instead, in a section of their own ("The agent tool's own
+  rules", `agent_tool` in the JSON), and count in no hotspot, score, total, gate or comparison.
+- "What to fix first" leads the terminal, Markdown and HTML reports. The headline counts strong
+  events and names weak ones beside them ("22 friction events (+11 weak)").
+- Git Bash on Windows: a `--repo-alias` that Git Bash rewrote (`C:/Program Files/Git/home/...`)
+  is recognized and restored, with a note about `MSYS_NO_PATHCONV=1`.
+- `docs/comparison.md`: agent-friction and Claude Code's `/insights` run on the same sessions.
 - `scan --fail-on SCORE` gate. Exit codes: 0 ok, 1 error, 2 usage, 3 gate.
 - Redaction of secrets in evidence excerpts. `--no-excerpts` removes all transcript text and
   pseudonymizes project-specific command, tool and path names.

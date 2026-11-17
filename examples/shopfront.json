@@ -1,4 +1,5 @@
 {
+  "agent_tool": [],
   "commands": [
     {
       "agent_commits": 0,
@@ -69,6 +70,7 @@
         {
           "detail": "`pytest` failed 7 times in 4 sessions; 5 times the agent then got the same job done with `make test`, and `pytest` did not work later in those sessions. Add a line to AGENTS.md such as: \"use `make test`, not `pytest`\".",
           "documented_in": [],
+          "events": 7,
           "id": "use-the-working-command",
           "replacement": "make test",
           "signals": [
@@ -148,6 +150,7 @@
         {
           "detail": "A human declined the agent's action once in 1 session. State the boundary explicitly (what must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a permission rule. Reasons given: \"never delete existing migrations, add a new revision on top\"",
           "documented_in": [],
+          "events": 1,
           "id": "state-the-boundary",
           "signals": [
             "tool-rejected"
@@ -349,6 +352,7 @@
         {
           "detail": "Agents searched under src/shopfront/ and found nothing 5 times in 2 sessions. They looked for `RefundPolicy` (2x), `**/*policy*.py`, `DiscountPolicy`. If the concept exists under another name or elsewhere, add a pointer in AGENTS.md (or a comment/alias where agents look). If it does not exist, say so.",
           "documented_in": [],
+          "events": 5,
           "id": "add-a-pointer",
           "signals": [
             "search-miss"
@@ -488,6 +492,7 @@
         {
           "detail": "This file says it is generated (it starts with a generated-file header), yet agents ran into trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md which source to change and which command regenerates it, and consider denying direct edits to it.",
           "documented_in": [],
+          "events": 7,
           "id": "edit-the-source-not-the-output",
           "signals": [
             "edit-miss",
@@ -498,6 +503,7 @@
         {
           "detail": "6 edits failed to locate the target in this 1031-line file (2 matched several places, 4 matched nothing) across 4 sessions. Split it into smaller modules, or give repeated blocks unique nearby text (section comments, distinct names) so an edit can be targeted.",
           "documented_in": [],
+          "events": 6,
           "id": "split-or-anchor-large-file",
           "signals": [
             "edit-miss"
@@ -507,6 +513,7 @@
         {
           "detail": "A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: \"No, stop hand-editing src/shopfront/api/schema_gen.py. It is generated: change api/openapi.yaml and run make codegen.\" / \"That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml.\"",
           "documented_in": [],
+          "events": 2,
           "id": "write-down-the-rule",
           "signals": [
             "user-correction"
@@ -636,6 +643,7 @@
         {
           "detail": "A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: \"It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only.\" / \"No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.\" (The human also named `src/shopfront/payments/legacy.py`, which the agent had not touched.)",
           "documented_in": [],
+          "events": 2,
           "id": "write-down-the-rule",
           "signals": [
             "user-correction"
@@ -1056,6 +1064,8 @@
   },
   "tool_failures": [],
   "totals": {
+    "agent_tool_events": 0,
+    "agent_tool_minutes": 0.0,
     "commands_affected": 4,
     "corrections": 4,
     "directories_affected": 1,

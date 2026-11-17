@@ -147,10 +147,12 @@ class PathResolver:
 
     def _disk_name(self, parents: Sequence[str], name: str) -> str | None:
         try:
-            directory = self.repo.joinpath(*parents)
-            if (directory / name).exists():
+            # Compare against the directory listing, not ``exists()``: where the working
+            # tree is on a case-insensitive file system (Windows, and macOS by default)
+            # ``exists()`` is true for any spelling, which would keep the transcript's.
+            names = [entry.name for entry in self.repo.joinpath(*parents).iterdir()]
+            if name in names:
                 return name
-            names = [entry.name for entry in directory.iterdir()]
             same = [e for e in names if e.casefold() == name.casefold()]
         except OSError:
             return None

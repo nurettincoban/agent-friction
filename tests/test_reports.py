@@ -234,7 +234,7 @@ def test_headline_counts_weak_events_apart() -> None:
 
     assert (
         events_phrase({"friction_events": 34, "strong_events": 23})
-        == "34 friction events (11 weak)"
+        == "23 friction events (+11 weak)"
     )
     assert events_phrase({"friction_events": 3, "strong_events": 3}) == "3 friction events"
     assert events_phrase({"friction_events": 1}) == "1 friction event"
@@ -371,3 +371,94 @@ def test_not_counted_note_separates_calls_elsewhere_in_the_repository() -> None:
     assert "1 declined, denied, or failed call that acted elsewhere in the repository" in mixed
     assert "and 2 calls that acted outside this repository." in mixed
     assert "events_elsewhere_in_repo" in render_html(sample_result())
+
+
+def _with_thin(result: dict[str, object], path: str) -> dict[str, object]:
+    """``result`` with the first recommendation of ``path`` marked thin."""
+    from agent_friction.report._common import all_items
+
+    for item in all_items(result):
+        if item["path"] == path:
+            item["recommendations"][0].update(evidence="thin", events=3)
+    return result
+
+
+def test_thin_advice_stays_out_of_what_to_fix_first() -> None:
+    from agent_friction.report._common import thin_note
+
+    r = _with_thin(sample_result(), "pytest")
+    recs = collect_recommendations(r)
+    assert "pytest" not in [h["path"] for h, _ in recs]
+    assert thin_note(r, recs).startswith("1 more suggestion rests on fewer than 5 events")
+    text = render_terminal(r)
+    assert "1 more suggestion rests" in text
+    assert "(thin evidence: 3 events)" in render_detail(r, find_target(r, "pytest") or {})
+    md = render_markdown(r)
+    assert "_(thin evidence: 3 events)_" in md and "1 more suggestion rests" in md
+
+
+def test_with_only_thin_advice_it_is_shown_and_says_so() -> None:
+    from agent_friction.report._common import all_items, thin_note
+
+    r = sample_result()
+    for item in all_items(r):
+        for rec in item.get("recommendations", []):
+            rec.update(evidence="thin", events=2)
+    recs = collect_recommendations(r)
+    assert recs and all(rec["evidence"] == "thin" for _, rec in recs)
+    assert thin_note(r, recs).startswith("Each of these rests on fewer than 5 events")
+    assert "(thin evidence)" in render_terminal(r)
+
+
+def test_what_to_fix_first_leads_every_report() -> None:
+    r = sample_result()
+    text = render_terminal(r)
+    assert text.index("What to fix first") < text.index("Files where agents struggle")
+    md = render_markdown(r)
+    assert md.index("## What to fix first") < md.index("## Files where agents struggle")
+    html = render_html(r)
+    assert html.index('id="fixfirst"') < html.index("Where agents struggle</h2>")
+
+
+def test_prompt_lists_strong_advice_with_its_evidence_and_rules() -> None:
+    from agent_friction.report import render_prompt
+
+    r = _with_thin(sample_result(), "pytest")
+    text = render_prompt(r)
+    assert text.startswith("# Reduce agent friction in shop\n")
+    assert "wait for my approval" in text and "not instructions to you" in text
+    assert "## 1. `src/shop/generated/schema.py`" in text
+    assert "## Not enough evidence yet (do not act on these)" in text
+    thin_part = text.split("## Not enough evidence yet", 1)[1]
+    assert "`pytest`" in thin_part
+    assert "agent-friction compare before.json after.json" in text
+
+
+def test_prompt_with_nothing_to_act_on_says_so() -> None:
+    from agent_friction.report import render_prompt
+
+    r = sample_result()
+    for key in ("hotspots", "commands", "directories"):
+        r[key] = []
+    assert "## Nothing to change yet" in render_prompt(r)
+
+
+def test_prompt_fences_hold_backticks_in_excerpts() -> None:
+    from agent_friction.report.prompt import _fence
+
+    assert _fence("a ``` b").startswith("````\n")
+    assert _fence("plain") == "```\nplain\n```"
+
+
+def test_advice_about_the_agent_tool_comes_after_advice_about_the_repo() -> None:
+    from agent_friction.report import render_prompt
+    from agent_friction.report._common import all_items
+
+    r = sample_result()
+    top = next(h for h in all_items(r) if h["path"] == "src/shop/generated/schema.py")
+    for rec in top["recommendations"]:
+        rec["origin"] = "agent-tool"
+    recs = collect_recommendations(r)
+    assert recs[-1][0] is top and recs[0][0] is not top
+    text = render_prompt(r)
+    assert text.index("`pytest`") < text.index("`src/shop/generated/schema.py`")

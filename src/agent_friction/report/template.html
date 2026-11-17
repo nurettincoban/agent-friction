@@ -101,6 +101,11 @@ input[type=search] { width: 100%; max-width: 320px; padding: 6px 10px; border: 1
   aside { max-height: none; overflow: visible; position: static; }
   .layout { grid-template-columns: 1fr; }
 }
+#fixfirst ol, #agenttool ul { padding-left: 22px; margin: 0; }
+#fixfirst li, #agenttool li { margin: 0 0 10px; line-height: 1.45; }
+#fixfirst li > span, #agenttool li > span { display: block; color: var(--muted); }
+.linkbtn { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; text-decoration: underline; }
+.thin { color: var(--muted); font-style: italic; font-weight: normal; }
 footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
 .empty { padding: 40px; text-align: center; color: var(--muted); }
 </style>
@@ -113,6 +118,8 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
 </header>
 <main>
   <div class="stats" id="stats"></div>
+  <section id="fixfirst" hidden><h2>What to fix first</h2><ol id="fixfirst-list"></ol><p class="sub" id="fixfirst-note"></p></section>
+  <section id="agenttool" hidden><h2>The agent tool's own rules (not counted above)</h2><ul id="agenttool-list"></ul></section>
   <h2>Where agents struggle</h2>
   <div class="controls">
     <div class="seg" role="group" aria-label="Map shows">
@@ -232,13 +239,16 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     document.getElementById("stats").insertAdjacentElement("afterend", el("p", { class: "sub" }, notCounted.join(" ")));
   }
   if (t.tool_calls_in_repo !== undefined) t.tool_calls = t.tool_calls_in_repo;
+  // The headline counts what can be acted on; weak signals are named beside it.
+  var weak = Number(t.friction_events) - Number(t.strong_events);
+  if (t.strong_events !== undefined && weak > 0) t = Object.assign({}, t, { friction_events: t.strong_events, weak_events: weak });
   [["sessions", "agent session", "agent sessions"], ["tool_calls", "tool call", "tool calls"],
    ["friction_events", "friction event", "friction events"], ["est_minutes_lost", "est. time lost", "est. time lost"],
    ["corrections", "human correction", "human corrections"], ["files_affected", "file affected", "files affected"]]
     .forEach(function (p) {
       var box = el("div", { class: "stat" });
       box.appendChild(el("b", null, p[0] === "est_minutes_lost" ? (Number(t[p[0]]) > 0 ? mins(t[p[0]]) : "n/a") : (t[p[0]] || 0)));
-      box.appendChild(el("span", null, Number(t[p[0]]) === 1 ? p[1] : p[2]));
+      box.appendChild(el("span", null, (Number(t[p[0]]) === 1 ? p[1] : p[2]) + (p[0] === "friction_events" && t.weak_events ? " (+" + t.weak_events + " weak)" : "")));
       document.getElementById("stats").appendChild(box);
     });
 
@@ -257,7 +267,9 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     if ((h.recommendations || []).length) {
       detail.appendChild(el("h2", null, "What to change"));
       h.recommendations.forEach(function (r) {
-        var d = el("div", { class: "rec" }); d.appendChild(rich("b", r.title)); d.appendChild(rich("span", r.detail)); detail.appendChild(d);
+        var d = el("div", { class: "rec" }); d.appendChild(rich("b", r.title));
+        if (r.evidence === "thin") d.appendChild(el("span", { class: "thin" }, " (thin evidence: " + (r.events === undefined ? "few events" : plural(r.events, "event")) + ")"));
+        d.appendChild(rich("span", r.detail)); detail.appendChild(d);
       });
     }
     if ((h.evidence || []).length) {
@@ -272,6 +284,67 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
       });
     }
   }
+  // What to fix first: the same choice as collect_recommendations in report/_common.py.
+  (function () {
+    var THIN = 5;
+    var ranked = items.slice().sort(function (a, b) {
+      var la = a.confidence === "low" ? 1 : 0, lb = b.confidence === "low" ? 1 : 0;
+      if (la !== lb) return la - lb;
+      if (Number(b.score) !== Number(a.score)) return Number(b.score) - Number(a.score);
+      var ka = String(a.kind || ""), kb = String(b.kind || ""), pa = String(a.path || ""), pb = String(b.path || "");
+      return ka < kb ? -1 : ka > kb ? 1 : pa < pb ? -1 : pa > pb ? 1 : 0;
+    });
+    function pick(thin) {
+      var out = [];
+      for (var i = 0; i < ranked.length; i++) {
+        var recs = (ranked[i].recommendations || []).filter(function (r) { return (r.evidence === "thin") === thin; });
+        if (recs.length) out.push([ranked[i], recs[0], out.length]);
+      }
+      // Advice about the repository first; a rule of the agent tool itself after it.
+      out.sort(function (a, b) {
+        var ta = a[1].origin === "agent-tool" ? 1 : 0, tb = b[1].origin === "agent-tool" ? 1 : 0;
+        return ta - tb || a[2] - b[2];
+      });
+      return out.slice(0, 5);
+    }
+    var shown = pick(false);
+    if (!shown.length) shown = pick(true);
+    if (!shown.length) return;
+    var list = document.getElementById("fixfirst-list");
+    shown.forEach(function (pair) {
+      var h = pair[0], r = pair[1], li = el("li");
+      var go = el("button", { type: "button", class: "linkbtn mono" }, h.path);
+      go.addEventListener("click", function () { showItem(h); detail.scrollIntoView({ block: "nearest" }); detail.focus(); });
+      li.appendChild(go); li.appendChild(document.createTextNode(": ")); li.appendChild(rich("b", r.title));
+      if (r.evidence === "thin") li.appendChild(el("span", { class: "thin", style: "display:inline" }, " (thin evidence)"));
+      li.appendChild(rich("span", r.detail));
+      list.appendChild(li);
+    });
+    var thinShown = shown.some(function (p) { return p[1].evidence === "thin"; }), left = 0;
+    items.forEach(function (h) { (h.recommendations || []).forEach(function (r) { if (r.evidence === "thin") left++; }); });
+    document.getElementById("fixfirst-note").textContent = thinShown
+      ? "Each of these rests on fewer than " + THIN + " events: a lead to look at, not yet a reason to change the repository."
+      : left ? plural(left, "more suggestion") + " " + (left === 1 ? "rests" : "rest") + " on fewer than " + THIN + " events each and " +
+        (left === 1 ? "is" : "are") + " left out here. Each item's own details list them, marked \"thin evidence\"." : "";
+    document.getElementById("fixfirst").hidden = false;
+  })();
+
+  // Refusals by the agent tool's own rules: the same in every repository, counted nowhere.
+  (function () {
+    var rows = R.agent_tool || [];
+    if (!rows.length) return;
+    var list = document.getElementById("agenttool-list");
+    rows.forEach(function (row) {
+      var li = el("li"), mins_ = Number(row.est_minutes_lost) || 0;
+      li.appendChild(el("b", { class: "mono" }, (row.command || "a call") + ": refused " + plural(row.events, "time") +
+        " in " + plural(row.sessions, "session") + (mins_ > 0 ? ", ~" + mins(mins_) + " of agent time" : "")));
+      var recs = row.recommendations || [];
+      li.appendChild(rich("span", recs.length ? recs[0].detail : "Refused by a rule of the agent tool itself, not by anything in this repository."));
+      list.appendChild(li);
+    });
+    document.getElementById("agenttool").hidden = false;
+  })();
+
   function showDir(n) {
     detail.textContent = "";
     detail.appendChild(el("div", { class: "sub" }, "directory"));

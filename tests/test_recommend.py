@@ -297,7 +297,9 @@ def test_harness_blocks_get_their_own_wording() -> None:
     found = [finding(signals.PERMISSION_DENIED, f"s{i}", variant="blocked") for i in range(2)]
     (rec,) = recommend.recommend(model.COMMAND, "gh run view", found)
     assert rec["id"] == "allow-or-document-the-boundary"
-    assert "the harness itself refuses" in str(rec["detail"]) and "allow rule" not in str(rec)
+    assert "the agent tool itself refuses" in str(rec["detail"]) and "allow rule" not in str(rec)
+    assert "not a hook, a permission setting or anything in this repository" in str(rec["detail"])
+    assert rec["origin"] == "agent-tool" and rec["events"] == 2 and rec["evidence"] == "thin"
 
 
 def test_inline_code_is_never_a_command_to_document() -> None:
@@ -1108,3 +1110,71 @@ def test_deny_rules_of_the_settings_are_read_and_matched(tmp_path: Path) -> None
     assert not rule_denies(rules, "Bash", ["git push"]) and not rule_denies(rules, "Bash", ["ls"])
     assert rule_denies(rules, "WebFetch") and not rule_denies(rules, "WebSearch")
     assert deny_rules(None) == [] and deny_rules(tmp_path / "missing") == []
+
+
+# ---- evidence strength ---------------------------------------------------------------
+
+
+def test_a_handful_of_interruptions_is_thin_evidence() -> None:
+    three = [finding(signals.USER_INTERRUPT, f"s{i}", fid=i) for i in range(3)]
+    (rec,) = recommend.recommend(model.COMMAND, "ls", three)
+    assert rec["id"] == "clarify-before-acting"
+    assert rec["events"] == 3 and recommend.is_thin(rec)
+    five = [finding(signals.USER_INTERRUPT, f"s{i}", fid=i) for i in range(5)]
+    (rec,) = recommend.recommend(model.COMMAND, "ls", five)
+    assert rec["events"] == 5 and not recommend.is_thin(rec) and "evidence" not in rec
+
+
+def test_a_reason_a_human_gave_is_not_thin() -> None:
+    said = [finding(signals.TOOL_REJECTED, "s1", reason="never delete migrations")]
+    (rec,) = recommend.recommend(model.COMMAND, "rm", said, quote=quote)
+    assert rec["id"] == "state-the-boundary" and not recommend.is_thin(rec)
+    silent = [finding(signals.TOOL_REJECTED, f"s{i}", fid=i) for i in range(2)]
+    (rec,) = recommend.recommend(model.COMMAND, "rm", silent)
+    assert recommend.is_thin(rec)
+
+
+def test_a_fact_about_the_repository_is_never_thin() -> None:
+    facts = FileFacts(True, 40, True, "header", generated_by="header")
+    found = [finding(signals.EDIT_MISS, "s1", key="gen.py")]
+    recs = recommend.recommend(model.FILE, "gen.py", found, facts)
+    first = recs[0]
+    assert first["id"] == "edit-the-source-not-the-output" and not recommend.is_thin(first)
+
+
+def test_the_agent_tools_own_rule_comes_before_two_declines() -> None:
+    blocked = "Blocked: sleep 30 followed by: gh run view. To wait for a condition, use Monitor"
+    found = [
+        finding(signals.PERMISSION_DENIED, f"s{i}", fid=i, variant="blocked", excerpt=blocked)
+        for i in range(280)
+    ] + [finding(signals.TOOL_REJECTED, f"r{i}", fid=1000 + i) for i in range(2)]
+    recs = recommend.recommend(model.COMMAND, "sleep", found, quote=quote)
+    assert ids(recs) == ["allow-or-document-the-boundary", "state-the-boundary"]
+    tool_rule, declined = recs
+    assert tool_rule["origin"] == "agent-tool" and tool_rule["events"] == 280
+    assert not recommend.is_thin(tool_rule) and recommend.is_thin(declined)
+    detail = str(tool_rule["detail"])
+    assert "Built into the agent tool, not this repository" in str(tool_rule["title"])
+    assert "Nothing in the repository needs to change" in detail
+    assert '"To wait for a condition, use Monitor"' in detail
+    # without excerpts, no transcript text
+    recs = recommend.recommend(model.COMMAND, "sleep", found)
+    assert "Monitor" not in str(recs[0]["detail"])
+
+
+@pytest.mark.parametrize(
+    ("part", "whole", "text"),
+    [
+        (0, 100, "0%"),
+        (3, 0, "0%"),
+        (1, 20_000, "<0.1%"),
+        (2, 1000, "0.2%"),
+        (19, 2000, "0.9%"),
+        (1, 100, "1%"),
+        (5, 100, "5%"),
+        (199, 200, "99%"),
+        (200, 200, "100%"),
+    ],
+)
+def test_a_rate_is_never_rounded_away(part: int, whole: int, text: str) -> None:
+    assert recommend.fmt_percent(part, whole) == text

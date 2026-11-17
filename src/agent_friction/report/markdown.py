@@ -6,6 +6,8 @@ import re
 from typing import Any
 
 from agent_friction.report._common import (
+    AGENT_TOOL_HEADING,
+    agent_tool_rules,
     collect_recommendations,
     dropped_note,
     events_phrase,
@@ -13,9 +15,11 @@ from agent_friction.report._common import (
     gone_note,
     grouped_unattributed,
     headline_lost,
+    is_thin,
     plural,
     repo_recommendations,
     signal_titles,
+    thin_note,
     top_signals,
     unattributed_heading,
 )
@@ -52,6 +56,21 @@ def _table(items: list[dict[str, Any]], label: str) -> list[str]:
     return lines
 
 
+def _events(rec: dict[str, Any]) -> str:
+    n = rec.get("events")
+    return plural(n, "event") if isinstance(n, int) else "few events"
+
+
+def _agent_tool_section(result: dict[str, Any]) -> list[str]:
+    rows = agent_tool_rules(result)
+    if not rows:
+        return []
+    out = [f"## {AGENT_TOOL_HEADING}", ""]
+    for heading, text in rows:
+        out.append(f"- **{_html_escape(heading)}.** {_html_escape(text)}")
+    return [*out, ""]
+
+
 def _details(h: dict[str, Any], titles: dict[str, str]) -> list[str]:
     out = [
         "<details>",
@@ -72,7 +91,8 @@ def _details(h: dict[str, Any], titles: dict[str, str]) -> list[str]:
                 _html_escape(str(rec.get("title", ""))),
                 _html_escape(str(rec.get("detail", ""))),
             )
-            out.append(f"- **{title}** {detail}".rstrip())
+            thin = f" _(thin evidence: {_events(rec)})_" if is_thin(rec) else ""
+            out.append(f"- **{title}**{thin} {detail}".rstrip())
         out.append("")
     ev = h.get("evidence", [])
     if ev:
@@ -169,24 +189,29 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
             out += ["No hotspot: no file, directory, or command collected friction.", ""]
         else:
             out += ["No recurring friction found.", ""]
+        out += _agent_tool_section(result)
         out += _unattributed(result)
         out += _repo_section(result)
         note = dropped_note(result)
         if note:
             out += [f"_{note}_", ""]
         return "\n".join(out)
-    note = dropped_note(result)
-    if note:
-        out += [f"_{note}_", ""]
-
     recs = collect_recommendations(result, limit=5)
     if recs:
         out += ["## What to fix first", ""]
         for i, (h, rec) in enumerate(recs, 1):
             title = _html_escape(str(rec.get("title", "")))
             detail = _html_escape(str(rec.get("detail", "")))
-            out.append(f"{i}. {_code(h.get('path'))}: **{title}** {detail}")
+            thin = " _(thin evidence)_" if is_thin(rec) else ""
+            out.append(f"{i}. {_code(h.get('path'))}: **{title}**{thin} {detail}")
         out.append("")
+        said = thin_note(result, recs)
+        if said:
+            out += [f"_{said}_", ""]
+    note = dropped_note(result)
+    if note:
+        out += [f"_{note}_", ""]
+    out += _agent_tool_section(result)
     out += _repo_section(result)
 
     if hotspots:
