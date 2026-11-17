@@ -4,6 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/nurettincoban/agent-friction/blob/main/LICENSE)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
+[![Live demo](https://img.shields.io/badge/live_demo-open-b4462b.svg)](https://nurettincoban.github.io/agent-friction/demo/)
 
 **Find the places in your codebase where coding agents keep getting stuck, and get the receipts.**
 
@@ -13,9 +14,43 @@ Each one is small. Together they are where your agent time goes, and nobody writ
 
 `agent-friction` reads the transcripts your coding agent already leaves on disk, finds those
 recurring failures, pins them to files, directories, and commands, and tells you what to change,
-with the evidence quoted so you can check it yourself.
+with the evidence quoted so you can check it yourself. It is for anyone who uses coding agents
+daily and keeps an `AGENTS.md` or `CLAUDE.md`. Alpha: Claude Code is supported natively, other
+agents through a small JSONL format.
 
-![Interactive friction map of the example repository](docs/assets/friction-map.png)
+**[Website](https://nurettincoban.github.io/agent-friction/)** · **[Live demo](https://nurettincoban.github.io/agent-friction/demo/)** · [Quick start](https://github.com/nurettincoban/agent-friction#quick-start) ·
+[What it detects](https://github.com/nurettincoban/agent-friction#what-it-detects) · [Privacy](https://github.com/nurettincoban/agent-friction#privacy) · [Methodology](https://github.com/nurettincoban/agent-friction/blob/main/docs/methodology.md)
+
+<a href="https://nurettincoban.github.io/agent-friction/demo/">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/nurettincoban/agent-friction/main/docs/assets/friction-map-dark.png">
+    <img src="https://raw.githubusercontent.com/nurettincoban/agent-friction/main/docs/assets/friction-map.png" width="100%" alt="The interactive HTML report for the example repository: a treemap of files sized by time lost, with the generated file schema_gen.py as the largest, darkest tile and a side panel explaining its score and what to change.">
+  </picture>
+</a>
+
+<sub>The HTML report for the sample repository. <a href="https://nurettincoban.github.io/agent-friction/demo/">Open it live</a>: one self-contained file, nothing loaded from the network.</sub>
+
+## Quick start
+
+Requires Python 3.10+ and nothing else. Install from GitHub (a PyPI release is planned for 0.1.0):
+
+```sh
+pipx install git+https://github.com/nurettincoban/agent-friction
+cd your-repo
+agent-friction scan
+```
+
+Or try it without installing anything:
+
+```sh
+uvx --from git+https://github.com/nurettincoban/agent-friction agent-friction scan
+```
+
+If you have used Claude Code in that repository, that is all: it finds the sessions on its own.
+Start with the "What to fix first" list, then run `agent-friction show <path>` on any line to
+see the evidence behind it.
+
+## Example output
 
 ```console
 $ agent-friction scan
@@ -43,7 +78,7 @@ What to fix first
 
 That output is real, abridged to its top rows: it comes from the synthetic sessions in [`tests/fixtures`](https://github.com/nurettincoban/agent-friction/tree/main/tests/fixtures).
 See the full example as [Markdown](https://github.com/nurettincoban/agent-friction/blob/main/examples/shopfront.md), [JSON](https://github.com/nurettincoban/agent-friction/blob/main/examples/shopfront.json),
-or [interactive HTML](https://github.com/nurettincoban/agent-friction/blob/main/examples/shopfront.html) (download it and open it in a browser).
+or [interactive HTML](https://nurettincoban.github.io/agent-friction/demo/).
 
 ## Why this exists
 
@@ -59,26 +94,16 @@ has go unanswered:
 across sessions** (one bad session is noise, the same failure in five sessions is a pattern), and
 backed by **evidence** you can trace to a transcript line.
 
-## Install
-
-Requires Python 3.10+. No dependencies. Not on PyPI yet, so install from GitHub:
-
-```sh
-pipx install git+https://github.com/nurettincoban/agent-friction
-# or run it without installing:
-uvx --from git+https://github.com/nurettincoban/agent-friction agent-friction scan
-```
-
 ## Use
 
 ```sh
 cd your-repo
-agent-friction scan                        # friction map in the terminal
-agent-friction scan --since 30d -o map.html  # interactive treemap, one self-contained file
-agent-friction scan -o friction.md         # Markdown for an issue or a PR
-agent-friction show src/api/client.py      # why one file scores high, with evidence
-agent-friction show "npm test"             # the same for a command, or a directory
-agent-friction sources                     # which transcripts it found
+agent-friction scan                          # friction map in the terminal
+agent-friction scan --since 30d -o map.html  # interactive treemap, one file
+agent-friction scan -o friction.md           # Markdown for an issue or a PR
+agent-friction show src/api/client.py        # why one file scores high, with evidence
+agent-friction show "npm test"               # the same for a command, or a directory
+agent-friction sources                       # which transcripts it found
 ```
 
 By default it finds Claude Code sessions for the repo (its subdirectories, its git worktrees, and
@@ -113,16 +138,22 @@ agent-friction compare before.json after.json
 ```
 
 `compare` measures each file and command against the sessions that actually touched it (events per
-10 exposed sessions), so a file nobody worked on afterwards shows up as "not touched", not as
-"resolved". When the fix was "use `make test`, not `pytest`", success means agents stop running
-`pytest`, so `compare` checks the recommended command instead: if it ran cleanly afterwards, the
-old one is reported as "replaced". When the fix was a hook or deny rule and agents still try
-the refused call but then go another way, those refusals count as the guardrail holding: they
-stay weak in the scan, and `compare` reports the target as "enforced". A file agents simply stop
-touching shows as "not touched"; that is the expected outcome, not proof. It ignores changes too small to mean anything, warns when either side has too few
-sessions, refuses to compare scans of different repositories, and refuses scans whose time windows overlap
-(a later scan without `--since` contains the earlier one, which would only dilute it). Both scans must use the
-same privacy mode: compare two `--no-excerpts` scans, or two scans without it.
+10 exposed sessions) and gives each one a verdict:
+
+| Verdict | Meaning |
+|---|---|
+| `regressed` / `new` | More friction per exposed session than before, or friction that was not there |
+| `improved` | Less friction per exposed session, by more than noise |
+| `resolved` | Agents still touched it afterwards, with no friction |
+| `replaced` | The fix was "use `make test`, not `pytest`": agents stopped running the old command, and the recommended one ran cleanly |
+| `enforced` | A hook or deny rule added on the advice now refuses the call, and agents go another way |
+| `inactive` | Nobody touched it afterwards. Often the expected outcome, but no evidence either way |
+| `too-little-data` | Too few sessions touched it on one side to tell |
+
+It ignores changes too small to mean anything, and refuses to compare scans of different
+repositories, scans whose time windows overlap, or a `--no-excerpts` scan with one made without
+it. The details are in
+[docs/methodology.md](https://github.com/nurettincoban/agent-friction/blob/main/docs/methodology.md).
 
 ### One package of a monorepo
 
@@ -252,7 +283,7 @@ See [SECURITY.md](https://github.com/nurettincoban/agent-friction/blob/main/SECU
 | Agent | Support |
 |---|---|
 | Claude Code | Native, auto-discovered, including subagents and resumed sessions |
-| Anything else | Convert to the [generic JSONL format](https://github.com/nurettincoban/agent-friction/blob/main/docs/schema.md#generic-transcript-format): one event per line, a few fields |
+| Any other agent | Convert to the [generic JSONL format](https://github.com/nurettincoban/agent-friction/blob/main/docs/schema.md#generic-transcript-format): one event per line, a few fields |
 | Git history | Any agent that marks its commits (`Co-Authored-By: Claude`, Codex, Copilot, Cursor, Aider, …). Without any transcripts, run `scan --allow-empty` for a git-only map |
 
 Native adapters for other agents are welcome; see [CONTRIBUTING.md](https://github.com/nurettincoban/agent-friction/blob/main/CONTRIBUTING.md).

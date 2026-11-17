@@ -31,6 +31,7 @@ dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/nurettincoban/agent-friction"
+Documentation = "https://nurettincoban.github.io/agent-friction/"
 Issues = "https://github.com/nurettincoban/agent-friction/issues"
 Changelog = "https://github.com/nurettincoban/agent-friction/blob/main/CHANGELOG.md"
 
