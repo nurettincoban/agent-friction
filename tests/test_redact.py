@@ -323,3 +323,34 @@ def test_a_blob_of_any_shape_is_replaced_not_chewed_through() -> None:
     assert redact.redact("see " + "x" * 5000 + " end") == "see [REDACTED:5000 characters] end"
     assert redact.redact("x" * 4096) == "x" * 4096
     assert time.monotonic() - started < 5
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("card 4111 1111 1111 1111 exp 12/27", "card [REDACTED:card-number] exp 12/27"),
+        ("pan=4111-1111-1111-1111", "pan=[REDACTED:card-number]"),
+        ("charge 5500005555555559 failed", "charge [REDACTED:card-number] failed"),
+        ("amex 3782 822463 10005 ok", "amex [REDACTED:card-number] ok"),
+        # numbers that are not cards: no Luhn check digit, an id, a timestamp, a version
+        ("order 4111111111111112 shipped", "order 4111111111111112 shipped"),
+        ("ts 1700000000000000000", "ts 1700000000000000000"),
+        ("0000000000000000", "0000000000000000"),
+        ("1 2 3 4 5 6 7 8 9 10 11 12 13 14", "1 2 3 4 5 6 7 8 9 10 11 12 13 14"),
+        ("id 4111111111111111abc", "id 4111111111111111abc"),
+        # a password glued to mysql's -p, quoted or not; a port or a plugin is no password
+        ("mysql -u root -p'S3cr3t!x' shop", "mysql -u root -p[REDACTED] shop"),
+        ("mysqldump -h db -phunter2 shop", "mysqldump -h db -p[REDACTED] shop"),
+        ("ssh -p 2222 host", "ssh -p 2222 host"),
+        ("pytest -p no:cacheprovider", "pytest -p no:cacheprovider"),
+    ],
+)
+def test_card_numbers_and_glued_passwords(text: str, expected: str) -> None:
+    assert redact.redact(text) == expected
+
+
+def test_zero_width_characters_are_stripped() -> None:
+    hidden = "src/​app‌/‍a‎‏.py⁠﻿"
+    assert redact.strip_controls(hidden) == "src/app/a.py"
+    assert redact.redact(hidden) == "src/app/a.py"
+    assert redact.strip_controls("plain ascii\ttext\n") == "plain ascii\ttext\n"

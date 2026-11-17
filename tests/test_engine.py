@@ -1624,11 +1624,17 @@ def test_advice_that_is_already_written_down_says_so(tmp_path: Path) -> None:
     )
     assert "Check that the cited line says not to edit it by hand." in schema["detail"]
     assert "Say in AGENTS.md" not in schema["detail"]
-    # other documentable advice about the same file keeps its text and gains a note
+    # the correction names what that line names: the rule is there, and was not followed
     rule = recommendation(out, SCHEMA, "write-down-the-rule")
     assert rule["documented_in"] == schema["documented_in"]
-    assert "(Also mentioned at `AGENTS.md:3`: check whether it already says" in rule["detail"]
-    assert rule["documented_as"] == "mention"
+    assert rule["title"] == "The rule seems to be written down already: make it harder to miss"
+    assert rule["detail"].startswith(
+        "`AGENTS.md:3` already says something about what the human corrected here 2 times in "
+        "2 sessions (`api/openapi.yaml`"
+    )
+    assert "make it more prominent or move it closer to the code" in rule["detail"]
+    assert "In their words:" in rule["detail"] and "Put the rule in" not in rule["detail"]
+    assert rule["documented_as"] == "instruction"
     # ... advice that is not about documentation is left alone
     split = recommendation(out, SCHEMA, "split-or-anchor-large-file")
     assert split["documented_in"] == [] and "already" not in split["detail"]
@@ -4083,3 +4089,157 @@ def test_python3_and_a_container_stay_in_the_command_name(tmp_path: Path) -> Non
     )
     assert "zebra" not in json.dumps(bare)
     assert bare["commands"][0]["path"].startswith("docker compose exec <")
+
+
+# ---- round 39 ------------------------------------------------------------------------------
+
+
+def _polyglot(tmp_path: Path, build: Any, count: int = 4) -> Any:
+    repo = tmp_path / "repo"
+    for name in ("backend", "frontend", "src"):
+        (repo / name).mkdir(parents=True, exist_ok=True)
+    sessions = []
+    for i in range(count):
+        s = Session(f"s{i}", cwd=str(repo)).user("go")
+        build(s, str(repo))
+        sessions.append(s)
+    return scan(tmp_path, sessions, repo)
+
+
+@pytest.mark.parametrize(
+    ("red", "green"),
+    [
+        ("ruff check backend", "cd frontend && npx eslint ."),
+        ("mypy src", "npx tsc --noEmit"),
+        ("black --check .", "npx prettier --check ."),
+        ("cargo build", "npm run build"),
+    ],
+)
+def test_another_ecosystems_tool_is_not_the_working_command(
+    tmp_path: Path, red: str, green: str
+) -> None:
+    missing = f"bash: {red.split()[0]}: command not found"
+    out = _polyglot(tmp_path, lambda s, _: s.bash(red, missing, exit_code=127).bash(green, "ok"))
+    (row,) = out["commands"]
+    (rec,) = row["recommendations"]
+    assert (
+        rec["id"] == "document-the-command"
+        and "is not installed where agents run" in (rec["title"])
+    )
+    assert green.split("&& ")[-1].rsplit(" ", 1)[0] not in json.dumps(row["recommendations"])
+
+
+@pytest.mark.parametrize(
+    ("red", "green"), [("ruff check .", "make lint"), ("pytest", "uv run pytest")]
+)
+def test_a_wrapper_or_the_same_family_is_still_the_working_command(
+    tmp_path: Path, red: str, green: str
+) -> None:
+    missing = f"bash: {red.split()[0]}: command not found"
+    out = _polyglot(tmp_path, lambda s, _: s.bash(red, missing, exit_code=127).bash(green, "ok"))
+    (row,) = out["commands"]
+    (rec,) = row["recommendations"]
+    assert (
+        rec["id"] == "use-the-working-command" and rec["title"] == f"Tell agents to use `{green}`"
+    )
+
+
+def test_a_green_run_of_another_ecosystem_closes_no_red_test(tmp_path: Path) -> None:
+    red = "FAILED tests/test_a.py::test_x - AssertionError\n1 failed, 10 passed in 2s"
+    green = "Tests: 3 passed, 3 total"
+
+    # nothing changed in between: pytest is red, and `npm test` is not what to use instead
+    out = _polyglot(
+        tmp_path / "unchanged",
+        lambda s, _: s.bash("pytest -q", red, exit_code=1).bash("npm test", green),
+    )
+    (row,) = out["commands"]
+    assert row["path"] == "pytest"
+    assert [r["id"] for r in row["recommendations"]] == ["say-if-it-is-known-broken"]
+    assert "npm test" not in json.dumps(row["recommendations"])
+
+    # edit, red, edit, and then the other ecosystem's tests pass: pytest never went green
+    def loop(s: Session, repo: str, check: str, said: str) -> None:
+        s.edit(f"{repo}/src/a.py").bash("pytest -q", red, exit_code=1)
+        s.edit(f"{repo}/src/a.py", "x", "y").bash(check, said)
+
+    out = _polyglot(tmp_path / "js", lambda s, repo: loop(s, repo, "npm test", green))
+    (row,) = out["commands"]
+    assert row["path"] == "pytest" and row["events"] == 4
+    assert out["totals"]["dropped_red_runs"] == 0
+    # ... while a wrapper, or a runner of the same family, closes the loop
+    for check in ("make test", "uv run pytest -q", "tox"):
+        out = _polyglot(
+            tmp_path / check.split()[0],
+            lambda s, repo, check=check: loop(s, repo, check, "11 passed in 1s"),
+        )
+        assert out["commands"] == [] and out["totals"]["dropped_red_runs"] == 4, check
+
+
+def test_a_green_run_in_another_directory_closes_nothing(tmp_path: Path) -> None:
+    failed = "make: *** [Makefile:3: build] Error 1"
+
+    def build(s: Session, repo: str, then: str) -> None:
+        s.edit(f"{repo}/backend/a.py").bash("cd backend && make build", failed, exit_code=2)
+        s.edit(f"{repo}/backend/a.py", "x", "y").bash(then, "built")
+
+    # side by side: `frontend/` building says nothing about `backend/`
+    out = _polyglot(tmp_path / "beside", lambda s, r: build(s, r, "cd frontend && make build"))
+    (row,) = out["commands"]
+    assert row["path"] == "make build (backend/)" and row["events"] == 4
+    # the same directory, and a wrapper run above it, do
+    for then in ("cd backend && make build", "make build", "make all"):
+        out = _polyglot(tmp_path / then.replace(" ", "_"), lambda s, r, t=then: build(s, r, t))
+        assert out["commands"] == [] and out["totals"]["dropped_red_runs"] == 4, then
+    # a typed linter passing next door does not verify a red type check here
+    red = "src/a.py:1: error: Incompatible types\nFound 1 error in 1 file"
+
+    def checked(s: Session, repo: str, then: str) -> None:
+        s.edit(f"{repo}/src/a.py").bash("mypy src", red, exit_code=1)
+        s.edit(f"{repo}/src/a.py", "x", "y").bash(then, "Tests: 3 passed, 3 total")
+
+    out = _polyglot(tmp_path / "ts", lambda s, r: checked(s, r, "npm test"))
+    assert [row["path"] for row in out["commands"]] == ["mypy"]
+    out = _polyglot(tmp_path / "py", lambda s, r: checked(s, r, "pytest -q"))
+    assert out["commands"] == []
+
+
+def test_a_server_stopped_in_the_foreground_gets_the_background_advice(tmp_path: Path) -> None:
+    def build(s: Session) -> None:
+        s.edit("/repo/src/app.py", "a", "b")
+        s.tool("Bash", {"command": "npm run dev"}, builders.INTERRUPT_TOOL, is_error=True, took=90)
+        s.user(builders.INTERRUPT_TOOL, as_blocks=True)
+        s.user("looks good in the browser, thanks. now commit")
+
+    out = scan(tmp_path, [_built(build, i) for i in range(4)])
+    assert out["hotspots"] == []  # the file that had been edited is not blamed
+    (row,) = out["commands"]
+    assert row["path"] == "npm run dev" and row["signals"] == {"user-interrupt": 4}
+    assert row["est_minutes_lost"] == 0 and out["totals"]["est_minutes_lost"] == 0
+    (rec,) = row["recommendations"]
+    assert rec["id"] == "run-it-in-the-background"
+    assert "sat until a human had to stop it 4 times in 4 sessions" in rec["detail"]
+    assert rec["signals"] == ["user-interrupt"]
+
+    # an ordinary command that was stopped, and nothing said against it: no event at all
+    def suite(s: Session) -> None:
+        s.edit("/repo/src/app.py", "a", "b")
+        s.tool("Bash", {"command": "pytest -q"}, builders.INTERRUPT_TOOL, is_error=True, took=90)
+        s.user(builders.INTERRUPT_TOOL, as_blocks=True)
+        s.user("looks good, thanks. now commit")
+
+    out = scan(tmp_path / "suite", [_built(suite, i) for i in range(4)])
+    assert out["hotspots"] == [] and out["commands"] == []
+    assert out["totals"]["friction_events"] == 0
+
+
+def test_paths_may_be_given_as_strings(tmp_path: Path) -> None:
+    s = Session("s0", cwd="/repo").user("go").bash("make lint", "boom", exit_code=2)
+    file = s.save(tmp_path / "t")
+    typed = analyze(AnalyzeOptions(repo=Path("/repo"), transcripts=[file], include_git=False))
+    as_text: Any = {"repo": "/repo", "transcripts": [str(file)], "include_git": False}
+    assert analyze(AnalyzeOptions(**as_text))["commands"] == typed["commands"]
+    one: Any = {"repo": "/repo", "transcripts": str(file), "include_git": False}
+    assert analyze(AnalyzeOptions(**one))["commands"] == typed["commands"]
+    relative: Any = {"repo": "shop", "transcripts": [file], "include_git": False}
+    assert analyze(AnalyzeOptions(**relative))["totals"]["sessions"] >= 0  # no crash

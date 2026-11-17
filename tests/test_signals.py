@@ -2969,7 +2969,8 @@ def test_an_interrupted_command_is_named_on_the_event(tmp_path: Path) -> None:
     s.user(builders.INTERRUPT_TOOL, as_blocks=True)
     (found,) = detect(s, tmp_path)
     assert found.signal == signals.USER_INTERRUPT and found.targets == []
-    assert found.detail == {"interrupted": "npm run e2e"}
+    assert found.detail == {"interrupted": "npm run e2e", "running": "1"}
+    assert found.interval is None  # how long it ran is not time the agent lost
     s = Session().user("go").read(A).interrupt()
     (found,) = detect(s, tmp_path)
     assert "interrupted" not in found.detail and keys(found) == [("file", "src/a.py")]
@@ -4072,10 +4073,10 @@ def test_a_refused_redirected_write_is_about_the_file(
             '( /usr/bin/time -v mytool scan . ; echo "exit $?" ); ls; which time',
             "bash: line 1: /usr/bin/time: No such file or directory\nexit 127\nREADME.md",
             0,
-            "time",
+            "mytool",
             "invocation",
         ),
-        ("time -v pytest", "bash: time: command not found", 127, "time", "invocation"),
+        ("time -v pytest", "bash: time: command not found", 127, "pytest", "invocation"),
         ('mytool run; echo "exit $?"', "exit 127", 0, "mytool", "invocation"),
         ('pytest -q; echo "exit $?"', "some output\nexit 1", 0, "pytest", "ordinary"),
         # the wrapper is there and the command behind it failed: the command's failure
@@ -4193,7 +4194,7 @@ def test_which_step_owns_the_exit_status() -> None:
             "( /usr/bin/time -v mytool scan . ); ls; which time",
             "bash: line 1: /usr/bin/time: No such file or directory\nREADME.md",
             1,
-            ("time", "invocation", "hidden"),
+            ("mytool", "invocation", "hidden"),
         ),
         # ... while the output still says what the command before it did
         ("pytest -q; which time", "1 failed in 0.2s", 1, ("pytest", "ordinary", "hidden")),
@@ -5433,3 +5434,117 @@ def test_a_traceback_that_is_shown_not_raised_is_no_verdict(tmp_path: Path) -> N
     s = Session().user("go").bash("python scripts/gen.py 2>&1 | tail -4", raised)
     (found,) = detect(s, tmp_path, files=("scripts/gen.py",))
     assert found.detail["status"] == "hidden" and signals.output_verdict(raised) == "red"
+
+
+# ---- round 39 ------------------------------------------------------------------------------
+
+
+def _stopped(command: str, said: str | None, took: float = 90) -> Session:
+    s = Session().user("show me").edit("/repo/src/app.py", "a", "b")
+    s.tool("Bash", {"command": command}, builders.INTERRUPT_TOOL, is_error=True, took=took)
+    s.user(builders.INTERRUPT_TOOL, as_blocks=True)
+    return s.user(said) if said is not None else s
+
+
+def test_a_foreground_server_that_was_stopped_is_about_the_command(tmp_path: Path) -> None:
+    for command in ("npm run dev", "uvicorn app:app --reload", "npm test -- --watch"):
+        s = _stopped(command, "looks good in the browser, thanks. now commit")
+        (found,) = detect(s, tmp_path)
+        assert found.signal == signals.USER_INTERRUPT and found.detail == {"server": "1"}
+        (target,) = found.targets  # no file is blamed, whatever had been edited
+        assert target.kind == "command" and target.share == signals.STOPPED_SERVER_SHARE
+        assert found.interval is None and found.intervals == ()
+        assert "a server or watcher that does not exit by itself" in found.summary
+
+
+def test_a_stopped_command_without_an_objection_is_not_an_event(tmp_path: Path) -> None:
+    for said in ("looks good, thanks. now commit", "ok that is enough output, carry on"):
+        assert detect(_stopped("pytest -q", said), tmp_path) == [], said
+    # an objection or a correction keeps it, on the files edited, with no time claimed
+    for said in ("no, don't run the whole suite", "stop, that is the wrong directory"):
+        found = by_signal(detect(_stopped("pytest -q", said), tmp_path), signals.USER_INTERRUPT)
+        assert [keys(f) for f in found] == [[("file", "src/app.py")]], said
+        assert found[0].interval is None
+    # nothing said afterwards: the interrupt stands
+    (found,) = detect(_stopped("pytest -q", None), tmp_path)
+    assert found.signal == signals.USER_INTERRUPT and found.interval is None
+    # a command that had finished when the human cut in is judged as before
+    s = Session().user("go").edit("/repo/src/app.py", "a", "b").bash("pytest -q", "5 passed")
+    s.interrupt().user("use the other branch")
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.USER_INTERRUPT and "running" not in found.detail
+
+
+def _debug_print(tmp_path: Path, old: str, new: str, ran: bool = True) -> list[Finding]:
+    s = Session().user("why is it slow").edit("/repo/src/app.py", old, new)
+    if ran:
+        s.bash("python scripts/run.py", "DEBUG 3")
+    s.edit("/repo/src/app.py", new, old)
+    return by_signal(detect(s, tmp_path, files=("scripts/run.py",)), signals.EDIT_REVERT)
+
+
+def test_a_debug_print_put_between_two_lines_is_not_a_revert(tmp_path: Path) -> None:
+    old = "    x = compute(y)\n    return x"
+    middle = "    x = compute(y)\n    print('DEBUG', x)\n    return x"
+    assert _debug_print(tmp_path, old, middle) == []
+    several = "    print('in')\n    x = compute(y)\n    print('DEBUG', x)\n    return x\n    # end"
+    assert _debug_print(tmp_path, old, several) == []
+    # nothing ran with the lines in place: put in and taken out again is a retreat
+    assert len(_debug_print(tmp_path, old, middle, ran=False)) == 1
+    # a line was changed as well as added: not "only added"
+    changed = "    x = compute(z)\n    print('DEBUG', x)\n    return x"
+    assert len(_debug_print(tmp_path, old, changed)) == 1
+    # the same lines in another order are a change too
+    swapped = "    return x\n    print('DEBUG', x)\n    x = compute(y)"
+    assert len(_debug_print(tmp_path, old, swapped)) == 1
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        # as stored: the first line has lost its leading space
+        "! [rejected]        main -> main (non-fast-forward)",
+        "Updates were rejected because the remote contains work that you do not have locally.",
+        "hint: Updates were rejected because the tip of your current branch is behind",
+        "error: failed to push some refs to 'origin'",
+    ],
+)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push && git merge origin/main",
+        "git push origin HEAD; git merge main",
+        "git commit -m x && git push && git checkout main && git merge feat",
+    ],
+)
+def test_a_push_hint_names_the_push_step(tmp_path: Path, command: str, output: str) -> None:
+    (found,) = detect(Session().user("go").bash(command, output, exit_code=1), tmp_path)
+    assert keys(found) == [("command", "git push")] and "ambiguous_step" not in found.detail
+    # ... and what a merge prints is still about the merge
+    conflict = "CONFLICT (content): Merge conflict in src/a.py\nAutomatic merge failed"
+    (found,) = detect(Session().user("go").bash(command, conflict, exit_code=1), tmp_path)
+    assert keys(found)[0] == ("command", "git merge")
+
+
+@pytest.mark.parametrize(
+    ("command", "output", "code", "missing"),
+    [
+        ("/usr/bin/time -v pytest -q", "bash: /usr/bin/time: No such file or directory", 127, True),
+        ("time -v pytest -q", "bash: time: command not found", 127, True),
+        (
+            "/usr/bin/time -v pytest -q",
+            "1 failed in 1s\n\tCommand exited with non-zero status 1",
+            1,
+            False,
+        ),
+        ('/usr/bin/time -f "%e %M" -o /tmp/t.txt pytest -q', "1 failed in 1s", 1, False),
+        ("gtime -v pytest -q", "1 failed in 1s", 1, False),
+    ],
+)
+def test_time_is_a_wrapper_also_when_it_is_missing(
+    tmp_path: Path, command: str, output: str, code: int, missing: bool
+) -> None:
+    (found,) = detect(Session().user("go").bash(command, output, exit_code=code), tmp_path)
+    assert keys(found)[0] == ("command", "pytest")
+    assert found.detail["variant"] == ("invocation" if missing else "ordinary")
+    assert found.detail.get("not_found") == ("time" if missing else None)

@@ -49,10 +49,12 @@ from agent_friction.attribution import (
     parse_command,
     path_candidates,
     prints_another_file,
+    same_family,
     same_invocation,
     selects_failures,
     setup_label,
     status_is_last_steps,
+    tool_family,
     written_file,
 )
 from agent_friction.model import Event, Finding, Stream, Target
@@ -847,8 +849,9 @@ def _step_signature(step: Step, runner: bool = True) -> list[re.Pattern[str]]:
 #: What a git command prints when it is the one that failed.
 _GIT_STEP_SIGNATURES: dict[str, re.Pattern[str]] = {
     "git push": re.compile(
-        r"failed to push some refs|^ ! \[(?:remote )?rejected\]|has no upstream branch"
-        r"|^hint: Updates were rejected",
+        # (the first line of stored output has lost its leading space)
+        r"failed to push some refs|^ ?! \[(?:remote )?rejected\]|has no upstream branch"
+        r"|^(?:hint: )?Updates were rejected",
         re.M,
     ),
     "git merge": re.compile(
@@ -1111,8 +1114,8 @@ _AUTH_RE = re.compile(
 _REGISTRY_AUTH_RE = re.compile(r"^npm (?:ERR!|error) code E40[13]\b", re.M)
 #: `git push` turned down because the remote branch has commits the local one lacks.
 PUSH_REJECTED_RE = re.compile(
-    r"^ ! \[rejected\][^\n]*\((?:non-fast-forward|fetch first)\)"
-    r"|^hint: Updates were rejected because (?:the tip of your current branch is behind"
+    r"^ ?! \[rejected\][^\n]*\((?:non-fast-forward|fetch first)\)"
+    r"|^(?:hint: )?Updates were rejected because (?:the tip of your current branch is behind"
     r"|the remote contains work)",
     re.M,
 )
@@ -1425,6 +1428,8 @@ _CURL_UNREACHABLE = frozenset({7, 28})
 #: uv naming the program it could not start: ``error: Failed to spawn: `mypy```.
 _SPAWN_RE = re.compile(r"(?m)^error: Failed to spawn: `([^`\n]+)`")
 _PYTHON3_RE = re.compile(r"^python3(?:\.\d+)?$")
+#: Share of an interrupt that goes to a server or watcher stopped in the foreground.
+STOPPED_SERVER_SHARE = 0.3
 _NO_UPSTREAM_RE = re.compile(r"has no upstream branch")
 _SET_UPSTREAM_RE = re.compile(r"\s(?:-u|--set-upstream)(?=\s|=|$)")
 #: Exit statuses of a process that was ended from outside: SIGINT, SIGKILL, SIGTERM.
@@ -2283,6 +2288,7 @@ class _State:
     tests_run: dict[int, int] = field(default_factory=dict)  # tests a red run counted
     red_seen: set[str] = field(default_factory=set)  # keys and labels that ran red
     turn_of: dict[int, int] = field(default_factory=dict)  # the turn a failure was seen in
+    ran_in: dict[int, str] = field(default_factory=dict)  # the repo directory a failure ran in
     trips: dict[int, tuple[float, float]] = field(default_factory=dict)  # see ``_promote``
     key_of: dict[int, str] = field(default_factory=dict)  # command key per failure
     # failures for which another command stood in, per failed command
@@ -2548,6 +2554,33 @@ class _Detector:
                 if found:
                     return posixpath.join(resolver.primary, found)
         return here
+
+    def _directory(self, step: Step | None, cwd: str | None) -> str:
+        """The repository directory ``step`` ran in: ``""`` at the root, or if unknown."""
+        here = self._where(step, cwd)
+        return (self.ctx.resolver.resolve(here, None) if here else None) or ""
+
+    def _same_place(self, finding: Finding, green_key: str, here: str | None) -> bool:
+        """Can a green run of *another* command in ``here`` be about ``finding``'s red run?
+
+        Only where it ran in the same directory. `cd frontend && npm run build` says
+        nothing about `cd backend && make build`. One thing reaches further: a
+        make-style wrapper or an aggregate check run in a directory above (`make
+        test` at the root after `cd backend && pytest`), which may well include it.
+        """
+        there = self.state.ran_in.get(id(finding))
+        if here is None or there is None or here == there:
+            return True
+        above = not here or there.startswith(here + "/")
+        if green_key == self.state.key_of.get(id(finding)):
+            # The same command: a run further up includes the directory below, and one
+            # further down may be where it has to be run (`green_in`). Side by side
+            # (`backend/`, `frontend/`) they are two commands. For one that is the same
+            # thing wherever it runs (`git push`) nothing differs.
+            placed = green_key.split(" ", 1)[0] in DIRECTORY_TOOLS or command_role(green_key)
+            below = not there or here.startswith(there + "/")
+            return above or below or not placed
+        return above and (tool_family(green_key) is None or is_aggregate_check(green_key))
 
     def _elsewhere(self, step: Step | None, cwd: str | None) -> bool:
         """Does ``step`` run, or only act, outside the repository?
@@ -3601,6 +3634,7 @@ class _Detector:
                 line=action.call.command or "",
                 label=shown(key),
                 output=result.output,
+                here=self._directory(located, action.call.cwd),
             )
             # The command works after all, so nothing "replaced" it earlier in the session.
             for finding in state.replaced.pop(key, []):
@@ -3715,7 +3749,11 @@ class _Detector:
                         steps = [s for s in steps if s and s != step_name] + [step_name]
                         state.setup_after[id(finding)] = " && ".join(steps)
                     waiting.append((finding, failed_key, left))
-                elif is_replacement(failed_key, key) and finding.detail["variant"] != "ordinary":
+                elif (
+                    is_replacement(failed_key, key)
+                    and finding.detail["variant"] != "ordinary"
+                    and self._same_place(finding, key, self._directory(located, action.call.cwd))
+                ):
                     # Only a command that could not run can be "replaced". A red test
                     # followed by another green test command is just a test going green.
                     better = shown(key)
@@ -3802,6 +3840,7 @@ class _Detector:
         if code not in INVOCATION_EXIT_CODES and _REGISTRY_AUTH_RE.search(result.output):
             invocation = False  # the registry wants a login: see `environment_error`
         step, certain = self._blamed_step(cmd, result.output)
+        no_wrapper = ""
         last = cmd.steps[-1] if cmd.steps else None
         if (
             not hidden
@@ -3826,8 +3865,9 @@ class _Detector:
             located = step
             missing_wrapper = _unfound_program(result.output)
             if missing_wrapper in step.wrappers and missing_wrapper != step.program:
-                # `/usr/bin/time -v pytest`: what could not be found is `time`
-                key, invocation = missing_wrapper, True
+                # `/usr/bin/time -v pytest`: what could not be found is `time`. The row
+                # is still the command that was asked for: `time` is how it was run.
+                invocation, no_wrapper = True, missing_wrapper
         inline = is_inline_code(key)
         if inline and code not in INVOCATION_EXIT_CODES:
             # Ad-hoc code failing says something about that code, not about how to run
@@ -3935,6 +3975,8 @@ class _Detector:
             if name == step.program or (typed is not None and step.program == "python"):
                 detail["not_found"] = name
                 detail["not_found_shown"] = self.ctx.command_key(name)
+        if no_wrapper:
+            detail["not_found"] = detail["not_found_shown"] = no_wrapper
         if not certain:
             detail["ambiguous_step"] = "1"
         if hidden:
@@ -3987,6 +4029,7 @@ class _Detector:
         state.changes_at[id(finding)] = state.changes
         state.red_seen.update((key, shown(key)))
         state.turn_of[id(finding)] = state.turns
+        state.ran_in[id(finding)] = self._directory(located, call.cwd)
         counted = tests_counted(result.output)
         if counted:
             state.tests_run[id(finding)] = counted
@@ -4121,6 +4164,7 @@ class _Detector:
         line: str = "",
         label: str = "",
         output: str = "",
+        here: str | None = None,
     ) -> None:
         """``key`` ran green: close what a green run of it, or of its job, closes.
 
@@ -4145,7 +4189,13 @@ class _Detector:
             """The failures of ``failed_key`` this green run answers; the others stay."""
             found = table.pop(failed_key)
             same = failed_key == actual
-            left = [f for f in found if not self._covered(f, failed_key, line, output, same)]
+            left = [
+                f
+                for f in found
+                if not self._covered(f, failed_key, line, output, same)
+                # a run somewhere else is about other code
+                or not self._same_place(f, actual, here)
+            ]
             if left:
                 # A narrower selection passing closes nothing: the red run is still red.
                 table[failed_key] = left
@@ -4182,6 +4232,9 @@ class _Detector:
                     for f in found
                     if f.detail.get("variant") == "ordinary"
                     and state.turn_of.get(id(f)) == state.turns
+                    # ... of the same code: `npm test` says nothing about a red `mypy`
+                    and same_family(failed_key, actual)
+                    and self._same_place(f, actual, here)
                 ]
                 left = [f for f in found if not any(f is c for c in closed)]
                 if left:
@@ -4624,6 +4677,7 @@ class _Detector:
         if last.result is not None and last.result.error == model.ERR_REJECTED:
             return  # already counted as tool-rejected
         stopped = ""
+        server = cut_short = False
         targets = self._action_targets(last)
         if not targets:
             if last.call.op in (model.OP_READ, model.OP_EDIT, model.OP_WRITE, model.OP_SHELL):
@@ -4634,13 +4688,24 @@ class _Detector:
             # command: the event goes to what the agent had been changing, if anything.
             what = f"running `{targets[0].key}`"
             stopped = targets[0].key
+            line = last.call.command or ""
+            # was it still running, or had it finished when the human cut in?
+            cut_short = last.result is None or last.result.error == model.ERR_INTERRUPTED
+            server = cut_short and bool(DEV_SERVER_RE.search(line) or _WATCH_RE.search(line))
             edited: list[str] = []
-            for action in reversed(turn):
+            for action in reversed(() if server else turn):
                 changed = action.call.op in (model.OP_EDIT, model.OP_WRITE)
                 if changed and action.file and action.file not in edited:
                     edited.append(action.file)
             edited = edited[:CORRECTION_MAX_FILES]
-            targets = [Target(model.FILE, rel, 1.0 / len(edited)) for rel in edited]
+            if server:
+                # A server or watcher in the foreground never returns: stopping it is the
+                # only way on, whatever the agent had been editing. That is about how
+                # the command was run, and no file is blamed.
+                targets = [Target(model.COMMAND, stopped, STOPPED_SERVER_SHARE)]
+                what += ", a server or watcher that does not exit by itself"
+            else:
+                targets = [Target(model.FILE, rel, 1.0 / len(edited)) for rel in edited]
             if edited:
                 what += " after edits to " + ", ".join(edited)
         elif last.result is not None and last.result.error == model.ERR_MISSING:
@@ -4656,8 +4721,16 @@ class _Detector:
             event,
             f"The user interrupted the agent while it was {what}",
             targets,
-            interval=_capped(_epoch(turn[-1].call), _epoch(event)),
-            detail={"interrupted": stopped} if stopped else None,
+            # ... and of a command that was stopped, nothing: how long it had been running
+            # is how long the human let it run, not time the agent lost.
+            interval=None if cut_short else _capped(_epoch(turn[-1].call), _epoch(event)),
+            detail=(
+                {"server": "1"}
+                if server
+                else {"interrupted": stopped, **({"running": "1"} if cut_short else {})}
+            )
+            if stopped
+            else None,
         )
         self.state.interrupted = self.findings[-1]
 
@@ -4685,6 +4758,18 @@ class _Detector:
         ):
             # "also bump the version": the human cut in to add to the job, not because
             # the agent was going wrong. Nothing to hold against what it was doing.
+            self._drop({id(stopped)})
+        elif (
+            stopped is not None
+            and "running" in stopped.detail
+            and confidence <= 0
+            and not instructed
+            and not softened
+            and not _OBJECTION_RE.search(head)
+        ):
+            # A command was stopped and the human carries on without a word against what
+            # the agent did ("looks good, thanks. now commit"): they had seen enough of
+            # it. A stopped server stays: it should not have been in the foreground.
             self._drop({id(stopped)})
         before = frozenset(
             a.file

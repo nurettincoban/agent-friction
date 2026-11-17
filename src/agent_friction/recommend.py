@@ -456,6 +456,7 @@ class _Rules:
             if len(named) and all(f.detail.get("also_named") for f in found)
             else "here"
         )
+        said = ""
         detail = (
             f"A human corrected the agent {here} {_in_sessions(found)}. Put the rule in "
             "AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read "
@@ -478,7 +479,8 @@ class _Rules:
                 if text and text not in quotes:
                     quotes.append(text)
             if quotes:
-                detail += " In their words: " + " / ".join(f'"{q}"' for q in quotes[:MAX_QUOTES])
+                said = " In their words: " + " / ".join(f'"{q}"' for q in quotes[:MAX_QUOTES])
+                detail += said
         if named:
             detail += (
                 f" (The human also named {_and([code(name) for name, _ in named])}, which "
@@ -495,6 +497,37 @@ class _Rules:
             ),
             detail,
             [signals.USER_CORRECTION],
+            self._rule_written(found, said),
+        )
+
+    def _rule_written(self, found: Sequence[Finding], said: str) -> Already | None:
+        """The "already written down" form: the files name what the human named.
+
+        A correction that names `PaymentClient` in a repository whose AGENTS.md has a
+        line about `PaymentClient` is most likely that line being overlooked, and one
+        more line would be overlooked the same way.
+        """
+        names: list[str] = []
+        # The file itself being named there is the ordinary "also mentioned" note.
+        own = {part for subject in self.subjects for part in (subject, subject.rsplit("/", 1)[-1])}
+        for finding in found:
+            for name in _NAME_RE.findall(finding.detail.get("quote", "")):
+                if name not in names and name not in own and name.rsplit("/", 1)[-1] not in own:
+                    names.append(name)
+        if not names:
+            return None
+        about = ""
+        if self.quote is not None:
+            shown = [code(self.quote(name, QUOTE_CHARS)) for name in names[:MAX_QUOTES]]
+            about = f" ({_and(shown)})"
+        return (
+            names,
+            "The rule seems to be written down already: make it harder to miss",
+            f"says something about what the human corrected here {_in_sessions(found)}"
+            f"{about}. If that is this rule, it is written down and still not followed: "
+            "make it more prominent or move it closer to the code (a nested AGENTS.md, a "
+            "comment at the top of the file), or enforce it with a hook or a check, rather "
+            f"than adding another line.{said}",
         )
 
     def rejections(self) -> None:
@@ -1050,15 +1083,25 @@ class _Rules:
                 "inner loop.",
                 [signals.COMMAND_FAILURE],
             )
-        if len(servers) >= MIN_EVENTS:
+        halted = [f for f in self.get(signals.USER_INTERRUPT) if f.detail.get("server")]
+        if len(servers) + len(halted) >= MIN_EVENTS:
+            ended = _and(
+                [
+                    *([f"the harness timed it out {_in_sessions(servers)}"] if servers else []),
+                    *([f"a human had to stop it {_in_sessions(halted)}"] if halted else []),
+                ]
+            )
             self.add(
                 "run-it-in-the-background",
                 f"Tell agents to run {code(key)} in the background",
                 f"{code(key)} is a server or watcher that never exits; run in the foreground it "
-                f"sat until the harness timed it out {_in_sessions(servers)}. Say in "
+                f"sat until {ended}. Say in "
                 "AGENTS.md to start it in the background (and how to check that it is up "
                 "and how to stop it), or provide a script that does so.",
-                [signals.COMMAND_FAILURE],
+                [
+                    *([signals.COMMAND_FAILURE] if servers else []),
+                    *([signals.USER_INTERRUPT] if halted else []),
+                ],
             )
         fixes = _top([f.detail.get("recovered_by", "") for f in failures], 1)
         # every step that helped twice or more, in the order agents ran them
@@ -1277,7 +1320,7 @@ class _Rules:
         self.no_convergence(key)
         self.rejections()
         self.denials(f"{code(key)}")
-        stopped = self.get(signals.USER_INTERRUPT)
+        stopped = [f for f in self.get(signals.USER_INTERRUPT) if not f.detail.get("server")]
         if len(stopped) >= MIN_EVENTS:
             self.add(
                 "clarify-before-acting",
@@ -1336,6 +1379,13 @@ _COMMON_WORDS = frozenset(
 #: one long word: a name such as ``PaymentClient`` or ``schema_gen`` rarely recurs by chance.
 SHARED_WORDS_MIN = 2
 SHARED_NAME_CHARS = 7
+
+
+#: Words of a correction that are names: `PaymentClient`, `schema_gen`, `src/pay/api.py`.
+_NAME_RE = re.compile(
+    r"(?<![\w./-])(?:[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+|[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+"
+    r"|(?:[\w.-]+/)+[\w.-]*\w|[\w-]+\.[A-Za-z]{1,4})(?![\w/-])"
+)
 
 
 def _content_words(text: str) -> set[str]:

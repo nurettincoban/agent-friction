@@ -1666,12 +1666,61 @@ def is_aggregate_check(key: str) -> bool:
     return any(part in AGGREGATE_WORDS for part in _key_words(" ".join(words[1:])))
 
 
+#: The ecosystem a tool belongs to. ``pytest`` and ``npm test`` are both test runners,
+#: and neither says anything about the other's code.
+TOOL_FAMILIES: dict[str, frozenset[str]] = {
+    "python": frozenset(
+        {"python", "pytest", "tox", "nox", "uv", "uvx", "poetry", "pipenv", "pdm", "hatch"}
+        | {"ruff", "flake8", "pylint", "mypy", "pyright", "black", "isort", "unittest", "pip"}
+        | {"ty", "coverage", "pipx", "conda", "django-admin", "alembic", "flask"}
+    ),
+    "js": frozenset(
+        {"npm", "pnpm", "yarn", "bun", "bunx", "npx", "node", "deno", "jest", "vitest", "mocha"}
+        | {"eslint", "tsc", "prettier", "playwright", "cypress", "karma", "ava", "webpack"}
+        | {"biome", "stylelint", "vite", "turbo", "nx", "next", "tsx", "ts-node", "rollup"}
+    ),
+    "rust": frozenset({"cargo", "rustc", "rustfmt", "clippy", "nextest", "rustup"}),
+    "go": frozenset({"go", "gofmt", "golangci-lint", "staticcheck", "gotestsum"}),
+    "ruby": frozenset({"bundle", "rspec", "rubocop", "rails", "ruby", "gem"}),
+    "php": frozenset({"php", "phpunit", "composer", "phpstan", "artisan"}),
+    "jvm": frozenset({"gradle", "gradlew", "mvn", "mvnw", "sbt", "java", "javac", "kotlinc"}),
+    "dotnet": frozenset({"dotnet", "msbuild", "nuget"}),
+    "c": frozenset({"cmake", "ctest", "ninja", "gcc", "clang", "cc", "meson", "bazel"}),
+    "shell": frozenset({"shellcheck", "shfmt", "bats"}),
+}
+
+
+def tool_family(key: str) -> str | None:
+    """``python``, ``js``, ``rust``, ... for a key whose tool says so; ``None`` otherwise.
+
+    ``make test``, ``just lint``, ``task build``, ``pre-commit run`` and a script of
+    the repository (``./scripts/test.sh``) are neutral: they wrap whatever the
+    project uses, and say nothing about which ecosystem that is.
+    """
+    for word in key.split(" (", 1)[0].split():
+        name = word.rsplit("/", 1)[-1]
+        if _SCRIPT_RE.search(name):
+            continue  # a script's name is the project's, not a tool's
+        for family, names in TOOL_FAMILIES.items():
+            if name in names:
+                return family
+    return None
+
+
+def same_family(one: str, other: str) -> bool:
+    """Could ``one`` and ``other`` be about the same code? Not ``pytest`` and ``npm test``."""
+    mine, theirs = tool_family(one), tool_family(other)
+    return mine is None or theirs is None or mine == theirs
+
+
 def is_replacement(failed: str, other: str) -> bool:
     """Can ``other`` stand in for ``failed``? (``make test`` for ``pytest``.)
 
-    True when both do the same job (same role) or one wraps the other's tool
-    (``uv run pytest`` for ``pytest``). Never for setup, version-control,
-    housekeeping or inspection commands.
+    True when both do the same job (same role) in the same tool family, with
+    make-style wrappers fitting any family (``make lint`` for ``ruff check``, never
+    ``npx eslint``), or when one wraps the other's tool (``uv run pytest`` for
+    ``pytest``). Never for setup, version-control, housekeeping or inspection
+    commands.
     """
     if not failed or not other or failed == other:
         return False
@@ -1684,6 +1733,8 @@ def is_replacement(failed: str, other: str) -> bool:
     program = other.split()[0]
     if program in ("git", "gh", "glab") or program in HOUSEKEEPING_PROGRAMS | SETUP_PROGRAMS:
         return False
+    if not same_family(failed, other):
+        return False  # another ecosystem's tool: it ran other code
     role = command_role(failed)
     if role is not None and role == command_role(other):
         return True

@@ -137,7 +137,8 @@ def edit_pairs(
     added = frozenset(
         (digest(old), digest(new))
         for old, new in pairs
-        if (old.strip() and old != new and old in new) or is_toggle(old, new)
+        if (old.strip() and old != new and (old in new or only_adds_lines(old, new)))
+        or is_toggle(old, new)
     )
     return hashed, added
 
@@ -146,6 +147,19 @@ _SWITCH_VALUE_RE = re.compile(
     r"\b(?:true|false|on|off|yes|no|0|1|debug|info|warn|warning|error|verbose|quiet|none|null)\b",
     re.I,
 )
+
+
+def only_adds_lines(old: str, new: str) -> bool:
+    """Do the lines of ``old`` all survive in ``new``, in order, with lines added between?
+
+    A pure-insert diff: a debug print put between two statements, or at several
+    points of the text that was matched. Nothing that was there is changed or gone.
+    """
+    was, now = old.split("\n"), new.split("\n")
+    if len(now) <= len(was):
+        return False
+    rest = iter(now)
+    return all(any(line == other for other in rest) for line in was)
 
 
 def is_toggle(old: str, new: str) -> bool:

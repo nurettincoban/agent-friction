@@ -95,6 +95,15 @@ class AnalyzeOptions:
     #: does not exist, or a file that is no transcript, is still an error.
     allow_no_transcripts: bool = False
 
+    def __post_init__(self) -> None:
+        # Callers of the library pass strings: `AnalyzeOptions(repo="shop")`.
+        self.repo = Path(self.repo)
+        given = self.transcripts
+        if isinstance(given, str | os.PathLike):
+            given = [given]  # one path, not a sequence of its characters
+        if given is not None and not all(isinstance(path, Path) for path in given):
+            self.transcripts = [Path(path) for path in given]
+
 
 def _utc(value: datetime | None) -> datetime | None:
     if value is None:

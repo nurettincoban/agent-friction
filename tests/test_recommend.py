@@ -1041,3 +1041,44 @@ def test_only_a_newline_ends_a_line_of_output() -> None:
     odd = finding(signals.COMMAND_FAILURE, variant="invocation")
     odd.excerpt = "$ tool run\ntool: error: unknown option --x see the manual\x0cpage 2"
     assert recommend._error_line(odd) == "tool: error: unknown option --x see the manual\x0cpage 2"
+
+
+def test_a_corrected_rule_that_is_already_written_down_says_so(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "AGENTS.md").write_text(
+        "# Shop\n\nPayments go through PaymentClient, never the legacy module.\n"
+    )
+    said = "No, use PaymentClient here, never the legacy module. I told you this already"
+    found = [finding(signals.USER_CORRECTION, f"s{i}", quote=said) for i in range(2)]
+    guide = Guidance(repo)
+    (rec,) = recommend.recommend(model.FILE, "src/pay/checkout.py", found, None, quote, None, guide)
+    assert rec["title"] == "The rule seems to be written down already: make it harder to miss"
+    text = str(rec["detail"])
+    assert text.startswith(
+        "`AGENTS.md:3` already says something about what the human corrected here 2 times in "
+        "2 sessions (`PaymentClient`). If that is this rule, it is written down and still not "
+        "followed: make it more prominent or move it closer to the code"
+    )
+    assert "In their words:" in text and "Put the rule in" not in text
+    assert rec["documented_in"] == [{"file": "AGENTS.md", "line": 3}]
+    assert rec["documented_as"] == "instruction"
+    # without excerpts the name is not shown, the place still is
+    (rec,) = recommend.recommend(model.FILE, "src/pay/checkout.py", found, None, None, None, guide)
+    assert "PaymentClient" not in str(rec["detail"]) and "`AGENTS.md:3` already" in str(
+        rec["detail"]
+    )
+    # the files say nothing about it: the advice is to write it down, as before
+    (repo / "AGENTS.md").write_text("# Shop\n\nRun the tests with pytest.\n")
+    (rec,) = recommend.recommend(
+        model.FILE, "src/pay/checkout.py", found, None, quote, None, Guidance(repo)
+    )
+    assert rec["title"] == "Write down the rule the human keeps repeating"
+    assert "documented_as" not in rec and "Put the rule in AGENTS.md" in str(rec["detail"])
+    # a correction that names nothing has nothing to look for
+    plain = [finding(signals.USER_CORRECTION, f"s{i}", quote="No, not like that") for i in range(2)]
+    (repo / "AGENTS.md").write_text("# Shop\n\nNot like that: never use the legacy module.\n")
+    (rec,) = recommend.recommend(
+        model.FILE, "src/pay/checkout.py", plain, None, quote, None, Guidance(repo)
+    )
+    assert "already" not in str(rec["title"]).lower()

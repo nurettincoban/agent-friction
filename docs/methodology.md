@@ -158,7 +158,9 @@ together, and so that the key can be shown even when excerpts are off:
    `done`, `fi`, ...) are looked through, and `bash -c '<script>'` is replaced
    by the commands of its script. Redirections, leading `VAR=value`
    assignments and wrappers (`sudo`, `env`, `time`, `timeout N`, `nohup`,
-   `xargs`, `nice`, `watch`, ...; also by absolute path, `/usr/bin/time -v`)
+   `xargs`, `nice`, `watch`, ...; also by absolute path, `/usr/bin/time -v`;
+   when the wrapper itself is what the shell cannot find, the row is still
+   the command behind it, with "`time` is not installed where agents run")
    are stripped from each command, together
    with the wrapper's own options and their values (`WRAPPER_VALUE_OPTIONS`:
    `sudo -u alice pytest` -> `pytest`, `xargs -n 1 pytest` -> `pytest`).
@@ -320,6 +322,36 @@ test:unit`), build, lint, type-check, format. Install and environment
 commands (`pip install`, `npm ci`, `uv sync`, `docker compose up`, ...) are
 *setup commands*. A command can stand in for another only if it has the same
 role or wraps the same tool.
+
+**Same job means same ecosystem, same place.** `pytest` and `npm test` are
+both test runners, and neither says anything about the other's code. A role
+match therefore also needs the same *tool family* (`TOOL_FAMILIES`,
+`tool_family`): python (`pytest`, `tox`, `nox`, `python -m ...`, `uv run
+...`, `poetry run ...`, `ruff`, `mypy`, `black`, ...), js (`npm`, `pnpm`,
+`yarn`, `bun`, `npx ...`, `jest`, `vitest`, `tsc`, `eslint`, `prettier`,
+...), rust (`cargo ...`), go, ruby, php, jvm, dotnet, c, shell. Make-style
+wrappers (`make test`, `just lint`, `task build`, `rake`, `pre-commit run`)
+and the repository's own scripts (`./scripts/test.sh`) belong to no family
+and fit any: `make lint` can stand in for `ruff check` and for `npx eslint`;
+`npx eslint` never stands in for `ruff check`, nor `npx tsc` for `mypy`,
+`prettier` for `black`, `npm run build` for `cargo build`.
+
+Directories count too. A green run of *another* command is about a red run
+only if it ran in the same directory of the repository; a wrapper or an
+aggregate check also when it ran in a directory above (`make test` at the
+root after `cd backend && pytest`). The *same* command pairs with itself in
+the same directory, above it, or below it (red at the root, green in
+`web/`: "run it in `web/`"), never side by side: `cd frontend && make
+build` going green says nothing about `cd backend && make build`.
+
+The same test decides three things: whether a command "worked instead"
+(`use-the-working-command`), whether a red run that goes green under
+another runner with nothing changed is the wrong runner (`green_as`), and
+whether red, edit, green is the development loop and dropped. So edit,
+`pytest` red, edit, `npm test` green leaves the `pytest` run on the record:
+it never went green. The same holds for the rule that a red type-check or
+lint run is closed by any green check after an edit: only a check of the
+same family, in the same place.
 
 More examples: `CI=1 npm test -- foo` -> `npm test`;
 `cat <<EOF > x.py ... EOF` + `python x.py` -> `python x.py`;
@@ -709,7 +741,7 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `make-edits-land` | 2+ `edit-miss` (above the repository's base rate, see Score) on a file that is neither large nor generated. Mostly ambiguous: "Repeated blocks: make edit targets unique". Mostly not-found: "Agents misremember this file: check what rewrites it" **only with evidence of a rewrite** (a `stale-edit` on the file, or a miss before which a command that rewrites files, such as a formatter, a fixer, `sed -i` or a commit hook, ran since the agent last read or edited the file; `rewritten` on the event); otherwise the neutral "Edits to this file keep missing their target", which asserts no cause |
 | `document-what-rewrites-this-file` | 2+ `stale-edit` of the "modified since read" kind |
 | `path-agents-expect` | 2+ `path-miss` (a read, an edit, a test command pointed at a missing test file, or a `cd` into a missing directory) |
-| `write-down-the-rule` | corroborated `user-correction` events whose attributed shares sum to 0.5 or more; quotes up to 3. "The rule the human keeps repeating" is claimed only when 2+ of the corrections share wording (two content words, or one distinctive word of 7+ letters, e.g. the same class name); otherwise the recommendation only asks whether the correction(s) reflect a standing rule. A `probable-correction` never counts |
+| `write-down-the-rule` | corroborated `user-correction` events whose attributed shares sum to 0.5 or more; quotes up to 3. "The rule the human keeps repeating" is claimed only when 2+ of the corrections share wording (two content words, or one distinctive word of 7+ letters, e.g. the same class name); otherwise the recommendation only asks whether the correction(s) reflect a standing rule. A `probable-correction` never counts. When an instruction file that applies here has a line with a name the human used in the correction (a class or function name such as `PaymentClient` or `schema_gen`, a file name or path; not the hotspot's own file), the advice takes its "already written" form instead: "The rule seems to be written down already: make it harder to miss" (`AGENTS.md:3` already says something about what the human corrected here ...; make it more prominent, move it closer to the code, or enforce it), with `documented_as: "instruction"` |
 | `state-the-boundary` | 2+ `tool-rejected`, or 1 with a stated reason |
 | `allow-or-document-the-boundary` | 2+ `permission-denied` |
 | `clarify-before-acting` | 2+ `user-interrupt`. On a command (one that humans stopped in 3+ sessions, see the signal) the advice is to say when it should be run and what to run instead |
@@ -724,7 +756,7 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `document-the-command` | 2+ setup/invocation failures of a command (and none of the above). If the same command then worked in a subdirectory, the advice names it ("run `npm test` from `web/`"). A command that is keyed by where it ran (`pytest (src/)`) is titled "Document how to run `pytest` in `src/`"; a command whose name is a placeholder without excerpts is titled "Document how to run this command (its name is hidden without excerpts)". When every one of those failures was the shell not finding one and the same program, the advice names it instead: "`gh` is not installed where agents run" (install it there, or say what to use instead) |
 | `name-the-missing-target` | 2+ setup/invocation failures of a command, most of which say that the make target or package script does not exist (`make: *** No rule to make target 'lint'.  Stop.`, npm's `Missing script`, `ERR_PNPM_NO_SCRIPT`, yarn's `Command "lint" not found`; a missing *prerequisite*, "needed by", is not this, and neither is an error that names another target than the one on the command line: `make test` answering "No rule to make target 'tst'" is a broken Makefile). Replaces `document-the-command`: there is nothing to document about running something that is not there. The same for a `just` recipe (`Justfile does not contain recipe`). The text lists up to 12 targets, scripts or recipes the Makefile, `package.json` or justfile (in the directory the command ran in) does define, and asks for an alias or a line saying what to run instead. If the file defines the missing name *now*, the advice is in the past tense instead: "`make typecheck` was missing in these sessions; it is defined now", with "re-scan with `--since <date>`" to confirm that the failures have stopped. Without excerpts neither the missing name nor the list is shown |
 | `make-the-failure-actionable` | 1+ `retry-loop` on a command |
-| `run-it-in-the-background` | 2+ harness timeouts of a command that is a server or watcher (`npm run dev`, `uvicorn`, ...); replaces `document-the-command` for those |
+| `run-it-in-the-background` | 2+ times a server or watcher (`npm run dev`, `uvicorn`, `... --watch`) run in the foreground sat until the harness timed it out or a human had to stop it (a `user-interrupt` of that command); replaces `document-the-command` for those. No file is blamed and no time is claimed for a stopped server |
 | `give-it-more-time` | 2+ harness timeouts of any other command (`npm run build` cut off after 2 minutes): say how long it takes, raise the timeout or run it in the background, or name a narrower command; replaces `document-the-command` for those |
 | `explain-the-failing-check` | 2+ `no-convergence` events from 2+ sessions, on the command ("Agents cannot get `pytest` to pass") or on a file edited during the rounds: document how to run and debug the check and what it expects |
 | `say-if-it-is-known-broken` | A command lifted out of the weak class because it stays red: it failed 2+ times and was still red at the end, in 3+ sessions (and there is no `no-convergence` event on it): "`npm run e2e` keeps ending red": say that it is known to be broken and what to run instead, or fix it. Also: the same test named as failed in 3+ sessions, none of which made it pass, and at least once before the session had changed any file ("`tests/test_legacy.py::test_old` is red session after session": fix it, or mark it as a known failure and say so); this form is given once: on the test file's row where the failure is attributed to a file of the repository, and on the command's row only for a test that has no such file |
@@ -940,10 +972,15 @@ Transcripts contain secrets. The engine therefore:
   character; home directories (`/home/x`, `/Users/x`, `C:\Users\x`, the real
   home) become `~`.
 
+**Card numbers.** A run of 13 to 19 digits, unbroken or in the groups cards
+are printed in (4-4-4-4, 4-6-5; spaces or dashes), that passes the Luhn
+check becomes `[REDACTED:card-number]`. Other long numbers (ids, epoch
+timestamps) fail the check nine times out of ten and are left alone.
+
 **Control characters.** Transcripts can contain terminal escape sequences
 (`ESC[2J`, OSC title changes) and invisible direction marks (U+202E). ANSI
-sequences, C0/C1 control characters other than newline and tab, and bidi
-controls are removed from every excerpt and, in a final pass, from every
+sequences, C0/C1 control characters other than newline and tab, bidi
+controls and zero-width characters (U+200B-U+200F, U+2060, U+FEFF) are removed from every excerpt and, in a final pass, from every
 string of the result: paths, command keys, summaries, recommendation text.
 
 Redaction is pattern matching and will miss secrets that look like ordinary

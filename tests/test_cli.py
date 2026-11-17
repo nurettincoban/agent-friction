@@ -704,3 +704,15 @@ def test_a_shallow_clone_is_noted(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert "shallow clone" not in err
     monkeypatch.undo()
     assert cli._is_shallow(tmp_path / "missing") is False
+
+
+def test_columns_narrows_the_terminal_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_friction.cli import _term_width
+
+    monkeypatch.setenv("COLUMNS", "60")
+    assert _term_width(None, io.StringIO()) == 60
+    assert _term_width(Path("out.txt"), io.StringIO()) == 100
+    monkeypatch.setenv("COLUMNS", "20")
+    assert _term_width(None, io.StringIO()) == 40
+    monkeypatch.delenv("COLUMNS")
+    assert _term_width(None, io.StringIO()) == 100

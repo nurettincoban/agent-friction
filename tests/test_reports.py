@@ -345,3 +345,14 @@ def test_identical_unattributed_lines_are_collapsed() -> None:
     assert term.count("WebFetch failed") == 1 and "(×5)" in term
     md = render_markdown(result)
     assert md.count("WebFetch failed") == 1 and "(×5)" in md
+
+
+def test_terminal_table_fits_a_narrow_terminal() -> None:
+    result = sample_result()
+    wide = render_terminal(result, width=100)
+    narrow = render_terminal(result, width=60)
+    assert "█" in wide
+    rows = [line for line in narrow.splitlines() if re.match(r"\s+\d+\.\d ", line)]
+    assert rows
+    assert all(len(line) <= 60 for line in rows)
+    assert "█" not in narrow

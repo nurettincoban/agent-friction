@@ -716,3 +716,19 @@ def test_colour_codes_are_stripped_from_tool_output(tmp_path: Path) -> None:
     assert outputs == ["FAILED tests/test_a.py::test_x\n1 failed in 0.1s"]
     assert common.clip_output("plain \x1b[38;5;196mred\x1b[m text") == "plain red text"
     assert common.clip_output("no codes here") == "no codes here"
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "expected"),
+    [
+        ("a\nb", "a\nprint(1)\nb", True),
+        ("a\nb", "x\na\ny\nb\nz", True),
+        ("a\nb", "a\nb", False),
+        ("a\nb", "a\nprint(1)\nc", False),
+        ("a\nb", "b\nprint(1)\na", False),
+        ("a\nb\nc", "a\nc", False),
+        ("a\na", "a\nx", False),
+    ],
+)
+def test_only_adds_lines(old: str, new: str, expected: bool) -> None:
+    assert common.only_adds_lines(old, new) is expected

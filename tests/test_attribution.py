@@ -939,3 +939,39 @@ def test_the_container_a_command_ran_in_is_kept(command: str, container: str) ->
     step = next(s for s in parsed.steps if s.key == parsed.key)
     assert step.container == container
     assert parsed.key in ("pytest", "npm test")  # what it is does not change
+
+
+@pytest.mark.parametrize(
+    ("failed", "other", "expected"),
+    [
+        ("ruff check", "npx eslint", False),
+        ("mypy", "npx tsc", False),
+        ("black", "prettier", False),
+        ("cargo build", "npm run build", False),
+        ("pytest", "npm test", False),
+        ("go test", "cargo test", False),
+        ("python -m pytest", "uv run pytest", True),
+        ("pytest", "tox", True),
+        ("npm test", "npx jest", True),
+        ("yarn test", "pnpm test", True),
+        ("eslint", "npm run lint", True),
+        # make-style wrappers and the repository's own scripts fit any family
+        ("pytest", "make test", True),
+        ("npx eslint", "make lint", True),
+        ("make test", "npm test", True),
+        ("cargo build", "just build", True),
+        ("pytest", "scripts/test.sh", True),
+    ],
+)
+def test_a_replacement_is_of_the_same_tool_family(failed: str, other: str, expected: bool) -> None:
+    assert attribution.is_replacement(failed, other) is expected
+
+
+def test_tool_family() -> None:
+    family = attribution.tool_family
+    assert family("uv run pytest") == family("python -m pytest") == family("ruff check") == "python"
+    assert family("npx tsc") == family("pnpm test") == family("jest") == "js"
+    assert family("cargo nextest") == "rust" and family("go vet") == "go"
+    assert family("make test") is family("just lint") is family("task build") is None
+    assert family("pre-commit run") is None and family("scripts/test.py") is None
+    assert family("pytest (backend/)") == "python"

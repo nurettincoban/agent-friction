@@ -160,6 +160,23 @@ def _use_color(choice: str, stream: TextIO) -> bool:
     return bool(getattr(stream, "isatty", lambda: False)())
 
 
+def _term_width(output: object, stream: TextIO) -> int:
+    """Terminal width for the table: COLUMNS or the tty size, else 100. Files get 100."""
+    if output is not None:
+        return 100
+    env = os.environ.get("COLUMNS", "")
+    if env.isdigit() and int(env) > 0:
+        cols = int(env)
+    elif getattr(stream, "isatty", lambda: False)():
+        try:
+            cols = os.get_terminal_size(stream.fileno()).columns
+        except (OSError, ValueError, AttributeError):
+            cols = 100
+    else:
+        cols = 100
+    return max(40, min(cols, 110))
+
+
 def _add_input_options(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("input")
     g.add_argument(
@@ -652,7 +669,9 @@ def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         text = render_html(result)
     else:
         color = args.output is None and _use_color(args.color, stdout)
-        text = render_terminal(result, color=color, top=args.top)
+        text = render_terminal(
+            result, color=color, top=args.top, width=_term_width(args.output, stdout)
+        )
     _write(text, args.output, stdout)
     if args.output is not None:
         stderr.write(f"wrote {fmt} report to {args.output}\n")
@@ -728,6 +747,7 @@ def _cmd_show(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         result = _analyze(args, args.repo, stderr)
     output = None if args.output is None or str(args.output) == "-" else args.output
     color = output is None and args.format == "text" and _use_color(args.color, stdout)
+    width = _term_width(output, stdout)
     target = _target_in_repo(args.target, getattr(args, "repo", None))
     item = find_target(result, target)
     node = find_dir(result, target)
@@ -754,16 +774,16 @@ def _cmd_show(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         _write(json.dumps(doc, indent=2, sort_keys=True) + "\n", output, stdout)
         return EXIT_OK
     if item is not None and item.get("kind") != "dir":
-        text = render_detail(result, item, color=color)
+        text = render_detail(result, item, color=color, width=width)
     else:
         # A directory: its rolled-up subtree first, then friction attributed to the
         # directory itself (for example searches that came back empty there).
-        text = render_dir_detail(result, node, color=color) if node is not None else ""
+        text = render_dir_detail(result, node, color=color, width=width) if node is not None else ""
         if item is not None:
             text += (
                 "\nFriction attributed to the directory itself "
                 "(for example searches in it that found nothing):\n\n"
-            ) + render_detail(result, item, color=color)
+            ) + render_detail(result, item, color=color, width=width)
     _write(text, output, stdout)
     return EXIT_OK
 

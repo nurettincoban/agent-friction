@@ -673,8 +673,28 @@ in its first 200 characters (no, not, don't, stop, wrong, instead, never,
 wait, why, revert, undo, actually, rather), they cut in to extend the task,
 not because the agent was going wrong. The interrupt is dropped.
 
+*Stopping a command that was still running* is judged differently from
+cutting in after it had finished (the tool result is the harness's
+"interrupted" notice):
+
+- **A server or watcher** (`npm run dev`, `uvicorn`, `... --watch`; the same
+  list as for timeouts): it never returns, so stopping it is the only way
+  on. The event is about how the command was run: it goes to the command
+  with a share of 0.3 (`STOPPED_SERVER_SHARE`, detail `server`), **no file
+  is blamed**, whatever had been edited, and two or more give
+  `run-it-in-the-background` on the command's row.
+- **Any other command**: if the human's next message carries no correction,
+  no instruction that redirects and no word of objection (the list above),
+  as in "looks good, thanks. now commit", they had seen enough of it and
+  **nothing is recorded**. With an objection, or with nothing said
+  afterwards, the event stands as described under Attribution.
+- **No time is claimed** for a stopped command in either case: how long it
+  had been running is how long the human let it run.
+
 **False positives:** people also interrupt because they ran out of time, or
-to add information in other words than those above.
+to add information in other words than those above. **False negatives:** a
+redirect phrased without any of the objection words after a running command
+was stopped ("use the other branch") is not recorded.
 
 ## `human-rework` — Human rework (git)
 
@@ -855,7 +875,9 @@ a different version was written in between. Strings are compared by hash.
 
 *Temporary debugging is not a revert:* if the earlier edit only **added**
 text (its old string survives inside its new string, e.g. a `print` after an
-existing line), a command ran successfully while it was in place, and the
+existing line; or every line of its old string survives in the new one, in
+order, with lines added in between: a `print` put between two statements,
+or at several points of the text that was matched), a command ran successfully while it was in place, and the
 edit is then exactly undone, nothing is recorded. The agent looked at
 something and cleaned up after itself. The same goes for a **switch** that
 is flipped, run with and flipped back: a one-line replacement that differs
