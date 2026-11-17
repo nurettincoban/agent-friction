@@ -4596,3 +4596,23 @@ def test_a_missing_target_is_noted_on_the_failure(tmp_path: Path) -> None:
     assert (found.detail["no_target_in"], found.detail["no_target"]) == ("Makefile", "lint")
     s = Session().user("go").bash("make lint", "ruff: command not found", exit_code=127)
     assert "no_target" not in detect(s, tmp_path)[0].detail
+
+
+# ---- round 29 ------------------------------------------------------------------------------
+
+
+def test_a_search_in_a_directory_that_does_not_exist_is_a_path_miss(tmp_path: Path) -> None:
+    said = "<tool_use_error>Path does not exist: /repo/srcs/api</tool_use_error>"
+    s = Session().user("go")
+    s.tool("Grep", {"pattern": "Client", "path": "/repo/srcs/api"}, said, is_error=True)
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.PATH_MISS and keys(found) == [("file", "srcs/api")]
+    assert found.summary == "Grep was pointed at srcs/api, which does not exist"
+    assert found.detail == {"variant": "search"}
+    # a directory that is there, a path outside the repo, and an empty search are not
+    assert detect(s, tmp_path, dirs=("srcs/api",)) == []
+    s = Session().user("go")
+    s.tool("Grep", {"pattern": "x", "path": "/srv/other"}, said, is_error=True)
+    assert detect(s, tmp_path) == []
+    s = Session().user("go").grep("Client", "/repo/src")
+    assert [f.signal for f in detect(s, tmp_path)] == [signals.SEARCH_MISS]

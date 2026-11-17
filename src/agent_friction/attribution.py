@@ -624,9 +624,13 @@ def _strip_wrapper(wrapper: str, rest: list[str]) -> list[str]:
     return out
 
 
+#: What Windows appends to a program's name: ``npm.cmd``, ``python.exe``, ``gradlew.bat``.
+_WINDOWS_SUFFIX_RE = re.compile(r"(?<=[^/.])\.(?:cmd|exe|bat)$", re.I)
+
+
 def _program_name(word: str) -> str:
     """Basename for absolute/vendored executables, cleaned relative path for repo scripts."""
-    word = to_posix(word)
+    word = _WINDOWS_SUFFIX_RE.sub("", to_posix(word))
     if "/" not in word:
         return word
     parts = [p for p in word.split("/") if p not in ("", ".")]

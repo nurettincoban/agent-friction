@@ -122,6 +122,12 @@ sessions, refuses to compare scans of different repositories, and refuses scans 
 (a later scan without `--since` contains the earlier one, which would only dilute it). Both scans must use the
 same privacy mode: compare two `--no-excerpts` scans, or two scans without it.
 
+### One package of a monorepo
+
+`agent-friction scan packages/web` maps only that directory: paths are relative to it, and
+friction elsewhere in the repository is left out, even from
+sessions that started at the repository root.
+
 ### For a team, and in CI
 
 Transcripts live on the machines where the agents ran (`~/.claude/projects/<encoded path>/` for

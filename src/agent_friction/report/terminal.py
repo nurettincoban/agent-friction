@@ -276,7 +276,7 @@ def render_terminal(
         out.append(
             st.yellow(
                 f"{plural(skipped, 'transcript line')} could not be parsed and "
-                "were skipped (see sources in --format json)."
+                f"{'was' if skipped == 1 else 'were'} skipped (see sources in --format json)."
             )
         )
     return "\n".join(out) + "\n"

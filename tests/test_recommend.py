@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_friction import model, recommend, redact, signals
+from agent_friction import model, recommend, redact, scoring, signals
 from agent_friction.guidance import Guidance, Mention, path_terms
 from agent_friction.model import Finding, Target
 from agent_friction.recommend import FileFacts, file_facts
@@ -909,3 +909,38 @@ def test_a_target_that_does_not_exist_is_not_something_to_document() -> None:
     assert ids(recommend.recommend(model.COMMAND, "make lint", other, None, quote)) == [
         "document-the-command"
     ]
+
+
+def test_corrections_are_called_different_only_when_they_can_be_told_apart() -> None:
+    def advice(*said: str) -> str:
+        found = [
+            finding(signals.USER_CORRECTION, f"s{i}", fid=i, quote=q) for i, q in enumerate(said)
+        ]
+        (rec,) = recommend.recommend(model.FILE, "a.py", found, None, quote)
+        return str(rec["detail"])
+
+    different = advice("No, use PaymentClient here", "That broke the migration, revert it")
+    assert "2 times in 2 sessions, each time about something else." in different
+    # nothing to tell by, or the same few words again: no claim either way
+    for said in (("No, stop", "No, stop"), ("no", "stop that"), ("No!", "That broke the build")):
+        text = advice(*said)
+        assert "something else" not in text and "2 times in 2 sessions. If what they" in text
+    assert "something else" not in advice("No, use PaymentClient here")
+
+
+def test_the_repo_wide_note_does_not_call_every_file_above_the_rate() -> None:
+    base = scoring.baseline({f"f{i}.py": (2, 2, 4) for i in range(7)})
+    assert len(base.above) == base.files == 7
+    item = recommend.repo_wide(signals.EDIT_MISS, base, 4, 0)
+    assert item is not None
+    text = str(item["detail"])
+    assert "clearly above that rate" not in text
+    assert "All 7 files with such events are far above the 5% taken as ordinary" in text
+    assert "none stands out from the others" in text
+    # some files above, others not: the old sentence still holds
+    counts = {"hot.py": (8, 8, 16), **{f"f{i}.py": (10, 1, 1) for i in range(8)}}
+    mixed = recommend.repo_wide(signals.EDIT_MISS, scoring.baseline(counts), 6, 0)
+    assert mixed is not None
+    assert "1 file is clearly above that rate and has its own entry: `hot.py`." in str(
+        mixed["detail"]
+    )

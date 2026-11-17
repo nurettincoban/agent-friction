@@ -742,3 +742,21 @@ def test_launcher_split_and_replacement() -> None:
     assert not same("uv run flask db", "uv run alembic upgrade")
     assert not same("python <inline>", "uv run python <inline>")
     assert not same("alembic upgrade", "uv sync")
+
+
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [
+        ("npm.cmd test", "npm test"),
+        ("npx.cmd jest", "npx jest"),
+        ("python.exe -m pytest", "python -m pytest"),
+        (r"C:\Python312\python.exe -m pytest", "python -m pytest"),
+        ("gradlew.bat build", "gradlew build"),
+        ("NPM.CMD test", "NPM"),
+        ("npm test", "npm test"),
+        # only a program's own suffix: a script argument keeps its name
+        ("python run.exe.py", "python run.exe.py"),
+    ],
+)
+def test_windows_program_suffixes_are_not_part_of_the_key(command: str, key: str) -> None:
+    assert attribution.normalize_command(command) == key

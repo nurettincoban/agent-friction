@@ -7,6 +7,7 @@ and agent-friction analyses them with the same detectors as Claude Code.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,18 @@ KIND = "generic"
 #: Optional: only whether the text ends in a question is used (never the text itself).
 ASSISTANT_MESSAGE = "assistant_message"
 KINDS = (model.TOOL_CALL, model.TOOL_RESULT, model.USER_MESSAGE, model.INTERRUPT)
+
+
+_INTEGER_RE = re.compile(r"\s*-?\d{1,9}\s*")
+
+
+def _exit_code(value: object) -> int | None:
+    """An exit status as a number; ``"1"`` (a number written as a string) is 1."""
+    if isinstance(value, str) and _INTEGER_RE.fullmatch(value):
+        return int(value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
 
 
 def _str(value: object) -> str | None:
@@ -34,8 +47,8 @@ def _event(obj: dict[str, Any], line: int) -> Event | None:
     if kind == model.TOOL_RESULT and isinstance(of, (str, int)) and not isinstance(of, bool):
         # how the command that call `of` launched in the background ended
         event.kind, event.task_id = model.BACKGROUND_OUTCOME, str(of)
-        code = obj.get("exit_code")
-        if isinstance(code, int) and not isinstance(code, bool):
+        code = _exit_code(obj.get("exit_code"))
+        if code is not None:
             event.exit_code = code
         event.ok = obj.get("ok") is not False
         status = _str(obj.get("status"))
@@ -68,8 +81,8 @@ def _event(obj: dict[str, Any], line: int) -> Event | None:
     elif kind == model.TOOL_RESULT:
         output = obj.get("output")
         text = output if isinstance(output, str) else ""
-        code = obj.get("exit_code")
-        if isinstance(code, int) and not isinstance(code, bool):
+        code = _exit_code(obj.get("exit_code"))
+        if code is not None:
             event.exit_code = code
         if isinstance(obj.get("prompted"), bool):
             event.prompted = obj["prompted"]

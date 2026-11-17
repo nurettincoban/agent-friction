@@ -40,6 +40,15 @@ directory) if set, otherwise `~/.claude` and `~/.config/claude`.
 - Directories for the repo root, its git worktrees and their subdirectories
   are used. Because the encoding is lossy (`/a/b-c` and `/a/b/c` collide),
   each session is checked against the working directory recorded inside it.
+- **A directory inside a git repository** (one package of a monorepo,
+  `agent-friction scan packages/web`) is only that directory. Git reports the
+  worktrees of the *enclosing* repository; what counts as the scanned
+  directory is the same relative path inside each of them
+  (`<worktree>/packages/web`, where it exists), never a worktree's root. A
+  session started in the parent counts only if it touched something under
+  the scanned directory, and only those calls count: `README.md` of the
+  monorepo and the neighbouring package are outside, and what went wrong
+  there is in `totals.events_outside_repo`.
 - **Worktrees.** The worktrees `git worktree list` reports are roots like the
   repository, including those it calls prunable (the directory is gone, git's
   record is not). A worktree kept *inside* the repository,
@@ -204,7 +213,8 @@ together, and so that the key can be shown even when excerpts are off:
      dropped like any option, and `yarn workspace @acme/web <script>` keeps
      both words (the workspace name is project-specific and becomes a
      placeholder without excerpts). `pip3` and `pip3.12` are `pip`, as
-     `python3` is `python`;
+     `python3` is `python`, and what Windows appends to a program's name is
+     dropped (`npm.cmd test` -> `npm test`, `python.exe -m pytest` -> `python -m pytest`);
    - **every other program is its executable name alone**: `./run s3cret` is
      `run`, `mytool acme-codename --x` is `mytool`, `ssh host cmd` is `ssh`,
      `docker run <image>` is `docker run`;

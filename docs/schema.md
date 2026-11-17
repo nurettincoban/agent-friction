@@ -311,7 +311,7 @@ Common fields:
 | `id` | Required (unless `of` is given). The call's id. |
 | `of` | Instead of `id`: the `id` of a `background` shell call whose command has now **ended**. `exit_code`, `ok` and `output` then describe that end, and it is judged exactly like a foreground run of the command at this point of the transcript. Optional `status`: `"killed"`, `"stopped"`, `"cancelled"` or `"running"` mean there is no outcome to judge (the line is ignored). Only the first outcome of a launch counts; an `of` that names no background call is ignored. |
 | `ok` | `false` marks a failure. If omitted, the call failed when `error` is set or `exit_code` is non-zero. |
-| `exit_code` | Shell exit status. |
+| `exit_code` | Shell exit status: an integer, or an integer written as a string (`"1"` is read as 1). Anything else is ignored. |
 | `error` | Optional class: `edit_not_found`, `edit_ambiguous`, `not_read`, `stale`, `missing`, `rejected` (a human declined), `denied` (permission settings or a hook refused; `reason` may be `"hook"`), `interrupted`, `exit`, `not_run` (the harness never started the call: ignored), `too_large` (a read refused for size), `error`. If omitted on a failure it is inferred from `output` using Claude Code's error wording. |
 | `output` | Tool output or error text (used for excerpts and to classify command failures). |
 | `matches` | Number of search results; `0` marks a search miss (alternatively `"empty": true`). |

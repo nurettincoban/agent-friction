@@ -391,7 +391,7 @@ class _Rules:
             detail = (
                 "A human corrected the agent here "
                 + ("once" if len(found) == 1 else _in_sessions(found))
-                + ("" if len(found) == 1 else ", each time about something else")
+                + (", each time about something else" if _differ(found) else "")
                 + ". If what they said is a standing rule rather than a one-off, put it in "
                 "AGENTS.md / CLAUDE.md (or a comment at the top of the file)."
             )
@@ -1160,6 +1160,16 @@ def _share_wording(quotes: Sequence[str]) -> bool:
     return False
 
 
+def _differ(found: Sequence[Finding]) -> bool:
+    """Can these corrections be said to be about different things?
+
+    Not when they are the same words again, and not when there are no words to tell
+    by ("no", "stop that"): then nothing is claimed either way.
+    """
+    said = [_content_words(f.detail.get("quote", "")) for f in found]
+    return len(said) > 1 and all(said) and len({frozenset(words) for words in said}) > 1
+
+
 def _command_key(finding: Finding) -> str:
     return next((t.key for t in finding.targets if t.kind == model.COMMAND), "")
 
@@ -1211,7 +1221,18 @@ def repo_wide(
     else:
         what, title = "edits were refused because the file was unread or had changed", "Stale edits"
     above = list(base.above)
-    if above:
+    if above and len(above) == base.files:
+        # every file with such events is "above": above the floor, not above each other
+        shown = _and([code(path) for path in above[:REPO_WIDE_MAX_FILES]])
+        more = len(above) - REPO_WIDE_MAX_FILES
+        standing = (
+            f"{'The one file' if len(above) == 1 else f'All {len(above)} files'} with such "
+            f"events {'is' if len(above) == 1 else 'are'} far above the "
+            f"{scoring.BASELINE_FLOOR:.0%} taken as ordinary, so none stands out from the "
+            f"others: {shown}" + (f" and {more} more" if more > 0 else "") + ". Each has its "
+            "own entry, but look for one cause they share before treating them one by one."
+        )
+    elif above:
         shown = _and([code(path) for path in above[:REPO_WIDE_MAX_FILES]])
         more = len(above) - REPO_WIDE_MAX_FILES
         standing = (

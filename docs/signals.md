@@ -1498,7 +1498,8 @@ file or documenting where its important parts are.
 **What:** a tool call that was refused before it ran, by something other than
 a human saying no: a missing permission ("Claude requested permissions to use
 Bash, but you haven't granted it yet"), a deny rule ("Permission to use Bash
-has been denied"), a hook ("PreToolUse:Bash hook error: ..."), or a safety
+has been denied"), a hook ("PreToolUse:Bash hook error: ...", "Edit operation
+blocked by hook: ...", "Bash operation blocked by hook: ..."), or a safety
 check ("Permission for this command was denied by ..."), or the harness
 refusing a command pattern outright ("Blocked: sleep 30 followed by: ...";
 variant `blocked`, with advice to document the alternative it suggests rather
@@ -1560,7 +1561,10 @@ never makes a hotspot or advice.
 
 **What:** a read or edit of a path that does not exist, a test command
 pointed at a test file that does not exist, or a `cd` into a directory that
-does not exist (variant `directory`; see `command-failure` for both). In
+does not exist (variant `directory`; see `command-failure` for both), or a
+Grep or Glob search pointed at a directory that does not exist ("Path does
+not exist: ...", variant `search`; the search never ran, so it is not a
+`search-miss`). In
 PowerShell, a cmdlet answering `Cannot find path '...' because it does not
 exist` (`Get-Content`, `gc`, `Set-Location`, ...) is the same miss on that
 path and not a failure of the cmdlet; from a cmdlet that lists or tests

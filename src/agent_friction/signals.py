@@ -2876,6 +2876,20 @@ class _Detector:
                 self.state.turn_misses = [
                     m for m in self.state.turn_misses if id(m[0]) not in found
                 ]
+        if not result.ok and result.error == model.ERR_MISSING and call.path:
+            # "Path does not exist": the search never ran, the agent guessed a directory
+            rel = (self.ctx.resolver.resolve(call.path, call.cwd) or "").rstrip("/")
+            if rel and not self.ctx.exists(rel) and not self.ctx.is_known_file(rel):
+                self._emit(
+                    PATH_MISS,
+                    result,
+                    f"{self._tool(call)} was pointed at {rel}, which does not exist",
+                    [Target(model.FILE, rel)],
+                    excerpt=result.output,
+                    interval=self._round_trip(action),
+                    detail={"variant": "search"},
+                )
+            return
         if not (result.ok and result.empty):
             return
         scope = _scope(call, self.ctx)

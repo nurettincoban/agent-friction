@@ -605,3 +605,85 @@ def test_permission_decisions_say_whether_a_person_was_asked(tmp_path: Path) -> 
     assert results({"decision": "accept", "source": "prompt"}) == [True]
     assert results(None) == [None] and results({"decision": "accept"}) == [None]
     assert results("accept") == [None]
+
+
+# ---- round 29 ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Edit operation blocked by hook:\n- [check-paths.sh]: generated file", "hook"),
+        ("Bash operation blocked by hook: no force pushes here", "hook"),
+        ("<tool_use_error>Write operation blocked by hook:\n- [x]: no</tool_use_error>", "hook"),
+        # words about hooks further in are not the harness refusing the call
+        ("error: the deploy operation blocked by hook is documented in HOOKS.md", None),
+        ("1 passed\nBash operation blocked by hook: x", None),
+    ],
+)
+def test_a_call_blocked_by_a_hook_is_a_denial(text: str, expected: str | None) -> None:
+    assert common.denial(text) == expected
+
+
+def test_a_hook_block_becomes_a_permission_denial_with_hook_wording(tmp_path: Path) -> None:
+    from agent_friction import signals
+
+    said = "Edit operation blocked by hook:\n- [check-paths.sh]: do not edit generated files"
+    s = (
+        Session()
+        .user("go")
+        .tool(
+            "Edit",
+            {"file_path": "/repo/src/a.py", "old_string": "a", "new_string": "b"},
+            said,
+            is_error=True,
+        )
+    )
+    (found,) = builders.detect(s, tmp_path)
+    assert found.signal == signals.PERMISSION_DENIED and found.detail["variant"] == "hook"
+    assert found.summary == "Edit on src/a.py was denied by a hook; it did not run"
+    s = (
+        Session()
+        .user("go")
+        .tool(
+            "Bash",
+            {"command": "git push --force"},
+            "Bash operation blocked by hook: no",
+            is_error=True,
+        )
+    )
+    (found,) = builders.detect(s, tmp_path)
+    assert found.summary == "Bash on `git push` was denied by a hook; it did not run"
+
+
+def test_path_does_not_exist_is_a_missing_path() -> None:
+    assert classify_error("Path does not exist: /repo/srcs")[0] == model.ERR_MISSING
+    assert classify_error("the path does not exist anymore, says the log")[0] == model.ERR_OTHER
+
+
+@pytest.mark.parametrize(
+    ("code", "failed", "status"),
+    [
+        ("1", True, 1),
+        (" 2 ", True, 2),
+        ("0", False, 0),
+        (1, True, 1),
+        (0, False, 0),
+        ("one", False, None),
+        (True, False, None),
+        ("1.5", False, None),
+    ],
+)
+def test_generic_exit_code_may_be_a_numeric_string(
+    tmp_path: Path, code: object, failed: bool, status: int | None
+) -> None:
+    base = {"session": "g", "cwd": "/repo"}
+    lines = [
+        {**base, "kind": "tool_call", "id": 1, "op": "shell", "command": "make build"},
+        {**base, "kind": "tool_result", "id": 1, "exit_code": code, "output": "x"},
+    ]
+    path = tmp_path / "g.jsonl"
+    path.write_text("".join(json.dumps(line) + "\n" for line in lines))
+    result = generic.parse_file(path).streams[0].events[1]
+    assert result.ok is not failed and result.exit_code == status
+    assert result.error == (model.ERR_EXIT if failed else "")

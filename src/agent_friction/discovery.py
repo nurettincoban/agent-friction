@@ -48,15 +48,10 @@ def claude_config_dirs(
     return [base / ".claude", (Path(xdg) if xdg else base / ".config") / "claude"]
 
 
-def git_worktrees(repo: Path) -> list[Path]:
-    """Roots of all git worktrees of ``repo`` (empty when git is unavailable).
-
-    Includes entries git calls prunable (the directory is gone, the record is not):
-    their sessions are still this repository's.
-    """
+def _git(repo: Path, *args: str) -> str | None:
     try:
         proc = subprocess.run(
-            ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+            ["git", "-C", str(repo), *args],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -65,14 +60,40 @@ def git_worktrees(repo: Path) -> list[Path]:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def git_worktrees(repo: Path) -> list[Path]:
+    """Where ``repo`` lives in each git worktree (empty when git is unavailable).
+
+    For a repository root these are the worktree roots, including entries git
+    calls prunable (the directory is gone, the record is not): their sessions
+    are still this repository's.
+
+    When ``repo`` is a directory *inside* a git repository (one package of a
+    monorepo), the worktrees are those of the enclosing repository, and only
+    the same directory inside each of them is ``repo``: ``<worktree>/<prefix>``,
+    where it exists. The worktree roots themselves are never returned then, or
+    the whole enclosing repository would be read as this directory.
+    """
+    listing = _git(repo, "worktree", "list", "--porcelain")
+    shown = _git(repo, "rev-parse", "--show-prefix")
+    if listing is None or shown is None:
         return []
-    if proc.returncode != 0:
-        return []
-    return [
-        Path(line[len("worktree ") :])
-        for line in proc.stdout.splitlines()
-        if line.startswith("worktree ") and line[len("worktree ") :].strip()
-    ]
+    prefix = shown.strip().strip("/")
+    found: list[Path] = []
+    for line in listing.splitlines():
+        if not line.startswith("worktree ") or not line[len("worktree ") :].strip():
+            continue
+        root = Path(line[len("worktree ") :])
+        if not prefix:
+            found.append(root)
+            continue
+        with contextlib.suppress(OSError):
+            if (root / prefix).is_dir():
+                found.append(root / prefix)
+    return found
 
 
 def removed_sibling_sessions(

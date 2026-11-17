@@ -297,6 +297,7 @@ def classify_error(text: str) -> tuple[str, int | None]:
         "file does not exist" in lowered
         or "no such file or directory" in lowered
         or "enoent" in lowered
+        or lowered.lstrip().startswith("path does not exist")
     ):
         return model.ERR_MISSING, None
     return model.ERR_OTHER, None
@@ -320,6 +321,7 @@ _DENIED_RE = re.compile(
     r"|Permission for this (?:command|tool|action|tool use) (?:was|has been) denied"
     r"|\S* ?(?:PreToolUse|PermissionRequest):\S* hook (?:error|blocking error|denied)"
     r"|[^\n]{0,80}\bhook (?:blocking error|returned blocking error|blocked this)"
+    r"|\S+ operation blocked by hook\b"
     r"|This command requires approval"
     r"|(?:The )?(?:command|tool use|action) was blocked (?:by|for)\b"
     r")",

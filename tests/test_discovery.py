@@ -286,3 +286,103 @@ def test_a_prunable_worktree_is_still_a_root_and_a_removed_sibling_is_named(
     # ... and naming it as an alias brings its sessions in
     aliased = AnalyzeOptions(repo=repo, include_git=False, repo_aliases=[str(removed)])
     assert analyze(aliased)["totals"]["sessions"] == 3
+
+
+# ---- round 29: a directory inside a git repository ------------------------------------------
+
+
+def _monorepo(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A git repository with two packages and a second worktree: (root, web, worktree)."""
+    mono = tmp_path / "mono"
+    web = mono / "packages" / "web"
+    for package in ("web", "api"):
+        (mono / "packages" / package / "src").mkdir(parents=True)
+        (mono / "packages" / package / "src" / "app.py").write_text("x = 1\n")
+    (mono / "README.md").write_text("# mono\n")
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+    worktree = tmp_path / "wt"
+    for args in (
+        ["init", "-q", "-b", "main"],
+        ["add", "."],
+        ["-c", "user.name=T", "-c", "user.email=t@example.test", "commit", "-q", "-m", "init"],
+        ["worktree", "add", "-q", str(worktree), "-b", "feature"],
+    ):
+        subprocess.run(["git", "-C", str(mono), *args], check=True, capture_output=True, env=env)
+    return mono, web, worktree
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_a_package_of_a_monorepo_is_not_the_monorepo(tmp_path: Path) -> None:
+    mono, web, worktree = _monorepo(tmp_path)
+    found = {p.resolve() for p in discovery.git_worktrees(web)}
+    # the same directory in each worktree, never the worktrees' roots
+    assert found == {web.resolve(), (worktree / "packages" / "web").resolve()}
+    assert {p.resolve() for p in discovery.git_worktrees(mono)} == {
+        mono.resolve(),
+        worktree.resolve(),
+    }
+    roots = {p.resolve() for p in discovery.repo_roots(web)}
+    assert mono.resolve() not in roots and worktree.resolve() not in roots
+    # a directory that the other worktree does not have is only itself
+    (mono / "packages" / "new").mkdir()
+    assert [p.resolve() for p in discovery.git_worktrees(mono / "packages" / "new")] == [
+        (mono / "packages" / "new").resolve()
+    ]
+    resolver = discovery.PathResolver(web, discovery.repo_roots(web)[1:])
+    m, w = mono.resolve().as_posix(), worktree.resolve().as_posix()
+    for outside in (
+        f"{m}/README.md",
+        f"{m}/packages/api/src/app.py",
+        f"{w}/README.md",
+        f"{m}/.claude/worktrees/feat/README.md",
+        f"{m}/.claude/worktrees/feat/packages/api/src/app.py",
+        f"{m}/packages/web/../api/src/app.py",
+    ):
+        assert resolver.resolve(outside) is None and not resolver.contains(outside)
+    assert resolver.resolve("README.md", m) is None
+    for inside in (
+        f"{m}/packages/web/src/app.py",
+        f"{w}/packages/web/src/app.py",
+        f"{m}/packages/web/.claude/worktrees/feat/src/app.py",
+    ):
+        assert resolver.resolve(inside) == "src/app.py"
+    assert resolver.resolve("packages/web/src/app.py", m) == "src/app.py"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+@pytest.mark.parametrize("include_git", [True, False])
+def test_scanning_a_package_reads_nothing_of_its_neighbours(
+    tmp_path: Path, include_git: bool
+) -> None:
+    mono, web, worktree = _monorepo(tmp_path)
+    m = mono.resolve().as_posix()
+    files = []
+    for i in range(4):  # sessions in the parent that never touch the package
+        s = Session(f"s{i}", cwd=m).user("go")
+        s.edit(f"{m}/packages/api/src/app.py", error=builders.EDIT_NOT_FOUND)
+        s.edit(f"{m}/README.md", error=builders.EDIT_NOT_FOUND)
+        s.edit("README.md", error=builders.EDIT_NOT_FOUND)
+        s.bash("make test", "make: *** No rule to make target 'test'.  Stop.", exit_code=2)
+        files.append(s.save(tmp_path / "t" / f"s{i}"))
+    options = AnalyzeOptions(
+        repo=web, transcripts=files, include_git=include_git, allow_no_transcripts=True
+    )
+    out = analyze(options)
+    assert out["totals"]["sessions"] == 0 and out["totals"]["friction_events"] == 0
+    assert out["hotspots"] == out["commands"] == out["directories"] == []
+    assert "README.md" not in str(out["exposure"]) and "app.py" not in str(out["exposure"])
+    # the same sessions are the monorepo's own
+    whole = analyze(AnalyzeOptions(repo=mono, transcripts=files, include_git=include_git))
+    assert whole["totals"]["sessions"] == 4
+    assert {h["path"] for h in whole["hotspots"]} == {"README.md", "packages/api/src/app.py"}
+    # a session in the parent, or in another worktree, that edits a file of the package
+    for i, root in enumerate((m, worktree.resolve().as_posix())):
+        s = Session(f"in{i}", cwd=root).user("go")
+        s.edit(f"{root}/packages/web/src/app.py", error=builders.EDIT_NOT_FOUND)
+        s.edit(f"{root}/README.md", error=builders.EDIT_NOT_FOUND)
+        files.append(s.save(tmp_path / "t" / f"in{i}"))
+    out = analyze(options)
+    assert out["totals"]["sessions"] == 2 and out["totals"]["friction_events"] == 2
+    assert [h["path"] for h in out["hotspots"]] == ["src/app.py"]
+    assert list(out["exposure"]["file"]) == ["src/app.py"]
+    assert out["totals"]["events_outside_repo"] == 2  # the README misses, seen and set aside
