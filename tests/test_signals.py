@@ -4616,3 +4616,60 @@ def test_a_search_in_a_directory_that_does_not_exist_is_a_path_miss(tmp_path: Pa
     assert detect(s, tmp_path) == []
     s = Session().user("go").grep("Client", "/repo/src")
     assert [f.signal for f in detect(s, tmp_path)] == [signals.SEARCH_MISS]
+
+
+# ---- round 30 ------------------------------------------------------------------------------
+
+
+def _stalled(named: bool = True, api_between: int = 0) -> Session:
+    api, util = "/repo/src/api.ts", "/repo/src/util.ts"
+    red = "src/util.ts(3,5): error TS2322: Type 'string' is not assignable" if named else "error"
+    s = Session().user("add the helper").edit(api, "a0", "a1")
+    s.bash("npm run build", "built in 2s")
+    for i in range(4):
+        s.edit(util, f"u{i}", f"u{i + 1}")
+        if i < api_between:
+            s.edit(api, f"a{i + 1}", f"a{i + 2}")
+        s.bash("npx tsc", f"{red}\nFound 1 error.", exit_code=2)
+    return s
+
+
+def test_a_file_edited_before_the_first_red_run_is_no_part_of_the_stall(tmp_path: Path) -> None:
+    (found,) = by_signal(detect(_stalled(), tmp_path), signals.NO_CONVERGENCE)
+    assert keys(found) == [("command", "npx tsc"), ("file", "src/util.ts")]
+    assert [t.share for t in found.targets] == [1.0, 1.0]
+    assert "(edits to src/util.ts)" in found.summary and "api.ts" not in found.summary
+    # the same when the output names no file: api.ts was changed before anything was red
+    (found,) = by_signal(detect(_stalled(named=False), tmp_path), signals.NO_CONVERGENCE)
+    assert keys(found) == [("command", "npx tsc"), ("file", "src/util.ts")]
+
+
+def test_files_edited_between_red_runs_share_by_edits_unless_the_output_names_some(
+    tmp_path: Path,
+) -> None:
+    # both edited between the red runs, nothing named: split by how often each was edited
+    (found,) = by_signal(
+        detect(_stalled(named=False, api_between=2), tmp_path), signals.NO_CONVERGENCE
+    )
+    shares = {t.key: t.share for t in found.targets if t.kind == "file"}
+    assert shares == {"src/util.ts": pytest.approx(3 / 4), "src/api.ts": pytest.approx(1 / 4)}
+    # the failing output names util.ts: api.ts stood by
+    (found,) = by_signal(detect(_stalled(api_between=2), tmp_path), signals.NO_CONVERGENCE)
+    assert keys(found) == [("command", "npx tsc"), ("file", "src/util.ts")]
+    # one edit and then only re-runs is no stall of edits at all (a retry loop instead)
+    s = Session().user("go").edit(A, "a", "b")
+    for _ in range(4):
+        s.bash("npx tsc", "error", exit_code=2)
+    assert by_signal(detect(s, tmp_path), signals.NO_CONVERGENCE) == []
+
+
+def test_a_make_error_about_another_target_is_not_a_missing_target(tmp_path: Path) -> None:
+    said = "make: *** No rule to make target 'tst'.  Stop."
+    s = Session().user("go").bash("make test", said, exit_code=2)
+    (found,) = detect(s, tmp_path)
+    assert found.detail["variant"] == "invocation" and "no_target" not in found.detail
+    s = Session().user("go").bash("make tst", said, exit_code=2)
+    assert detect(s, tmp_path)[0].detail["no_target"] == "tst"
+    # `tst` inside another word is not the target that was asked for
+    s = Session().user("go").bash("make tst-all", said, exit_code=2)
+    assert "no_target" not in detect(s, tmp_path)[0].detail

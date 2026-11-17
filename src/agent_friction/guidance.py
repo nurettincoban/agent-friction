@@ -38,6 +38,8 @@ _IMPORT_RE = re.compile(
 NESTED_FILES: tuple[str, ...] = ("AGENTS.md", "CLAUDE.md")
 #: Directory whose files (any depth one) are rules for Cursor.
 CURSOR_RULES_DIR = ".cursor/rules"
+#: How far above the scanned directory instruction files are looked for (to the git root).
+MAX_PARENT_LEVELS = 12
 #: Settings files whose ``permissions.deny`` rules are read.
 SETTINGS_FILES: tuple[str, ...] = (".claude/settings.json", ".claude/settings.local.json")
 #: Larger files are not read: instruction files are small, and this must stay cheap.
@@ -96,12 +98,41 @@ def _pattern(term: str) -> re.Pattern[str]:
 class Guidance:
     """The instruction files of one repository, read lazily and at most once."""
 
-    def __init__(self, repo: Path | None) -> None:
+    def __init__(self, repo: Path | None, parents: bool = True) -> None:
         self.repo = repo
+        #: Also read the instruction files above a directory inside a git repository.
+        self.parents = parents
         self._lines: dict[str, list[tuple[int, str]]] = {}
         self._seen: set[Path] = set()
         self._cursor: list[str] | None = None
         self._imports: dict[str, list[str]] = {}
+        self._parents: list[str] | None = None
+
+    def _parent_files(self) -> list[str]:
+        """Instruction files above a scanned directory that lies inside a git repository.
+
+        Agents started in ``packages/web`` also load ``AGENTS.md`` and ``CLAUDE.md``
+        from every directory up to the repository root. They are named relative to
+        the scanned directory (``../../AGENTS.md``), nearest first. Nothing is read
+        above the directory that holds ``.git``, and nothing at all when the scanned
+        directory is the root or is in no repository.
+        """
+        if self._parents is None:
+            self._parents = []
+            found: list[str] = []
+            try:
+                here = self.repo.resolve() if self.repo is not None else None
+                if here is not None and self.parents and not (here / ".git").exists():
+                    for level, parent in enumerate(here.parents[:MAX_PARENT_LEVELS], 1):
+                        top = (parent / ".git").exists()
+                        names = ROOT_FILES if top else NESTED_FILES
+                        found.extend("../" * level + name for name in names)
+                        if top:
+                            self._parents = found
+                            break
+            except (OSError, RuntimeError):
+                pass
+        return self._parents
 
     def _read(self, rel: str) -> list[tuple[int, str]]:
         """The searchable lines of ``rel``; empty if it is missing, large or not text."""
@@ -114,7 +145,8 @@ class Guidance:
         try:
             root = self.repo.resolve()
             path = (self.repo / rel).resolve()
-            if root not in path.parents or path in self._seen or not path.is_file():
+            inside = root in path.parents or rel in self._parent_files()
+            if not inside or path in self._seen or not path.is_file():
                 return lines  # outside the repo, or AGENTS.md is a link to CLAUDE.md
             self._seen.add(path)
             if path.stat().st_size > MAX_FILE_BYTES:
@@ -190,6 +222,7 @@ class Guidance:
         for depth in range(1, len(parts) + 1):
             directory = "/".join(parts[:depth])
             names.extend(f"{directory}/{name}" for name in NESTED_FILES)
+        names.extend(self._parent_files())
         with_imports: list[str] = []
         for name in names:
             with_imports.append(name)

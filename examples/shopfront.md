@@ -18,9 +18,9 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 |---:|---|---:|---:|---:|---:|---|---|
 | 1 | `src/shopfront/api/schema_gen.py` | 56.8 | 4 | 12 | 4m | `edit-miss`×6, `user-correction`×2, `probable-correction`×1 | high |
 | 2 | `src/shopfront/checkout/service.py` | 42.4 | 3 | 5 | 2m | `user-correction`×2, `edit-revert`×1, `edit-thrash`×1 | high |
-| 3 | `src/shopfront/payments/refunds.py` | 11.4 | 1 | 1 | 18s | `path-miss`×1 | low |
+| 3 | `src/shopfront/payments/refunds.py` (not in tree) | 11.4 | 1 | 1 | 18s | `path-miss`×1 | low |
 | 4 | `api/openapi.yaml` | 9.7 | 1 | 1 | n/a | `search-miss`×1 | low |
-| 5 | `tests/test_refunds.py` | 8.5 | 1 | 1 | n/a | `command-failure`×1 | low |
+| 5 | `tests/test_refunds.py` (not in tree) | 8.5 | 1 | 1 | n/a | `command-failure`×1 | low |
 
 ## Commands that keep failing
 

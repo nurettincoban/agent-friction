@@ -126,7 +126,8 @@ same privacy mode: compare two `--no-excerpts` scans, or two scans without it.
 
 `agent-friction scan packages/web` maps only that directory: paths are relative to it, and
 friction elsewhere in the repository is left out, even from
-sessions that started at the repository root.
+sessions that started at the repository root. Instruction files above the package (`AGENTS.md`,
+`CLAUDE.md` up to the repository root) still count as guidance agents were given.
 
 ### For a team, and in CI
 

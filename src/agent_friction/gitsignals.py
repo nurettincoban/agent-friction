@@ -218,6 +218,45 @@ def ignored_directories(repo: Path, directories: Sequence[str]) -> set[str]:
     return {d.strip("/") for d in proc.stdout.split("\0") if d.strip("/")}
 
 
+def removal(repo: Path, rel: str) -> tuple[str | None, str | None]:
+    """When ``rel`` left the tree, and what it was renamed to: ``(date, new path)``.
+
+    The date is that of the last commit that touched ``rel`` (ISO 8601), if that
+    commit deleted or renamed it. ``(None, None)`` where git knows nothing of the
+    kind: no git, not a repository, a path that was never tracked, a file that is
+    only missing from the working tree. Never raises.
+    """
+
+    def git(*args: str) -> str | None:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(repo), "-c", "core.quotepath=off", *args],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=GIT_TIMEOUT_SECONDS,
+                check=False,
+                env={**os.environ, "LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0"},
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return proc.stdout if proc.returncode == 0 else None
+
+    last = (git("log", "-1", "--format=%H%x09%cI", "--", rel) or "").strip()
+    sha, _, date = last.partition("\t")
+    if not sha or not date:
+        return None, None
+    shown = git("show", "-M", "--relative", "--name-status", "--format=", sha) or ""
+    for line in shown.splitlines():
+        fields = line.split("\t")
+        if len(fields) == 3 and fields[0].startswith("R") and fields[1] == rel:
+            return date, fields[2]
+        if len(fields) == 2 and fields[0] == "D" and fields[1] == rel:
+            return date, None
+    return None, None
+
+
 def is_untracked(repo: Path, rel: str) -> bool:
     """True if git knows ``repo`` and does not track ``rel`` (ignored, or never added).
 

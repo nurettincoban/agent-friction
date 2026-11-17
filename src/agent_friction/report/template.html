@@ -158,6 +158,11 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     if (text !== undefined && text !== null) e.textContent = String(text);
     return e;
   }
+  function gone(h) {
+    var f = h && h.kind === "file" ? h.file : null;
+    if (!f || f.exists !== false) return "";
+    return f.renamed_to ? " (renamed)" : " (not in tree)";
+  }
   function plural(n, word) { n = Number(n) || 0; return n + " " + word + (n === 1 ? "" : "s"); }
   function utc(ts) { var t = String(ts || "").slice(0, 16).replace("T", " "); return t ? t + " UTC" : ""; }
   function lostPhrase(m) { return Number(m) > 0 ? "~" + mins(m) + " lost" : "no time estimate"; }
@@ -227,7 +232,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
   function showItem(h) {
     detail.textContent = "";
     detail.appendChild(el("div", { class: "sub" }, h.kind === "command" ? "command" : h.kind === "dir" ? "directory" : "file"));
-    detail.appendChild(el("h3", { class: "mono" }, h.path));
+    detail.appendChild(el("h3", { class: "mono" }, h.path + gone(h)));
     detail.appendChild(el("div", { class: "sub" }, "score " + Number(h.score).toFixed(1) + " · " + plural(h.sessions, "session") +
       " · " + plural(h.events, "event") + " · " + lostPhrase(h.est_minutes_lost) + " · " + h.confidence + " confidence"));
     if (h.why) detail.appendChild(el("p", null, h.why));
@@ -424,7 +429,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
       .forEach(function (h) {
         var tr = el("tr", { class: "row" });
         var td = el("th", { class: "mono", scope: "row" });
-        var btn = el("button", { class: "linkish", type: "button" }, (h.kind === "command" ? "$ " : "") + h.path + (h.kind === "dir" ? "/" : ""));
+        var btn = el("button", { class: "linkish", type: "button" }, (h.kind === "command" ? "$ " : "") + h.path + (h.kind === "dir" ? "/" : "") + gone(h));
         td.appendChild(btn); tr.appendChild(td);
         tr.appendChild(el("td", { class: "num" }, Number(h.score).toFixed(1)));
         tr.appendChild(el("td", { class: "num hide-sm" }, h.sessions));

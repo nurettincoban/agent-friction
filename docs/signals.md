@@ -545,7 +545,12 @@ development. The agent could not work out what the check wants, and gave up
 or handed back.
 
 **Attribution:** the normalized command, in full, and the files edited between
-the red runs (the 3 most edited, the event split evenly between them).
+the red runs. A file edited only *before* the command first went red is not
+part of the stall (it is used only if nothing was edited between the runs).
+Where the failing output names some of the edited files (`src/util.ts(3,5):
+error ...`), only those are blamed; the others stood by. Of what remains the
+3 most edited share the event in proportion to their edits (3 edits and 1
+edit: 0.75 and 0.25).
 
 **Time:** only the red runs themselves (each from call to result) and the
 edits between them, at most 15 minutes per event, newest first. The agent's
@@ -1290,7 +1295,11 @@ command's" below.
   no time claimed. From 3 episodes of work on (`RECURRING_RED_MIN_SESSIONS`)
   it is a habit and gets `pull-before-pushing` ("say in AGENTS.md to fetch
   and rebase (or merge) before pushing, and whether a force-push is ever
-  acceptable"); still no time is claimed. A push refused for want of
+  acceptable"); still no time is claimed. A rejected push that the agent
+  put right at once (`git pull --rebase && git push` goes through) is kept
+  for that count rather than dropped as red, change, green: no file was
+  fixed, the branch was behind. Below 3 episodes such a push is not
+  reported at all (it is in `totals.dropped_red_runs`). A push refused for want of
   credentials is an `auth` failure as above.
 - *A program that is only there by its path:* `zebractl: command not found`
   followed by `./bin/zebractl ...` succeeding records `works_as:

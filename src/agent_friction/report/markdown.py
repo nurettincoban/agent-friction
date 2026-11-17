@@ -10,6 +10,7 @@ from agent_friction.report._common import (
     dropped_note,
     events_phrase,
     fmt_lost,
+    gone_note,
     headline_lost,
     plural,
     repo_recommendations,
@@ -41,7 +42,8 @@ def _table(items: list[dict[str, Any]], label: str) -> list[str]:
     for i, h in enumerate(items, 1):
         sig = ", ".join(f"{_code(sid)}×{n}" for sid, n in top_signals(h, 3))
         lines.append(
-            f"| {i} | {_cell(_code(h.get('path', '')))} | {float(h.get('score', 0)):.1f}"
+            f"| {i} | {_cell(_code(h.get('path', '')))}{gone_note(h)}"
+            f" | {float(h.get('score', 0)):.1f}"
             f" | {h.get('sessions', 0)} | {h.get('events', 0)}"
             f" | {fmt_lost(float(h.get('est_minutes_lost', 0)))} | {_cell(sig)}"
             f" | {h.get('confidence', 'low')} |"

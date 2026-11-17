@@ -3,7 +3,16 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
+
+
+def gone_note(h: dict[str, Any]) -> str:
+    """ " (renamed)" / " (not in tree)" for a file hotspot that is no longer in the tree."""
+    f = h.get("file")
+    if h.get("kind") != "file" or not isinstance(f, dict) or f.get("exists") is not False:
+        return ""
+    return " (renamed)" if f.get("renamed_to") else " (not in tree)"
 
 
 def repo_recommendations(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -125,7 +134,29 @@ def find_target(result: dict[str, Any], target: str) -> dict[str, Any] | None:
     for h in pool:
         if h.get("kind") == "command" and h.get("path") in keys:
             return h
-    return None
+    # "npm test" for a command only run in a directory, keyed "npm test (packages/web/)".
+    qualified = command_candidates(result, target)
+    return qualified[0] if len(qualified) == 1 else None
+
+
+_DIR_SUFFIX = re.compile(r" \([^()]*/\)$")
+
+
+def command_candidates(result: dict[str, Any], target: str) -> list[dict[str, Any]]:
+    """Command rows whose key, without its ``(dir/)`` suffix, is the command typed."""
+    from agent_friction.attribution import normalize_command, public_key
+
+    raw = target.strip()
+    keys = {k for line in {raw, raw.lower()} if line for k in (normalize_command(line),) if k}
+    keys |= {public_key(k) for k in keys}
+    keys |= {raw}
+    return [
+        h
+        for h in all_items(result)
+        if h.get("kind") == "command"
+        and _DIR_SUFFIX.search(str(h.get("path", "")))
+        and _DIR_SUFFIX.sub("", str(h.get("path", ""))) in keys
+    ]
 
 
 def find_dir(result: dict[str, Any], target: str) -> dict[str, Any] | None:

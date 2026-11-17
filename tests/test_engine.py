@@ -125,7 +125,13 @@ def test_story_generated_schema_is_the_top_file(result: dict[str, Any]) -> None:
     top = result["hotspots"][0]
     assert top["path"] == SCHEMA and top["confidence"] == "high" and top["sessions"] == 4
     assert top["signals"]["edit-miss"] == 6 and top["signals"]["user-correction"] == 2
-    assert top["file"] == {"exists": True, "lines": 1031, "generated": True}
+    assert top["file"] == {
+        "exists": True,
+        "lines": 1031,
+        "generated": True,
+        "removed_at": None,
+        "renamed_to": None,
+    }
     recs = {r["id"]: r["detail"] for r in top["recommendations"]}
     assert list(recs)[:2] == ["edit-the-source-not-the-output", "split-or-anchor-large-file"]
     assert "stop hand-editing src/shopfront/api/schema_gen.py" in recs["write-down-the-rule"]
@@ -2836,7 +2842,7 @@ def test_with_nothing_else_edited_the_advice_does_not_speak_of_the_rest(tmp_path
     (row,) = scan(tmp_path, sessions)["hotspots"]
     (rec,) = row["recommendations"]
     assert rec["id"] == "make-edits-land" and "rest of this repository" not in rec["detail"]
-    assert "edited too little else in this repository" in rec["detail"]
+    assert "Too little else was edited here to compare against" in rec["detail"]
 
 
 def _failing_tools(count: int, tool: str = "mcp__postgres__query") -> list[Session]:
@@ -3050,3 +3056,225 @@ def test_a_workspace_selector_puts_the_command_in_its_directory(tmp_path: Path) 
     assert rows["npm test (web/)"] == 4
     assert rows["pnpm test"] == 4  # the scoped name says nothing about a directory
     assert not [key for key in rows if "pip3" in key or "workspace" in key or "filter" in key]
+
+
+# ---- round 30 ------------------------------------------------------------------------------
+
+
+def _package_sessions(tmp_path: Path, repo: Path, cwd: Path | None = None) -> list[Session]:
+    sessions = []
+    for i in range(3):
+        s = Session(f"s{i}", cwd=str(cwd or repo)).user("go")
+        where = "" if cwd else "cd packages/web && "
+        s.bash(f"{where}npm test", 'npm error Missing script: "test"', exit_code=1)
+        s.bash(f"{where}pnpm test", "3 passed")
+        sessions.append(s)
+    return sessions
+
+
+def test_a_command_documented_for_its_directory_counts_as_documented(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "packages" / "web").mkdir(parents=True)
+    sessions = _package_sessions(tmp_path, repo)
+    (row,) = scan(tmp_path, sessions, repo)["commands"]
+    (rec,) = row["recommendations"]
+    assert row["path"] == "npm test (packages/web/)" and rec["id"] == "use-the-working-command"
+    # the title names the command as it is typed; the directory is said in the text
+    assert rec["title"] == "Tell agents to use `pnpm test`" and rec["documented_in"] == []
+    assert "`npm test` in `packages/web/` failed 3 times in 3 sessions" in rec["detail"]
+    assert "got the same job done with `pnpm test` in `packages/web/`" in rec["detail"]
+    assert 'such as: "in `packages/web/`, use `pnpm test`, not `npm test`".' in rec["detail"]
+    assert rec["replacement"] == "pnpm test (packages/web/)"  # the key, as in `exposure`
+    # the tool's own suggested line, written down: that is an instruction, not a mention
+    (repo / "AGENTS.md").write_text(
+        "# Agents\n\nIn `packages/web/`, use `pnpm test`, not `npm test`.\n"
+    )
+    (row,) = scan(tmp_path / "again", sessions, repo)["commands"]
+    (rec,) = row["recommendations"]
+    assert rec["documented_as"] == "instruction"
+    assert rec["documented_in"] == [{"file": "AGENTS.md", "line": 3}]
+    assert rec["title"] == "`pnpm test` is documented, yet agents run `npm test`"
+    assert rec["detail"].startswith(
+        "`AGENTS.md:3` already names `pnpm test`; agents still ran `npm test` in `packages/web/`"
+    )
+    assert "(packages/web/)" not in rec["title"] + rec["detail"]
+    # a line that rules the working command out documents nothing
+    (repo / "AGENTS.md").write_text("# Agents\n\nNever use `pnpm test` here.\n")
+    (row,) = scan(tmp_path / "ruled-out", sessions, repo)["commands"]
+    assert row["recommendations"][0].get("documented_as") != "instruction"
+
+
+def test_a_package_scan_reads_the_instruction_files_above_it(tmp_path: Path) -> None:
+    repo = tmp_path / "mono"
+    web = repo / "packages" / "web"
+    web.mkdir(parents=True)
+    (repo / ".git").mkdir()  # the repository root: nothing above it is read
+    (tmp_path / "AGENTS.md").write_text("Use `pnpm test`.\n")
+    (repo / "AGENTS.md").write_text("# Agents\n\nIn `packages/web/`, use `pnpm test`.\n")
+    sessions = _package_sessions(tmp_path, web, cwd=web)
+    (row,) = scan(tmp_path, sessions, web)["commands"]
+    (rec,) = row["recommendations"]
+    assert row["path"] == "npm test" and rec["documented_as"] == "instruction"
+    assert rec["documented_in"] == [{"file": "../../AGENTS.md", "line": 3}]
+    assert rec["detail"].startswith("`../../AGENTS.md:3` already names `pnpm test`")
+    # the package's own file comes first, the one in between is read too
+    (web / "AGENTS.md").write_text("Run `pnpm test`.\n")
+    (repo / "packages" / "CLAUDE.md").write_text("x\n\nuse `pnpm test`\n")
+    (row,) = scan(tmp_path / "own", sessions, web)["commands"]
+    assert [m["file"] for m in row["recommendations"][0]["documented_in"]] == [
+        "AGENTS.md",
+        "../CLAUDE.md",
+        "../../AGENTS.md",
+    ]
+    # with an alias the sessions were recorded elsewhere: what lies above this copy is
+    # not what those agents loaded
+    (web / "AGENTS.md").unlink()
+    aliased = scan(tmp_path / "alias", sessions, web, repo_aliases=["/work/mono/packages/web"])
+    assert aliased["commands"][0]["recommendations"][0]["documented_in"] == []
+
+
+def test_guidance_reads_nothing_above_a_root_or_outside_a_repository(tmp_path: Path) -> None:
+    from agent_friction.guidance import Guidance
+
+    (tmp_path / "AGENTS.md").write_text("Use `pnpm test`.\n")
+    plain = tmp_path / "plain" / "pkg"
+    plain.mkdir(parents=True)  # no .git anywhere above: not inside a repository
+    assert Guidance(plain).mentions(["pnpm test"]) == []
+    root = tmp_path / "root"
+    (root / ".git").mkdir(parents=True)  # the scanned directory is the root itself
+    assert Guidance(root).mentions(["pnpm test"]) == []
+    inside = root / "pkg"
+    inside.mkdir()
+    (root / "AGENTS.md").write_text("Use `pnpm test`.\n")
+    assert [str(m) for m in Guidance(inside).mentions(["pnpm test"])] == ["../AGENTS.md:1"]
+    assert Guidance(inside, parents=False).mentions(["pnpm test"]) == []
+
+
+def _renamed(tmp_path: Path) -> tuple[Path, list[Session]]:
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "api.ts").write_text("export const a = 1;\n" * 40)
+    (repo / "src" / "old.ts").write_text("x\n")
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_AUTHOR_DATE": "2026-11-03T12:00:00+00:00",
+        "GIT_COMMITTER_DATE": "2026-11-03T12:00:00+00:00",
+    }
+    identity = ["-c", "user.name=Dev", "-c", "user.email=dev@example.test"]
+    for args in (
+        ["init", "-q", "-b", "main"],
+        ["add", "."],
+        [*identity, "commit", "-q", "-m", "init"],
+        ["mv", "src/api.ts", "src/client.ts"],
+        ["rm", "-q", "src/old.ts"],
+        [*identity, "commit", "-q", "-m", "rename the client"],
+    ):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, env=env)
+    sessions = []
+    for i in range(3):
+        s = Session(f"s{i}", cwd=str(repo)).user("go")
+        for name in ("api.ts", "old.ts", "never.ts"):
+            s.edit(f"{repo}/src/{name}", error=builders.EDIT_NOT_FOUND)
+            s.edit(f"{repo}/src/{name}", error=builders.EDIT_NOT_FOUND)
+        sessions.append(s)
+    return repo, sessions
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_a_renamed_or_deleted_file_is_said_to_be_gone(tmp_path: Path) -> None:
+    repo, sessions = _renamed(tmp_path)
+    rows = {h["path"]: h for h in scan(tmp_path, sessions, repo, include_git=True)["hotspots"]}
+    api, old, never = rows["src/api.ts"], rows["src/old.ts"], rows["src/never.ts"]
+    assert api["file"] == {
+        "exists": False,
+        "lines": None,
+        "generated": False,
+        "removed_at": "2026-11-03T12:00:00+00:00",
+        "renamed_to": "src/client.ts",
+    }
+    (rec,) = api["recommendations"]
+    assert rec["id"] == "file-is-gone"
+    assert rec["title"] == "This file was renamed to `src/client.ts`"
+    assert "renamed to `src/client.ts` on 2026-11-03" in rec["detail"]
+    assert "scan with `--since 2026-11-03` to leave this history out." in rec["detail"]
+    assert "CRLF" not in rec["detail"] and rec["signals"] == ["edit-miss"]
+    assert (old["file"]["removed_at"], old["file"]["renamed_to"]) == (
+        "2026-11-03T12:00:00+00:00",
+        None,
+    )
+    (rec,) = old["recommendations"]
+    assert rec["title"] == "This file is no longer in the tree"
+    assert "It was removed on 2026-11-03" in rec["detail"]
+    # a path git never knew is not "gone": it keeps the advice the events call for
+    assert (never["file"]["removed_at"], never["file"]["renamed_to"]) == (None, None)
+    assert [r["id"] for r in never["recommendations"]] == ["make-edits-land"]
+    # without git nothing is known, and nothing is claimed
+    plain = scan(tmp_path / "plain", sessions, repo, include_git=False)["hotspots"]
+    for row in plain:
+        assert row["file"]["removed_at"] is None and row["file"]["renamed_to"] is None
+        assert [r["id"] for r in row["recommendations"]] == ["make-edits-land"]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_what_a_human_said_about_a_file_that_is_gone_is_still_passed_on(tmp_path: Path) -> None:
+    repo, _ = _renamed(tmp_path)
+    (repo / "src" / "api.ts").write_text("x\n")  # there while the sessions ran
+    sessions = []
+    for i in range(2):
+        s = Session(f"s{i}", cwd=str(repo)).user("go").edit(f"{repo}/src/api.ts", "a", "b")
+        s.user("No, never touch the retry logic in src/api.ts")
+        s.edit(f"{repo}/src/api.ts", "b", "c")
+        sessions.append(s)
+    files = [s.save(tmp_path / "t" / s.session_id) for s in sessions]
+    (repo / "src" / "api.ts").unlink()
+    out = analyze(AnalyzeOptions(repo=repo, transcripts=files, include_git=True))
+    api = entry(out["hotspots"], "src/api.ts")
+    assert [r["id"] for r in api["recommendations"]] == ["file-is-gone", "write-down-the-rule"]
+    assert (
+        "read the advice below as being about the work, not the file"
+        in (api["recommendations"][0]["detail"])
+    )
+
+
+def test_a_rejected_push_that_a_pull_put_right_is_a_habit_only_when_it_recurs(
+    tmp_path: Path,
+) -> None:
+    rejected = (
+        " ! [rejected]        main -> main (non-fast-forward)\n"
+        "error: failed to push some refs to 'github.com:acme/shop.git'"
+    )
+
+    def build(s: Session) -> None:
+        s.bash("git push", rejected, exit_code=1)
+        s.bash("git pull --rebase && git push", "To github.com:acme/shop.git")
+
+    sessions = [Session(f"s{i}").user("go") for i in range(4)]
+    for s in sessions:
+        build(s)
+    out = scan(tmp_path, sessions)
+    (row,) = out["commands"]
+    assert row["path"] == "git push" and row["events"] == 4
+    assert [r["id"] for r in row["recommendations"]] == ["pull-before-pushing"]
+    assert "rejected 4 times in 4 sessions" in row["recommendations"][0]["detail"]
+    assert out["totals"]["dropped_red_runs"] == 0
+    # once or twice, and put right at once: the loop working, not reported
+    out = scan(tmp_path / "twice", sessions[:2])
+    assert out["commands"] == [] and out["totals"]["dropped_red_runs"] == 2
+
+
+def test_a_hidden_command_name_is_not_offered_for_documentation(tmp_path: Path) -> None:
+    sessions = []
+    for i in range(2):
+        s = Session(f"s{i}").user("go")
+        s.bash("acmectl sync", "acmectl: error: unrecognized arguments: sync", exit_code=2)
+        s.bash("acmectl sync", "acmectl: error: unrecognized arguments: sync", exit_code=2)
+        sessions.append(s)
+    (row,) = scan(tmp_path, sessions)["commands"]
+    assert [r["title"] for r in row["recommendations"]] == ["Document how to run `acmectl`"]
+    (row,) = scan(tmp_path / "bare", sessions, include_excerpts=False)["commands"]
+    assert row["path"] == public_key("acmectl") and "acmectl" not in json.dumps(row)
+    assert [r["title"] for r in row["recommendations"]] == [
+        "Document how to run this command (its name is hidden without excerpts)"
+    ]

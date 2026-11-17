@@ -639,3 +639,23 @@ def test_compare_rejects_deeply_nested_json_cleanly(tmp_path: Path) -> None:
     # Python 3.14's decoder parses it (then it is not a result); older ones hit the depth limit.
     assert code == 1 and err.startswith("agent-friction: ")
     assert "nested too deeply" in err or "not an agent-friction result" in err
+
+
+def test_show_lists_directories_when_a_command_ran_in_several(tmp_path: Path) -> None:
+    before = tmp_path / "scan.json"
+    run("scan", *INPUT, "-o", str(before))
+    data = json.loads(before.read_text(encoding="utf-8"))
+    base = dict(data["commands"][0])
+    data["commands"] = [
+        {**base, "path": "npm test (packages/web/)"},
+        {**base, "path": "npm test (packages/api/)"},
+    ]
+    scan = tmp_path / "two.json"
+    scan.write_text(json.dumps(data), encoding="utf-8")
+    code, _, err = run("show", "npm test", "--from", str(scan))
+    assert code == EXIT_USAGE
+    assert "ran in several directories" in err and "'npm test (packages/api/)'" in err
+    data["commands"] = data["commands"][:1]
+    scan.write_text(json.dumps(data), encoding="utf-8")
+    code, out, _ = run("show", "npm test", "--from", str(scan))
+    assert code == EXIT_OK and "packages/web/" in out

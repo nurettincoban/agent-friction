@@ -202,7 +202,8 @@ CATALOG: tuple[SignalDef, ...] = (
         "Edit, run, red, again and again without ever going green: the agent could not "
         "work out what the check wants.",
         "The normalized command, and the files edited between the runs (the "
-        f"{NO_CONVERGENCE_MAX_FILES} most edited, split evenly).",
+        f"{NO_CONVERGENCE_MAX_FILES} most edited, in proportion to their edits; only those the "
+        "failing output names, if it names any).",
         3.0,
     ),
     SignalDef(
@@ -2006,7 +2007,9 @@ class _Cycle:
     judged: bool = False  # a red run of it was read from output, not from an exit status
     unknown: bool = False  # its latest run showed neither red nor green
     spans: list[tuple[float, float]] = field(default_factory=list)  # red runs, edits between
-    files: dict[str, int] = field(default_factory=dict)
+    files: dict[str, int] = field(default_factory=dict)  # edits between its red runs
+    before: dict[str, int] = field(default_factory=dict)  # edits before its first red run
+    named: set[str] = field(default_factory=set)  # of those, files its red output names
 
 
 #: What makes a run of edits to one file "thrash" rather than a productive sitting.
@@ -2356,10 +2359,17 @@ class _Detector:
 
     def _no_convergence(self, key: str, cycle: _Cycle) -> None:
         assert cycle.result is not None
-        ranked = sorted(cycle.files.items(), key=lambda kv: (-kv[1], kv[0]))
-        files = [path for path, _ in ranked[:NO_CONVERGENCE_MAX_FILES]]
+        # The files edited between the red runs; if there were none (one edit, then only
+        # re-runs), the ones edited before the first. Where the failing output names
+        # some of them, the others were bystanders. Shares follow the number of edits.
+        edited = cycle.files or cycle.before
+        blamed = {path: n for path, n in edited.items() if path in cycle.named} or edited
+        ranked = sorted(blamed.items(), key=lambda kv: (-kv[1], kv[0]))
+        ranked = ranked[:NO_CONVERGENCE_MAX_FILES]
+        files = [path for path, _ in ranked]
+        total = sum(n for _, n in ranked)
         targets = [Target(model.COMMAND, cycle.label)]
-        targets += [Target(model.FILE, path, 1.0 / len(files)) for path in files]
+        targets += [Target(model.FILE, path, n / total) for path, n in ranked]
         # Its last run showed neither red nor green (`pytest | tail -1` cut the verdict
         # off): it may well have gone green out of sight. Kept as a weak lead that claims no time.
         uncertain = cycle.unknown
@@ -3344,7 +3354,11 @@ class _Detector:
             "command": call.command or "",
         }
         absent = missing_target(result.output) if invocation else None
-        if absent is not None:
+        # ... if the name it prints is the one that was asked for: `make test` answering
+        # "No rule to make target 'tst'" is a broken Makefile, not a missing `test`.
+        if absent is not None and re.search(
+            rf"(?<![\w-]){re.escape(absent[1])}(?![\w-])", call.command or ""
+        ):
             detail["no_target_in"], detail["no_target"] = absent
         if (
             not invocation
@@ -3502,6 +3516,11 @@ class _Detector:
         fixed: set[int] = set()
         for failed_key in [k for k in state.red_then_edited if closes(k)]:
             for finding in state.red_then_edited.pop(failed_key):
+                if "push_rejected" in finding.detail:
+                    # Rejected, pulled, pushed: no file was fixed, the branch was behind.
+                    # Once is routine; whether it is a habit, the engine can tell.
+                    finding.detail["push_recovered"] = "1"
+                    continue
                 # A module of the repo that could not be imported, an edit, and then
                 # *another* command for the job passes: the edit proves nothing about the
                 # import, and the command that failed has still not been seen to work.
@@ -3511,6 +3530,10 @@ class _Detector:
         # environment, and the command that put it right is worth writing down.
         for failed_key in [k for k in state.red_then_ran if closes(k)]:
             for finding in state.red_then_ran.pop(failed_key):
+                if "push_rejected" in finding.detail:
+                    finding.detail["push_recovered"] = "1"
+                    state.ran_after.pop(id(finding), None)
+                    continue
                 ran = state.ran_after.pop(id(finding), [])
                 setups = list(dict.fromkeys(label for label, setup in ran if setup))
                 others = [label for label, setup in ran if not setup]
@@ -3598,13 +3621,17 @@ class _Detector:
                 if number <= cycle.seen:
                     break
                 if path:
-                    cycle.files[path] = cycle.files.get(path, 0) + 1
+                    # What was edited before the command first went red is not part of
+                    # the stall: only the edits that tried to get it green again are.
+                    edited = cycle.before if fresh else cycle.files
+                    edited[path] = edited.get(path, 0) + 1
                 if span is not None and not fresh:
                     cycle.spans.append(span)  # an edit between two red runs
         cycle.seen = state.changes
         run = _capped(self._started(action), _epoch(action.result))
         if run is not None:
             cycle.spans.append(run)
+        cycle.named.update(path for path in (*cycle.files, *cycle.before) if path in result.output)
         cycle.judged = cycle.judged or hidden
         cycle.unknown = False
         cycle.result = result

@@ -52,7 +52,13 @@ def test_file_facts(tmp_path: Path) -> None:
     for lock in ("package-lock.json", "sub/yarn.lock", "poetry.lock", "go.sum"):
         assert file_facts(tmp_path, lock).generated
     assert not file_facts(tmp_path, "src/locksmith.py").generated
-    assert generated.as_dict() == {"exists": True, "lines": 10, "generated": True}
+    assert generated.as_dict() == {
+        "exists": True,
+        "lines": 10,
+        "generated": True,
+        "removed_at": None,
+        "renamed_to": None,
+    }
 
 
 def test_generated_file_rule_wins_over_generic_edit_advice() -> None:
@@ -870,8 +876,8 @@ def test_edit_miss_advice_does_not_compare_with_a_rest_that_is_not_there() -> No
     (alone,) = recommend.recommend(model.FILE, "a.py", misses(no_comparison="1"))
     text = str(alone["detail"])
     assert alone["id"] == "make-edits-land" and "rest of this repository" not in text
-    assert "edited too little else in this repository to say how unusual that is" in text
-    assert "well above 5% of the sessions that touched the file" in text
+    assert "Too little else was edited here to compare against; it is reported because" in text
+    assert "it is well above the 5% taken as ordinary." in text
     assert "Nothing in the transcripts shows the file being rewritten" in text
 
 

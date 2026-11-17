@@ -466,7 +466,9 @@
       "file": {
         "exists": true,
         "generated": true,
-        "lines": 1031
+        "lines": 1031,
+        "removed_at": null,
+        "renamed_to": null
       },
       "friction_rate": 1.0,
       "kind": "file",
@@ -610,7 +612,9 @@
       "file": {
         "exists": true,
         "generated": false,
-        "lines": 13
+        "lines": 13,
+        "removed_at": null,
+        "renamed_to": null
       },
       "friction_rate": 1.0,
       "kind": "file",
@@ -687,7 +691,9 @@
       "file": {
         "exists": false,
         "generated": false,
-        "lines": null
+        "lines": null,
+        "removed_at": null,
+        "renamed_to": null
       },
       "friction_rate": 1.0,
       "kind": "file",
@@ -739,7 +745,9 @@
       "file": {
         "exists": true,
         "generated": false,
-        "lines": 18
+        "lines": 18,
+        "removed_at": null,
+        "renamed_to": null
       },
       "friction_rate": 0.5,
       "kind": "file",
@@ -791,7 +799,9 @@
       "file": {
         "exists": false,
         "generated": false,
-        "lines": null
+        "lines": null,
+        "removed_at": null,
+        "renamed_to": null
       },
       "friction_rate": 1.0,
       "kind": "file",
@@ -852,7 +862,7 @@
       "why": "The failure output did not tell the agent what to do, so it kept guessing."
     },
     {
-      "attribution": "The normalized command, and the files edited between the runs (the 3 most edited, split evenly).",
+      "attribution": "The normalized command, and the files edited between the runs (the 3 most edited, in proportion to their edits; only those the failing output names, if it names any).",
       "count": 0,
       "description": "Within one turn the agent ran the same command 4 or more times, each run after a file change since the previous one, every run failed as an ordinary failure, and the turn ended with the command still failing.",
       "id": "no-convergence",

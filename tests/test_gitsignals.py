@@ -517,3 +517,31 @@ def test_after_a_formatter_commit_line_overlap_no_longer_counts(repo: Repo) -> N
         ("b.py", "overlap"),
         ("a.py", "subject"),
     ]
+
+
+# ---- round 30: files that left the tree -----------------------------------------------------
+
+
+def test_removal_says_when_a_file_left_the_tree_and_what_it_became(repo: Repo) -> None:
+    body = "".join(f"export const v{i} = {i};\n" for i in range(30))
+    repo.commit(1, "add", {"src/api.ts": body, "src/old.ts": "x\n", "src/keep.ts": "y\n"})
+    repo.git("mv", "src/api.ts", "src/client.ts")
+    repo.git("rm", "-q", "src/old.ts")
+    repo.git("commit", "-q", "-m", "rename the client", date="2026-10-05T12:00:00+00:00")
+    assert gitsignals.removal(repo.path, "src/api.ts") == (
+        "2026-10-05T12:00:00+00:00",
+        "src/client.ts",
+    )
+    assert gitsignals.removal(repo.path, "src/old.ts") == ("2026-10-05T12:00:00+00:00", None)
+    # a file that is there, one git never knew, one only missing from the working tree
+    assert gitsignals.removal(repo.path, "src/keep.ts") == (None, None)
+    assert gitsignals.removal(repo.path, "src/never.ts") == (None, None)
+    (repo.path / "src" / "keep.ts").unlink()
+    assert gitsignals.removal(repo.path, "src/keep.ts") == (None, None)
+    # relative to a scanned subdirectory
+    assert gitsignals.removal(repo.path / "src", "api.ts")[1] == "client.ts"
+
+
+def test_removal_without_git_knows_nothing(tmp_path: Path) -> None:
+    assert gitsignals.removal(tmp_path, "a.py") == (None, None)
+    assert gitsignals.removal(tmp_path / "missing", "a.py") == (None, None)

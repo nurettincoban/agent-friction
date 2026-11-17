@@ -26,7 +26,13 @@ from agent_friction.report import (
     render_markdown,
     render_terminal,
 )
-from agent_friction.report._common import all_items, find_dir, find_target, plural
+from agent_friction.report._common import (
+    all_items,
+    command_candidates,
+    find_dir,
+    find_target,
+    plural,
+)
 from agent_friction.report.terminal import render_detail, render_dir_detail
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_GATE = 0, 1, 2, 3
@@ -654,6 +660,13 @@ def _cmd_show(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     item = find_target(result, target)
     node = find_dir(result, target)
     if item is None and node is None:
+        several = command_candidates(result, target)
+        if several:
+            listed = ", ".join(repr(str(h.get("path"))) for h in several[:8])
+            stderr.write(
+                f"agent-friction: {args.target!r} ran in several directories; name one: {listed}\n"
+            )
+            return EXIT_USAGE
         stderr.write(
             f"agent-friction: no friction recorded for {args.target!r}. "
             "Run `agent-friction scan` to list hotspots.\n"

@@ -301,3 +301,32 @@ def test_not_counted_note_reports_untimed_sessions() -> None:
     assert note == (
         "Not counted: 2 sessions with no timestamps, which cannot be placed in this time window."
     )
+
+
+def test_find_target_matches_a_command_run_in_one_directory() -> None:
+    from agent_friction.report._common import command_candidates, find_target
+
+    row = {"kind": "command", "path": "npm test (packages/web/)", "score": 60.9}
+    other = {"kind": "command", "path": "npm test (packages/api/)", "score": 20.0}
+    one = {"hotspots": [], "commands": [row], "directories": []}
+    assert find_target(one, "npm test") is row
+    both = {"hotspots": [], "commands": [row, other], "directories": []}
+    assert find_target(both, "npm test") is None
+    assert command_candidates(both, "npm test") == [row, other]
+    assert find_target(both, "npm test (packages/api/)") is other
+    assert command_candidates(both, "pytest") == []
+
+
+def test_files_no_longer_in_the_tree_are_marked() -> None:
+    from agent_friction.report._common import gone_note
+
+    result = sample_result()
+    h = result["hotspots"][0]
+    assert gone_note(h) == ""
+    h["file"] = {**h.get("file", {}), "exists": False, "renamed_to": "src/new.py"}
+    assert gone_note(h) == " (renamed)"
+    assert " (renamed)" in render_markdown(result)
+    assert " (renamed)" in render_detail(result, h)
+    h["file"]["renamed_to"] = None
+    assert gone_note(h) == " (not in tree)"
+    assert gone_note({"kind": "command", "path": "pytest"}) == ""

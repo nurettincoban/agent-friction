@@ -453,7 +453,12 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
             len(pushes.get(key, ())) >= RECURRING_RED_MIN_SESSIONS for key in _command_keys(finding)
         ):
             finding.detail["push_rejected"] = "recurring"
-    dropped: list[Finding] = []
+    # ... and one that was put right by pulling, and is no habit, was the loop working.
+    dropped: list[Finding] = [
+        f
+        for f in turned_down
+        if f.detail.get("push_rejected") != "recurring" and "push_recovered" in f.detail
+    ]
     for finding in pending:
         fix = finding.detail.pop("fixed_by_command")
         recurs = any(
@@ -776,7 +781,9 @@ class _Analysis:
         self.touched: set[str] = set()
         self._is_file_cache: dict[str, bool | None] = {}
         self._facts: dict[str, recommend.FileFacts] = {}
-        self.guidance = Guidance(self.repo)
+        # With an alias the sessions were recorded where this copy does not live: what
+        # lies above the copy is not what those agents loaded.
+        self.guidance = Guidance(self.repo, parents=not options.repo_aliases)
         self.repo_advice: list[dict[str, object]] = []
         self.outside: dict[Path, set[str]] = {}
         self.skipped_events: dict[str, int] = {}
@@ -1629,6 +1636,11 @@ class _Analysis:
         kind, key = entry["kind"], entry["path"]
         found = [f for f, _ in items]
         facts = self.facts(key) if kind == model.FILE else None
+        if facts is not None and not facts.exists and options.include_git:
+            # Gone from the tree: ask git when, and whether it lives on under another name.
+            removed_at, renamed_to = gitsignals.removal(self.repo, key)
+            facts = dataclasses.replace(facts, removed_at=removed_at, renamed_to=renamed_to)
+            self._facts[key] = facts
         quote = self.quote if options.include_excerpts else None
         shares = {f.fid: share for f, share in items}
         entry["recommendations"] = recommend.recommend(

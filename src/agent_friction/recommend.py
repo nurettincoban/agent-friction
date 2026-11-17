@@ -111,6 +111,7 @@ RULE_IDS: tuple[str, ...] = (
     "say-if-it-is-known-broken",
     "fix-the-flaky-test",
     "pull-before-pushing",
+    "file-is-gone",
     "note-the-background-rate",
 )
 #: Events, files and sessions a mechanical signal needs before its repository-wide rate
@@ -132,9 +133,19 @@ class FileFacts:
     generated_reason: str = ""
     #: What says so: a header in the file, its name, or its (untracked) directory.
     generated_by: str = ""
+    #: From git, for a file that is gone: the date (ISO 8601) of the commit that removed
+    #: or renamed it, and what it was renamed to (repo-relative), if it was renamed.
+    removed_at: str | None = None
+    renamed_to: str | None = None
 
     def as_dict(self) -> dict[str, object]:
-        return {"exists": self.exists, "lines": self.lines, "generated": self.generated}
+        return {
+            "exists": self.exists,
+            "lines": self.lines,
+            "generated": self.generated,
+            "removed_at": self.removed_at,
+            "renamed_to": self.renamed_to,
+        }
 
 
 def in_output_directory(rel: str) -> bool:
@@ -180,6 +191,12 @@ def _located(key: str) -> str:
     if match is None:
         return code(key)
     return f"{code(match.group(1))} in {code(match.group(2))}"
+
+
+def _bare(key: str) -> str:
+    """A display key without its directory: ``pnpm test`` for ``pnpm test (web/)``."""
+    match = _IN_DIRECTORY_RE.match(key)
+    return match.group(1) if match else key
 
 
 def _place(key: str) -> str:
@@ -263,6 +280,21 @@ DOCUMENTABLE: frozenset[str] = frozenset(
         "explain-the-failing-check",
         "say-if-it-is-known-broken",
         "fix-the-flaky-test",
+    }
+)
+
+#: Advice about what a file is like. For a file that is gone it is replaced (`gone`).
+FILE_SHAPE_RULES = frozenset(
+    {
+        "edit-the-source-not-the-output",
+        "split-or-anchor-large-file",
+        "make-edits-land",
+        "document-what-rewrites-this-file",
+        "path-agents-expect",
+        "add-a-fast-check",
+        "state-the-constraint",
+        "add-a-pointer",
+        "summarize-this-file",
     }
 )
 
@@ -613,10 +645,9 @@ class _Rules:
             else:
                 # "More than the rest of the repository" needs a rest to compare with.
                 compared = (
-                    ". These sessions edited too little else in this repository to say how "
-                    "unusual that is; it is reported because it is well above "
-                    f"{scoring.BASELINE_FLOOR:.0%} of the sessions that touched the file, "
-                    "the rate taken as ordinary. "
+                    ". Too little else was edited here to compare against; it is reported "
+                    f"because it is well above the {scoring.BASELINE_FLOOR:.0%} taken as "
+                    "ordinary. "
                     if any(f.detail.get(scoring.NO_COMPARISON) for f in misses)
                     else ", clearly more often than in the rest of this repository. "
                 )
@@ -801,6 +832,41 @@ class _Rules:
         )
         return True
 
+    def gone(self, facts: FileFacts) -> None:
+        """The file left the tree: advice about its shape is advice about nothing."""
+        kept = [r for r in self.out if r["id"] not in FILE_SHAPE_RULES]
+        day = (facts.removed_at or "")[:10]
+        if facts.renamed_to:
+            title = f"This file was renamed to {code(facts.renamed_to)}"
+            what = f"It was renamed to {code(facts.renamed_to)} on {day}"
+            then = (
+                " Events after the rename are listed under the new name; what is here "
+                "happened before it."
+            )
+        else:
+            title = "This file is no longer in the tree"
+            what = f"It was removed on {day}"
+            then = " What is listed here happened before that."
+        self.out = [
+            {
+                "id": "file-is-gone",
+                "title": title,
+                "detail": (
+                    f"{what} (the date of the commit).{then} Nothing about the file itself "
+                    f"can be fixed any more: scan with `--since {day}` to leave this history "
+                    "out"
+                    + (
+                        "."
+                        if not kept
+                        else ", and read the advice below as being about the work, not the file."
+                    )
+                ),
+                "signals": sorted(self.by_signal),
+                "documented_in": [],
+            },
+            *kept,
+        ]
+
     def environment(self, key: str, failures: list[Finding]) -> None:
         """The command is fine; what it needs around it was not there."""
         kind = _top([f.detail.get("environment", "") for f in failures], 1)[0][0]
@@ -858,15 +924,18 @@ class _Rules:
         self.add("document-the-environment", title, detail, [signals.COMMAND_FAILURE])
 
     def _use_instead(self, better: str, worse: str, failures: Sequence[Finding]) -> Already:
+        # A display key (`pnpm test (packages/web/)`) is nothing a file would say: the
+        # command is looked for as it is typed, and the directory is said in words.
         return (
-            [better],
-            f"{code(better)} is documented, yet agents run {code(worse)}",
-            f"names {code(better)}; agents still ran {code(worse)} and failed "
+            [_bare(better)],
+            f"{code(_bare(better))} is documented, yet agents run {code(_bare(worse))}",
+            f"names {code(_bare(better))}; agents still ran {_located(worse)} and failed "
             f"{_in_sessions(failures)}. Check that the cited line tells agents to use "
-            f"{code(better)} here. If it does, another line will not help; the next step is "
+            f"{code(_bare(better))} here. If it does, another line will not help; the next step is "
             "to enforce it: a hook or "
-            f"permission rule that blocks {code(worse)}, or a wrapper that makes "
-            f"{code(worse)} do what {code(better)} does. (If that line is newer than these "
+            f"permission rule that blocks {code(_bare(worse))}, or a wrapper that makes "
+            f"{code(_bare(worse))} do what {code(_bare(better))} does. (If that line is newer "
+            "than these "
             "sessions, give it time first.)",
         )
 
@@ -929,10 +998,10 @@ class _Rules:
             form, count = forms[0]
             self.add(
                 "use-the-working-command",
-                f"Tell agents to use {code(form)}",
-                f"{code(key)} failed {_in_sessions(invocation)} with setup or invocation "
-                f"errors; {_times(count)} the same command then ran as {code(form)}, with no "
-                "file edited in between. Add a line to AGENTS.md such as: "
+                f"Tell agents to use {code(_bare(form))}",
+                f"{_located(key)} failed {_in_sessions(invocation)} with setup or invocation "
+                f"errors; {_times(count)} the same command then ran as {code(_bare(form))}, "
+                "with no file edited in between. Add a line to AGENTS.md such as: "
                 f'"{_agents_line(_place(key), "use " + _typed(form, _place(key)))}", '
                 + (
                     "or add the option where the command is defined."
@@ -960,9 +1029,10 @@ class _Rules:
             fix, count = fixes[0]
             self.add(
                 "use-the-working-command",
-                f"Tell agents to use {code(fix)}",
-                f"{code(key)} failed {_in_sessions(failures)}; {_times(count)} the agent then "
-                f"got the same job done with {code(fix)}, and {code(key)} did not work later in "
+                f"Tell agents to use {code(_bare(fix))}",
+                f"{_located(key)} failed {_in_sessions(failures)}; {_times(count)} the agent then "
+                f"got the same job done with {_located(fix)}, and {code(_bare(key))} did not "
+                "work later in "
                 f"those sessions. Add a line to AGENTS.md such as: "
                 + '"'
                 + _agents_line(
@@ -1029,7 +1099,10 @@ class _Rules:
             )
             self.add(
                 "document-the-command",
-                f"Document how to run {_located(key)}",
+                # a placeholder is nothing anyone could document: say that it is one
+                "Document how to run this command (its name is hidden without excerpts)"
+                if "<" in _bare(key)
+                else f"Document how to run {_located(key)}",
                 detail,
                 [signals.COMMAND_FAILURE],
             )
@@ -1306,6 +1379,8 @@ def recommend(
     rules = _Rules(findings, quote, shares or {}, guidance, subjects, near, name, known_targets)
     if kind == model.FILE:
         rules.file(facts)
+        if facts is not None and not facts.exists and facts.removed_at:
+            rules.gone(facts)
     elif kind == model.COMMAND:
         rules.command(key)
     else:

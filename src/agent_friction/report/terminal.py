@@ -12,6 +12,7 @@ from agent_friction.report._common import (
     events_phrase,
     fmt_lost,
     fmt_minutes,
+    gone_note,
     headline_lost,
     plural,
     repo_recommendations,
@@ -146,7 +147,7 @@ def _hotspot_rows(
         lines.append(
             "  "
             + st.heat(score, f"{bar(score)} {score:>5.1f}")
-            + f" {_truncate(str(h.get('path', '')), path_w):<{path_w}}"
+            + f" {_truncate(str(h.get('path', '')) + gone_note(h), path_w):<{path_w}}"
             + f" {h.get('sessions', 0):>4} {h.get('events', 0):>6}"
             + f" {fmt_lost(float(h.get('est_minutes_lost', 0))):>7}  "
             + st.dim(f"{conf_mark} ")
@@ -291,7 +292,7 @@ def render_detail(
     score = float(item.get("score", 0))
     out: list[str] = []
     kind = {"command": "command", "dir": "directory"}.get(str(item.get("kind")), "file")
-    out.append(st.bold(f"{kind}: {item.get('path')}"))
+    out.append(st.bold(f"{kind}: {item.get('path')}{gone_note(item)}"))
     out.append(
         st.heat(score, f"{bar(score)} {score:.1f}/100")
         + st.dim(
