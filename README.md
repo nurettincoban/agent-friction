@@ -15,7 +15,7 @@ Each one is small. Together they are where your agent time goes, and nobody writ
 recurring failures, pins them to files, directories, and commands, and tells you what to change,
 with the evidence quoted so you can check it yourself.
 
-![Interactive friction map of the example repository](https://raw.githubusercontent.com/nurettincoban/agent-friction/main/docs/assets/friction-map.png)
+![Interactive friction map of the example repository](docs/assets/friction-map.png)
 
 ```console
 $ agent-friction scan
