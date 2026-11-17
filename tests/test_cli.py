@@ -636,4 +636,6 @@ def test_compare_rejects_deeply_nested_json_cleanly(tmp_path: Path) -> None:
     deep = tmp_path / "deep.json"
     deep.write_text('{"a":' + "[" * 100000 + "]" * 100000 + "}", encoding="utf-8")
     code, _, err = run("compare", "--allow-overlap", str(deep), str(deep))
-    assert code == 1 and "nested too deeply" in err
+    # Python 3.14's decoder parses it (then it is not a result); older ones hit the depth limit.
+    assert code == 1 and err.startswith("agent-friction: ")
+    assert "nested too deeply" in err or "not an agent-friction result" in err
