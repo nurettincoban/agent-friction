@@ -52,16 +52,23 @@ else; to install it, `pipx install git+https://github.com/nurettincoban/agent-fr
 
 ## Apply the fixes
 
-Let Claude Code do it, with your approval for each change:
+In Claude Code, install the plugin once:
 
-```sh
-agent-friction install-skill    # once; then type /agent-friction-fix in Claude Code
+```text
+/plugin install agent-friction --marketplace nurettincoban/agent-friction
 ```
 
-The skill scans, checks each finding against the repository, proposes the smallest change for
-each (a line in `AGENTS.md`, a hook, a deny rule), applies only what you approve, and next time
-compares against this scan. With any other agent, `agent-friction scan -f prompt` prints the
-same fixes as a task to paste into a session. Details: [docs/usage.md](https://github.com/nurettincoban/agent-friction/blob/main/docs/usage.md#apply-the-fixes).
+Then, inside any repository:
+
+| Command | What it does |
+| --- | --- |
+| `/agent-friction:scan` | Maps the friction and lists what to fix first. Changes nothing. |
+| `/agent-friction:fix` | Checks each finding against the repository, proposes the smallest change for each (a line in `AGENTS.md`, a hook, a deny rule) and applies only what you approve. |
+| `/agent-friction:compare` | A week or two later: measures the sessions since that scan against it, so you see what went down. |
+
+The plugin carries its own copy of agent-friction and needs only Python 3.10+. With any other
+agent, `agent-friction scan -f prompt` prints the same fixes as a task to paste into a
+session. Details: [docs/usage.md](https://github.com/nurettincoban/agent-friction/blob/main/docs/usage.md#apply-the-fixes).
 
 ## How it differs from `/insights`
 

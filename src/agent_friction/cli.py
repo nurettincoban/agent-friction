@@ -177,6 +177,85 @@ def parse_when(value: str, *, now: datetime | None = None) -> datetime:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+class SavedScanCut(datetime):
+    """``--since saved.json``: the second after the saved scan's last event.
+
+    It carries the saved scan, so the new scan can read the same transcripts in the
+    same way (:func:`_inherit_inputs`).
+    """
+
+    scan: dict[str, Any]
+
+
+def _since(value: str) -> datetime:
+    """``--since``: a time as for :func:`parse_when`, or a saved scan (``.json``).
+
+    A saved scan stands for "the second after its last event", so a later scan holds
+    only events the saved one did not see, and the two can be compared.
+    """
+    if not value.strip().lower().endswith(".json"):
+        return parse_when(value)
+    try:
+        saved = json.loads(Path(value).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"can't read the saved scan {value!r}: {exc}") from None
+    last = _event_span(saved)[1] if isinstance(saved, dict) else None
+    if last is None:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not a saved scan with events (`agent-friction scan -f json`)"
+        )
+    t = last + timedelta(seconds=1)
+    cut = SavedScanCut(t.year, t.month, t.day, t.hour, t.minute, t.second, t.microsecond, t.tzinfo)
+    cut.scan = saved
+    return cut
+
+
+def _tilde(path: Path) -> str:
+    """``path`` absolute, with this user's home directory as ``~``, as the JSON shows paths."""
+    full, home = path.expanduser().resolve(), Path.home().resolve()
+    try:
+        return (Path("~") / full.relative_to(home)).as_posix()
+    except ValueError:
+        return full.as_posix()
+
+
+def _inherit_inputs(args: argparse.Namespace, stderr: TextIO) -> None:
+    """After ``--since saved.json``, read what the saved scan read, the way it read it.
+
+    Options given on this command line win. Without this, a follow-up scan would miss
+    the transcripts or aliases the first one needed, or differ in git or excerpts, and
+    the comparison would be wrong.
+    """
+    if not isinstance(getattr(args, "since", None), SavedScanCut):
+        return
+    settings = args.since.scan.get("settings") or {}
+    inputs = settings.get("inputs") or {}
+    took: list[str] = []
+    for dest, flag in (("transcripts", "--transcripts"), ("repo_alias", "--repo-alias")):
+        given, saved = getattr(args, dest, None), inputs.get(dest)
+        if given or not saved:
+            continue
+        if saved is True:  # a --no-excerpts scan notes the option, not the paths
+            raise UsageError(
+                f"the saved scan was made with {flag}, but does not record its paths "
+                f"(it was made with --no-excerpts): pass {flag} again"
+            )
+        setattr(
+            args,
+            dest,
+            [Path(p).expanduser() for p in saved] if dest == "transcripts" else list(saved),
+        )
+        took += [f"{flag} {p}" for p in saved]
+    if settings.get("excerpts") is False and not getattr(args, "no_excerpts", True):
+        args.no_excerpts = True
+        took.append("--no-excerpts")
+    if settings.get("git") is False and not getattr(args, "no_git", True):
+        args.no_git = True
+        took.append("--no-git")
+    if took:
+        stderr.write(f"agent-friction: as in the saved scan: {' '.join(took)}\n")
+
+
 def _positive_int(value: str) -> int:
     try:
         n = int(value)
@@ -235,10 +314,11 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
     )
     g.add_argument(
         "--since",
-        type=parse_when,
+        type=_since,
         metavar="WHEN",
         help="only events from WHEN on (30d, 2w, 12h, 3m = three months, or 2026-01-31; "
-        "dates and times without a zone are UTC); a session that straddles it is cut",
+        "dates and times without a zone are UTC), or after the last event of a saved "
+        "scan (scan.json), to compare with it; a session that straddles it is cut",
     )
     g.add_argument(
         "--until", type=parse_when, metavar="WHEN", help="only events before WHEN (same forms, UTC)"
@@ -543,6 +623,8 @@ def _analyze(args: argparse.Namespace, repo: Path, err: TextIO | None = None) ->
 
     if not repo.is_dir():
         raise AgentFrictionError(f"{repo}: not a directory (pass the repository root)")
+    if err is not None:
+        _inherit_inputs(args, err)
     for given in args.transcripts or []:
         # Checked even with --allow-empty: a mistyped path in CI would otherwise pass every
         # gate with a git-only report.
@@ -575,6 +657,16 @@ def _analyze(args: argparse.Namespace, repo: Path, err: TextIO | None = None) ->
         raise NoTranscriptsError(
             f"{exc} For a map from the git history alone, run again with --allow-empty."
         ) from None
+    # What this scan read, so that `scan --since this.json` can read the same. With
+    # --no-excerpts only that the option was given: paths are local, that mode keeps to
+    # the map.
+    inputs: dict[str, list[str] | bool] = {}
+    if args.transcripts:
+        inputs["transcripts"] = args.no_excerpts or [_tilde(p) for p in args.transcripts]
+    if args.repo_alias:
+        inputs["repo_alias"] = args.no_excerpts or [str(p) for p in args.repo_alias]
+    if inputs:
+        result.setdefault("settings", {})["inputs"] = inputs
     if err is not None and args.transcripts is None and not args.repo_alias:
         _note_removed_worktrees(repo, err)
     if err is not None and not args.no_git and _is_shallow(repo):
@@ -1028,6 +1120,13 @@ def _cmd_compare(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> in
         )
     if not args.allow_overlap:
         _check_windows(before, after)
+    gits = (before.get("settings", {}).get("git"), after.get("settings", {}).get("git"))
+    if gits[0] != gits[1] and None not in gits:
+        stderr.write(
+            "agent-friction: note: only the "
+            f"{'before' if gits[0] else 'after'} scan read git history, so findings from it "
+            "(human rework) are on one side only; scan both with or without --no-git\n"
+        )
     roots = (before.get("repo", {}).get("root"), after.get("repo", {}).get("root"))
     if roots[0] != roots[1] and None not in roots:
         stderr.write(
