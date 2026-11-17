@@ -28,6 +28,7 @@ STATUSES = (
     "improved",
     "resolved",
     "replaced",
+    "enforced",
     "inactive",
     "too-little-data",
     "unchanged",
@@ -49,6 +50,7 @@ class Change:
     replaced_by: str | None = None  # the working command agents ran instead (status "replaced")
     replacement_sessions: int = 0
     replacement_events: int = 0
+    guardrail_hits: int = 0  # after-scan events that were a hook or deny rule holding
 
     @property
     def before_rate(self) -> float | None:
@@ -81,6 +83,7 @@ class Change:
             "replaced_by": self.replaced_by,
             "replacement_sessions": self.replacement_sessions,
             "replacement_events": self.replacement_events,
+            "guardrail_hits": self.guardrail_hits,
         }
 
 
@@ -173,6 +176,17 @@ def compare(
             needed = (a_exp,) if status == "new" else (b_exp, a_exp)
             if min(needed) < min_exposure:
                 status = "too-little-data"
+        # A guardrail added on the "before" advice now refuses the call and agents go another
+        # way: the friction left is the guardrail holding, not the old problem.
+        a_guard = int(a.get("guardrail_hits", 0) or 0) if a else 0
+        b_guard = int(b.get("guardrail_hits", 0) or 0) if b else 0
+        if (
+            a_guard > 0
+            and a_events - a_guard < min_events
+            and b_events - b_guard >= min_events
+            and status in ("unchanged", "improved", "regressed")
+        ):
+            status = "enforced"
         replaced_by, r_sessions, r_events = None, 0, 0
         substitute = _replacement(b) if status == "inactive" else None
         if substitute is not None:
@@ -204,6 +218,7 @@ def compare(
                 replaced_by=replaced_by,
                 replacement_sessions=r_sessions if replaced_by else 0,
                 replacement_events=r_events if replaced_by else 0,
+                guardrail_hits=a_guard,
             )
         )
     order = {s: i for i, s in enumerate(STATUSES)}
@@ -244,6 +259,7 @@ def render_compare(
         "improved": st.green,
         "resolved": st.green,
         "replaced": st.green,
+        "enforced": st.green,
     }
     groups = [
         ("regressed", "Regressed"),
@@ -251,6 +267,7 @@ def render_compare(
         ("improved", "Improved"),
         ("resolved", "Resolved (touched afterwards, no friction)"),
         ("replaced", "Replaced (agents ran the recommended command instead)"),
+        ("enforced", "Enforced (a guardrail now refuses it and agents go another way)"),
         ("inactive", "Not touched afterwards (no evidence either way)"),
         ("too-little-data", "Too few sessions touched these to tell"),
     ]
@@ -287,6 +304,15 @@ def render_compare(
                     f" {plural(c.replacement_sessions, 'session')} with"
                     f" {plural(c.replacement_events, 'friction event')}"
                     f" (before: {c.before_events}/{c.before_exposure}, score {c.before_score:.1f})"
+                )
+            if c.status == "enforced":
+                rest = c.after_events - c.guardrail_hits
+                body = (
+                    f"{plural(c.guardrail_hits, 'refusal')} by a hook or deny rule in"
+                    f" {plural(c.after_exposure, 'session')} afterwards, after which the agent"
+                    f" went another way; {plural(rest, 'other friction event')}"
+                    f" (before: {c.before_events}/{c.before_exposure}, score"
+                    f" {c.before_score:.1f})"
                 )
             out.append(f"- `{name}`: {body}" if markdown else f"  {name}: {body}")
         out.append("")

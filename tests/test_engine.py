@@ -4334,3 +4334,260 @@ def test_calls_in_a_sibling_package_are_counted_apart(tmp_path: Path) -> None:
     whole.bash("cd /srv/other && make test", "boom", exit_code=2)
     totals = scan(tmp_path / "w", [whole], repo=mono)["totals"]
     assert totals["events_outside_repo"] == 1 and totals["events_elsewhere_in_repo"] == 0
+
+
+_HOOK_SAYS = (
+    "PreToolUse:Bash hook error: [python3 .claude/hooks/guard.py]: "
+    "Use `make test` instead of calling pytest directly"
+)
+_EDIT_DENIED = "Permission to use Edit has been denied."
+
+
+def _guarded(
+    tmp_path: Path, build: Any, *, settings: dict[str, Any] | None = None, count: int = 5
+) -> dict[str, Any]:
+    repo = tmp_path / "repo"
+    (repo / "src" / "gen").mkdir(parents=True)
+    (repo / "src" / "gen" / "schema.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "AGENTS.md").write_text("# Notes\n\nUse `make test` to run the tests.\n", "utf-8")
+    if settings is not None:
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+    sessions = []
+    for index in range(count):
+        s = Session(f"g{index}", cwd=str(repo)).user("do it")
+        build(s, str(repo))
+        sessions.append(s)
+    (entry,) = scan(tmp_path, sessions, repo=repo)["commands" if settings is None else "hotspots"]
+    return dict(entry)
+
+
+def _said(entry: dict[str, Any]) -> str:
+    return " ".join(f"{r['title']} {r['detail']}" for r in entry["recommendations"])
+
+
+def test_a_hook_that_sends_agents_to_the_documented_command_is_a_guardrail(tmp_path: Path) -> None:
+    def blocked(s: Session, repo: str) -> None:
+        s.tool("Bash", {"command": "pytest -q"}, _HOOK_SAYS, is_error=True)
+        s.bash("make test", "5 passed")
+
+    entry = _guarded(tmp_path, blocked)
+    assert entry["path"] == "pytest" and entry["signals"] == {"permission-denied": 5}
+    assert entry["guardrail_hits"] == 5 and entry["score"] <= scoring.WEAK_ONLY_SCORE_CAP
+    assert entry["confidence"] == "low" and entry["score_detail"]["capped"]
+    assert "guardrails doing their job" in entry["why"]
+    assert "nothing is recommended" not in entry["why"]
+    (advice,) = entry["recommendations"]
+    assert advice["id"] == "the-guardrail-works" and advice["replacement"] == "make test"
+    assert advice["title"] == "The guardrail works; agents still try `pytest` first"
+    assert "(5 times with `make test`)" in advice["detail"]
+    assert 'The hook says: "Use `make test` instead of calling pytest directly"' in advice["detail"]
+    assert advice["documented_in"] == [{"file": "AGENTS.md", "line": 3}]
+    assert "`AGENTS.md:3` already names `make test`" in advice["detail"]
+    said = _said(entry)
+    assert "allow rule" not in said and "enforce" not in said
+    assert "then used `make test`" in entry["evidence"][0]["summary"]
+
+
+def test_a_hook_the_agent_gets_around_or_stalls_on_is_not_a_guardrail_hit(tmp_path: Path) -> None:
+    def around(s: Session, repo: str) -> None:
+        s.tool("Bash", {"command": "pytest -q"}, _HOOK_SAYS, is_error=True)
+        s.bash("pytest tests/", "5 passed")  # the same command got through after all
+
+    entry = _guarded(tmp_path / "a", around)
+    assert entry["guardrail_hits"] == 0 and entry["score"] > scoring.WEAK_ONLY_SCORE_CAP
+    (advice,) = entry["recommendations"]
+    assert advice["title"] == "Tell agents this is off limits, or close the way around"
+    assert "allow rule" not in _said(entry) and "enforce it" not in _said(entry)
+
+    def stalled(s: Session, repo: str) -> None:
+        s.tool("Bash", {"command": "pytest -q"}, _HOOK_SAYS, is_error=True)
+
+    entry = _guarded(tmp_path / "b", stalled)  # the session ends on the refusal
+    assert entry["guardrail_hits"] == 0
+    (advice,) = entry["recommendations"]
+    assert advice["title"] == "Tell agents this is off limits, and what to do instead"
+    assert "allow rule" not in _said(entry) and "enforce it" not in _said(entry)
+
+    def unconfigured(s: Session, repo: str) -> None:  # no hook, no rule: nobody decided
+        denied = "Claude requested permissions to use Bash, but you haven't granted it yet."
+        s.tool("Bash", {"command": "pytest -q"}, denied, is_error=True)
+        s.bash("make test", "5 passed")
+
+    entry = _guarded(tmp_path / "c", unconfigured)
+    assert entry["guardrail_hits"] == 0 and "add an allow rule" in _said(entry)
+
+
+def test_a_deny_rule_on_a_file_that_holds_is_a_guardrail(tmp_path: Path) -> None:
+    rule = {"permissions": {"deny": ["Edit(src/gen/**)"]}}
+
+    def refused(s: Session, repo: str) -> None:
+        change = {"file_path": f"{repo}/src/gen/schema.py", "old_string": "x", "new_string": "y"}
+        s.tool("Edit", change, _EDIT_DENIED, is_error=True)
+
+    def moved_on(s: Session, repo: str) -> None:
+        refused(s, repo)
+        s.edit(f"{repo}/src/app.py", "x", "y")
+
+    entry = _guarded(tmp_path / "a", moved_on, settings=rule)
+    assert entry["path"] == "src/gen/schema.py" and entry["guardrail_hits"] == 5
+    assert entry["score"] <= scoring.WEAK_ONLY_SCORE_CAP
+    (advice,) = entry["recommendations"]
+    assert advice["id"] == "the-guardrail-works"
+    assert advice["title"] == "The guardrail works; agents still try to change this file"
+    assert "refused by a deny rule in the settings" in advice["detail"]
+    said = _said(entry)
+    assert "allow rule" not in said and "enforce" not in said and "permission rule" not in said
+    assert ".claude/settings.json" not in said  # the rule itself is not cited as guidance
+
+    # the same refusal with no rule that matches it: nobody is known to have decided
+    other = {"permissions": {"deny": ["Edit(docs/**)", "Bash(rm:*)"]}}
+    entry = _guarded(tmp_path / "b", moved_on, settings=other)
+    assert entry["guardrail_hits"] == 0 and "add an allow rule" in _said(entry)
+
+    def around(s: Session, repo: str) -> None:
+        refused(s, repo)
+        s.bash("sed -i s/x/y/ src/gen/schema.py", "")  # changed anyway, by another tool
+
+    entry = _guarded(tmp_path / "c", around, settings=rule)
+    assert entry["guardrail_hits"] == 0
+    assert "close the way around" in _said(entry) and "allow rule" not in _said(entry)
+
+
+_WATCHING = (
+    "Command timed out after 2m 0s\n PASS  src/app.test.js\n\nTests: 3 passed, 3 total\n\n"
+    "Watch Usage: Press w to show more.\n"
+)
+_STILL_RUNNING = "Command timed out after 2m 0s\ncollected 900 items\n\ntests/test_a.py ....."
+
+
+def _timed_out(tmp_path: Path, command: str, output: str, after: list[str]) -> dict[str, Any]:
+    sessions = []
+    for index in range(4):
+        s = Session(f"t{index}").user("run the tests")
+        s.bash(command, output, exit_code=143, took=120)
+        if after:
+            s.bash(after[index % len(after)], "Tests: 3 passed, 3 total")
+        sessions.append(s)
+    (entry,) = scan(tmp_path, sessions)["commands"]
+    return dict(entry)
+
+
+def test_a_command_that_times_out_in_watch_mode_is_told_apart_from_a_slow_one(
+    tmp_path: Path,
+) -> None:
+    forms = ["CI=true npm test", "CI=true npm test", "npm test -- --watchAll=false"]
+    entry = _timed_out(tmp_path / "a", "npm test", _WATCHING, forms)
+    (advice,) = entry["recommendations"]
+    assert advice["id"] == "use-the-working-command"
+    assert advice["title"] == "Tell agents to use `CI=true npm test`"
+    assert advice["replacement"] == "CI=true npm test"
+    assert "(also with `npm test -- --watchAll=false`)" in advice["detail"]
+    assert "waiting for file changes (watch mode)" in advice["detail"]
+    assert "longer timeout" not in _said(entry) and "background" not in _said(entry)
+    assert "it was in watch mode" in entry["evidence"][0]["summary"]
+    # another command of the same kind, named as it was typed
+    entry = _timed_out(tmp_path / "b", "npm test", _WATCHING, ["npx vitest run"])
+    (advice,) = entry["recommendations"]
+    assert advice["title"] == "Tell agents to use `npx vitest run`"
+    # a watcher and nothing that worked: say what it is, not "give it more time"
+    entry = _timed_out(tmp_path / "c", "npm test", _WATCHING, [])
+    (advice,) = entry["recommendations"]
+    assert advice["id"] == "run-it-once-not-in-watch-mode"
+    assert advice["title"] == "`npm test` runs in watch mode by default"
+    assert "longer timeout" not in advice["detail"]
+    # a slow command with nothing that worked is still a slow command
+    entry = _timed_out(tmp_path / "d", "pytest", _STILL_RUNNING, [])
+    (advice,) = entry["recommendations"]
+    assert advice["id"] == "give-it-more-time" and "longer timeout" in advice["detail"]
+    # ... one working alternative in a single session does not change that
+    one = Session("t9").user("run").bash("pytest", _STILL_RUNNING, exit_code=143, took=120)
+    slow = [
+        Session(f"t{i}").user("run").bash("pytest", _STILL_RUNNING, exit_code=143, took=120)
+        for i in range(3)
+    ]
+    (entry,) = scan(tmp_path / "e", [*slow, one.bash("make test", "5 passed")])["commands"]
+    assert "give-it-more-time" in [r["id"] for r in entry["recommendations"]]
+    # ... and a replacement seen in every session is what to use
+    entry = _timed_out(tmp_path / "f", "pytest", _STILL_RUNNING, ["make test"])
+    (advice,) = entry["recommendations"]
+    assert advice["title"] == "Tell agents to use `make test`"
+    assert "longer timeout" not in advice["detail"] and "watch mode" not in advice["detail"]
+
+
+def _committing(count: int) -> list[Session]:
+    hook = "ruff-format....Failed\n- hook id: ruff-format\n- files were modified by this hook"
+    return [
+        Session(f"c{i}")
+        .user("commit it")
+        .edit("/repo/src/app.py", "a", "b")
+        .bash("git commit -am 'x'", hook, exit_code=1)
+        .bash("git commit -am 'x'", "[main 1a2b3c4] x")
+        for i in range(count)
+    ]
+
+
+def test_a_formatting_hook_that_stops_every_commit_is_a_habit_worth_a_line(tmp_path: Path) -> None:
+    out = scan(tmp_path / "a", _committing(4))
+    (entry,) = out["commands"]
+    assert entry["path"] == "git commit" and entry["events"] == 4
+    assert entry["score"] <= scoring.WEAK_ONLY_SCORE_CAP and entry["confidence"] == "low"
+    assert "nothing is recommended" not in entry["why"]
+    (advice,) = entry["recommendations"]
+    assert advice["id"] == "format-before-committing"
+    assert advice["title"] == "Tell agents to run the formatter before `git commit`"
+    assert "(`ruff-format`)" in advice["detail"]
+    assert "`pre-commit run ruff-format`" in advice["detail"]
+    assert "stopped by a pre-commit hook that rewrote files" in entry["evidence"][0]["summary"]
+    # twice is the loop working: nothing
+    quiet = scan(tmp_path / "b", _committing(2))
+    assert quiet["commands"] == [] and quiet["totals"]["friction_events"] == 0
+    # without excerpts the hook is not named
+    bare = scan(tmp_path / "c", _committing(4), include_excerpts=False)
+    assert "ruff-format" not in json.dumps(bare)
+
+
+@pytest.mark.parametrize("joiner", [";", " &&"])
+def test_a_setup_step_in_front_of_the_green_run_on_one_line_is_the_fix(
+    tmp_path: Path, joiner: str
+) -> None:
+    def sessions(green: str) -> list[Session]:
+        return [
+            Session(f"n{i}")
+            .user("run the tests")
+            .bash("npm test", "sh: 1: jest: not found", exit_code=127)
+            .bash(green, "Tests: 3 passed, 3 total")
+            for i in range(4)
+        ]
+
+    (entry,) = scan(tmp_path / "a", sessions(f"npm install{joiner} npm test"))["commands"]
+    (advice,) = entry["recommendations"]
+    assert advice["id"] == "document-the-setup-step"
+    assert "run `npm install` before `npm test`" in advice["detail"]
+    # a step in front that prepares nothing is no setup step
+    (entry,) = scan(tmp_path / "b", sessions(f"git status{joiner} npm test"))["commands"]
+    assert "document-the-setup-step" not in [r["id"] for r in entry["recommendations"]]
+
+
+def test_a_deny_rule_cited_as_guidance_is_not_followed_by_enforce_it(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / ".claude").mkdir()
+    rule = {"permissions": {"deny": ["Read(src/old_schema.py)"]}}
+    (repo / ".claude" / "settings.json").write_text(json.dumps(rule, indent=1), encoding="utf-8")
+    sessions = [
+        Session(f"e{i}", cwd=str(repo))
+        .user("go")
+        .read(f"{repo}/src/old_schema.py", missing=True)
+        .read(f"{repo}/src/old_schema.py", missing=True)
+        for i in range(3)
+    ]
+    (entry,) = scan(tmp_path, sessions, repo=repo)["hotspots"]
+    said = _said(entry)
+    assert "Also mentioned at `.claude/settings.json:" in said and "enforce it" not in said
+    # the same file mentioned in AGENTS.md: the note still says what the next step is
+    (repo / ".claude" / "settings.json").unlink()
+    (repo / "AGENTS.md").write_text("src/old_schema.py held the schema.\n", encoding="utf-8")
+    (entry,) = scan(tmp_path / "b", sessions, repo=repo)["hotspots"]
+    assert "enforce it with a hook" in _said(entry)

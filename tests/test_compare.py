@@ -162,3 +162,28 @@ def test_structured_replacement_field_wins_over_the_title() -> None:
     before["commands"][0]["recommendations"][0]["replacement"] = "npm run test:unit"
     before["commands"][0]["recommendations"][0]["title"] = "something else"
     assert _statuses(before, after)["npm test"] == "replaced"
+
+
+def test_a_guardrail_that_holds_counts_as_enforced() -> None:
+    before, after = sample_result(), sample_result()
+    pytest_after = next(c for c in after["commands"] if c["path"] == "pytest")
+    pytest_after["guardrail_hits"] = pytest_after["events"]
+    (change,) = [c for c in compare(before, after) if c.path == "pytest"]
+    assert change.status == "enforced"
+    assert change.to_dict()["guardrail_hits"] == pytest_after["events"]
+    text = render_compare(before, after, compare(before, after))
+    assert "Enforced (a guardrail now refuses it and agents go another way)" in text
+    assert "by a hook or deny rule" in text and "0 other friction events" in text
+
+
+def test_guardrail_hits_with_other_friction_left_are_not_enforced() -> None:
+    before, after = sample_result(), sample_result()
+    pytest_after = next(c for c in after["commands"] if c["path"] == "pytest")
+    pytest_after["guardrail_hits"] = 1
+    assert _statuses(before, after)["pytest"] != "enforced"
+    # Guardrail refusals before and after, and nothing else: no change to report.
+    before, after = sample_result(), sample_result()
+    for result in (before, after):
+        cmd = next(c for c in result["commands"] if c["path"] == "pytest")
+        cmd["guardrail_hits"] = cmd["events"]
+    assert _statuses(before, after)["pytest"] == "unchanged"

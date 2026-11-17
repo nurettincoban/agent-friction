@@ -1082,3 +1082,29 @@ def test_a_corrected_rule_that_is_already_written_down_says_so(tmp_path: Path) -
         model.FILE, "src/pay/checkout.py", plain, None, quote, None, Guidance(repo)
     )
     assert "already" not in str(rec["title"]).lower()
+
+
+def test_deny_rules_of_the_settings_are_read_and_matched(tmp_path: Path) -> None:
+    from agent_friction.guidance import deny_rules, rule_denies
+
+    (tmp_path / ".claude").mkdir()
+    rules_text = (
+        '{"permissions": {"deny": ["Edit(src/gen/**)", "Read(.env)", "Bash(pytest:*)", '
+        '"Bash(rm -rf *)", "Bash(git push --force)", "WebFetch", 7], "allow": ["Bash(ls:*)"]}}'
+    )
+    (tmp_path / ".claude" / "settings.json").write_text(rules_text, encoding="utf-8")
+    (tmp_path / ".claude" / "settings.local.json").write_text("not json", encoding="utf-8")
+    rules = deny_rules(tmp_path)
+    assert ("edit", "src/gen/**") in rules and ("webfetch", "") in rules and len(rules) == 6
+    assert rule_denies(rules, "Edit", rel="src/gen/schema.py")
+    assert rule_denies(rules, "Write", rel="src/gen/deep/er.py")  # an Edit rule covers writes
+    assert not rule_denies(rules, "Edit", rel="src/app.py")
+    assert not rule_denies(rules, "Read", rel="src/gen/schema.py")
+    assert rule_denies(rules, "Read", rel="config/.env") and rule_denies(rules, "Read", rel=".env")
+    assert rule_denies(rules, "Bash", ["pytest -q"]) and rule_denies(rules, "Bash", ["pytest"])
+    assert not rule_denies(rules, "Bash", ["pytest-watch"])
+    assert rule_denies(rules, "Bash", ["cd x && rm -rf build", "rm -rf build"])
+    assert rule_denies(rules, "Bash", ["git push --force"])
+    assert not rule_denies(rules, "Bash", ["git push"]) and not rule_denies(rules, "Bash", ["ls"])
+    assert rule_denies(rules, "WebFetch") and not rule_denies(rules, "WebSearch")
+    assert deny_rules(None) == [] and deny_rules(tmp_path / "missing") == []

@@ -42,7 +42,7 @@ from agent_friction.discovery import (
     repo_roots,
 )
 from agent_friction.errors import AgentFrictionError, BadTranscriptError, NoTranscriptsError
-from agent_friction.guidance import Guidance
+from agent_friction.guidance import Guidance, deny_rules, rule_denies
 from agent_friction.model import Finding, ParsedFile, Stream, Target
 
 __all__ = [
@@ -512,7 +512,7 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
     # a line of guidance from ``RECURRING_RED_MIN_SESSIONS`` sessions on.
     # So is a first push of a new branch without `-u`, put right with `--set-upstream`.
     dropped: list[Finding] = []
-    for habit in ("push_rejected", "no_upstream"):
+    for habit in ("push_rejected", "no_upstream", "hook_rewrote"):
         pushes: dict[str, set[str]] = {}
         turned_down = [
             f
@@ -528,6 +528,14 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
                 for key in _command_keys(finding)
             ):
                 finding.detail[habit] = "recurring"
+                if habit == "hook_rewrote":
+                    finding.summary = re.sub(
+                        r" failed \(.*$",
+                        " was stopped by a pre-commit hook that rewrote files; it went "
+                        "through on the next attempt",
+                        finding.summary,
+                        count=1,
+                    )
         # ... and one that was put right at once, and is no habit, was the loop working.
         dropped += [
             f
@@ -630,7 +638,11 @@ def _is_git(finding: Finding) -> bool:
 
 def _beside_ordinary(items: Sequence[Item]) -> list[Item]:
     """The evidence left when ordinary command failures are set aside (all of it if none)."""
-    return [(f, share) for f, share in items if not scoring.is_ordinary_failure(f)]
+    return [
+        (f, share)
+        for f, share in items
+        if not scoring.is_ordinary_failure(f) and not scoring.is_guardrail_hit(f)
+    ]
 
 
 def _score(items: Sequence[Item], exposed: set[str]) -> scoring.Score:
@@ -1130,6 +1142,11 @@ class _Analysis:
     def quote(self, text: str, limit: int) -> str:
         return redact.one_line(text, min(limit, max(self.options.excerpt_chars, 1)))
 
+    def _denied_by_rule(self) -> Callable[[str, Sequence[str], str], bool]:
+        """Does a ``permissions.deny`` rule of the repository's settings refuse a call?"""
+        rules = deny_rules(self.repo)
+        return lambda tool, commands, rel: rule_denies(rules, tool, commands, rel)
+
     def _enclosing(self) -> Callable[[str], bool]:
         """Is an absolute path in the git repository the scanned directory is part of?"""
         tops = [to_posix(str(top)) for top in enclosing_repositories(self.repo)]
@@ -1267,6 +1284,7 @@ class _Analysis:
             workspace_dir=self.workspace_dir,
             delegated=self._delegated(streams),
             enclosing=self._enclosing(),
+            denied_by_rule=self._denied_by_rule(),
         )
         findings: list[Finding] = []
         dropped: list[tuple[int, float, str]] = []
@@ -1718,10 +1736,11 @@ class _Analysis:
         level = scoring.confidence((s.session_id for s in result.sessions), signal_counts)
         capped = scoring.weak_only(found)
         rest = [f for f, _ in _beside_ordinary(items)]
+        guarded = sum(scoring.is_guardrail_hit(f) for f in found)
         ordinary = len(found) - len(rest)
         if capped:
             level = "low"  # evidence that is routine on its own is a lead, never a pattern
-        elif ordinary:
+        elif ordinary and rest:
             # ... and next to real evidence it corroborates nothing: the sessions and the
             # kinds of evidence that count are those of the rest
             level = scoring.confidence({f.unit for f in rest}, {f.signal for f in rest})
@@ -1743,6 +1762,8 @@ class _Analysis:
             "events": len(found),
             "est_minutes_lost": scoring.lost_minutes(found),
             "signals": dict(ranked),
+            # refusals by a hook or a deny rule after which the agent went another way
+            "guardrail_hits": guarded,
             "confidence": level,
             "why": scoring.explain(
                 ranked,
@@ -1752,7 +1773,9 @@ class _Analysis:
                 commits,
                 capped=capped,
                 episodes=len(units) - commits,
-                ordinary=ordinary if limited else 0,
+                ordinary=ordinary - guarded if limited else 0,
+                guardrail=guarded,
+                rewritten=sum(scoring.is_hook_habit(f) for f in found) if capped else 0,
             ),
             "recommendations": [],
             "evidence": [],

@@ -636,7 +636,8 @@ nanoseconds according to their size.
 | `edit-miss`, `stale-edit` | one round trip; extended to the edit of the same file that lands only if every tool call in between failed too |
 | `command-failure` (setup/invocation) | one round trip; extended to the end of the command that recovered it (the same command succeeding, or a replacement doing the same job, within the next 5 shell calls of the turn, read-only inspection such as `ls`, `which` or `cat` not counted) only if every tool call in between failed too |
 | `command-failure` (ordinary) | none |
-| `path-miss`, `file-too-large`, `permission-denied` | one round trip (a `path-miss` that is a routine probe for an optional file: none) |
+| `path-miss`, `file-too-large` | one round trip (a `path-miss` that is a routine probe for an optional file: none) |
+| `permission-denied` | the refusal itself: from the call to its result. A refusal that comes back in 0.2 s costs 0.2 s; what the agent thought about before its next call is its next step, not time the refusal took |
 | any interval that starts at a call | starts later where a person had to approve the call: see "A person's time at a permission prompt" below |
 | `tool-rejected` | from the human's answer to the next event in the transcript; the time the permission prompt was open (call to result) is a human's time and is never counted |
 | `search-miss`, `probable-correction`, `tool-failure` | none: weak signals never claim time |
@@ -771,7 +772,8 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `path-agents-expect` | 2+ `path-miss` (a read, an edit, a test command pointed at a missing test file, or a `cd` into a missing directory) |
 | `write-down-the-rule` | corroborated `user-correction` events whose attributed shares sum to 0.5 or more; quotes up to 3. "The rule the human keeps repeating" is claimed only when 2+ of the corrections share wording (two content words, or one distinctive word of 7+ letters, e.g. the same class name); otherwise the recommendation only asks whether the correction(s) reflect a standing rule. A `probable-correction` never counts. When an instruction file that applies here has a line with a name the human used in the correction (a class or function name such as `PaymentClient` or `schema_gen`, a file name or path; not the hotspot's own file), the advice takes its "already written" form instead: "The rule seems to be written down already: make it harder to miss" (`AGENTS.md:3` already says something about what the human corrected here ...; make it more prominent, move it closer to the code, or enforce it), with `documented_as: "instruction"` |
 | `state-the-boundary` | 2+ `tool-rejected`, or 1 with a stated reason |
-| `allow-or-document-the-boundary` | 2+ `permission-denied` |
+| `allow-or-document-the-boundary` | 2+ `permission-denied` that are not guardrail hits. "Add an allow rule, or say it is off limits" only where nobody is known to have decided (a missing permission). Where a hook or a deny rule of `.claude/settings.json` refused the call, an allow rule is never suggested: "Tell agents this is off limits, or close the way around" when the agent then got the same thing done anyway (the same command in another form, the same file by another tool), "Tell agents this is off limits, and what to do instead" when the sessions end on the refusal |
+| `the-guardrail-works` | 2+ guardrail hits (`guardrail_hits` on the row): a hook or a deny rule of the settings refused the call and the agent never got the refused thing to run afterwards. "The guardrail works; agents still try `pytest` first": names the command agents used instead where one of the same job followed (`replacement`), quotes the hook's own reason, and cites the instruction line that already names the alternative, if any. It is the one piece of advice a row of weak evidence gets; it never proposes an allow rule, a hook or a permission rule |
 | `clarify-before-acting` | 2+ `user-interrupt`. On a command (one that humans stopped in 3+ sessions, see the signal) the advice is to say when it should be run and what to run instead |
 | `add-a-fast-check` | 2+ `edit-revert` events with no check run between the edit and its undoing (see `state-the-constraint`), or `edit-thrash` events of turns that did not end on a successful command and ran no test, lint or type check (thrash next to a check was not for want of one). Not when the file has 2+ `no-convergence` events: a check that will not pass needs `explain-the-failing-check`, not another check. The text names only what was seen ("2 reverted edits in 2 sessions") |
 | `state-the-constraint` | 2+ `edit-revert` where `add-a-fast-check` does not apply because a test, lint, type-check or build command ran between an edit and its undoing (`checked` on the event): the agents had a check and used it, and backed the change out. The advice is to write down what the file does not allow. Not when the file has 2+ `no-convergence` events |
@@ -785,12 +787,14 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `name-the-missing-target` | 2+ setup/invocation failures of a command, most of which say that the make target or package script does not exist (`make: *** No rule to make target 'lint'.  Stop.`, npm's `Missing script`, `ERR_PNPM_NO_SCRIPT`, yarn's `Command "lint" not found`; a missing *prerequisite*, "needed by", is not this, and neither is an error that names another target than the one on the command line: `make test` answering "No rule to make target 'tst'" is a broken Makefile). Replaces `document-the-command`: there is nothing to document about running something that is not there. The same for a `just` recipe (`Justfile does not contain recipe`). The text lists up to 12 targets, scripts or recipes the Makefile, `package.json` or justfile (in the directory the command ran in) does define, and asks for an alias or a line saying what to run instead. If the file defines the missing name *now*, the advice is in the past tense instead: "`make typecheck` was missing in these sessions; it is defined now", with "re-scan with `--since <date>`" to confirm that the failures have stopped. Without excerpts neither the missing name nor the list is shown |
 | `make-the-failure-actionable` | 1+ `retry-loop` on a command |
 | `run-it-in-the-background` | 2+ times a server or watcher (`npm run dev`, `uvicorn`, `... --watch`) run in the foreground sat until the harness timed it out or a human had to stop it (a `user-interrupt` of that command); replaces `document-the-command` for those. No file is blamed and no time is claimed for a stopped server |
-| `give-it-more-time` | 2+ harness timeouts of any other command (`npm run build` cut off after 2 minutes): say how long it takes, raise the timeout or run it in the background, or name a narrower command; replaces `document-the-command` for those |
+| `give-it-more-time` | 2+ harness timeouts of any other command (`npm run build` cut off after 2 minutes): say how long it takes, raise the timeout or run it in the background, or name a narrower command; replaces `document-the-command` for those. Not when agents then got the job done another way in 2+ sessions (the same command with a variable or an option in front, `CI=true npm test`, `npm test -- --watchAll=false`, or another command of the same job and family, quoted as typed where short: `npx vitest run`): the advice is then `use-the-working-command` with the most common working form, the others named after it, and no word about a longer timeout. And not for a watcher (next row) |
+| `run-it-once-not-in-watch-mode` | 2+ harness timeouts of a command most of which were in watch mode: the output shows it had finished and was waiting for file changes ("Watch Usage", "Waiting for file changes", "watching for file changes", "press q to quit", ...; `WATCH_OUTPUT_RE`), or the line asked for it (`--watch`). With no working alternative seen: "`npm test` runs in watch mode by default", say how to run it once. More time would not help |
 | `explain-the-failing-check` | 2+ `no-convergence` events from 2+ sessions, on the command ("Agents cannot get `pytest` to pass") or on a file edited during the rounds: document how to run and debug the check and what it expects |
 | `say-if-it-is-known-broken` | A command lifted out of the weak class because it stays red: it failed 2+ times and was still red at the end, in 3+ sessions (and there is no `no-convergence` event on it): "`npm run e2e` keeps ending red": say that it is known to be broken and what to run instead, or fix it. Also: the same test named as failed in 3+ sessions, none of which made it pass, and at least once before the session had changed any file ("`tests/test_legacy.py::test_old` is red session after session": fix it, or mark it as a known failure and say so); this form is given once: on the test file's row where the failure is attributed to a file of the repository, and on the command's row only for a test that has no such file |
 | `fix-the-flaky-test` | A test command failed and then passed on a plain re-run, with nothing changed in between, in 3+ sessions (variant `flaky`): "`npm test` looks flaky": fix or quarantine the flaky test, and say in AGENTS.md that a red run should be re-run once before anything is changed |
 | `pull-before-pushing` | `git push` was rejected as non-fast-forward (the remote branch had commits the local one lacked) in 3+ sessions: "tell agents to bring the branch up to date before `git push`": say in AGENTS.md to fetch and rebase (or merge) before pushing, and whether a force-push is ever acceptable. No time is claimed |
 | `push-with-upstream` | `git push` failed with "has no upstream branch" and went through with `--set-upstream` / `-u` in 3+ sessions: "tell agents to push a new branch with `git push -u origin HEAD`", or set `push.autoSetupRemote` where agents run. No time is claimed |
+| `format-before-committing` | `git commit` was stopped by a pre-commit hook that rewrote files ("files were modified by this hook") and went through on the next attempt, in 3+ sessions: "run the formatter (`pre-commit run <hook id>`, or the hook's own command) before committing". The events are weak (score capped at 19, no time claimed); in fewer sessions they are the loop working and are not recorded |
 | `file-is-gone` | a file hotspot whose file is not in the working tree **and** whose last commit in git deleted or renamed it (`file.removed_at`; needs git). Replaces every rule about what the file is like (`edit-the-source-not-the-output`, `split-or-anchor-large-file`, `make-edits-land`, `document-what-rewrites-this-file`, `path-agents-expect`, `add-a-fast-check`, `state-the-constraint`, `add-a-pointer`, `summarize-this-file`): "This file was renamed to `src/client.ts`" or "This file is no longer in the tree", with the date of that commit and `--since <date>` to leave the history out. What a human said (`write-down-the-rule`, `state-the-boundary`, ...) is kept below it. A path git never tracked, or a scan without git, is not "gone": nothing is known, and nothing changes |
 | `note-the-background-rate` | repository-level only (top-level `recommendations`, never on a hotspot): `edit-miss` or `stale-edit` with 5+ events in 3+ files and 3+ sessions, over 20+ file visits. States the rate per file visit and names the files clearly above it (see "The repository's base rate"). Mentions a rewriting command only when misses followed one |
 
@@ -938,6 +942,41 @@ repository's instruction files are searched for what it is about
   after the sessions that were analysed; the text says so ("if that line is
   newer than these sessions, give it time first"). The instruction files
   are never quoted, with or without excerpts: only `file:line` is shown.
+
+### Guardrails that hold
+
+Advice such as "enforce it: a hook or permission rule that blocks `pytest`"
+has to be something a repository can follow and then see closed. So a
+refusal is read for who refused and what the agent did next:
+
+- **Deliberate** is a refusal by a hook, or one that a `permissions.deny`
+  rule of `.claude/settings.json` / `.claude/settings.local.json` matches
+  (`Edit(src/gen/**)` covers Edit, Write and MultiEdit on files under it,
+  matched like a gitignore line; `Bash(pytest:*)` covers a command line or a
+  step of one that starts with `pytest`). A missing permission ("you haven't
+  granted it yet") or a refusal no rule accounts for is not: nobody is known
+  to have decided.
+- A deliberate refusal is a **guardrail hit** when the agent never got the
+  refused thing to run later in the session (the same command, or a change
+  to the same file by any tool, `sed -i` included) and did something else
+  afterwards. Where a successful command of the same job and family followed
+  (`make test` after `pytest`), it is recorded as the alternative.
+- A guardrail hit is weak evidence, like a red test: weight 0.3
+  (`GUARDRAIL_SHARE`), no part in confidence, and on a row with nothing but
+  weak evidence the score is capped at 19, below every band a threshold
+  such as `--fail-on 45` would be set to. Each row carries the count as
+  `guardrail_hits`, so a comparison can tell "still failing" from
+  "enforced".
+- The row gets `the-guardrail-works`, and nothing that tells the reader to
+  add what is already there: no allow rule (it does not override a hook and
+  would contradict a deny rule), no "enforce it with a hook or a permission
+  rule" in the note about instruction files (dropped whenever a refusal on
+  the row was deliberate, or the only place the subject is mentioned is the
+  deny rule itself).
+- If the session ends on the refusal, nobody knows what came next: it stays
+  an ordinary `permission-denied`, with advice that still never proposes an
+  allow rule. If the agent got the same thing done anyway, the guardrail
+  leaks, and the advice says so.
 
 ### One session is a lead
 

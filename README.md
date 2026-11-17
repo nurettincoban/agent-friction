@@ -116,8 +116,10 @@ agent-friction compare before.json after.json
 10 exposed sessions), so a file nobody worked on afterwards shows up as "not touched", not as
 "resolved". When the fix was "use `make test`, not `pytest`", success means agents stop running
 `pytest`, so `compare` checks the recommended command instead: if it ran cleanly afterwards, the
-old one is reported as "replaced". A fix that keeps agents away from a file (a denied edit) can
-only show as "not touched"; that is the expected outcome, not proof. It ignores changes too small to mean anything, warns when either side has too few
+old one is reported as "replaced". When the fix was a hook or deny rule and agents still try
+the refused call but then go another way, those refusals count as the guardrail holding: they
+stay weak in the scan, and `compare` reports the target as "enforced". A file agents simply stop
+touching shows as "not touched"; that is the expected outcome, not proof. It ignores changes too small to mean anything, warns when either side has too few
 sessions, refuses to compare scans of different repositories, and refuses scans whose time windows overlap
 (a later scan without `--since` contains the earlier one, which would only dilute it). Both scans must use the
 same privacy mode: compare two `--no-excerpts` scans, or two scans without it.

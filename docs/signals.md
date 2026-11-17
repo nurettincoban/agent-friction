@@ -272,7 +272,13 @@ corroborated: ...").
     skipping ..."), "we use pnpm, not npm", and an undo or a verdict by file
     name: "Revert src/app.py", "src/app.py is still failing" (labels "it
     fails now", "why are you …", "we use X, not Y", "revert/still failing,
-    by file"). Without "now" or a pronoun the same words describe a bug to
+    by file"), "The test in tests/test_app.py still fails, please fix it"
+    (an outcome, where it is, and "still ...": label "still failing, in a
+    file"; not "... fails on main"), and one construct named in place of
+    another: "Instead of a class, use a function in src/app.py" ("instead
+    of X, use | write | keep | make it ...": label "instead of X, use Y";
+    not "Instead of the README, start with the changelog", and not "Use a
+    function instead of a class in the new module"). Without "now" or a pronoun the same words describe a bug to
     work on ("the build fails on Windows, can you look", "The app crashes
     when the list is empty"), and "Revert README.md to last week's version"
     is a task. Behaviour decides:
@@ -760,6 +766,21 @@ days by default), **and** that human commit either
   rolls back (`UNDO_SUBJECT_RE`) counts either way: taking back a deletion
   only adds lines.
 
+**In plain terms, what a human commit must do to count:**
+
+| The human commit ... | Counts? |
+| --- | --- |
+| has any subject, and one of its hunks changes, deletes, or inserts into the middle of lines the agent commit added or modified in that file | yes (`overlap`) |
+| has a subject without a repair word and only touches other lines of the file, or appends after the agent's last line | no |
+| has a repair word in its subject (`fix`, `revert`, ...) and removes or changes at least one line of the file, anywhere in it | yes (`subject`) |
+| has a repair word in its subject and only adds lines to the file (`+N/-0`), outside what the agent wrote | no |
+| says it reverts, undoes or rolls back, and only adds lines | yes (`subject`) |
+| announces new work (`feat: ...`, "add ...") and rewrites the agent's lines more than 2 days later | no |
+
+So a commit that is not called a fix counts on one ground only: it rewrote
+at least one line the agent commit had written, and one such hunk is
+enough. There is no minimum number of lines or share of the file.
+
 A commit whose subject says a tool rewrote the files (`style: ...`, `format:
 ...`, `lint: ...`, "run black", "apply prettier", "reformat ...", `gofmt`,
 `ruff format`; `MECHANICAL_SUBJECT_RE`) is never rework, at any size: five
@@ -1052,6 +1073,17 @@ command's" below.
     package.
 
   If neither happens (the session ends red), it stays ordinary.
+- *A watcher is not a slow command:* when the harness timeout hits a command
+  whose output shows it had finished and was waiting for the next change
+  ("Watch Usage: Press w to show more", "Waiting for file changes...",
+  "watching for file changes", "press q to quit"; `WATCH_OUTPUT_RE`), or
+  whose line asks for a watcher, the event says so (detail `watcher`: "ran
+  until the harness timed it out: it was in watch mode, waiting for file
+  changes, and never exits on its own"). The advice is the command that
+  worked instead where one did in 2+ sessions (`CI=true npm test`, `npm test
+  -- --watchAll=false`, `npx vitest run`: an option after `--` counts as an
+  added flag, and a replacement is quoted as typed where it is short), and
+  otherwise `run-it-once-not-in-watch-mode`; never "give it more time".
 - *A foreground server is not a failed command:* when the harness timeout hits
   a command that never exits by design (`npm run dev`, `vite`, `uvicorn`,
   `flask run`, `rails s`, `manage.py runserver`, `docker compose up` without
@@ -1637,8 +1669,26 @@ command's" below.
   nothing changed is dropped (see [retry loop](#retry-loop--retry-loop)).
 - *`git commit` routines:* "nothing to commit" is a no-op and not recorded. A
   commit stopped by a pre-commit hook that reformatted files ("files were
-  modified by this hook") is dropped when the next `git commit` succeeds; a
-  hook that rejects the commit for another reason is an ordinary failure.
+  modified by this hook") is dropped when the next `git commit` succeeds,
+  unless that happens in 3 or more sessions: then every session pays a round
+  trip for it, and the events are kept as weak evidence (detail
+  `hook_rewrote: recurring`; "`git commit` was stopped by a pre-commit hook
+  that rewrote files; it went through on the next attempt"; score capped at
+  19, no time claimed) with the advice `format-before-committing`, naming
+  the hook ids pre-commit printed. A hook that rejects the commit for
+  another reason is an ordinary failure.
+- *Selecting no tests is not a failure:* `pytest -k name` / `-m marker`
+  that exits 5 because everything collected was deselected ("12 deselected
+  in 0.10s", "no tests ran, 12 deselected", "12 deselected / 0 selected") is
+  not recorded: the selection missed, nothing was red, and it must not add
+  to the setup failures of `pytest`. Exit 5 with nothing collected at all
+  ("collected 0 items", "no tests ran") is still an ordinary failure.
+- *A setup step on the same line:* `npm test` fails and `npm install; npm
+  test` (or `&&`) then passes with no file edited: the setup step in front
+  of the command on the line that passed is what the red run lacked
+  (`fixed_by_setup`, "run `npm install` before `npm test`"), exactly as when
+  it is run as a call of its own. Only steps that prepare something count
+  (`is_setup_command`), and not one the failed line already had.
 - *Which step of a chain failed:* for `a && b` the exit status does not say
   whether `b` ever ran. The output is matched against what each kind of step
   prints (`STEP_SIGNATURES`: `npm error code E401`, `Failed to build`,
@@ -1822,6 +1872,30 @@ names in words of its own, else the first destructive step, so `ls build; rm
 -f build/out.bin` is keyed to `rm`. The harness usually quotes the whole
 command line in its message; that quotation is ignored when looking for the
 step it names).
+
+**A guardrail that holds is weak evidence.** A refusal by a hook, or one
+that a `permissions.deny` rule of the repository's `.claude/settings.json`
+matches, is there on purpose (detail `deliberate`: `hook` or `rule`). If
+the agent never got the refused thing to run afterwards in that session
+(the same command; the same file changed by any tool) and went on to
+something else, the event is a *guardrail hit* (detail `guardrail`): the
+summary ends "; the agent then used `make test`" (a successful command of
+the same job and family that followed, detail `alternative`) or "; the
+agent moved on". It weighs 0.3, does not count towards confidence, cannot
+lift a row past 19 on its own, and is counted per row in `guardrail_hits`.
+The advice is `the-guardrail-works` ("The guardrail works; agents still try
+`pytest` first"), with the alternative, the hook's own stated reason
+(quoted, so not without excerpts) and the instruction line that already
+names the alternative. In the other direction: the same command running
+later, or the same file changed by `sed -i` after an Edit was refused
+(detail `got_through`), is a guardrail that leaks and stays a full event;
+so does a refusal the session ends on. A missing permission, or a "has been
+denied" that no deny rule of the settings accounts for, is never a
+guardrail hit. For none of the deliberate refusals is an allow rule
+suggested (see methodology, "Guardrails that hold").
+
+**Time:** the refusal itself, call to result. The agent's thinking before
+its next call is not counted.
 
 **False negatives:** harnesses and hooks word their refusals freely; only the
 shapes above are recognised, anything else that is flagged as an error is

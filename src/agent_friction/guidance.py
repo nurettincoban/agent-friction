@@ -11,8 +11,10 @@ result, only ``file:line``.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -397,6 +399,98 @@ def _deny_lines(text: str, numbered: list[tuple[int, str]]) -> list[tuple[int, s
         return []
     rules = [json.dumps(rule) for rule in deny if isinstance(rule, str)]
     return [(n, line) for n, line in numbered if any(rule in line for rule in rules)]
+
+
+#: Tools a deny rule on ``Edit`` covers, and those a rule on ``Read`` covers.
+_EDIT_TOOLS = frozenset({"edit", "write", "multiedit", "notebookedit"})
+_READ_TOOLS = frozenset({"read", "grep", "glob"})
+_DENY_RULE_RE = re.compile(r"^\s*([A-Za-z_][\w.-]*)\s*(?:\((.*)\))?\s*$", re.S)
+
+
+def deny_rules(repo: Path | None) -> list[tuple[str, str]]:
+    """The ``permissions.deny`` rules of the repository's settings: ``(tool, pattern)``.
+
+    ``Edit(src/gen/**)`` is ``("edit", "src/gen/**")``, a bare ``WebFetch`` has an empty
+    pattern. Missing or unreadable settings are no rules.
+    """
+    rules: list[tuple[str, str]] = []
+    for name in SETTINGS_FILES if repo is not None else ():
+        try:
+            path = repo / name  # type: ignore[operator]
+            if not path.is_file() or path.stat().st_size > MAX_FILE_BYTES:
+                continue
+            data = json.loads(path.read_bytes().decode("utf-8", "replace"))
+        except (OSError, ValueError, RecursionError):
+            continue
+        permissions = data.get("permissions") if isinstance(data, dict) else None
+        deny = permissions.get("deny") if isinstance(permissions, dict) else None
+        for rule in deny if isinstance(deny, list) else ():
+            match = _DENY_RULE_RE.match(rule) if isinstance(rule, str) else None
+            if match is not None:
+                rules.append((match.group(1).lower(), (match.group(2) or "").strip()))
+    return rules
+
+
+def _glob(pattern: str) -> re.Pattern[str]:
+    """A settings path pattern as a regex: ``**`` crosses directories, ``*`` does not."""
+    out = ""
+    index = 0
+    while index < len(pattern):
+        if pattern.startswith("**/", index):
+            out, index = out + "(?:.*/)?", index + 3
+        elif pattern.startswith("**", index):
+            out, index = out + ".*", index + 2
+        elif pattern[index] == "*":
+            out, index = out + "[^/]*", index + 1
+        elif pattern[index] == "?":
+            out, index = out + "[^/]", index + 1
+        else:
+            out, index = out + re.escape(pattern[index]), index + 1
+    return re.compile(out + r"(?:/.*)?\Z")
+
+
+def rule_denies(
+    rules: Sequence[tuple[str, str]], tool: str, commands: Sequence[str] = (), rel: str = ""
+) -> bool:
+    """Does one of ``rules`` refuse this call?
+
+    ``tool`` is the tool's name; ``commands`` the shell command lines it would run
+    (the whole line and each of its steps); ``rel`` the repo-relative file it
+    acts on. A file rule is matched like a gitignore line: against the path, or
+    against any part of it when the pattern has no slash.
+    """
+    name = tool.lower()
+    for rule_tool, pattern in rules:
+        covers = (
+            rule_tool == name
+            or (rule_tool == "edit" and name in _EDIT_TOOLS)
+            or (rule_tool == "read" and name in _READ_TOOLS)
+        )
+        if not covers:
+            continue
+        if not pattern:
+            return True
+        if name == "bash":
+            prefix = re.sub(r"(?::\*| \*|\*)$", "", pattern)
+            open_ended = prefix != pattern
+            for command in commands:
+                said = command.strip()
+                if said == prefix or (open_ended and said.startswith(prefix + " ")):
+                    return True
+                if "*" in prefix and fnmatch.fnmatchcase(said, pattern):
+                    return True
+        elif rel:
+            wanted = pattern.removeprefix("./").lstrip("/")
+            if not wanted:
+                continue
+            if "/" not in wanted.rstrip("/"):
+                parts = rel.split("/")
+                tails = ["/".join(parts[i:]) for i in range(len(parts))]
+            else:
+                tails = [rel]
+            if any(_glob(wanted.rstrip("/")).match(tail) for tail in tails):
+                return True
+    return False
 
 
 def path_terms(rel: str) -> list[str]:

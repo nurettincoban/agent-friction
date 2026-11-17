@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent_friction import attribution, model, scoring, signals
-from agent_friction.guidance import Guidance, Mention, path_terms
+from agent_friction.guidance import SETTINGS_FILES, Guidance, Mention, path_terms
 from agent_friction.model import Finding
 
 #: A file with at least this many lines is called "large" in recommendations.
@@ -93,6 +93,7 @@ RULE_IDS: tuple[str, ...] = (
     "write-down-the-rule",
     "state-the-boundary",
     "allow-or-document-the-boundary",
+    "the-guardrail-works",
     "clarify-before-acting",
     "add-a-fast-check",
     "state-the-constraint",
@@ -107,11 +108,13 @@ RULE_IDS: tuple[str, ...] = (
     "make-the-failure-actionable",
     "run-it-in-the-background",
     "give-it-more-time",
+    "run-it-once-not-in-watch-mode",
     "explain-the-failing-check",
     "say-if-it-is-known-broken",
     "fix-the-flaky-test",
     "pull-before-pushing",
     "push-with-upstream",
+    "format-before-committing",
     "file-is-gone",
     "note-the-background-rate",
 )
@@ -414,7 +417,15 @@ class _Rules:
             else:
                 terms = [*self.subjects, *(already[0] if already is not None else ())]
                 mentions = guidance.mentions(terms, self.near)
-                if mentions:
+                enforced = any(
+                    "deliberate" in f.detail for f in self.get(signals.PERMISSION_DENIED)
+                ) or all(m.file in SETTINGS_FILES for m in mentions)
+                if mentions and enforced:
+                    # what is cited is the deny rule itself, or a hook or a rule already
+                    # refuses this: "enforce it" is what was done
+                    documented = "mention"
+                    detail += f" (Also mentioned at {_refs(mentions)}.)"
+                elif mentions:
                     documented = "mention"
                     detail += (
                         f" (Also mentioned at {_refs(mentions)}: check whether it already says "
@@ -856,8 +867,62 @@ class _Rules:
                 [signals.READ_LOOP],
             )
 
+    def guardrail(self, what: str) -> None:
+        """A hook or a deny rule refused the call and the agent went another way."""
+        held = [f for f in self.get(signals.PERMISSION_DENIED) if scoring.is_guardrail_hit(f)]
+        if len(held) < MIN_EVENTS:
+            return
+        hooks = sum(f.detail.get("deliberate") == "hook" for f in held)
+        by = "a hook" if hooks * 2 > len(held) else "a deny rule in the settings"
+        ways = _top([f.detail["alternative"] for f in held if f.detail.get("alternative")])
+        went = (
+            f"and each time the agent went on without it ({_times(ways[0][1])} with "
+            f"{code(ways[0][0])})"
+            if ways
+            else "and each time the agent went on without retrying it"
+        )
+        reasons = _top([f.detail["hook_said"] for f in held if f.detail.get("hook_said")])
+        said = (
+            f' The hook says: "{self.quote(reasons[0][0], QUOTE_CHARS)}".'
+            if reasons and self.quote is not None
+            else ""
+        )
+        # where agents could have read it before trying
+        terms = [_bare(ways[0][0])] if ways else list(self.subjects)
+        written = self.guidance.mentions(terms, self.near) if self.guidance is not None else []
+        written = [m for m in written if m.file not in SETTINGS_FILES]
+        tell = code(_bare(ways[0][0])) if ways else "what to do instead"
+        if written:
+            closing = (
+                f"Nothing needs fixing: {_refs(written)} already names "
+                f"{tell if ways else 'it'}, and the refusal costs one round trip. If that "
+                "is too many, move that line to where agents read first."
+            )
+        else:
+            closing = (
+                "Nothing needs fixing in the guardrail. To save the round trip, say in "
+                f"AGENTS.md that this is refused and to use {tell}."
+                if ways
+                else "Nothing needs fixing in the guardrail. To save the round trip, say in "
+                "AGENTS.md that this is refused and what to do instead."
+            )
+        first = "try to change this file" if what.startswith("to ") else f"try {what} first"
+        self.add(
+            "the-guardrail-works",
+            f"The guardrail works; agents still {first}",
+            f"Agents tried {what} {_in_sessions(held)} and were refused by {by} before "
+            f"anything ran, {went}.{said} {closing}",
+            [signals.PERMISSION_DENIED],
+        )
+        if ways:
+            self.out[-1]["replacement"] = ways[0][0]
+        if written:
+            self.out[-1]["documented_in"] = [m.as_dict() for m in written]
+            self.out[-1]["documented_as"] = "instruction" if ways else "mention"
+
     def denials(self, what: str) -> None:
-        denied = self.get(signals.PERMISSION_DENIED)
+        self.guardrail(what)
+        denied = [f for f in self.get(signals.PERMISSION_DENIED) if not scoring.is_guardrail_hit(f)]
         if len(denied) < MIN_EVENTS:
             return
         hooks = sum(f.detail.get("variant") == "hook" for f in denied)
@@ -886,6 +951,36 @@ class _Rules:
             )
             return
         by = "a hook" if hooks * 2 > len(denied) else "permission settings"
+        deliberate = sum("deliberate" in f.detail for f in denied)
+        if deliberate * 2 > len(denied):
+            # A hook or a deny rule is there on purpose: an allow rule does not override
+            # a hook, and would contradict the rule.
+            by = "a hook" if hooks * 2 > len(denied) else "a deny rule in the settings"
+            around = sum("got_through" in f.detail for f in denied)
+            if around * 2 > len(denied):
+                self.add(
+                    "allow-or-document-the-boundary",
+                    "Tell agents this is off limits, or close the way around",
+                    f"Agents tried {what} {_in_sessions(denied)} and were refused by {by} "
+                    "before anything ran, and then got the same thing done anyway (the same "
+                    "command in another form, or the same file by another tool). If it is "
+                    "meant to be off limits, say so in AGENTS.md together with what to do "
+                    "instead, and check that the guardrail covers the form that got "
+                    "through; if it is fine, narrow the guardrail so the first attempt is "
+                    "not refused.",
+                    [signals.PERMISSION_DENIED],
+                )
+            else:
+                self.add(
+                    "allow-or-document-the-boundary",
+                    "Tell agents this is off limits, and what to do instead",
+                    f"Agents tried {what} {_in_sessions(denied)} and were refused by {by} "
+                    "before anything ran; the sessions end there, so no other way was "
+                    "seen. The guardrail is there on purpose: say in AGENTS.md that this "
+                    "is refused and what to do instead, or have the refusal itself say it.",
+                    [signals.PERMISSION_DENIED],
+                )
+            return
         self.add(
             "allow-or-document-the-boundary",
             "Allow it, or tell agents it is off limits",
@@ -1046,6 +1141,89 @@ class _Rules:
         )
         return True
 
+    def hook_habit(self, key: str) -> None:
+        """A pre-commit hook rewrote files and stopped the commit, session after session."""
+        stopped = [f for f in self.get(signals.COMMAND_FAILURE) if scoring.is_hook_habit(f)]
+        if not stopped:
+            return
+        ids = [h for f in stopped for h in f.detail.get("hook_ids", "").split("\n") if h]
+        hooks = [code(name) for name, _ in _top(ids)] if self.quote is not None else []
+        which = f" ({_and(hooks)})" if hooks else ""
+        run = (
+            f"`pre-commit run {_top(ids)[0][0]}`"
+            if hooks and len(set(ids)) == 1
+            else "`pre-commit run`"
+        )
+        self.add(
+            "format-before-committing",
+            f"Tell agents to run the formatter before {code(key)}",
+            f"{code(key)} was stopped {_in_sessions(stopped)} by a pre-commit hook that "
+            f"rewrote files{which}, and went through on the next attempt. Each time costs "
+            f"one round trip. Say in AGENTS.md to run the formatter ({run}, or the hook's "
+            "own command) before committing, or that a commit the hook modified files "
+            "for is to be staged and made again.",
+            [signals.COMMAND_FAILURE],
+        )
+
+    def timed_out(self, key: str, slow: Sequence[Finding]) -> bool:
+        """A command the harness cut off that needs another form, not more time.
+
+        Either agents then got the job done another way in two or more sessions (the
+        same command with a variable or an option, or another command of its kind), or
+        its output shows a watcher: it had finished and sat waiting for file changes.
+        """
+        if len(slow) < MIN_EVENTS:
+            return False
+        watchers = [f for f in slow if f.detail.get("watcher")]
+        watching = len(watchers) * 2 > len(slow)
+        ways: dict[str, set[str]] = {}
+        for finding in slow:
+            way = (
+                finding.detail.get("works_with")
+                or finding.detail.get("recovered_as")
+                or finding.detail.get("recovered_by")
+                or ""
+            )
+            if way and (self.quote is not None or "recovered_as" not in finding.detail):
+                ways.setdefault(way, set()).add(finding.unit)
+        sessions = {unit for units in ways.values() for unit in units}
+        ranked = sorted(ways, key=lambda way: (-len(ways[way]), way))
+        why = f"{code(key)} was cut off by the harness timeout {_in_sessions(slow)}" + (
+            ": its output shows that it had finished and was waiting for file changes "
+            "(watch mode), so more time would not have helped"
+            if watching
+            else ""
+        )
+        if len(sessions) >= MIN_EVENTS:
+            best = ranked[0]
+            others = [code(_bare(way)) for way in ranked[1:MAX_QUOTES]]
+            also = f" (also with {_and(others)})" if others else ""
+            self.add(
+                "use-the-working-command",
+                f"Tell agents to use {code(_bare(best))}",
+                f"{why}. In {_n(len(sessions), 'session')} the agent then got the same job "
+                f"done with {code(_bare(best))}{also}. Add a line to AGENTS.md such as: "
+                f'"{_agents_line(_place(key), "use " + _typed(best, _place(key)))}, not '
+                f'{code(_bare(key))}"'
+                + (", or make the command itself run once and exit." if watching else "."),
+                [signals.COMMAND_FAILURE],
+                self._use_instead(best, key, slow),
+                replacement=best,
+            )
+            return True
+        if watching:
+            self.add(
+                "run-it-once-not-in-watch-mode",
+                f"{code(key)} runs in watch mode by default",
+                f"{why}. Say in AGENTS.md how to run it once (the non-watch form: a `run` "
+                "subcommand, `CI=true`, an option such as `--watchAll=false` or "
+                "`--watch=false`), or make the command itself run once and exit where "
+                "agents call it.",
+                [signals.COMMAND_FAILURE],
+            )
+            return True
+        return False
+
     def _use_instead(self, better: str, worse: str, failures: Sequence[Finding]) -> Already:
         # A display key (`pnpm test (packages/web/)`) is nothing a file would say: the
         # command is looked for as it is typed, and the directory is said in words.
@@ -1073,7 +1251,9 @@ class _Rules:
         invocation = [f for f in invocation if not f.detail.get("timeout")]
         if attribution.is_inline_code(key):
             invocation = []  # ad-hoc code is not a command anyone could document
-        if len(slow) >= MIN_EVENTS:
+        if self.timed_out(key, slow):
+            failures = [f for f in failures if not f.detail.get("timeout")]
+        elif len(slow) >= MIN_EVENTS:
             self.add(
                 "give-it-more-time",
                 f"{code(key)} outlasts the harness timeout",
@@ -1284,6 +1464,7 @@ class _Rules:
                 "otherwise fix it, so that a red run means something again.",
                 [signals.COMMAND_FAILURE],
             )
+        self.hook_habit(key)
         rejected = [f for f in failures if f.detail.get("push_rejected") == "recurring"]
         if rejected:
             self.add(
@@ -1540,7 +1721,10 @@ def recommend(
     (default 1). ``guidance`` is what the repository's instruction files already
     say (see :mod:`agent_friction.guidance`); without it nothing counts as documented.
     """
-    if scoring.weak_only(findings):
+    held = scoring.weak_only(findings) and any(
+        scoring.is_guardrail_hit(f) or scoring.is_hook_habit(f) for f in findings
+    )
+    if scoring.weak_only(findings) and not held:
         return []  # nothing here that productive work does not also produce
     subjects: list[str] = []
     near, name = "", "it"
@@ -1551,6 +1735,12 @@ def recommend(
         base = located.group(1) if located else key
         subjects, near, name = [base], (located.group(2) if located else ""), code(base)
     rules = _Rules(findings, quote, shares or {}, guidance, subjects, near, name, known_targets)
+    if held:
+        # Nothing but weak evidence, some of it a guardrail that held: that much is said.
+        rules.guardrail("to change this file" if kind == model.FILE else code(key))
+        if kind == model.COMMAND:
+            rules.hook_habit(key)
+        return rules.out
     if kind == model.FILE:
         rules.file(facts)
         if facts is not None and not facts.exists and facts.removed_at:

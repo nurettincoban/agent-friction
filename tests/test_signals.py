@@ -1582,7 +1582,11 @@ def test_git_commit_no_ops_and_hook_auto_fixes_are_not_friction(tmp_path: Path) 
     hook = "ruff-format....Failed\n- hook id: ruff-format\n- files were modified by this hook"
     s.bash("git add -A && git commit -m 'feat: x'", hook, exit_code=1)
     s.bash("git add -A && git commit -m 'feat: x'", "[main 1a2b3c4] feat: x")
-    assert detect(s, tmp_path) == []
+    # the no-op is nothing; the hook's rewrite is kept for the engine, which reports it
+    # only as a habit of three or more sessions (see test_engine)
+    (kept,) = detect(s, tmp_path)
+    assert kept.detail["hook_rewrote"] == "1" and kept.detail["push_recovered"] == "1"
+    assert kept.detail["hook_ids"] == "ruff-format" and scoring.is_weak(kept)
 
     rejected = Session().user("commit it")  # a hook that just says no stays on the record
     rejected.bash("git commit -m 'x'", "mypy....Failed\n- hook id: mypy\nerror: x", exit_code=1)
@@ -5754,3 +5758,88 @@ def test_a_traceback_out_of_an_inline_snippet_is_the_snippets_failure(
     (found,) = detect(Session().user("go").bash(command, output, exit_code=1), tmp_path)
     assert keys(found)[0] == ("command", key)
     assert ("ambiguous_step" not in found.detail) == certain
+
+
+def test_selecting_no_tests_is_not_a_failure_of_the_test_command(tmp_path: Path) -> None:
+    none = "collected 12 items / 12 deselected / 0 selected\n\n===== 12 deselected in 0.10s ====="
+    s = Session().user("go").bash("pytest -k test_nope", none, exit_code=5)
+    assert detect(s, tmp_path) == []
+    s = (
+        Session()
+        .user("go")
+        .bash("pytest -m slow", "===== no tests ran, 12 deselected in 0.10s =====", exit_code=5)
+    )
+    assert detect(s, tmp_path) == []
+    # nothing collected at all is still on the record, as an ordinary failure
+    empty = "collected 0 items\n\n===== no tests ran in 0.01s ====="
+    (found,) = detect(Session().user("go").bash("pytest tests/x", empty, exit_code=5), tmp_path)
+    assert found.detail["variant"] == "ordinary"
+    # ... and so is a selection that ran and failed
+    red = "collected 12 items / 11 deselected / 1 selected\n\n=== 1 failed, 11 deselected in 1s ==="
+    (found,) = detect(Session().user("go").bash("pytest -k test_a", red, exit_code=1), tmp_path)
+    assert found.signal == signals.COMMAND_FAILURE
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The test in tests/test_app.py still fails, please fix it",
+        "the tests in test_app.py are still failing",
+        "Instead of a class, use a function in src/app.py",
+        "Instead of a class, use a function",
+    ],
+)
+def test_more_verdicts_that_count_only_when_the_agent_goes_back(tmp_path: Path, text: str) -> None:
+    (found,) = _reply(text, tmp_path, back=True)
+    assert found.signal == signals.USER_CORRECTION and keys(found) == [("file", "src/app.py")]
+    assert _reply(text, tmp_path, back=False) == []
+    assert detect(Session().user(text).edit("/repo/src/app.py"), tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Instead of the README, start with the changelog",
+        "instead of waiting, run the linter too",
+        "The test in tests/test_app.py fails on main, please fix it",
+        "Add a test in tests/test_app.py that still fails without the fix",
+        "Use a function instead of a class in the new module src/new.py",
+    ],
+)
+def test_wording_near_those_verdicts_is_not_one(tmp_path: Path, text: str) -> None:
+    assert _reply(text, tmp_path, back=True) == []
+
+
+def test_a_refusal_costs_its_own_round_trip_not_the_thinking_after_it(tmp_path: Path) -> None:
+    denied = "Claude requested permissions to use Bash, but you haven't granted it yet."
+    s = Session().user("go")
+    s.tool("Bash", {"command": "make deploy"}, denied, is_error=True, took=0.2)
+    s.tick(30).bash("ls", "x")  # half a minute of thinking before the next call
+    (found,) = detect(s, tmp_path)
+    assert found.signal == signals.PERMISSION_DENIED and found.interval is not None
+    start, end = found.interval
+    assert end - start < 5
+
+
+def test_a_guardrail_hit_is_marked_on_the_refusal_itself(tmp_path: Path) -> None:
+    hook = "PreToolUse:Bash hook error: [guard.py]: use make test"
+    s = Session().user("go").tool("Bash", {"command": "pytest -q"}, hook, is_error=True)
+    (found,) = detect(s.bash("make test", "5 passed"), tmp_path)
+    assert found.detail["guardrail"] == "1" and found.detail["alternative"] == "make test"
+    assert found.detail["hook_said"] == "use make test" and scoring.is_weak(found)
+    assert found.weight == signals.GUARDRAIL_SHARE
+    assert found.summary.endswith("it did not run; the agent then used `make test`")
+    # nothing of its kind afterwards: it moved on
+    s = Session().user("go").tool("Bash", {"command": "pytest -q"}, hook, is_error=True)
+    (found,) = detect(s.read("/repo/a.py"), tmp_path)
+    assert found.detail["guardrail"] == "1" and "alternative" not in found.detail
+    # the same command ran afterwards: the guardrail did not hold
+    s = Session().user("go").tool("Bash", {"command": "pytest -q"}, hook, is_error=True)
+    (found,) = detect(s.bash("pytest tests/", "5 passed"), tmp_path)
+    assert "guardrail" not in found.detail and found.detail["got_through"] == "1"
+    assert not scoring.is_weak(found) and found.weight == 1.0
+    # a refusal nobody configured is not a guardrail, whatever follows
+    ask = "Claude requested permissions to use Bash, but you haven't granted it yet."
+    s = Session().user("go").tool("Bash", {"command": "pytest -q"}, ask, is_error=True)
+    (found,) = detect(s.bash("make test", "5 passed"), tmp_path)
+    assert "guardrail" not in found.detail and "deliberate" not in found.detail

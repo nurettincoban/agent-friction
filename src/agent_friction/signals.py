@@ -17,7 +17,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 from agent_friction import model
-from agent_friction.adapters.common import QUESTION_TOOL_RE
+from agent_friction.adapters.common import QUESTION_TOOL_RE, strip_error_tags
 from agent_friction.attribution import (
     DESTRUCTIVE_PROGRAMS,
     HOUSEKEEPING_PROGRAMS,
@@ -707,8 +707,11 @@ def _added_flags(failed: str, passed: str) -> str:
         if word not in rest:
             return ""
         rest.remove(word)
-    plain = re.compile(r"--?[A-Za-z][\w-]*(?:=[\w./:@-]{1,40})?")
+    # `npm test -- --watchAll=false`: the separator that hands options to the script
+    plain = re.compile(r"--?[A-Za-z][\w-]*(?:=[\w./:@-]{1,40})?|--")
     if not rest or len(rest) > 3 or not all(plain.fullmatch(word) for word in rest):
+        return ""
+    if rest == ["--"]:
         return ""
     return " ".join(rest)
 
@@ -986,6 +989,18 @@ NOTHING_TO_COMMIT_RE = re.compile(
 )
 #: A pre-commit hook reformatted files and stopped the commit so they can be re-staged.
 HOOK_MODIFIED_RE = re.compile(r"files were modified by this hook|^Fixing \S+", re.I | re.M)
+#: The hooks that did so, as pre-commit names them under the line that failed.
+_HOOK_ID_RE = re.compile(
+    r"(?m)^- hook id: ([\w.-]{1,40})\n(?:- [^\n]*\n)*?- files were modified by this hook"
+)
+MAX_QUOTED_HOOKS = 3
+
+
+def _habit(finding: Finding) -> bool:
+    """A red run that is routine once and worth a line of guidance when it recurs."""
+    return "push_rejected" in finding.detail or "hook_rewrote" in finding.detail
+
+
 #: git subcommands that put files back the way they were.
 _GIT_UNDO_KEYS = frozenset({"git revert", "git reset", "git restore", "git stash"})
 
@@ -1457,6 +1472,14 @@ _SET_UPSTREAM_RE = re.compile(r"\s(?:-u|--set-upstream)(?=\s|=|$)")
 #: Exit statuses of a process that was ended from outside: SIGINT, SIGKILL, SIGTERM.
 _KILLED_EXIT_CODES = frozenset({130, 137, 143})
 _WATCH_RE = re.compile(r"\s(?:--watch(?:All)?|-w|watch)(?:\s|=|$)")
+#: What a test runner or a builder prints once it has finished and sits waiting for the
+#: next change: it is in watch mode, asked for or not (jest, vitest, tsc, webpack, nodemon).
+WATCH_OUTPUT_RE = re.compile(
+    r"\bWatch Usage\b|\bwait(?:ing)? for (?:file )?changes\b|\bwatching for (?:file )?changes\b"
+    r"|\bpress q to quit\b|\bpress h to show help\b|\bWatching for file changes\b"
+    r"|\bwatching (?:path|extensions)\b|\bto restart at any time, enter `rs`",
+    re.I,
+)
 #: "bash: pnpm: command not found" and its variants: the program a shell could not find.
 #: Also cmd.exe ("'x' is not recognized as an internal or external command") and
 #: PowerShell ("The term 'x' is not recognized as the name of a cmdlet, function, ...").
@@ -1967,6 +1990,24 @@ _INSTRUCTION_CUES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
             + ")",
         ),
         (
+            # the outcome, with where it is: "The test in tests/test_app.py still fails"
+            "still failing, in a file",
+            _OPEN
+            + r"(?:the |my |our )?(?:"
+            + _RESULT_NOUN
+            + r") (?:in|for|of|from) "
+            + _FILE_WORD
+            + r"(?:'s| is| are)? (?:"
+            + _STILL
+            + ")",
+        ),
+        (
+            # one construct named in place of another: "Instead of a class, use a function"
+            "instead of X, use Y",
+            _OPEN + r"instead of (?:an? |the |that |this |those |using )?[\w-]+(?: [\w-]+){0,2}"
+            r",? (?:please )?(?:use|write|make it|keep)\b",
+        ),
+        (
             "restore the old …",
             r"\brestore (?:(?:the|my|that|this) (?:old|original|previous|earlier|former)\b"
             r"|(?:it|that)\b)",
@@ -2199,6 +2240,9 @@ class DetectContext:
     #: True if an absolute path lies in the git repository that the scanned directory
     #: is a part of (always false when the scanned directory is the repository).
     enclosing: Callable[[str], bool] = lambda absolute: False
+    #: True if a deny rule of the repository's settings refuses this call:
+    #: ``(tool name, command lines, repo-relative file)``.
+    denied_by_rule: Callable[[str, Sequence[str], str], bool] = lambda tool, commands, rel: False
 
 
 @dataclass
@@ -2211,6 +2255,37 @@ class _Action:
     #: A shell call that is not this repository's command (a script that lives outside
     #: it) but was run with the shell standing inside it: it may have changed files here.
     ran_here: bool = False
+
+
+#: pytest's summary when a `-k`/`-m` selection left nothing to run.
+_DESELECTED_ALL_RE = re.compile(
+    r"(?m)^=+ (?:no tests ran, )?\d+ deselected(?:, \d+ warnings?)? in [\d.]+"
+    r"|\b\d+ deselected / 0 selected\b"
+)
+#: A replacement command is quoted as typed only if it is this short and this plain.
+MAX_TYPED_CHARS = 48
+_TYPED_RE = re.compile(r"[\w./:@=+ -]+")
+
+
+def _index(steps: Sequence[Step], step: Step | None) -> int:
+    """Where ``step`` stands on its line (0 if it is not on it)."""
+    return next((i for i, other in enumerate(steps) if other is step), 0)
+
+
+#: A call that never ran: refused, declined, interrupted or not started.
+_NEVER_RAN = frozenset(
+    {model.ERR_DENIED, model.ERR_REJECTED, model.ERR_INTERRUPTED, model.ERR_NOT_RUN}
+)
+#: What a hook's refusal says before the hook's own words.
+_HOOK_SAID_RE = re.compile(
+    r"^\s*(?:\S* ?(?:PreToolUse|PermissionRequest):\S* hook (?:blocking error|error|denied)"
+    r"(?: from command)?|[^\n:]{0,80}\bhook (?:returned blocking error|blocking error|blocked this)"
+    r"|\S+ operation blocked by hook)\s*:?\s*(?:-\s*)?(?:\[[^\]\n]*\]\s*:?\s*)?",
+    re.I,
+)
+#: The weight of a refusal by a guardrail that held (a hook, a deny rule), like any
+#: event that the setup meant to happen.
+GUARDRAIL_SHARE = 0.3
 
 
 def _span(action: _Action) -> tuple[float, float] | None:
@@ -2471,6 +2546,8 @@ class _Detector:
         # repository: seen, and deliberately not counted as this repository's friction.
         self.outside: list[int] = []
         self.nearby: list[int] = []
+        #: Calls a hook or a rule refused: the finding, the call, the command key refused.
+        self.refused: list[tuple[Finding, _Action, str]] = []
         self._durations: dict[str, list[tuple[_Action, float]]] = {}
         #: Red runs taken off the record: (transcript line, seconds the run took, reason)
         self.dropped: list[tuple[int, float, str]] = []
@@ -2803,6 +2880,7 @@ class _Detector:
                 self.skipped_events += 1
         self._settle_correction()
         self._end_turn()
+        self._settle_guardrails(items)
         state = self.state
         still_red = set(state.red) | set(state.red_then_edited) | set(state.red_then_ran)
         for finding in self.findings:
@@ -3558,7 +3636,7 @@ class _Detector:
         for table in (state.red_then_edited, state.red_then_ran):
             for finding in table.pop(key, []):
                 state.ran_after.pop(id(finding), None)
-                if id(finding) not in state.looped and "push_rejected" not in finding.detail:
+                if id(finding) not in state.looped and not _habit(finding):
                     closed.add(id(finding))
         if closed:
             state.cycles.pop(key, None)
@@ -3785,6 +3863,22 @@ class _Detector:
             for finding, failed_key, left in state.pending:
                 if failed_key == key:
                     setup = state.setup_after.pop(id(finding), "")
+                    if (
+                        not setup
+                        and state.changes_at.get(id(finding)) == state.changes
+                        and not _activation(cmd, finding.detail["command"])
+                    ):
+                        # `npm install; npm test` on one line: the step in front of the
+                        # command that now passes is what the red run lacked
+                        was = finding.detail["command"]
+                        leading = [
+                            shown(setup_label(step))
+                            for step in cmd.steps[: _index(cmd.steps, located)]
+                            if is_setup_command(step.key)
+                            and inner_key(step.key) != inner_key(key)
+                            and setup_label(step) not in was
+                        ]
+                        setup = " && ".join(dict.fromkeys(leading))
                     # ... if it is the line that failed which now passes, not another one
                     if setup and same_invocation(
                         finding.detail["command"], action.call.command or "", key, loose=True
@@ -3890,6 +3984,15 @@ class _Detector:
                     if local is not None and not better.startswith("<"):
                         better = "./" + better  # as it must be typed: `./bin/zebractl`
                     finding.detail["recovered_by"] = better
+                    as_typed = " ".join([located.program, *located.args]) if located else ""
+                    if (
+                        self.ctx.command_key is str
+                        and as_typed.startswith(key)
+                        and len(as_typed) <= MAX_TYPED_CHARS
+                        and _TYPED_RE.fullmatch(as_typed)
+                    ):
+                        # as it was typed, where that is short and plain: `npx vitest run`
+                        finding.detail["recovered_as"] = as_typed
                     state.replaced.setdefault(failed_key, []).append(finding)
                     self._recover(finding, action)
                 else:  # an unrelated command (git, housekeeping, another job) fixes nothing
@@ -3959,6 +4062,11 @@ class _Detector:
                 self._silent_rerun(key, action.call.command or "", result.output)
             return
         call = action.call
+        if code == 5 and command_role(key) == "test" and _DESELECTED_ALL_RE.search(result.output):
+            # `pytest -k name` that matched nothing: every test was collected and all of
+            # them were deselected. The selection missed; nothing about how tests are
+            # run here went wrong, and nothing was red.
+            return
         timed_out = HARNESS_TIMEOUT_RE.match(result.output) is not None
         if result.harness_error and code is None and not timed_out:
             return  # the harness's own error message: the command was never executed
@@ -4083,6 +4191,13 @@ class _Detector:
             detail["own_module"] = "1"
         if pushed and environment is None and not invocation:
             detail["push_rejected"] = "1"
+        if hook_fixed:
+            # Stopped by a hook that rewrote files, to be committed again: routine once,
+            # and a habit worth a line of guidance when every session pays for it.
+            detail["hook_rewrote"] = "1"
+            hooks = _HOOK_ID_RE.findall(result.output)
+            if hooks and self.ctx.command_key is str:
+                detail["hook_ids"] = "\n".join(dict.fromkeys(hooks[:MAX_QUOTED_HOOKS]))
         if unset and environment is None and not invocation:
             detail["no_upstream"] = "1"
         if environment is not None:
@@ -4127,6 +4242,15 @@ class _Detector:
                     detail["after_edit"] = "1"
         if timed_out:
             detail["timeout"] = "1"
+            if not DEV_SERVER_RE.search(call.command or "") and (
+                WATCH_OUTPUT_RE.search(result.output) or _WATCH_RE.search(call.command or "")
+            ):
+                # nobody asked for a watcher, or it was red before it sat down to wait
+                detail["watcher"] = "1"
+                summary = (
+                    f"`{shown(key)}` ran until the harness timed it out: it was in watch "
+                    "mode, waiting for file changes, and never exits on its own"
+                )
             if DEV_SERVER_RE.search(call.command or ""):
                 detail["server"] = "1"
                 summary = (
@@ -4334,7 +4458,7 @@ class _Detector:
         fixed: set[int] = set()
         for failed_key in [k for k in state.red_then_edited if closes(k)]:
             for finding in take(state.red_then_edited, failed_key):
-                if "push_rejected" in finding.detail:
+                if _habit(finding):
                     # Rejected, pulled, pushed: no file was fixed, the branch was behind.
                     # Once is routine; whether it is a habit, the engine can tell.
                     finding.detail["push_recovered"] = "1"
@@ -4373,7 +4497,7 @@ class _Detector:
         # environment, and the command that put it right is worth writing down.
         for failed_key in [k for k in state.red_then_ran if closes(k)]:
             for finding in take(state.red_then_ran, failed_key):
-                if "push_rejected" in finding.detail:
+                if _habit(finding):
                     finding.detail["push_recovered"] = "1"
                     state.ran_after.pop(id(finding), None)
                     continue
@@ -4743,6 +4867,7 @@ class _Detector:
         targets = self._action_targets(action)
         if call.op in (model.OP_READ, model.OP_EDIT, model.OP_WRITE) and not targets:
             return  # a file outside the repo
+        step: Step | None = None
         if call.op == model.OP_SHELL:
             if action.cmd is None:
                 return
@@ -4779,15 +4904,76 @@ class _Detector:
         what = f"`{what}`" if targets and targets[0].kind == model.COMMAND else what
         denied = f"{tool} on {what}" if what else tool
         excerpt = [f"$ {call.command}"] if call.op == model.OP_SHELL and call.command else []
-        self._emit(
+        finding = self._emit(
             PERMISSION_DENIED,
             result,
             f"{denied} was denied by {by}; it did not run",
             targets,
             excerpt="\n".join([*excerpt, result.output]),
-            interval=self._round_trip(action),
+            # The refusal itself: the call and its answer. What the agent thought about
+            # afterwards is its next step, not time the refusal took.
+            interval=_capped(self._started(action), _epoch(result)),
             detail={"variant": result.reason or "permission", "command": call.command or ""},
         )
+        key = step.key if call.op == model.OP_SHELL and step is not None else ""
+        self.refused.append((finding, action, key))
+
+    def _settle_guardrails(self, items: Sequence[_Action | Event]) -> None:
+        """Mark the refusals that are a guardrail doing its job.
+
+        A hook, or a deny rule of the repository's settings, is there on purpose. If
+        the agent never got the refused thing to run afterwards (the same command, a
+        change to the same file by any means), the guardrail held and the agent went
+        another way: a weak event, with the way it went where that can be told.
+        """
+        position = {id(item): index for index, item in enumerate(items)}
+        for finding, action, key in self.refused:
+            call, result = action.call, action.result
+            if finding not in self.findings or result is None:
+                continue
+            if result.reason == "hook":
+                finding.detail["deliberate"] = "hook"
+                said = _HOOK_SAID_RE.sub("", strip_error_tags(result.output), count=1).strip()
+                if said:
+                    finding.detail["hook_said"] = said
+            elif result.reason in (None, "", "permission"):
+                steps = action.cmd.steps if action.cmd is not None else ()
+                lines = [call.command or "", *(" ".join([s.program, *s.args]) for s in steps)]
+                if self.ctx.denied_by_rule(call.tool or "", lines, action.file or ""):
+                    finding.detail["deliberate"] = "rule"
+            if "deliberate" not in finding.detail:
+                continue
+            files = {t.key for t in finding.targets if t.kind == model.FILE}
+            got_through, alternative, went_on = False, "", False
+            for later in items[position[id(action)] + 1 :]:
+                if not isinstance(later, _Action) or later.result is None:
+                    continue
+                if later.result.error in _NEVER_RAN:
+                    continue
+                went_on = True
+                keys = {s.key for s in later.cmd.steps} if later.cmd is not None else set()
+                changed = set(self._shell_changed(later) or ())
+                if later.call.op in (model.OP_EDIT, model.OP_WRITE) and later.file:
+                    changed.add(later.file)
+                if (key and key in keys) or (files & changed):
+                    got_through = True
+                    break
+                if key and not alternative and later.result.ok and later.cmd is not None:
+                    for step in later.cmd.steps:
+                        if is_replacement(key, step.key):
+                            alternative = self._label(step.key, step, later.call.cwd)
+                            break
+            if got_through:
+                finding.detail["got_through"] = "1"  # it got the same thing done anyway
+            if got_through or not went_on:
+                continue  # ... or the session ends here: nobody knows what came next
+            finding.detail["guardrail"] = "1"
+            finding.weight = min(finding.weight, GUARDRAIL_SHARE)
+            if alternative:
+                finding.detail["alternative"] = alternative
+            finding.summary += (
+                f"; the agent then used `{alternative}`" if alternative else "; the agent moved on"
+            )
 
     def _shell_changed(self, action: _Action) -> list[str] | None:
         """Repo files a successful shell edit names; ``None`` if the call is no such edit.

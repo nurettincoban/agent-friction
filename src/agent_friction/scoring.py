@@ -17,6 +17,7 @@ from agent_friction.signals import (
     HUMAN_REWORK,
     NO_CONVERGENCE,
     PATH_MISS,
+    PERMISSION_DENIED,
     PROBABLE_CORRECTION,
     READ_LOOP,
     RETRY_LOOP,
@@ -340,6 +341,8 @@ def explain(
     capped: bool = False,
     episodes: int = 0,
     ordinary: int = 0,
+    guardrail: int = 0,
+    rewritten: int = 0,
 ) -> str:
     """One-sentence reason for a hotspot's score and confidence.
 
@@ -376,11 +379,30 @@ def explain(
         f"{_plural(events, 'friction event')} in {where} ({top}); "
         f"{level} confidence because {reason}."
     )
-    if capped:
+    held = (
+        f" {guardrail} of the events {'is a guardrail' if guardrail == 1 else 'are guardrails'}"
+        f" doing {'its' if guardrail == 1 else 'their'} job (a hook or a deny rule refused "
+        f"the call and the agent went another way)"
+        if guardrail
+        else ""
+    )
+    if capped and rewritten:
+        text += (
+            f" {'The event is' if rewritten == 1 else 'The events are'} a pre-commit hook "
+            "rewriting files, after which the commit went through: routine each time, a "
+            f"habit across sessions. The score is capped at {WEAK_ONLY_SCORE_CAP:g}."
+        )
+    elif capped and guardrail:
+        text += (
+            f"{held}; with nothing else here but weak signals the score is capped at "
+            f"{WEAK_ONLY_SCORE_CAP:g}."
+        )
+    elif capped:
         text += (
             f" Only weak signals, which also accompany productive work: the score is capped "
             f"at {WEAK_ONLY_SCORE_CAP:g} and nothing is recommended."
         )
+
     elif ordinary:
         kind = "is an ordinary failure" if ordinary == 1 else "are ordinary failures"
         text += (
@@ -389,12 +411,24 @@ def explain(
             f"and in sessions with nothing else they cannot lift the score past "
             f"{WEAK_ONLY_SCORE_CAP:g}."
         )
+    if guardrail and not capped:
+        text += f"{held}: that does not count towards confidence."
     return text
 
 
 def is_ordinary_failure(finding: Finding) -> bool:
     """A command failure that is routine on its own (see `is_weak`)."""
     return finding.signal == COMMAND_FAILURE and is_weak(finding)
+
+
+def is_guardrail_hit(finding: Finding) -> bool:
+    """A call that a hook or a deny rule refused, after which the agent went another way."""
+    return finding.signal == PERMISSION_DENIED and finding.detail.get("guardrail") == "1"
+
+
+def is_hook_habit(finding: Finding) -> bool:
+    """A commit that a pre-commit hook stopped to rewrite files, session after session."""
+    return finding.signal == COMMAND_FAILURE and finding.detail.get("hook_rewrote") == "recurring"
 
 
 def is_weak(finding: Finding) -> bool:
@@ -420,6 +454,8 @@ def is_weak(finding: Finding) -> bool:
     if finding.signal == STALE_EDIT:
         # a new file's write refused by the harness's read-first rule
         return finding.detail.get("variant") == "unread-write"
+    if is_guardrail_hit(finding):
+        return True  # the setup meant this call to be refused, and it was
     if finding.signal == PATH_MISS:
         return finding.detail.get("probe") == "1"  # looking for an optional README, .env, ...
     return finding.signal in WEAK_ALONE_SIGNALS
