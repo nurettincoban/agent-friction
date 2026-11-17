@@ -1214,7 +1214,10 @@ command's" below.
      ERR! Test failed.`, the red step is `npm test`, although `npm ERR!` fits
      `npm run lint` just as well;
   3. the runner's generic line (`npm ERR!`, `make: ***`, `error: could not
-     compile`), for the first step it fits, as before.
+     compile`), for the first step it fits, as before;
+  4. where the output decides nothing and the line ends in `; last` with a
+     non-zero status, the status is that last step's own: `make build;
+     python3 -c "..."` failing is the snippet failing.
 
   The excerpt of such a line ends at the line that decided it: the red
   step's own verdict, or before it a line that reads as a setup/invocation
@@ -1331,7 +1334,29 @@ command's" below.
     treated as if nothing had run: the red run stays what it was, and a
     test that then passes untouched is judged by the flaky rule;
   - **version control** (`git`, `gh`) is never the fix: the failure is
-    dropped.
+    dropped;
+  - **a command run to be read** (`mytool dump | head -3`, `... | less`,
+    `... | grep x`: piped into a pager or filter) is a look and never the
+    fix, unless it is a known setup step (`npm install | tail -3`).
+
+  **It has to be the line that failed which passes.** A command in between
+  gets the credit only if the green run is the red one again:
+  - for a known setup step, the same things named (switches aside; the
+    green run may name fewer: `pytest` after `pytest tests/test_a.py -x`);
+  - for any other command, the same argument line, a launcher or
+    activation in front aside (`uv run pytest -q` is `pytest -q`).
+
+  Otherwise the agent corrected its own invocation, and the failure is
+  dropped as normal work, whatever ran in between: `python
+  scripts/analyze.py --month 2026-13` (ValueError), `mytool dump`, `python
+  scripts/analyze.py --month 2026-12`. For **ad-hoc code** (`python -c`, a
+  heredoc, and what is written on the line of `psql -c`, `mysql -e`,
+  `sqlite3`, `jq`, `awk`, `sed`) the text of the snippet is part of the
+  line: a snippet that failed and another that passed is the agent
+  rewriting its code, an edit like any other, and dropped, with or without
+  a command in between. The same goes for a command with no role as a
+  check (a script, a tool) that failed and then passed with other
+  arguments and nothing changed.
 
   A setup step that succeeds is never itself "the check going green": `npx
   playwright install` running fine says nothing about `npm run e2e`.
@@ -1349,7 +1374,8 @@ command's" below.
   the advice is that step, never both), it is a standing failure, not "a red test during development":
   those failures count in full, claim their run time, are attributed to the
   test file too if it exists, and lead to `say-if-it-is-known-broken` ("fix
-  it, or mark it as a known failure and say so"). The test is named only
+  it, or mark it as a known failure and say so"). The advice is given once: on
+  the test file's row, or on the command's row for a test without a file. The test is named only
   with excerpts: its name comes from command output. Names are read from
   pytest (`FAILED tests/test_a.py::test_x`), go (`--- FAIL: TestX`), jest
   (`● cart › adds an item` under `FAIL src/cart.test.ts`, named
@@ -1620,7 +1646,9 @@ blocked by hook: ...", "Bash operation blocked by hook: ..."), or a safety
 check ("Permission for this command was denied by ..."), or the harness
 refusing a command pattern outright ("Blocked: sleep 30 followed by: ...";
 variant `blocked`, with advice to document the alternative it suggests rather
-than to add an allow rule). Who refused is said where the transcript says
+than to add an allow rule; attributed to the step the message names first,
+here `sleep`, not to whatever the line ends in, and to no command if it
+names none). Who refused is said where the transcript says
 it: "denied by the auto-mode classifier" (variant `classifier`: "Permission
 for this action was denied by the Claude Code auto mode classifier") and
 "denied by a built-in safety check" (variant `safety`), each only when the

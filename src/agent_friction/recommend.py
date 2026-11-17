@@ -397,7 +397,11 @@ class _Rules:
                     list(already[0]),
                     self.near,
                     affirmed=rule_id in AFFIRMED_RULES,
-                    context="file" if rule_id == "edit-the-source-not-the-output" else "command",
+                    context="file"
+                    if rule_id == "edit-the-source-not-the-output"
+                    else "step"
+                    if rule_id == "document-the-setup-step"
+                    else "command",
                 )
             if mentions and already is not None:
                 title, detail = already[1], f"{_refs(mentions)} already {already[2]}"
@@ -565,11 +569,19 @@ class _Rules:
 
     # ---- file rules ------------------------------------------------------------------
 
-    def standing_test(self, when: str) -> bool:
-        """The same test is red in session after session and nothing makes it pass."""
+    def standing_test(self, when: str, command: bool = False) -> bool:
+        """The same test is red in session after session and nothing makes it pass.
+
+        The advice is given once: on the test's file where the failure is attributed
+        to one, and on the command only for a test that has no file in the repository.
+        """
         known = [f for f in self.get(signals.COMMAND_FAILURE) if f.detail.get("standing_test")]
         if not known:
             return False
+        if command:
+            known = [f for f in known if not any(t.kind == model.FILE for t in f.targets)]
+            if not known:
+                return True  # said on the file's row; nothing more to say here
         tests = _top([f.detail["standing_test"] for f in known], 3)
         if self.quote is not None:
             named = _and([code(self.quote(test, QUOTE_CHARS)) for test, _ in tests])
@@ -1198,7 +1210,7 @@ class _Rules:
                 [signals.RETRY_LOOP],
             )
         standing = [f for f in failures if f.detail.get("recurring_red")]
-        if self.standing_test(f"when agents ran {code(key)}"):
+        if self.standing_test(f"when agents ran {code(key)}", command=True):
             pass  # the test is named: that says more than "keeps ending red"
         elif standing and not self.get(signals.NO_CONVERGENCE):
             self.add(

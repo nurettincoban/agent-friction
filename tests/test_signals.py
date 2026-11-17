@@ -1727,7 +1727,7 @@ def test_calls_the_harness_never_started_are_not_failures(tmp_path: Path) -> Non
     )
     (denied,) = detect(blocked, tmp_path)
     assert denied.signal == signals.PERMISSION_DENIED and denied.detail["variant"] == "blocked"
-    assert denied.summary == "Bash on `gh run view` was denied by the harness; it did not run"
+    assert denied.summary == "Bash on `sleep` was denied by the harness; it did not run"
 
     # a command that really ran and printed the same words did fail
     ran = Session().user("go").bash("npm test", "Cancelled: parallel tool call", exit_code=1)
@@ -5163,3 +5163,56 @@ def test_a_traceback_printed_by_a_later_look_is_not_the_commands(tmp_path: Path)
     ):
         s = Session().user("go").bash(command, trace)
         assert len(detect(s, tmp_path)) == 1, command
+
+
+def test_after_a_semicolon_the_status_is_the_last_steps_own(tmp_path: Path) -> None:
+    trace = "Traceback (most recent call last):\n  File \"<string>\", line 1\nKeyError: 'k'"
+    for first, said in (("make build", "built"), ("pytest -q 2>&1 | tail -3", "5 passed in 0.1s")):
+        s = Session().user("go")
+        s.bash(f"{first}; python3 -c 'print(d[\"k\"])'", f"{said}\n{trace}", exit_code=1)
+        (failure,) = detect(s, tmp_path)
+        assert keys(failure) == [("command", "python <inline>")]
+        assert failure.summary == "`python <inline>` failed (exit 1; ordinary failure)"
+    # with `&&` the output has to say which step it was, as before
+    s = Session().user("go").bash("make build && pytest -q", "boom", exit_code=1)
+    (failure,) = detect(s, tmp_path)
+    assert "the output does not show which" in failure.summary
+
+
+def test_a_harness_block_names_the_step_it_objects_to(tmp_path: Path) -> None:
+    s = Session().user("go")
+    s.tool(
+        "Bash",
+        {"command": "sleep 100; cat out.log"},
+        "Blocked: sleep 100 followed by: cat out.log. To wait for a condition, use Monitor",
+        is_error=True,
+    )
+    (denied,) = detect(s, tmp_path)
+    assert denied.signal == signals.PERMISSION_DENIED and keys(denied) == [("command", "sleep")]
+
+
+def test_a_search_that_confirms_a_rename_is_not_a_miss(tmp_path: Path) -> None:
+    s = Session().user("rename it").grep("OldName", "/repo/src", found=True)
+    s.edit(A, "OldName", "NewName").grep("OldName", "/repo/src")
+    assert detect(s, tmp_path) == []
+    s = Session().user("rename it").bash("grep -rn OldName src", "src/a.py:1:OldName")
+    s.bash("sed -i s/OldName/NewName/g src/a.py", "").bash("grep -rn OldName src", "", exit_code=1)
+    assert detect(s, tmp_path) == []
+
+
+def test_what_counts_as_the_same_invocation() -> None:
+    from agent_friction.attribution import looked_at, same_invocation
+
+    assert same_invocation("pytest -q", "uv run pytest -q", "pytest", "uv run pytest")
+    assert same_invocation("pytest -q", "source .venv/bin/activate && pytest -q", "pytest")
+    assert not same_invocation("pytest tests/a.py -x", "pytest tests/a.py", "pytest")
+    assert same_invocation("pytest tests/a.py -x", "pytest tests/a.py", "pytest", loose=True)
+    assert same_invocation("pytest tests/a.py", "pytest", "pytest", loose=True)
+    month = "python scripts/a.py --month 2026-1{}"
+    assert not same_invocation(month.format(3), month.format(2), "python scripts/a.py", loose=True)
+    sql = 'psql -c "select {} from users"'
+    assert not same_invocation(sql.format("nme"), sql.format("name"), "psql", loose=True)
+    assert same_invocation(sql.format("name"), sql.format("name"), "psql")
+    assert looked_at("mytool dump | head -3") == {"mytool"}
+    assert looked_at("npm install 2>&1 | tail -3; mytool sync") == {"npm"}
+    assert looked_at("mytool sync && pytest") == frozenset()

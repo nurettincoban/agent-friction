@@ -20,7 +20,7 @@ with the evidence quoted so you can check it yourself.
 ```console
 $ agent-friction scan
 agent-friction · shopfront
-6 sessions · 74 tool calls · 33 friction events (11 weak) · ~9m lost · 4 human corrections
+6 sessions · 74 tool calls · 33 friction events (11 weak) · ~9m lost · 4 human corrections · 2026-10-26 → 2026-11-12
 
 Files where agents struggle
   score            path                                   sess events    lost  top signals

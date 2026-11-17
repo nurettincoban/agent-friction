@@ -38,13 +38,16 @@ from agent_friction.attribution import (
     is_setup_command,
     is_setup_step,
     is_shell_edit,
+    is_snippet,
     is_windows_path,
+    looked_at,
     may_change_files,
     normalize_argv,
     objectionable_step,
     parse_command,
     path_candidates,
     prints_another_file,
+    same_invocation,
     setup_label,
     status_is_last_steps,
     written_file,
@@ -3269,11 +3272,12 @@ class _Detector:
             # The command the line is judged by is never its own fix, so it counts after.
             at = next((i for i, step in enumerate(steps) if step.key == cmd.key), len(steps))
             before, after = steps[:at], steps[at:]
+        looked = looked_at(action.call.command or "") if before or after else frozenset()
         for step in before:
-            self._possibly_changed(step, action.call.cwd)
+            self._possibly_changed(step, action.call.cwd, looked)
         self._judge_shell(action, cmd, result, edit)
         for step in after:
-            self._possibly_changed(step, action.call.cwd)
+            self._possibly_changed(step, action.call.cwd, looked)
 
     def _just_imported(self, result: Event) -> bool:
         """Is the module a failure reports missing one that a recent edit imports?"""
@@ -3288,7 +3292,9 @@ class _Detector:
         )
         return bool(top) and any(wanted.search(text) for text in self.state.added)
 
-    def _possibly_changed(self, step: Step, cwd: str | None) -> None:
+    def _possibly_changed(
+        self, step: Step, cwd: str | None, looked: frozenset[str] = frozenset()
+    ) -> None:
         """``step`` ran and may have changed something (see ``may_change_files``)."""
         if is_inline_code(step.key):
             # `python -c ...`, `node -e ...`, a heredoc: every such snippet has the same
@@ -3300,6 +3306,8 @@ class _Detector:
         setup = copied is not None or is_setup_step(step)
         if not setup and not may_change_files(step.key):
             return
+        if not setup and step.program in looked:
+            return  # `mytool dump | head`: run to be read, which changes nothing
         # Version control records work, it does not make a failing command pass.
         named = step.program not in ("git", "gh", "glab")
         label = copied if copied and self.ctx.command_key is str else None
@@ -3481,7 +3489,10 @@ class _Detector:
             for finding, failed_key, left in state.pending:
                 if failed_key == key:
                     setup = state.setup_after.pop(id(finding), "")
-                    if setup:
+                    # ... if it is the line that failed which now passes, not another one
+                    if setup and same_invocation(
+                        finding.detail["command"], action.call.command or "", key, loose=True
+                    ):
                         finding.detail.setdefault("fixed_by_setup", setup)
                     # The same command, somewhere else or under another name
                     label = shown(key)
@@ -3638,6 +3649,19 @@ class _Detector:
         if code not in INVOCATION_EXIT_CODES and _REGISTRY_AUTH_RE.search(result.output):
             invocation = False  # the registry wants a login: see `environment_error`
         step, certain = self._blamed_step(cmd, result.output)
+        last = cmd.steps[-1] if cmd.steps else None
+        if (
+            not hidden
+            and not certain
+            and result.error == model.ERR_EXIT
+            and last is not None
+            and last.key
+            and not last.inspection
+            and status_is_last_steps(call.command or "")
+        ):
+            # `make build; python3 -c "..."` exiting non-zero: after a `;` the status is
+            # the last step's own, so that is the step that failed, whatever came before.
+            step, certain = last, True
         if red_step is not None:
             step, certain = red_step, True
             invocation = bool(setup_error)
@@ -3994,6 +4018,16 @@ class _Detector:
                 ran = state.ran_after.pop(id(finding), [])
                 setups = list(dict.fromkeys(label for label, setup in ran if setup))
                 others = [label for label, setup in ran if not setup]
+                red_line = finding.detail.get("command", "")
+                if line and failed_key == actual and id(finding) not in state.looped:
+                    if not same_invocation(red_line, line, failed_key, actual, loose=True):
+                        # The agent changed what it ran (another snippet, another value)
+                        # and that passed: it corrected its own invocation. Nothing that
+                        # ran in between gets the credit.
+                        fixed.add(id(finding))
+                        continue
+                    if not setups and not same_invocation(red_line, line, failed_key, actual):
+                        others = []  # ... nor does an unrelated command, for a line that changed
                 if failed_key != actual and self._promote(finding):
                     # A package of the repo could not be imported, and what passed in
                     # the end was another command: that, not the setup step, is the lead.
@@ -4017,6 +4051,19 @@ class _Detector:
         # Green with no change in between: those red runs stay on the record for good.
         for failed_key in [k for k in state.red if closes(k)]:
             for finding in take(state.red, failed_key):
+                if (
+                    line
+                    and (is_snippet(failed_key) or command_role(failed_key) is None)
+                    and failed_key == actual
+                    and finding.detail.get("variant") == "ordinary"
+                    and id(finding) not in state.looped
+                    and not same_invocation(finding.detail.get("command", ""), line, failed_key)
+                ):
+                    # Ad-hoc code that failed and other ad-hoc code that passed: the
+                    # agent rewrote its snippet, which is an edit like any other. So is
+                    # a script given another value (`--month 2026-13`, then `2026-12`).
+                    fixed.add(id(finding))
+                    continue
                 if failed_key != actual:
                     # the package was there; another way of running the job found it
                     promoted = self._promote(finding)
@@ -4332,6 +4379,14 @@ class _Detector:
             # can say which step was the problem. Otherwise: the destructive step.
             said = result.output.replace(call.command or "\0", " ")
             step = denied_step(action.cmd, said)
+            if result.reason == "blocked":
+                # "Blocked: sleep 100 followed by: cat out.log": the harness names what
+                # it objects to first. That is the step, not whatever the line ends in.
+                first = re.search(r"\bBlocked: (?:\S+/)?([\w.-]+)", result.output[:200])
+                step = next(
+                    (s for s in action.cmd.steps if first and first.group(1) == s.program), None
+                )
+                targets = []
             if self._elsewhere(step, call.cwd):
                 self.outside.append(result.line)
                 return

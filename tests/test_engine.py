@@ -2302,16 +2302,17 @@ def test_the_same_red_test_in_three_sessions_is_a_standing_failure(tmp_path: Pat
 
     out = scan(tmp_path / "five", sessions(5), repo)
     (command,) = out["commands"]
-    (advice,) = command["recommendations"]
-    assert command["score"] > 19 and advice["id"] == "say-if-it-is-known-broken"
-    assert advice["title"] == "`tests/test_legacy.py::test_old` is red session after session"
+    # the advice is given once, on the test's file; the command's row only counts it
+    assert command["score"] > 19 and command["recommendations"] == []
     (row,) = out["hotspots"]
     assert row["path"] == "tests/test_legacy.py" and row["signals"] == {"command-failure": 5}
-    assert [r["id"] for r in row["recommendations"]] == ["say-if-it-is-known-broken"]
+    (advice,) = row["recommendations"]
+    assert advice["id"] == "say-if-it-is-known-broken"
+    assert advice["title"] == "`tests/test_legacy.py::test_old` is red session after session"
     # without excerpts the test is not named, the file (a repo path) still is
     bare = scan(tmp_path / "bare", sessions(5), repo, include_excerpts=False)
     assert "test_old" not in json.dumps(bare)
-    assert bare["commands"][0]["recommendations"][0]["title"] == (
+    assert bare["hotspots"][0]["recommendations"][0]["title"] == (
         "The same test is red session after session"
     )
     # twice is not a pattern, and a test the session fixed is the development loop
@@ -3637,3 +3638,114 @@ def test_a_headless_session_picked_up_after_a_long_silence_is_a_new_episode(
     slow.bash("make eval", "ok")
     (stream,) = parse_transcript(slow.save(tmp_path / "l")).streams
     assert episode_starts([stream]) == {}
+
+
+KEY_ERROR = "Traceback (most recent call last):\n  File \"<stdin>\", line 2\nKeyError: 'k'"
+
+
+@pytest.mark.parametrize(
+    ("red", "output", "between", "green"),
+    [
+        # the real shape: a heredoc with its own bug, the project's tool, another heredoc
+        (
+            "python3 - <<E\nimport json\nprint(json.load(open('a'))['k'])\nE",
+            KEY_ERROR,
+            "mytool show src/a.py",
+            "python3 - <<E\nimport json\nprint(json.load(open('a')).get('k'))\nE",
+        ),
+        (
+            "python3 -c \"print(open('nope.txt').read())\"",
+            "FileNotFoundError: [Errno 2] No such file or directory: 'nope.txt'",
+            "mytool list",
+            "python3 -c \"print(open('there.txt').read())\"",
+        ),
+        (
+            'psql -c "select nme from users"',
+            'ERROR:  column "nme" does not exist',
+            "mytool schema users",
+            'psql -c "select name from users"',
+        ),
+        (
+            "python scripts/analyze.py --month 2026-13",
+            "Traceback (most recent call last):\nValueError: month must be in 1..12",
+            "mytool dump | head -3",
+            "python scripts/analyze.py --month 2026-12",
+        ),
+        (
+            "python scripts/analyze.py --month 2026-13",
+            "Traceback (most recent call last):\nValueError: month must be in 1..12",
+            "mytool dump",
+            "python scripts/analyze.py --month 2026-12",
+        ),
+    ],
+)
+def test_a_changed_invocation_that_passes_credits_nothing_that_ran_in_between(
+    tmp_path: Path, red: str, output: str, between: str, green: str
+) -> None:
+    def build(s: Session) -> None:
+        s.bash(red, output, exit_code=1).bash(between, "x").bash(green, "ok")
+
+    sessions = [stashed_session(i, build) for i in range(3)]
+    out = scan(tmp_path, sessions)
+    assert out["commands"] == [] and out["totals"]["friction_events"] == 0
+    assert out["totals"]["dropped_red_runs"] == 3
+
+
+def test_the_same_line_passing_after_another_command_still_names_that_command(
+    tmp_path: Path,
+) -> None:
+    red = "E   fixture data missing\n1 failed"
+
+    def build(s: Session) -> None:
+        s.bash("pytest", red, exit_code=1).bash("mytool seed", "seeded").bash("pytest", "9 passed")
+
+    (row,) = _commands(tmp_path / "same", build, count=3)
+    (rec,) = row["recommendations"]
+    assert rec["id"] == "document-the-setup-step" and rec["setup"] == "mytool seed"
+
+    # a known setup step keeps the credit when only switches changed
+    def flags(s: Session) -> None:
+        s.bash("pytest tests/test_a.py -x", PG_DOWN, exit_code=1)
+        s.bash("docker compose up -d db", "Started").bash("pytest tests/test_a.py", "9 passed")
+
+    (row,) = _commands(tmp_path / "flags", flags, count=3)
+    assert row["recommendations"][0]["id"] == "document-the-setup-step"
+
+    # ... but something run only to be read through a pager or filter is a look
+    def looked(s: Session) -> None:
+        s.bash("pytest", red, exit_code=1).bash("mytool seed | head -3", "x")
+        s.bash("pytest", "9 passed")
+
+    rows = _commands(tmp_path / "looked", looked, count=3)
+    assert "document-the-setup-step" not in [r["id"] for c in rows for r in c["recommendations"]]
+
+
+@pytest.mark.parametrize(
+    ("text", "documented"),
+    [
+        ("# mytool", None),
+        ("# mytool\n\nThis repo is mytool, a widget library.", None),
+        ("## Using mytool", "mention"),
+        ("mytool is our widget CLI.", None),  # the repository's own name mentions nothing
+        ("Run `mytool` before the tests.", "instruction"),
+        ("Before testing:\n\n```\nmytool\n```", "instruction"),
+    ],
+)
+def test_a_title_or_a_sentence_does_not_document_a_setup_step(
+    tmp_path: Path, text: str, documented: str | None
+) -> None:
+    repo = tmp_path / "mytool"
+    repo.mkdir()
+    (repo / "AGENTS.md").write_text(text + "\n")
+    sessions = []
+    for i in range(3):
+        s = Session(f"s{i}", cwd=str(repo)).user("go")
+        s.bash("pytest", "E   fixture data missing\n1 failed", exit_code=1)
+        sessions.append(s.bash("mytool --seed", "seeded").bash("pytest", "9 passed"))
+    (row,) = scan(tmp_path / "t", sessions, repo)["commands"]
+    (rec,) = row["recommendations"]
+    assert rec["id"] == "document-the-setup-step" and rec["setup"] == "mytool"
+    assert rec.get("documented_as") == documented
+    assert ("is documented, yet agents start without it" in rec["title"]) == (
+        documented == "instruction"
+    )

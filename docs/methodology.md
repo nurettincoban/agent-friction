@@ -695,7 +695,7 @@ the evidence that triggered them. A target whose only evidence is weak (see
 | `run-it-in-the-background` | 2+ harness timeouts of a command that is a server or watcher (`npm run dev`, `uvicorn`, ...); replaces `document-the-command` for those |
 | `give-it-more-time` | 2+ harness timeouts of any other command (`npm run build` cut off after 2 minutes): say how long it takes, raise the timeout or run it in the background, or name a narrower command; replaces `document-the-command` for those |
 | `explain-the-failing-check` | 2+ `no-convergence` events from 2+ sessions, on the command ("Agents cannot get `pytest` to pass") or on a file edited during the rounds: document how to run and debug the check and what it expects |
-| `say-if-it-is-known-broken` | A command lifted out of the weak class because it stays red: it failed 2+ times and was still red at the end, in 3+ sessions (and there is no `no-convergence` event on it): "`npm run e2e` keeps ending red": say that it is known to be broken and what to run instead, or fix it. Also: the same test named as failed in 3+ sessions, none of which made it pass, and at least once before the session had changed any file ("`tests/test_legacy.py::test_old` is red session after session": fix it, or mark it as a known failure and say so); this form also appears on the test file's row |
+| `say-if-it-is-known-broken` | A command lifted out of the weak class because it stays red: it failed 2+ times and was still red at the end, in 3+ sessions (and there is no `no-convergence` event on it): "`npm run e2e` keeps ending red": say that it is known to be broken and what to run instead, or fix it. Also: the same test named as failed in 3+ sessions, none of which made it pass, and at least once before the session had changed any file ("`tests/test_legacy.py::test_old` is red session after session": fix it, or mark it as a known failure and say so); this form is given once: on the test file's row where the failure is attributed to a file of the repository, and on the command's row only for a test that has no such file |
 | `fix-the-flaky-test` | A test command failed and then passed on a plain re-run, with nothing changed in between, in 3+ sessions (variant `flaky`): "`npm test` looks flaky": fix or quarantine the flaky test, and say in AGENTS.md that a red run should be re-run once before anything is changed |
 | `pull-before-pushing` | `git push` was rejected as non-fast-forward (the remote branch had commits the local one lacked) in 3+ sessions: "tell agents to bring the branch up to date before `git push`": say in AGENTS.md to fetch and rebase (or merge) before pushing, and whether a force-push is ever acceptable. No time is claimed |
 | `file-is-gone` | a file hotspot whose file is not in the working tree **and** whose last commit in git deleted or renamed it (`file.removed_at`; needs git). Replaces every rule about what the file is like (`edit-the-source-not-the-output`, `split-or-anchor-large-file`, `make-edits-land`, `document-what-rewrites-this-file`, `path-agents-expect`, `add-a-fast-check`, `state-the-constraint`, `add-a-pointer`, `summarize-this-file`): "This file was renamed to `src/client.ts`" or "This file is no longer in the tree", with the date of that commit and `--since <date>` to leave the history out. What a human said (`write-down-the-rule`, `state-the-boundary`, ...) is kept below it. A path git never tracked, or a scan without git, is not "gone": nothing is known, and nothing changes |
@@ -795,7 +795,13 @@ repository's instruction files are searched for what it is about
   `make test` locally", "never pytest directly", "`make test` was removed",
   "we no longer use make test" (a negation in the 40 characters before the
   name within its sentence, or "was removed / is deprecated / no longer",
-  "is slow / is flaky / is too expensive" right after it). Terms
+  "is slow / is flaky / is too expensive" right after it). A setup step
+  may be one bare word (`mytool`), so for `document-the-setup-step` every
+  term must stand where a command stands (in backticks, in a code fence,
+  after run/use/with/via), never in a Markdown heading: the title "#
+  mytool" and "This repo is mytool, a widget library" document nothing.
+  The repository's own name (its directory name) alone is never a mention
+  of any kind, unless it stands where a command stands. Terms
   shorter than 4 characters, bare launchers (`make`, `npm`... alone) and
   pseudonymized keys are not looked for, so with `--no-excerpts` only paths
   and public command names can match.

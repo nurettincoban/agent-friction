@@ -14,7 +14,7 @@ import sys
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, TextIO
+from typing import Any, NoReturn, TextIO
 
 from agent_friction import __version__
 from agent_friction.compare import compare, render_compare
@@ -236,8 +236,15 @@ def _add_input_options(p: argparse.ArgumentParser) -> None:
     )
 
 
+class _Parser(argparse.ArgumentParser):
+    """Put the error first: a full usage block above it buries the one line that matters."""
+
+    def error(self, message: str) -> NoReturn:
+        self.exit(2, f"{self.prog}: error: {message}\n(see `{self.prog} --help`)\n")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="agent-friction",
         allow_abbrev=False,
         description="Map where coding agents lose time, make mistakes, and need human "

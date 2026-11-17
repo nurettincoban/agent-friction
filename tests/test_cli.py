@@ -683,3 +683,11 @@ def test_show_from_a_saved_scan_refuses_flags_it_cannot_honour(tmp_path: Path) -
     hidden = json.loads(private.read_text(encoding="utf-8"))["commands"][0]["path"]
     code, _, _ = run("show", hidden, "--from", str(private), "--no-excerpts")
     assert code == EXIT_OK
+
+
+def test_argument_errors_lead_with_the_message(capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(["scan", "--top", "0"])
+    assert code == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert err.startswith("agent-friction scan: error: argument --top")
+    assert "usage:" not in err and "--help" in err

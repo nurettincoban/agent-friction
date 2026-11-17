@@ -244,6 +244,11 @@ class Guidance:
           command stands: in backticks, in a code fence, after a ``$`` prompt, or
           after run/use/with/via/call. "We make test data with factories" does not
           mention ``make test``. One distinctive word (``pytest``) is enough as it is.
+        * ``"step"``: stricter still, for a setup step that may be one bare word
+          (``mytool``): every term must stand where a command stands, never in a
+          Markdown heading, and the repository's own name only after a word that
+          says to run it or in a code fence. "# mytool" and "This repo is mytool, a
+          widget library" document nothing.
         * ``"file"``: the line must also carry an instruction about the file (edit,
           change, modify, generated, regenerate, never, don't, do not, ...). "See
           src/schema_gen.py for an example of our style" does not instruct anything.
@@ -253,6 +258,7 @@ class Guidance:
         if not patterns or self.repo is None:
             return []
         found: list[Mention] = []
+        own = self.repo.name.casefold()
         for rel in self.files(near):
             fenced = False
             for number, line in self._read(rel):
@@ -260,6 +266,13 @@ class Guidance:
                     fenced = not fenced
                     continue
                 hits = [(t, m) for t, m in ((t, p.search(line)) for t, p in patterns) if m]
+                # The repository's own name is in every title and introduction: alone it
+                # mentions nothing, unless it stands where a command stands.
+                hits = [
+                    (t, m)
+                    for t, m in hits
+                    if t.casefold() != own or fenced or _as_command(line, m.start())
+                ]
                 if affirmed:
                     hits = [(t, m) for t, m in hits if not _negated(line, m.start(), m.end())]
                 if context == "command":
@@ -267,6 +280,18 @@ class Guidance:
                         (t, m)
                         for t, m in hits
                         if " " not in t or fenced or _as_command(line, m.start())
+                    ]
+                elif context == "step":
+                    heading = not fenced and line.lstrip().startswith("#")
+                    hits = [
+                        (t, m)
+                        for t, m in hits
+                        if not heading
+                        and (
+                            fenced
+                            or _COMMAND_LEAD_RE.search(line[: m.start()].rstrip("`'\""))
+                            or (t.casefold() != own and _as_command(line, m.start()))
+                        )
                     ]
                 elif context == "file":
                     hits = hits if _INSTRUCTION_RE.search(line) else []

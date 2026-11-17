@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import itertools
 import os
 import posixpath
 import re
@@ -247,7 +248,8 @@ SETUP_PROGRAMS = frozenset(
 )
 #: Prefixes stripped in front of the real program.
 WRAPPER_PROGRAMS = frozenset(
-    {"sudo", "time", "env", "nohup", "command", "exec", "nice", "xargs", "watch", "stdbuf"}
+    {"sudo", "time", "gtime", "env", "nohup", "command", "exec", "nice", "xargs", "watch"}
+    | {"stdbuf"}
     | {"timeout", "ionice", "doas", "caffeinate", "setsid", "chronic", "unbuffer"}
 )
 #: Options of those wrappers that take a separate value (``sudo -u alice pytest``).
@@ -264,6 +266,7 @@ WRAPPER_VALUE_OPTIONS: dict[str, frozenset[str]] = {
     "watch": frozenset({"-n", "-d", "--interval"}),
     "stdbuf": frozenset({"-i", "-o", "-e"}),
     "time": frozenset({"-f", "-o", "--format", "--output"}),
+    "gtime": frozenset({"-f", "-o", "--format", "--output"}),
     "exec": frozenset({"-a"}),
 }
 #: Shell keywords that may precede a command; stripped (``if ! make lint`` is ``make lint``).
@@ -1163,6 +1166,76 @@ FILE_READERS = frozenset(
     | {"awk"}
 )
 _PATTERN_FIRST = frozenset({"grep", "egrep", "fgrep", "rg", "sed", "awk"})
+
+
+#: What output is piped into to be read: a pager or a filter.
+_READ_THROUGH = FILE_READERS | {"wc", "sort", "uniq", "cut", "jq", "column", "fold", "tr", "xxd"}
+
+
+def looked_at(command: str) -> frozenset[str]:
+    """Programs of ``command`` whose output goes into a pager or filter (``x | head``).
+
+    Running something to read what it prints is a look, whatever the program is.
+    """
+    try:
+        pieces = _pieces(command)
+    except (IndexError, ValueError, RecursionError):
+        return frozenset()
+    found: set[str] = set()
+    for (words, operator), (after, _) in itertools.pairwise(pieces):
+        if operator in ("|", "|&") and _program_of(after)[0] in _READ_THROUGH:
+            found.add(_program_of(words)[0])
+    return frozenset(found)
+
+
+def same_invocation(red: str, green: str, key: str, other: str = "", loose: bool = False) -> bool:
+    """Is ``green`` the command line ``red`` again, as far as its arguments go?
+
+    Compared are the words of the step keyed ``key`` in ``red`` and of the step
+    keyed ``other`` (default: the same key) in ``green``. A launcher or activation
+    in front of either does not count (``uv run pytest -q`` is ``pytest -q``). For
+    ad-hoc code (``python -c``, a heredoc, SQL given to ``psql -c``) the text of the
+    snippet is part of the line. With ``loose``, switches are ignored and the green
+    run may name fewer things than the red one (``pytest`` after ``pytest
+    tests/test_a.py -x``): enough for "the same job", where a changed value
+    (``--month 2026-13``, then ``2026-12``) is not.
+    """
+    if is_snippet(key):
+        return normalize_argv(red) == normalize_argv(green)
+    try:
+        was = next((s for s in parse_command(red).steps if s.key == key), None)
+        now = next((s for s in parse_command(green).steps if s.key == (other or key)), None)
+    except Exception:
+        return False
+    if was is None or now is None:
+        return False
+    a, b = (was.program, *was.args), (now.program, *now.args)
+    if loose:
+        named = [w for w in b if not w.startswith("-")]
+        return all(w in a for w in named[1:])
+    short, long = sorted((a, b), key=len)
+    return long[len(long) - len(short) :] == short
+
+
+#: Programs that are handed code or a query on the command line.
+_QUERY_FLAGS: dict[str, frozenset[str]] = {
+    "psql": frozenset({"-c", "--command"}),
+    "mysql": frozenset({"-e", "--execute"}),
+    "mariadb": frozenset({"-e", "--execute"}),
+    "sqlite3": frozenset(),
+    "duckdb": frozenset({"-c"}),
+    "jq": frozenset(),
+    "yq": frozenset(),
+    "awk": frozenset(),
+    "sed": frozenset(),
+    "redis-cli": frozenset(),
+    "mongosh": frozenset({"--eval"}),
+}
+
+
+def is_snippet(key: str) -> bool:
+    """Is ``key`` a command that runs code written on its line (inline code, SQL, a filter)?"""
+    return is_inline_code(key) or key.split(" ", 1)[0].rsplit("/", 1)[-1] in _QUERY_FLAGS
 
 
 def _program_of(words: list[str]) -> tuple[str, list[str]]:
