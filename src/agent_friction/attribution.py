@@ -2008,7 +2008,14 @@ def is_shell_edit(parsed: ParsedCommand, command: str) -> bool:
     """
     if any(is_inline_code(s.key) for s in parsed.steps) and WRITE_CALL_RE.search(command):
         return True
+    # `git stash && pytest; git stash pop`: the tree is shelved and put back on one line,
+    # to see whether a failure was there before the agent's change. Nothing is changed.
+    stashes = [s for s in parsed.steps if s.program == "git" and tuple(s.args[:1]) == ("stash",)]
+    restored = len(stashes) == 2 and tuple(stashes[0].args[1:2]) in ((), ("push",))
+    restored = restored and tuple(stashes[1].args[1:2]) in (("pop",), ("apply",))
     for step in parsed.steps:
+        if restored and any(step is stash for stash in stashes):
+            continue
         args = step.args
         flags = set(args)
         program = step.program

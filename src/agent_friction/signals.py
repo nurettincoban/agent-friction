@@ -4687,6 +4687,13 @@ class _Detector:
                 setups = list(dict.fromkeys(label for label, setup in ran if setup))
                 others = [label for label, setup in ran if not setup]
                 red_line = finding.detail.get("command", "")
+                if (
+                    not setups
+                    and not others
+                    and id(finding) not in state.looped
+                    and self._green_unchanged(finding, failed_key, actual, line, exact)
+                ):
+                    continue  # another form of the job passed with no file edited (engine)
                 if line and failed_key == actual and id(finding) not in state.looped:
                     if not same_invocation(red_line, line, failed_key, actual, loose=True):
                         # The agent changed what it ran (another snippet, another value)
@@ -4738,6 +4745,12 @@ class _Detector:
                     # a script given another value (`--month 2026-13`, then `2026-12`).
                     fixed.add(id(finding))
                     continue
+                if (
+                    failed_key == actual
+                    and finding.detail.get("variant") == "ordinary"
+                    and self._green_unchanged(finding, failed_key, actual, line, exact)
+                ):
+                    continue  # `TZ=UTC pytest` after a red `pytest` (engine)
                 if failed_key != actual:
                     # the package was there; another way of running the job found it
                     promoted = self._promote(finding)
@@ -4783,6 +4796,36 @@ class _Detector:
                     # it is, only its recurring across sessions can say (engine).
                     finding.detail["rerun_green"] = "1"
         self._drop(fixed, DROPPED_DEV_LOOP)
+
+    def _green_unchanged(
+        self, finding: Finding, failed_key: str, actual: str, line: str, exact: bool
+    ) -> bool:
+        """An ordinary red run, then the job passing in another form with no file edited
+        in between: another runner (``green_as``: `make test` after `pytest`) or the same
+        command with a variable set in front (``green_with``: `TZ=UTC pytest`). Whether
+        that is how the job must be run here, recurrence across sessions decides."""
+        state = self.state
+        if (
+            exact
+            or finding.detail.get("variant") != "ordinary"
+            or state.changes_at.get(id(finding)) != state.changes
+        ):
+            return False
+        if failed_key == actual:
+            prefix = _env_prefix(line, self.ctx.command_key is str)
+            if prefix and not _env_prefix(finding.detail.get("command", ""), True):
+                finding.detail["green_with"] = f"{prefix} {self.ctx.command_key(actual)}"
+                return True
+            return False
+        if (
+            is_replacement(failed_key, actual)
+            and not is_aggregate_check(actual)
+            and actual not in state.red_seen
+        ):
+            finding.detail["green_as"] = self.ctx.command_key(actual)
+            state.replaced.setdefault(failed_key, []).append(finding)
+            return True
+        return False
 
     def _failed_under(self, finding: Finding, label: str) -> bool:
         """Do the failing tests the red run named (if any) all lie in ``label``'s directory?"""

@@ -31,6 +31,9 @@ MIN_EVENTS = 2
 #: it is still listed under its hotspot, but kept out of "What to fix first". Three
 #: interruptions of `ls` over hundreds of runs is not a reason to change AGENTS.md.
 THIN_EVIDENCE_EVENTS = 5
+#: Rules resting on the same job seen to pass another way, with nothing changed: from two
+#: sessions on they are not thin.
+SEEN_WORKING_RULES = frozenset({"use-the-working-command"})
 #: Rules grounded in a fact about the repository (a generated-file header, a make target
 #: that does not exist, a file that is gone) or in a human's own words: one event
 #: carries them, so they are never "thin".
@@ -572,7 +575,15 @@ class _Rules:
         assert rule_id in RULE_IDS, rule_id
         if events is None:
             events = len({f.fid for signal in based_on for f in self.get(signal)})
-        thin = events < THIN_EVIDENCE_EVENTS and not stated and rule_id not in FACT_BACKED_RULES
+        sessions = len({f.unit for signal in based_on for f in self.get(signal)})
+        thin = (
+            events < THIN_EVIDENCE_EVENTS
+            and not stated
+            and rule_id not in FACT_BACKED_RULES
+            # the job done another way, with nothing changed, in two sessions: a fact of
+            # how this repository runs, not a guess
+            and not (rule_id in SEEN_WORKING_RULES and sessions >= 2)
+        )
         mentions: list[Mention] = []
         documented = ""
         guidance = self.guidance
@@ -1720,6 +1731,25 @@ class _Rules:
                     _place(key), f"use {_typed(fix, _place(key))}, not {_typed(key, _place(key))}"
                 )
                 + ".",
+            )
+        elif fixes and forms and fixes[0][1] + forms[0][1] >= MIN_EVENTS:
+            # `make test` passed after a red `pytest` in one session, `TZ=UTC pytest` in
+            # another, nothing changed either time: the bare command lacks what both set.
+            (fix, ran), (form, count) = fixes[0], forms[0]
+            place = _place(key)
+            line = f"use {_typed(fix, place)} (or {_typed(form, place)}), not {_typed(key, place)}"
+            self.add(
+                "use-the-working-command",
+                f"Tell agents to use {code(_bare(fix))}, not {code(_bare(key))}",
+                f"{_located(key)} failed {_in_sessions(failures)}, and with no file changed the "
+                f"same job then passed as {code(_bare(fix))} ({_times(ran)}) and as "
+                f"{code(_bare(form))} ({_times(count)}). Add a line to AGENTS.md such as: "
+                f'"{_agents_line(place, line)}", or make {code(_bare(key))} work on its own '
+                "(set the variable in the test setup).",
+                [signals.COMMAND_FAILURE],
+                self._use_instead(fix, key, failures),
+                replacement=fix,
+                agents_md=_agents_line(place, line) + ".",
             )
         elif setups:
             setup, count = setups[0]

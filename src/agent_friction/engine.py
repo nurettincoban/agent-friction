@@ -336,6 +336,8 @@ BUILD_DIRS = frozenset({"target", "dist", "build"})
 FLAKY_MIN_SESSIONS = 3
 #: Sessions in which another runner must pass, untouched, after a command went red.
 RUNNER_MIN_SESSIONS = 3
+#: Sessions in which a command passed unchanged with a variable set in front.
+ENV_MIN_SESSIONS = 2
 #: Episodes in which the same test must be red, unresolved, to be a standing failure.
 STANDING_TEST_MIN_SESSIONS = 3
 #: A command the human stops in this many sessions is a row of its own.
@@ -426,6 +428,30 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
             )
     # Another runner for the same job passed with nothing changed (``green_as``): in
     # ``RUNNER_MIN_SESSIONS`` sessions or more, the failing command is the wrong one here.
+    # The same command with a variable set in front passed, nothing changed
+    # (``green_with``: `TZ=UTC pytest` after a red `pytest`): in ``ENV_MIN_SESSIONS``
+    # sessions, counting those where another runner passed unchanged, the bare command
+    # is missing what that variable gives it.
+    prefixed = [f for f in findings if "green_with" in f.detail]
+    envs: dict[str, set[str]] = {}
+    for finding in [*prefixed, *(f for f in findings if "green_as" in f.detail)]:
+        for key in _command_keys(finding):
+            envs.setdefault(key, set()).add(finding.unit)
+    for finding in prefixed:
+        form = finding.detail.pop("green_with")
+        if finding.detail.get("variant") != "ordinary" or not any(
+            len(envs.get(key, ())) >= ENV_MIN_SESSIONS for key in _command_keys(finding)
+        ):
+            continue
+        finding.detail["works_with"] = form
+        finding.detail["variant"] = "invocation"
+        finding.targets = [t for t in finding.targets if t.kind == model.COMMAND]
+        finding.weight = 1.0
+        finding.interval = finding.interval or finding.run
+        finding.summary = finding.summary.replace(
+            "ordinary failure", f"`{form}` then passed, with nothing changed"
+        )
+    env_keys = {key for key, units in envs.items() if len(units) >= ENV_MIN_SESSIONS}
     runners: dict[tuple[str, str], set[str]] = {}
     swapped = [f for f in findings if "green_as" in f.detail]
     for finding in swapped:
@@ -435,7 +461,10 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
         other = finding.detail.pop("green_as")
         keys = _command_keys(finding)
         if finding.detail.get("variant") != "ordinary" or not any(
-            len(runners.get((key, other), ())) >= RUNNER_MIN_SESSIONS for key in keys
+            len(runners.get((key, other), ())) >= RUNNER_MIN_SESSIONS
+            # ... or fewer, when the same command also passed with a variable set
+            or (key in env_keys and any("works_with" in f.detail for f in prefixed))
+            for key in keys
         ):
             continue
         finding.detail["recovered_by"] = other
