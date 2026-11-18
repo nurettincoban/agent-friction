@@ -1,0 +1,23 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ferry
+          POSTGRES_PASSWORD: ferry
+          POSTGRES_DB: ferrydesk
+        ports: ["5432:5432"]
+    env:
+      FERRYDESK_DATABASE_URL: postgres://ferry:ferry@localhost:5432/ferrydesk?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.23" }
+      - run: make tools
+      - run: make migrate-up
+      - run: make test
+      - run: make lint
