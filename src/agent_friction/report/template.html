@@ -275,6 +275,15 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
         d.appendChild(rich("span", r.detail)); detail.appendChild(d);
       });
     }
+    if ((h.signatures || []).length) {
+      detail.appendChild(el("h2", null, "What the tool kept saying"));
+      h.signatures.forEach(function (sig) {
+        var d = el("div", { class: "ev" });
+        d.appendChild(el("div", { class: "meta" }, plural(sig.events, "event") + " · " + plural(sig.sessions, "session")));
+        d.appendChild(el("blockquote", null, sig.text));
+        detail.appendChild(d);
+      });
+    }
     if ((h.evidence || []).length) {
       detail.appendChild(el("h2", null, "Evidence"));
       h.evidence.forEach(function (e) {
