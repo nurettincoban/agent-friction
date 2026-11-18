@@ -1,0 +1,14 @@
+[ingest]
+noaa_base_url = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
+csv_drop_dir = "/var/tidewater/drops"
+max_retries = 3
+
+[qc]
+spike_threshold_mm = 250
+flatline_minutes = 60
+
+[resample]
+interval = "1h"
+
+[warehouse]
+url = "postgresql://tide:tide@localhost:5433/tide"
