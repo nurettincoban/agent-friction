@@ -1580,7 +1580,10 @@ _SOFTENER_RE = re.compile(
     r"\b(?:thanks|thank you|thx|great|good job|nice(?:ly)?|perfect|awesome|excellent|well done"
     r"|love it|like it|nailed it|keep going|looks good|lgtm|all good|amazing|wonderful"
     r"|no worries|never ?mind|ignore (?:it|that|this)|unrelated|not your fault|flaky"
-    r"|(?:that's|it's|that is|it is|is|are) (?:fine|ok|okay)"
+    r"|(?:that's|it's|that is|it is|this is|that was|it was) (?:fine|ok|okay)"
+    # "... but here spaces are fine"; not "for a CLI flag the unit tests are fine", which
+    # says what to run instead
+    r"|(?:but|here|now|then) (?:\w+ ){0,3}(?:is|are) (?:fine|ok|okay)"
     # a shrug ("not quite what I had in mind but fine") or an afterthought ("no, wait, also")
     r"|but (?:fine|ok|okay|whatever|it works|that works|good enough|i can live with (?:it|that))"
     r"|(?:wait|oh|hang on|hold on),? (?:also|and also|one more thing|additionally|while you)"
@@ -1592,7 +1595,7 @@ _SOFTENER_RE = re.compile(
     r"|as (?:asked|requested|expected|planned|discussed|agreed|i (?:asked|wanted|said))"
     # the problem predates the agent's work
     r"|before your (?:change|changes|edit|edits|commit|commits|fix|pr)|not caused by you(?:r \w+)?"
-    r"|already (?:broken|failing|red|there)|pre-?existing|not (?:related to|because of) your"
+    r"|already (?:broken|failing|red)|(?:was|were|been) already there|pre-?existing|not (?:related to|because of) your"
     r"|since (?:yesterday|last (?:night|week|month|\w+day)|this morning|\w+day|before)"
     r"|for (?:days|weeks|months|a while|ages))\b",
     re.I,
@@ -1602,6 +1605,12 @@ _SOFTENER_RE = re.compile(
 #: pulled your change", "when I run it", "since I can't sign in", "because we use tabs",
 #: which say what is wrong with the agent's work. It voids a phrase like any softener,
 #: but if the agent then changes the same files again its work did need redoing.
+#: A turn after praise: "thanks, but", "one thing though", "however".
+_CONTRAST_RE = re.compile(
+    r"\b(?:but|though|however|although|that said|one (?:thing|problem|issue|catch))\b"
+    r"(?! (?:fine|ok|okay|whatever|it works|that works|good enough|i can live)\b)",
+    re.I,
+)
 _SELF_BLAME_RE = re.compile(
     r"\b(?:because|after|since|as|cause|cuz) (?:i|we)(?:'d|'ve| had| have| just| accidentally"
     r"| never| also)* "
@@ -1627,7 +1636,7 @@ _NEW_TASK_RE = re.compile(
 #: Interjections that may precede a verdict at the start of a message ("hmm, that's wrong").
 _OPEN = (
     r"^(?:(?:hmm+|ugh+|argh+|wtf|ok(?:ay)?|well|so|sorry|oh|hey|no+|nope|nah|but|and|damn|sigh"
-    r"|um+|uh+|eh|again|man|dude|wait|still)[,.!…:;—-]*\s+)*"
+    r"|um+|uh+|eh|again|man|dude|wait|still|hang on|hold on|hm+)[,.!…:;—-]*\s+)*"
 )
 _YOU_DID = (
     r"\byou (?:broke|removed|deleted|forgot|missed|ignored|misunderstood|overwrote)\b"
@@ -1666,7 +1675,9 @@ _UNDO_OBJECT = (
     r"(?:that|this|it|your|those|these|all (?:of )?(?:that|this|your)|everything|what you"
     r"|(?:the|my) (?:last|previous|latest) (?:change|changes|edit|edits|commit|commits|one"
     r"|thing|step|two|three|few|\d+)"
-    r"|the (?:change|changes|edit|edits|commit|commits))\b"
+    r"|the (?:change|changes|edit|edits|commit|commits)"
+    # "revert the timing bound change", "undo the retry tweak"
+    r"|the (?:[\w-]+ ){1,3}(?:change|changes|edit|edits|tweak|tweaks|bump))\b"
     # "revert the commit abc123 from last week" is about old history, not the agent's work
     r"(?!(?: [0-9a-f]{6,40})? (?:from|of) (?:last|yesterday|earlier|before|\d|an? |the other"
     r"|the previous|(?:mon|tues|wednes|thurs|fri|satur|sun)day|(?:the )?\w+ release))"
@@ -1806,6 +1817,19 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
             False,
         ),
         (
+            # "Not that file. It's generated", "Not that one, it's the slow suite"
+            "not that one",
+            _OPEN + rf"not (?:that|this|those|these) (?:{_THING}|ones)\b(?! (?:i|we) (?:mean|meant))",
+            False,
+        ),
+        (
+            # "That's the old package", "this is the legacy module"
+            "that's the old one",
+            _OPEN + r"(?:that|this|it)(?:'s| is| was) (?:the |an? )?(?:old|legacy|deprecated"
+            rf"|dead|obsolete|unused|stale) (?:{_THING}|copy|version|code)\b",
+            False,
+        ),
+        (
             "that's wrong",
             _OPEN + r"(?:that|this|it)(?:'s| is| was) (?:"
             r"(?:still |just |simply |completely |totally |plain )?(?:wrong|incorrect|broken)"
@@ -1917,6 +1941,45 @@ _INSTRUCTION_CUES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
             _OPEN + r"(?:please |pls )?(?:don't|do not) (?!forget|worry|bother|need|hesitate|mind"
             r"|have to|think|know|see|understand|care|get me wrong|be sorry|apologi[sz]e)\w+\b"
             r"(?!(?: \S+){0,3},? yet\b)",
+        ),
+        (
+            # the same, at the start of a later sentence or clause: "Thanks. Please don't
+            # kick off test-all", "In the parser, don't route feet through metres"
+            "… don't …",
+            r"(?:[.!?;:,]|\bthough)\s+(?:please |pls |and |so )?(?:don't|do not) "
+            r"(?!forget|worry|bother|need|hesitate|mind|have to|think|know|see|understand|care"
+            r"|get me wrong|be sorry|apologi[sz]e)\w+\b(?!(?: \S+){0,3},? yet\b)",
+        ),
+        (
+            # "No skipping, and no bumping the number either"
+            "no …ing",
+            _OPEN + r"no (?:more )?(?!thing\b|nothing\b)\w{3,}ing\b",
+        ),
+        (
+            # what is already there, by name: "There's already `units.mm_from_m` for this"
+            "there's already X",
+            r"\bthere(?:'s| is| are) already (?:an? |the )?`?[\w./-]+`?(?: \w+){0,3} "
+            r"(?:for (?:this|that|it|these)|that (?:does|handles|converts))\b",
+        ),
+        (
+            # "Hang on: threshold in mm please"
+            "hang on: …",
+            r"^(?:hang on|hold on|wait)\s*[:,.!—-]+\s*\S",
+        ),
+        (
+            "you don't need …",
+            r"(?:^|[.!?;:]\s+)you (?:don't|do not|didn't|did not) need (?:the|to|a|an|that|this)\b",
+        ),
+        (
+            # "Why is --min-level a float in metres?", "why are these in the legacy package"
+            "why is it …",
+            r"\bwhy (?:is|are|was|were) (?:\S+ ){1,4}?(?:a|an|in|still|here|there|using|not)\b",
+        ),
+        (
+            # asked after the agent said it was done: "Did you run anything after that?"
+            "did you run it?",
+            r"\b(?:did|have) you (?:actually |even )?(?:run|test|try|check|verify)(?:ed)?\b"
+            r"|\bapplied where\b",
         ),
         (
             "I don't want …",
@@ -2169,6 +2232,11 @@ def _judge(
     head = _REPORTED_SPEECH_RE.sub(" ", head)
     softeners = [m.start() for m in _SOFTENER_RE.finditer(head)]
     last_softener = max(softeners) if softeners else -1
+    # "Thanks. One thing though: ..." / "Great, but ...": what follows the "but" is the point
+    contrast = [m.start() for m in _CONTRAST_RE.finditer(head)]
+    if contrast and max(contrast) > last_softener >= 0:
+        softeners = []
+        last_softener = -1
     blame = [m.start() for m in _SELF_BLAME_RE.finditer(head)]
     last_blame = max(blame) if blame else -1
     softened: list[str] = []
@@ -2395,7 +2463,10 @@ _REPORTS_FAILURE_RE = re.compile(
     r"\bstill\s+(?:fail(?:s|ing)?|broken|crash(?:es|ing)?|errors?|(?:does ?n[o']t|is ?n[o']t)\b)"
     r"|\b(?:it|this|that|which|still)\s+(?:does ?n[o']t|did ?n[o']t|is ?n[o']t|does not|did not"
     r"|is not)\s+work(?:ing)?\b(?!\s+(?:like|that way|the way|on it|today))"
-    r"|\b(?:is|it's|it is) broken\b|\bfails? (?:on|in|for) (?:staging|prod|ci|my|me)\b",
+    r"|\b(?:is|it's|it is) broken\b|\bfails? (?:on|in|for) (?:staging|prod|ci|my|me)\b"
+    # "The staging ingest blew up with ...", "I get an ImportError", "it's not in my local db"
+    r"|\b(?:blew|blows) up\b|\bi(?:'m| am)? (?:get|got|getting|see|seeing) (?:an? |the )?\w*"
+    r"(?:Error|Exception|Traceback|crash|failure)\b|\bit(?:'s| is) not in my\b",
     re.I,
 )
 
