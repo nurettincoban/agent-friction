@@ -420,23 +420,29 @@ def _count(value: object) -> int:
 
 
 def _record_usage(
-    obj: dict[str, Any], stream: Stream, responses: dict[tuple[bool, str], int]
+    obj: dict[str, Any],
+    stream: Stream,
+    responses: dict[tuple[bool, str], int],
+    first_seen: dict[tuple[bool, str], datetime | None],
 ) -> None:
     """Add an assistant line's ``message.usage`` to ``stream``, once per response.
 
     One response is written as several lines (thinking, text, each tool call), all with
-    the same ``message.id`` and a copy of its usage: the first line places it in time,
-    and the largest value seen of each count is kept.
+    the same ``message.id`` and a copy of its usage: the response is placed at its first
+    recorded line, and the largest value seen of each count is kept.
     """
     message = obj["message"]
+    ident = message.get("id")
+    key = (stream.sidechain, ident) if isinstance(ident, str) and ident else None
+    stamp = common.parse_ts(obj.get("timestamp"))
+    if key is not None:
+        stamp = first_seen.setdefault(key, stamp)
     usage = message.get("usage")
     if not isinstance(usage, dict):
         return
     counts = {name: _count(usage.get(raw)) for name, raw in _USAGE_FIELDS}
     if not any(counts.values()):
         return  # a placeholder response (an API error, a cancelled turn): nothing used
-    ident = message.get("id")
-    key = (stream.sidechain, ident) if isinstance(ident, str) and ident else None
     if key is not None and key in responses:
         index = responses[key]
         known = stream.usage[index]
@@ -444,7 +450,6 @@ def _record_usage(
             known.ts, **{name: max(getattr(known, name), n) for name, n in counts.items()}
         )
         return
-    stamp = common.parse_ts(obj.get("timestamp"))
     if key is not None:
         responses[key] = len(stream.usage)
     stream.usage.append(model.Usage(stamp.timestamp() if stamp else None, **counts))
@@ -471,6 +476,7 @@ def parse_file(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFi
     # (stream, text) -> was it a queued one, and when
     delivered: dict[tuple[bool, str], tuple[bool, datetime | None]] = {}
     responses: dict[tuple[bool, str], int] = {}  # (stream, message id) -> index in usage
+    first_seen: dict[tuple[bool, str], datetime | None] = {}  # ... -> its first line's time
     with model.open_transcript(path) as handle:
         for number, raw in enumerate(handle, 1):
             raw = raw.strip()
@@ -521,7 +527,7 @@ def parse_file(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFi
                 else:
                     delivered[said] = (queued is not None, event.ts)
             if obj["type"] == "assistant":
-                _record_usage(obj, target, responses)
+                _record_usage(obj, target, responses, first_seen)
                 asked = _asks_question(obj["message"].get("content"))
                 if asked is not None:
                     asking[target.sidechain] = asked

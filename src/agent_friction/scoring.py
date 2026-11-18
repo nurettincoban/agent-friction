@@ -10,7 +10,7 @@ from bisect import bisect_right
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
-from agent_friction.model import Finding, Usage
+from agent_friction.model import Finding, Stream, Usage
 from agent_friction.signals import (
     COMMAND_FAILURE,
     EDIT_MISS,
@@ -310,42 +310,66 @@ class TokenIndex:
     assignment; the counts in them are what the transcripts recorded.
     """
 
-    def __init__(self, usage: Mapping[str, Sequence[Usage]]) -> None:
+    def __init__(self, streams: Iterable[Stream]) -> None:
         self._times: dict[str, list[float]] = {}
         self._rows: dict[str, list[Usage]] = {}
-        for stream, rows in usage.items():
-            timed = sorted((u for u in rows if u.ts is not None), key=lambda u: u.ts or 0.0)
-            if timed:
-                self._times[stream] = [u.ts or 0.0 for u in timed]
-                self._rows[stream] = timed
-        self.known = any(usage.values())
+        self._session: dict[str, str] = {}
+        for stream in streams:
+            if not stream.usage:
+                continue
+            self._session[stream.key] = stream.session_id
+            timed = sorted((u for u in stream.usage if u.ts is not None), key=lambda u: u.ts or 0.0)
+            self._times[stream.key] = [u.ts or 0.0 for u in timed]
+            self._rows[stream.key] = timed
+        #: does any scanned stream record usage at all?
+        self.known = bool(self._session)
 
-    @staticmethod
-    def tally(rows: Iterable[Usage]) -> dict[str, int]:
+    def tally(self, rows: Iterable[tuple[str, Usage]]) -> dict[str, int]:
+        """Counts per field, responses, and the sessions they came from."""
         counts = dict.fromkeys(TOKEN_FIELDS, 0)
         responses = 0
-        for row in rows:
+        sessions: set[str] = set()
+        for stream, row in rows:
             responses += 1
+            sessions.add(self._session.get(stream, stream))
             for name in TOKEN_FIELDS:
                 counts[name] += getattr(row, name)
-        return {**counts, "responses": responses}
+        return {**counts, "responses": responses, "sessions": len(sessions)}
 
-    def claimed_by(self, findings: Iterable[Finding]) -> dict[str, int] | None:
-        """Tokens of the responses inside the findings' stretches; ``None`` when the
-        scan has no usage at all (a transcript format that does not record it)."""
+    def total(self) -> dict[str, int] | None:
+        """Every response in the scanned streams; ``None`` without usage."""
         if not self.known:
             return None
-        rows: list[Usage] = []
-        for stream, spans in _stretches(findings).items():
-            times = self._times.get(stream)
-            if not times:
-                continue
+        return self.tally((key, row) for key, rows in self._rows.items() for row in rows)
+
+    def claimed_by(self, findings: Iterable[Finding]) -> dict[str, int] | None:
+        """Tokens of the responses inside the findings' stretches.
+
+        ``None`` when nothing the findings claim lies in a stream that records usage
+        (and the scan has any): no count, rather than a count of 0.
+        """
+        if not self.known:
+            return None
+        stretches = _stretches(findings)
+        if stretches and not any(stream in self._session for stream in stretches):
+            return None
+        rows: list[tuple[str, Usage]] = []
+        for stream, spans in stretches.items():
+            if stream not in self._session:
+                continue  # a transcript that records no usage: nothing to count
+            times = self._times[stream]
             taken = -1  # the last response claimed, so that none is claimed twice
             for start, end in spans:
-                first, last = max(bisect_right(times, start), taken + 1), bisect_right(times, end)
-                if first >= last and first < len(times) and times[first] - end <= IDLE_GAP_SECONDS:
-                    last = first + 1  # nothing written inside: the response that read it
-                rows.extend(self._rows[stream][first:last])
+                inside, last = bisect_right(times, start), bisect_right(times, end)
+                if inside >= last:
+                    # nothing written inside: the response that read the result, if it
+                    # came before an idle gap and no earlier stretch already took it
+                    if inside < len(times) and times[inside] - end <= IDLE_GAP_SECONDS:
+                        last = inside + 1
+                    first = inside if inside > taken else last
+                else:
+                    first = max(inside, taken + 1)
+                rows.extend((stream, row) for row in self._rows[stream][first:last])
                 taken = max(taken, last - 1)
         return self.tally(rows)
 

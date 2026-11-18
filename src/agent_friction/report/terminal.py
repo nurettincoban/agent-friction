@@ -362,9 +362,17 @@ def render_terminal(
     )
     out.append(
         st.dim(
-            "Per-row time can overlap (one stall can involve a file and a command); "
-            "n/a means the evidence carries no time estimate; "
-            "the total counts each minute once."
+            (
+                "Per-row time and tokens can overlap (one stall can involve a file and a "
+                "command); n/a means the evidence carries no time estimate; "
+                "the total counts each minute and each response once."
+            )
+            if isinstance(totals.get("tokens_total"), dict)
+            else (
+                "Per-row time can overlap (one stall can involve a file and a command); "
+                "n/a means the evidence carries no time estimate; "
+                "the total counts each minute once."
+            )
         )
     )
     note = dropped_note(result)

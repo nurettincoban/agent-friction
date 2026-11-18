@@ -143,7 +143,8 @@
         "cache_write": 7200,
         "input": 24,
         "output": 960,
-        "responses": 4
+        "responses": 4,
+        "sessions": 3
       },
       "why": "7 friction events in all 4 sessions that touched it (7 command failures); medium confidence because it recurs across sessions."
     },
@@ -213,7 +214,8 @@
         "cache_write": 1800,
         "input": 6,
         "output": 240,
-        "responses": 1
+        "responses": 1,
+        "sessions": 1
       },
       "why": "1 friction event in the only session that touched it (1 declined tool call); low confidence because there is too little independent evidence so far."
     },
@@ -278,7 +280,8 @@
         "cache_write": 1800,
         "input": 6,
         "output": 240,
-        "responses": 1
+        "responses": 1,
+        "sessions": 1
       },
       "why": "1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far."
     },
@@ -343,7 +346,8 @@
         "cache_write": 1800,
         "input": 6,
         "output": 240,
-        "responses": 1
+        "responses": 1,
+        "sessions": 1
       },
       "why": "1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far."
     }
@@ -585,7 +589,8 @@
         "cache_write": 0,
         "input": 0,
         "output": 0,
-        "responses": 0
+        "responses": 0,
+        "sessions": 0
       },
       "why": "5 friction events in all 2 sessions that touched it (5 search misses); medium confidence because it recurs across sessions."
     }
@@ -791,7 +796,8 @@
         "cache_write": 14400,
         "input": 48,
         "output": 1920,
-        "responses": 8
+        "responses": 8,
+        "sessions": 3
       },
       "why": "11 friction events in all 4 sessions that touched it (6 edit misses, 2 user corrections, 1 read loop, 2 more signal types); high confidence because it recurs across sessions with several kinds of evidence."
     },
@@ -931,7 +937,8 @@
         "cache_write": 10800,
         "input": 36,
         "output": 1440,
-        "responses": 6
+        "responses": 6,
+        "sessions": 3
       },
       "why": "5 friction events in all 3 sessions that touched it (3 user corrections, 1 reverted edit, 1 edit thrash episode); high confidence because it recurs across sessions with several kinds of evidence."
     },
@@ -994,7 +1001,8 @@
         "cache_write": 1800,
         "input": 6,
         "output": 240,
-        "responses": 1
+        "responses": 1,
+        "sessions": 1
       },
       "why": "1 friction event in the only session that touched it (1 path miss); low confidence because there is too little independent evidence so far."
     },
@@ -1057,7 +1065,8 @@
         "cache_write": 0,
         "input": 0,
         "output": 0,
-        "responses": 0
+        "responses": 0,
+        "sessions": 0
       },
       "why": "1 friction event in 1 of the 2 sessions that touched it (1 search miss); low confidence because there is too little independent evidence so far. Only weak signals, which also accompany productive work: the score is capped at 19 and nothing is recommended."
     },
@@ -1133,7 +1142,8 @@
         "cache_write": 0,
         "input": 0,
         "output": 0,
-        "responses": 0
+        "responses": 0,
+        "sessions": 0
       },
       "why": "1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far. Only weak signals, which also accompany productive work: the score is capped at 19 and nothing is recommended."
     }
@@ -1423,14 +1433,16 @@
       "cache_write": 37800,
       "input": 126,
       "output": 5040,
-      "responses": 21
+      "responses": 21,
+      "sessions": 5
     },
     "tokens_total": {
       "cache_read": 1876800,
       "cache_write": 126000,
       "input": 420,
       "output": 16800,
-      "responses": 70
+      "responses": 70,
+      "sessions": 5
     },
     "tool_calls": 74,
     "tool_calls_in_repo": 74,

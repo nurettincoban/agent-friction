@@ -963,7 +963,7 @@ class _Analysis:
         self.events_elsewhere_in_repo = 0
         self._dirs_by_name: dict[str, list[str]] | None = None
         self.untimed_sessions_excluded = 0
-        self.tokens = scoring.TokenIndex({})
+        self.tokens = scoring.TokenIndex(())
         self.unreadable: list[tuple[Path, str]] = []
         self.third_party_events = 0
         self._ignored: set[str] | None = None
@@ -1307,7 +1307,7 @@ class _Analysis:
             }
             item.streams = relevant
         streams = [s for item in parsed for s in item.streams]
-        self.tokens = scoring.TokenIndex({s.key: s.usage for s in streams})
+        self.tokens = scoring.TokenIndex(streams)
         self.source_labels = {str(item.path): self.source_label(item) for item in parsed}
         for stream in streams:
             asked: dict[str, str] = {}
@@ -1810,9 +1810,7 @@ class _Analysis:
                 # recorded them, and in all the scanned sessions (``None``: the
                 # transcripts do not record usage).
                 "tokens_lost": self.tokens.claimed_by(findings),
-                "tokens_total": self.tokens.tally(u for s in streams for u in s.usage)
-                if self.tokens.known
-                else None,
+                "tokens_total": self.tokens.total(),
                 # Red runs that were seen and deliberately not reported: the development
                 # loop (red, change, green), waiting, one-off fixes. Not friction.
                 "dropped_red_runs": len(self.dropped),

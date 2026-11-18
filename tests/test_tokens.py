@@ -4,16 +4,27 @@ claims (the same stretches as its time lost)."""
 from __future__ import annotations
 
 import json
+import re
+import shutil
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from agent_friction import model, scoring, signals
 from agent_friction.adapters import claude_code
 from agent_friction.compare import summary_line
 from agent_friction.engine import AnalyzeOptions, analyze
 from agent_friction.model import Finding, Target, Usage
-from agent_friction.report import render_html, render_investigate, render_markdown, render_terminal
+from agent_friction.report import (
+    render_html,
+    render_investigate,
+    render_markdown,
+    render_prompt,
+    render_terminal,
+)
 from agent_friction.report._common import fmt_count, headline_tokens, tokens_phrase
 from tests.builders import Session
 
@@ -118,49 +129,71 @@ def _finding(
     )
 
 
-def _index(*times: float) -> scoring.TokenIndex:
-    return scoring.TokenIndex({"a": [Usage(t, input=1, output=10, cache_read=100) for t in times]})
+def _stream(key: str, *times: float) -> model.Stream:
+    stream = model.Stream(session_id=key, source=Path(key), kind="claude-code")
+    stream.usage = [Usage(t, input=1, output=10, cache_read=100) for t in times]
+    return stream
+
+
+def _index(*times: float) -> tuple[scoring.TokenIndex, str]:
+    stream = _stream("a", *times)
+    return scoring.TokenIndex([stream, _stream("b", 1)]), stream.key
 
 
 def test_a_stretch_claims_the_responses_written_inside_it_once() -> None:
-    index = _index(100, 105, 110, 200)
+    index, a = _index(100, 105, 110, 200)
     # (100, 110]: the response at 100 wrote the failing call; 105 and 110 dealt with it
-    one = index.claimed_by([_finding("a", (100, 110))])
+    one = index.claimed_by([_finding(a, (100, 110))])
     assert one == {
         "input": 2,
         "output": 20,
         "cache_write": 0,
         "cache_read": 200,
         "responses": 2,
+        "sessions": 1,
     }
     # two findings over the same turns: counted once, as for time lost
-    both = index.claimed_by([_finding("a", (100, 110)), _finding("a", (104, 106))])
+    both = index.claimed_by([_finding(a, (100, 110)), _finding(a, (104, 106))])
     assert both is not None and both["responses"] == 2
     # another stream's responses are not this one's
-    other = index.claimed_by([_finding("b", (100, 110))])
+    b = _stream("b").key
+    other = index.claimed_by([_finding(b, (100, 110))])
     assert other is not None and other["responses"] == 0
 
 
 def test_a_failed_run_alone_claims_the_response_that_read_it() -> None:
-    index = _index(100, 130, 900)
-    run_only = index.claimed_by([_finding("a", (100, 120))])  # call at 100, result at 120
+    index, a = _index(100, 130, 900)
+    run_only = index.claimed_by([_finding(a, (100, 120))])  # call at 100, result at 120
     assert run_only is not None and run_only["responses"] == 1  # the response at 130
-    # after an idle gap the next response is not about the failure any more
-    stale = index.claimed_by([_finding("a", (300, 320))])
+    # after an idle gap (more than 5 minutes) the next response is about something else
+    stale = index.claimed_by([_finding(a, (300, 320))])
     assert stale is not None and stale["responses"] == 0
     # and a response one stretch claimed is not claimed again by the next
-    chained = index.claimed_by([_finding("a", (100, 120), (125, 129))])
+    chained = index.claimed_by([_finding(a, (100, 120), (125, 129))])
     assert chained is not None and chained["responses"] == 1
 
 
+def test_two_failed_runs_read_by_one_response_claim_it_once_and_nothing_after() -> None:
+    # one response (at 1) wrote two calls; both failed and were read by the response at 12
+    index, a = _index(1, 12, 50)
+    alone = [index.claimed_by([_finding(a, span)]) for span in ((2, 10), (11, 11.5))]
+    assert [t and t["responses"] for t in alone] == [1, 1]
+    together = index.claimed_by([_finding(a, (2, 10)), _finding(a, (11, 11.5))])
+    assert together is not None and together["responses"] == 1
+
+
 def test_no_usage_in_the_transcripts_is_no_count_not_zero() -> None:
-    index = scoring.TokenIndex({"a": []})
-    assert index.claimed_by([_finding("a", (0, 10))]) is None
-    assert scoring.TokenIndex({}).claimed_by([]) is None
+    assert scoring.TokenIndex([_stream("a")]).claimed_by([_finding("a", (0, 10))]) is None
+    assert scoring.TokenIndex([]).claimed_by([]) is None
+    assert scoring.TokenIndex([]).total() is None
+    # usage elsewhere in the scan, but none in the stream this finding claims time in
+    index, _ = _index(5)
+    assert index.claimed_by([_finding(_stream("c").key, (0, 10))]) is None
 
 
 def test_a_finding_that_claims_no_time_claims_no_tokens() -> None:
-    claimed = _index(100, 105).claimed_by([_finding("a", None)])
+    index, a = _index(100, 105)
+    claimed = index.claimed_by([_finding(a, None)])
     assert claimed is not None and claimed["responses"] == 0
 
 
@@ -232,7 +265,72 @@ def test_counts_are_short_and_cache_reads_are_named_apart() -> None:
 
 def test_compare_sets_tokens_per_session_side_by_side_only_when_both_have_them() -> None:
     tally = {"input": 0, "output": 1_000, "cache_write": 0, "cache_read": 0, "responses": 4}
-    with_usage = {"totals": {"sessions": 2, "est_minutes_lost": 4, "tokens_lost": tally}}
+    total = {**tally, "sessions": 2}
+    with_usage = {
+        "totals": {
+            "sessions": 3,
+            "est_minutes_lost": 4,
+            "tokens_lost": tally,
+            "tokens_total": total,
+        }
+    }
+    fixed = {**tally, "output": 0, "responses": 0}
+    after = {
+        "totals": {
+            "sessions": 2,
+            "est_minutes_lost": 0,
+            "tokens_lost": fixed,
+            "tokens_total": total,
+        }
+    }
     without = {"totals": {"sessions": 2, "est_minutes_lost": 4, "tokens_lost": None}}
-    assert summary_line(with_usage, with_usage).count("500 tokens") == 2
+    line = summary_line(with_usage, after)
+    # averaged over the 2 sessions that record usage, not all 3; a fix down to 0 is shown
+    assert "500 tokens (+0 cache reads)" in line and "0 tokens (+0 cache reads)" in line
     assert "tokens" not in summary_line(without, with_usage)
+
+
+def test_a_resumed_session_s_replayed_lines_are_counted_once(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    first = _failing(repo, "one", 0, USAGE)
+    resumed = Session("two", cwd=str(repo), start=START + timedelta(hours=1))
+    resumed.usage = USAGE
+    resumed.lines = list(first.lines)  # a resumed session replays the old lines
+    resumed.say("Picking up where we left off.")
+    out = _scan(tmp_path, [first, resumed])
+    responses = sum(1 for line in first.lines if json.loads(line).get("type") == "assistant")
+    assert out["totals"]["tokens_total"]["responses"] == responses + 1
+    assert out["totals"]["tokens_total"]["sessions"] == 1
+
+
+def test_every_format_names_cache_reads_apart_and_the_assignment(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out = _scan(tmp_path, [_failing(repo, f"s{i}", i, USAGE) for i in range(3)])
+    prompt = render_prompt(out)
+    assert "cache reads) in the turns counted against it" in prompt
+    investigate = render_investigate(out)
+    assert "lost; " in investigate and "in the turns counted against it" in investigate
+    markdown = render_markdown(out)
+    assert "Cost so far: " in markdown and "agent-friction's assignment" in markdown
+
+
+def test_the_html_map_formats_counts_as_the_other_reports_do() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    page = (Path(__file__).parent.parent / "src/agent_friction/report/template.html").read_text()
+    match = re.search(r"  function fmtCount\(n\) \{.*?\n  \}\n", page, re.S)
+    assert match is not None
+    values = [0, 950, 999, 1_000, 1_050, 1_250, 6_250, 9_949, 9_950, 79_312, 999_499, 999_500]
+    values += [1_250_000, 7_536_419, 999_499_999, 999_500_000, 2_345_678_901]
+    script = match.group(0) + f"console.log(JSON.stringify({values}.map(fmtCount)));"
+    shown = subprocess.run([node, "-e", script], capture_output=True, text=True, check=True)
+    assert json.loads(shown.stdout) == [fmt_count(v) for v in values]
+
+
+def test_stretches_in_a_stream_without_usage_add_nothing() -> None:
+    index, a = _index(100, 105)
+    mixed = index.claimed_by([_finding(a, (100, 110)), _finding(_stream("c").key, (0, 10))])
+    assert mixed is not None and mixed["responses"] == 1

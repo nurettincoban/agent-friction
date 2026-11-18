@@ -726,14 +726,17 @@ Claude Code writes the model's token usage into every response it records
 input read back from it). agent-friction reads it once per response (a
 response written as several lines, one per thinking, text or tool-call block,
 carries one `message.id` and is counted once) and places it at the response's
-first line.
+first recorded line. "Tokens" in the reports are input, output and cache
+writes added up; cache reads are always given apart.
 
 A finding's tokens are those of the responses that **started inside the
 stretches it claims for time lost**: after a stretch's start (the response
 that wrote the failing call came before it) and up to its end. A stretch
 inside which no response started, as when only a failed run's own time is
 claimed (call to result), claims the response that read the result, unless
-an idle gap of more than 5 minutes came first. The stretches are merged per
+an idle gap of more than 5 minutes came first, or an earlier stretch already
+claimed it. That response can occasionally be the reply to a human who wrote
+in the meantime. The stretches are merged per
 stream before counting, exactly as for time lost, so a response is counted
 once per row and once in `totals.tokens_lost`; rows can overlap, as their
 minutes do. Everything that claims no time (weak evidence, events without
@@ -752,7 +755,11 @@ plan and date.
 Transcripts that record no usage (the generic format, or Claude Code lines
 without `message.usage`) give `null`, never 0; where only some sessions of a scan record it, the
 counts cover those sessions. A `--since` / `--until` window keeps only the
-responses inside it.
+responses inside it, so a stretch that runs past `--until` loses the
+responses after it. `totals.tokens_total` is the usage of the whole scanned
+sessions, including any work they did outside this repository (a session
+started in a parent directory). `sessions` in a tally counts the sessions its
+responses came from.
 
 ## Confidence
 
