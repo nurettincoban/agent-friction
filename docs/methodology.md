@@ -719,6 +719,41 @@ hand: they are the union of its events' intervals, which is the sum of those
 seconds unless intervals overlap (and more than the listed items add up to
 when `max_evidence` hides some events).
 
+## Measured tokens
+
+Claude Code writes the model's token usage into every response it records
+(`message.usage`: uncached input, output, input written to the prompt cache,
+input read back from it). agent-friction reads it once per response (a
+response written as several lines, one per thinking, text or tool-call block,
+carries one `message.id` and is counted once) and places it at the response's
+first line.
+
+A finding's tokens are those of the responses that **started inside the
+stretches it claims for time lost**: after a stretch's start (the response
+that wrote the failing call came before it) and up to its end. A stretch
+inside which no response started, as when only a failed run's own time is
+claimed (call to result), claims the response that read the result, unless
+an idle gap of more than 5 minutes came first. The stretches are merged per
+stream before counting, exactly as for time lost, so a response is counted
+once per row and once in `totals.tokens_lost`; rows can overlap, as their
+minutes do. Everything that claims no time (weak evidence, events without
+timestamps) claims no tokens.
+
+The counts are measured; **which turns belong to which problem is
+agent-friction's assignment**, made by the same rules as time lost, and
+inherits its floor: the agent's thinking before a failed call and the turns
+of a problem that left no trace are not in it. The reports name cache reads
+apart (`6.2k tokens (+79k cache reads)`): every response re-reads the
+conversation so far from the cache, so cache reads are most of every count,
+cost a fraction of fresh input per token, and grow with the session's length
+rather than with the problem. No prices are applied: they differ by model,
+plan and date.
+
+Transcripts that record no usage (the generic format, or Claude Code lines
+without `message.usage`) give `null`, never 0; where only some sessions of a scan record it, the
+counts cover those sessions. A `--since` / `--until` window keeps only the
+responses inside it.
+
 ## Confidence
 
 | Level | Rule |

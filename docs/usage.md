@@ -18,6 +18,7 @@ looks like, every command, how to apply the fixes, Windows notes, privacy and li
 $ agent-friction demo
 agent-friction · shopfront
 6 sessions · 74 tool calls · 23 friction events (+10 weak) · ~9m lost · 5 human corrections · 2026-10-26 → 2026-11-12
+tokens: 43k (+588k cache reads) in the turns counted as lost, of 143k (+1.9M cache reads) in all sessions
 
 What to fix first
   1. src/shopfront/api/schema_gen.py: Generated file: point agents at its source
@@ -25,6 +26,8 @@ What to fix first
   2. pytest: Tell agents to use `make test`
      `pytest` failed 7 times in 4 sessions; 5 times the agent then got the same job done with
      `make test`, and `pytest` did not work later in those sessions.
+     Cost so far: 8.2k tokens (+111k cache reads) and ~3m in the agent turns counted against it,
+     over 4 sessions.
   3. src/shopfront/checkout/service.py: Write down the rule the human keeps repeating
      A human corrected the agent here 3 times in 3 sessions...
 
@@ -278,6 +281,13 @@ double-counted that way; each minute is claimed once.
   result counts up to 30 seconds, or the command's usual run time in that session if longer. No
   single event claims more than 5 minutes (a no-convergence stretch, 15). `n/a` means the
   evidence carries no time estimate.
+- **Tokens** are measured, not estimated: the model's usage as Claude Code writes it into each
+  transcript, summed over the responses inside the stretches counted as time lost (for a failed
+  run alone, the response that read its output). Which turns belong to which problem is
+  agent-friction's assignment; the counts in them are the transcript's. Cache reads are shown
+  apart (`6.2k tokens (+79k cache reads)`): they re-read the conversation so far and cost a
+  fraction of fresh input, so one sum would mostly measure how long the session already was.
+  Transcripts that record no usage (the generic format) show no token counts.
 - **Confidence** (low / medium / high) depends on how many sessions back a hotspot and whether an
   independent second kind of evidence agrees.
 

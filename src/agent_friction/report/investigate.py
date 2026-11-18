@@ -20,7 +20,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent_friction.report._common import all_items, code_span, dropped_note, plural
+from agent_friction.report._common import (
+    TOKENS_NOTE,
+    all_items,
+    code_span,
+    dropped_note,
+    headline_tokens,
+    plural,
+    tokens_phrase,
+)
 
 #: Hotspots listed, at most (strongest first).
 MAX_HOTSPOTS = 40
@@ -168,6 +176,7 @@ def _hotspots(result: dict[str, Any], labels: dict[str, str]) -> list[str]:
             f"{plural(len(sessions), 'session')}: {', '.join(sessions) or '?'}; "
             f"touched in {plural(int(item.get('exposure_sessions', 0) or 0), 'session')}; "
             f"{item.get('confidence', '?')} confidence"
+            + (f"; {tokens}" if (tokens := tokens_phrase(item.get("tokens_lost"))) else "")
             + (f"; {', '.join(facts)}" if facts else ""),
             "- signals: "
             + ", ".join(f"{name}×{n}" for name, n in (item.get("signals") or {}).items()),
@@ -213,6 +222,9 @@ def render_investigate(result: dict[str, Any]) -> str:
         "",
         _HEAD,
     ]
+    tokens = headline_tokens(totals)
+    if tokens:
+        out += [f"Tokens: {tokens}. {TOKENS_NOTE}", ""]
     if (result.get("settings") or {}).get("excerpts") is False:
         out += [
             "_This scan was made without transcript text (`--no-excerpts`): the humans' words "

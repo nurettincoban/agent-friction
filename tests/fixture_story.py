@@ -54,6 +54,15 @@ def _day(day: int, month: int = 11, hour: int = 10) -> datetime:
 
 def _session(name: str, start: datetime) -> Session:
     session = Session(session_uuid(name), RECORDED_AT, start)
+    # What Claude Code records for each response: a few fresh input tokens, the new turn
+    # written to the prompt cache, the conversation so far read back from it.
+    session.usage = {
+        "input_tokens": 6,
+        "output_tokens": 240,
+        "cache_creation_input_tokens": 1_800,
+        "cache_read_input_tokens": 14_000,
+    }
+    session.usage_growth = 1_900
     # Lines the parser must ignore, as found at the top of real transcripts.
     session.raw(
         {"type": "queue-operation", "operation": "enqueue", "sessionId": session.session_id}

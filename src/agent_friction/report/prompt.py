@@ -22,6 +22,7 @@ from agent_friction.report._common import (
     paste_lines,
     paste_settings_json,
     plural,
+    tokens_phrase,
     tool_said,
 )
 
@@ -106,6 +107,9 @@ def _basis(item: dict[str, Any], rec: dict[str, Any]) -> str:
     lost = float(item.get("est_minutes_lost", 0) or 0)
     if lost > 0:
         parts.append(f"~{fmt_minutes(lost)} lost")
+    tokens = tokens_phrase(item.get("tokens_lost"))
+    if tokens:
+        parts.append(f"{tokens} in the turns counted against it")
     parts.append(f"{item.get('confidence', '?')} confidence")
     return f"{head} ({kind} overall: {', '.join(parts)})"
 

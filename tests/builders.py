@@ -76,6 +76,11 @@ class Session:
         self.decision: dict[str, Any] | None = None
         self._count = 0
         self._parent: str | None = None
+        #: ``message.usage`` written on every assistant line from now on, if set; its
+        #: cache reads grow by ``usage_growth`` per response, as a conversation does.
+        self.usage: dict[str, int] | None = None
+        self.usage_growth = 0
+        self._responses = 0
 
     # ---- low level -------------------------------------------------------------------
 
@@ -180,9 +185,17 @@ class Session:
                 "model": "claude-test",
                 "content": blocks,
                 "stop_reason": None,
+                **({"usage": self._usage()} if self.usage is not None else {}),
             },
             requestId=self._id("req_"),
         )
+
+    def _usage(self) -> dict[str, int]:
+        usage = dict(self.usage or {})
+        read = usage.get("cache_read_input_tokens", 0) + self._responses * self.usage_growth
+        usage["cache_read_input_tokens"] = read
+        self._responses += 1
+        return usage
 
     def call(self, name: str, tool_input: dict[str, Any], *, think: float = 4) -> str:
         """Emit only the assistant tool_use line and return its id."""

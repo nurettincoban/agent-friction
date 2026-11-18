@@ -10,14 +10,17 @@ from agent_friction.report._common import (
     LEADS_HEADING,
     PASTE_HEADING,
     PASTE_NOTE,
+    TOKENS_NOTE,
     agent_tool_rules,
     collect_recommendations,
+    cost_line,
     dropped_note,
     events_phrase,
     fmt_lost,
     gone_note,
     grouped_unattributed,
     headline_lost,
+    headline_tokens,
     is_thin,
     paste_deny,
     paste_lines,
@@ -26,6 +29,7 @@ from agent_friction.report._common import (
     repo_recommendations,
     signal_titles,
     thin_note,
+    tokens_phrase,
     tool_said,
     top_signals,
     unattributed_heading,
@@ -83,7 +87,8 @@ def _details(h: dict[str, Any], titles: dict[str, str]) -> list[str]:
         "<details>",
         f"<summary><code>{_html_escape(str(h.get('path', '')))}</code> · score "
         f"{float(h.get('score', 0)):.1f} · {plural(int(h.get('sessions', 0)), 'session')}"
-        "</summary>",
+        + (f" · {_html_escape(t)}" if (t := tokens_phrase(h.get("tokens_lost"))) else "")
+        + "</summary>",
         "",
     ]
     why = str(h.get("why", "")).strip()
@@ -214,6 +219,8 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
         f"{plural(int(totals.get('files_affected', 0)), 'file')} affected",
         "",
     ]
+    if headline_tokens(totals):
+        out += [f"Tokens: {headline_tokens(totals)}. {TOKENS_NOTE}", ""]
     hotspots = list(result.get("hotspots", []))[:top]
     commands = list(result.get("commands", []))[:top]
     if not hotspots and not commands and not result.get("directories"):
@@ -240,6 +247,9 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
                 detail += " " + _html_escape(said)
             thin = " _(thin evidence)_" if is_thin(rec) else ""
             mark = "-" if leads else f"{i}."
+            cost = cost_line(h)
+            if cost:
+                detail += " " + _html_escape(cost)
             out.append(f"{mark} {_code(h.get('path'))}: **{title}**{thin} {detail}")
         out.append("")
         said = thin_note(result, recs)

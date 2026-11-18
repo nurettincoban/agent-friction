@@ -14,6 +14,7 @@ from typing import Any
 
 from agent_friction.report._common import (
     PASTE_NOTE,
+    TOKENS_NOTE,
     paste_deny,
     paste_lines,
     paste_settings_json,
@@ -50,5 +51,6 @@ def render_html(result: dict[str, Any]) -> str:
             "settings": paste_settings_json(result),
             "replay": [f"{rule}: replayed, {what}." for rule, what in paste_deny(result)],
         },
+        "tokens_note": TOKENS_NOTE,
     }
     return _template().replace("__DATA__", _embed_json(shown))

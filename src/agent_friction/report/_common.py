@@ -67,6 +67,74 @@ def headline_lost(totals: dict[str, Any]) -> str:
     return f"~{fmt_minutes(minutes)} lost" if minutes > 0 else "no time estimate"
 
 
+def fmt_count(n: int) -> str:
+    """A token count compactly: ``950``, ``6.2k``, ``79k``, ``1.2M``."""
+    for size, unit in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "k")):
+        if n >= size * 0.9995:
+            value = n / size
+            text = f"{value:.1f}" if value < 9.95 else f"{value:.0f}"
+            return text.removesuffix(".0") + unit
+    return str(n)
+
+
+def _token_parts(tokens: object) -> tuple[int, int] | None:
+    """(tokens the model was given fresh or wrote, tokens read from the prompt cache)."""
+    if not isinstance(tokens, dict) or not int(tokens.get("responses", 0) or 0):
+        return None
+    fresh = sum(int(tokens.get(k, 0) or 0) for k in ("input", "cache_write", "output"))
+    return fresh, int(tokens.get("cache_read", 0) or 0)
+
+
+def tokens_phrase(tokens: object) -> str:
+    """ "6.2k tokens (+79k cache reads)" for a ``tokens_lost`` tally, "" when it has none.
+
+    Cache reads are named apart: they are most of every count and cost a fraction of
+    the rest, so one sum would mostly measure how long the conversation already was.
+    """
+    parts = _token_parts(tokens)
+    if parts is None:
+        return ""
+    fresh, cached = parts
+    return f"{fmt_count(fresh)} tokens" + (f" (+{fmt_count(cached)} cache reads)" if cached else "")
+
+
+#: What the token counts are, said wherever they are shown in full.
+TOKENS_NOTE = (
+    "Token counts are the model's usage as the transcripts recorded it, in the responses "
+    "written inside the stretches counted as time lost (for a failed run alone, the response "
+    "that read its output); which stretches belong to which problem is "
+    "agent-friction's assignment, not something the transcripts say. Cache reads are shown "
+    "apart: they are re-reads of the conversation so far, cheaper per token than the rest."
+)
+
+
+def cost_line(item: dict[str, Any]) -> str:
+    """ "Cost so far: 6.2k tokens (+79k cache reads) and ~2m, over 3 sessions." for one
+    item: "" when the scan has no token usage for it."""
+    tokens = tokens_phrase(item.get("tokens_lost"))
+    if not tokens:
+        return ""
+    minutes = float(item.get("est_minutes_lost", 0) or 0)
+    lost = f" and ~{fmt_minutes(minutes)}" if minutes > 0 else ""
+    sessions = int(item.get("sessions", 0) or 0)
+    return (
+        f"Cost so far: {tokens}{lost} in the agent turns counted against it, over "
+        f"{plural(sessions, 'session')}."
+    )
+
+
+def headline_tokens(totals: dict[str, Any]) -> str:
+    """ "20k (+304k cache reads) in the turns counted as lost, of 391k (+7.5M cache reads)
+    in all sessions": "" without usage."""
+    lost, total = _token_parts(totals.get("tokens_lost")), _token_parts(totals.get("tokens_total"))
+    if lost is None or total is None:
+        return ""
+    return (
+        f"{fmt_count(lost[0])} (+{fmt_count(lost[1])} cache reads) in the turns counted as "
+        f"lost, of {fmt_count(total[0])} (+{fmt_count(total[1])} cache reads) in all sessions"
+    )
+
+
 def fmt_minutes(minutes: float) -> str:
     """Render a duration in minutes compactly: ``42s``, ``7m``, ``2h 05m``."""
     # Round half up (not Python's half-to-even) so this matches the HTML report.

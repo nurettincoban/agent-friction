@@ -156,6 +156,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
 (function () {
   "use strict";
   var R = JSON.parse(document.getElementById("data").textContent);
+  var TOKENS_NOTE = R.tokens_note || "";
   var titles = {};
   (R.signals || []).forEach(function (s) { titles[s.id] = s.title || s.id; });
   var items = (R.hotspots || []).concat(R.commands || [], R.directories || []);
@@ -185,6 +186,33 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
   function plural(n, word) { n = Number(n) || 0; return n + " " + word + (n === 1 ? "" : "s"); }
   function utc(ts) { var t = String(ts || "").slice(0, 16).replace("T", " "); return t ? t + " UTC" : ""; }
   function lostPhrase(m) { return Number(m) > 0 ? "~" + mins(m) + " lost" : "no time estimate"; }
+  // Token counts: same rules as fmt_count, tokens_phrase and cost_line in report/_common.py.
+  function fmtCount(n) {
+    n = Number(n) || 0;
+    var units = [[1e9, "B"], [1e6, "M"], [1e3, "k"]];
+    for (var i = 0; i < units.length; i++) {
+      if (n >= units[i][0] * 0.9995) {
+        var v = n / units[i][0], text = v < 9.95 ? v.toFixed(1) : v.toFixed(0);
+        return text.replace(/\.0$/, "") + units[i][1];
+      }
+    }
+    return String(n);
+  }
+  function tokenParts(t) {
+    if (!t || typeof t !== "object" || !Number(t.responses)) return null;
+    return [(Number(t.input) || 0) + (Number(t.cache_write) || 0) + (Number(t.output) || 0), Number(t.cache_read) || 0];
+  }
+  function tokensPhrase(t) {
+    var p = tokenParts(t);
+    if (!p) return "";
+    return fmtCount(p[0]) + " tokens" + (p[1] ? " (+" + fmtCount(p[1]) + " cache reads)" : "");
+  }
+  function costLine(h) {
+    var tokens = tokensPhrase(h.tokens_lost);
+    if (!tokens) return "";
+    var m = Number(h.est_minutes_lost) || 0;
+    return "Cost so far: " + tokens + (m > 0 ? " and ~" + mins(m) : "") + " in the agent turns counted against it, over " + plural(Number(h.sessions) || 0, "session") + ".";
+  }
   function mins(m) {
     m = Number(m) || 0;
     // Same rules as fmt_minutes in report/_common.py: round half up.
@@ -254,6 +282,15 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
       box.appendChild(el("span", null, (Number(t[p[0]]) === 1 ? p[1] : p[2]) + (p[0] === "friction_events" && t.weak_events ? " (+" + t.weak_events + " weak)" : "")));
       document.getElementById("stats").appendChild(box);
     });
+  (function () {
+    var lost = tokenParts(R.totals && R.totals.tokens_lost), all = tokenParts(R.totals && R.totals.tokens_total);
+    if (!lost || !all) return;
+    var box = el("div", { class: "stat", title: TOKENS_NOTE });
+    box.appendChild(el("b", null, fmtCount(lost[0])));
+    box.appendChild(el("span", null, "tokens in turns counted as lost (+" + fmtCount(lost[1]) + " cache reads), of " +
+      fmtCount(all[0]) + " (+" + fmtCount(all[1]) + ") in all sessions"));
+    document.getElementById("stats").appendChild(box);
+  })();
 
   // Detail panel
   var detail = document.getElementById("detail");
@@ -262,8 +299,10 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     detail.appendChild(el("div", { class: "sub" }, h.kind === "command" ? "command" : h.kind === "dir" ? "directory" : "file"));
     detail.appendChild(el("h3", { class: "mono" }, h.path + gone(h)));
     detail.appendChild(el("div", { class: "sub" }, "score " + Number(h.score).toFixed(1) + " · " + plural(h.sessions, "session") +
-      " · " + plural(h.events, "event") + " · " + lostPhrase(h.est_minutes_lost) + " · " + h.confidence + " confidence"));
+      " · " + plural(h.events, "event") + " · " + lostPhrase(h.est_minutes_lost) + (tokensPhrase(h.tokens_lost) ? " · " + tokensPhrase(h.tokens_lost) : "") +
+      " · " + h.confidence + " confidence"));
     if (h.why) detail.appendChild(el("p", null, h.why));
+    if (tokensPhrase(h.tokens_lost)) detail.appendChild(el("p", { class: "sub" }, TOKENS_NOTE));
     var chips = el("div");
     topSignals(h, 99).forEach(function (s) { chips.appendChild(el("span", { class: "chip", title: s[0] }, (titles[s[0]] || s[0]) + " × " + s[1])); });
     detail.appendChild(chips);
@@ -360,6 +399,8 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
       li.appendChild(rich("span", r.detail));
       var said = toolSaid(h, r);
       if (said) li.appendChild(rich("span", " " + said));
+      var cost = costLine(h);
+      if (cost) li.appendChild(el("span", { class: "sub" }, " " + cost));
       list.appendChild(li);
     });
     var thinShown = shown.some(function (p) { return p[1].evidence === "thin"; }), left = 0;
