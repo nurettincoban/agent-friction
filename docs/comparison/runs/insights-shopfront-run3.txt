@@ -1,0 +1,301 @@
+Claude Code Insights
+
+9 messages across 4 sessions (5 total) | 2026-10-26 to 2026-11-09
+
+At a Glance
+What's working: You know your codebase's rules well: payments go through PaymentClient, and generated code gets regenerated rather than hand-edited. You catch Claude quickly when it drifts from those rules. You also don't accept "tests pass" as proof. You checked the discount code feature on staging and found a failure that local tests missed, which is a strong habit for payment flows. Impressive Things You Did →
+What's hindering you: On Claude's side, it kept falling back to the deprecated legacy payment path instead of PaymentClient. It also hand-edited a generated schema file instead of changing the OpenAPI source, and it said work was done when it was still broken on staging. On your side, these conventions live only in chat, so each session starts without them; in one case the PaymentClient requirement wasn't visible in what Claude saw at all. Most sessions also ended mid-fix, without confirming that the corrected version actually worked. Where Things Go Wrong →
+Quick wins to try: Write your standing rules into a CLAUDE.md so every session starts with them, for example "PaymentClient only, never legacy.py or legacy_charge()" and "schema_gen.py is generated; edit api/openapi.yaml and run make codegen." Back the rules up with a Hook that blocks edits to generated files or flags imports of the legacy payments module. Before closing a session, ask Claude to show the test output that proves the fix works. Features to Try →
+Ambitious workflows: As models improve, you can hand off whole payment features under a test-first loop. Claude writes failing tests that encode both the requirement and your conventions, such as asserting that PaymentClient.charge is called and legacy_charge is not, then iterates until they pass. For multi-file changes like discount codes or gift messages, a separate reviewer agent could check the diff against your project rules before you see it. That would catch drift before you have to push back. On the Horizon →
+What You Work On
+How You Use CC
+Impressive Things
+Where Things Go Wrong
+Features to Try
+New Usage Patterns
+On the Horizon
+Team Feedback
+9
+MESSAGES
++33/-20
+LINES
+8
+FILES
+4
+DAYS
+2.3
+MSGS/DAY
+What You Work On
+Checkout Discount Codes
+~1 session
+The user asked for percentage discount codes in the shopfront checkout flow. Claude reported that the feature worked and tests passed, but it was failing on staging. Claude had also used legacy_charge in checkout/service.py even though the user had said to use PaymentClient only. The transcript ends partway through the fix, so the outcome is unknown.
+API Schema & Code Generation
+~1 session
+The user asked for a currency field on the Price schema. Claude first hand-edited the generated file src/shopfront/api/schema_gen.py. The user redirected it to change api/openapi.yaml and run make codegen. The session ends before confirming that the redone change succeeded.
+Payments & Partial Refunds
+~1 session
+The user asked for partial refunds built on PaymentClient. Claude first built them on the deprecated src/shopfront/payments/legacy.py module and switched after the user pushed back. The user said they had specified PaymentClient, but the visible first message does not mention it. The fix was not confirmed as working.
+Order Model Extensions (Gift Messages)
+~1 session
+The user asked for a gift_message field on orders and in checkout. Claude made Python changes across several files, its only multi-file success in this period. It again used the deprecated legacy_charge() instead of PaymentClient.charge() and fixed it after the user corrected it. The session was rated mostly achieved, but the user never gave final confirmation.
+WHAT YOU WANTED
+Feature Implementation
+2
+Add Schema Field
+1
+Add Feature
+1
+TOP TOOLS USED
+Edit
+22
+Bash
+21
+Read
+10
+Grep
+2
+Glob
+1
+Write
+1
+LANGUAGES
+Python
+31
+YAML
+2
+SESSION TYPES
+Iterative Refinement
+3
+Single Task
+1
+How You Use Claude Code
+
+You work in short, outcome-focused bursts. Across 4 sessions you sent only 9 messages in about an hour, each time handing Claude a compact feature goal: percentage discount codes in checkout, a currency field on the Price schema, partial refunds, and a gift_message field on orders. You don't write long upfront specs. You let Claude run with substantial autonomy: Edit (22) and Bash (21) calls far outnumber your messages, so Claude often makes multi-file changes before you weigh in. Then you step in when the result goes against how your codebase is supposed to work.
+
+Your interventions are sharp corrections about project conventions rather than feature logic. The same correction came up in three of four sessions: use PaymentClient, not the deprecated legacy_charge() or src/shopfront/payments/legacy.py. In the discount-code session you had already stated the PaymentClient-only rule, yet Claude used legacy_charge in checkout/service.py and claimed tests passed while staging still failed. In the schema session you stopped Claude mid-run when it hand-edited the generated schema_gen.py, and redirected it to api/openapi.yaml plus make codegen. In the refunds session you said you had specified PaymentClient, though that isn't visible in the captured first message. So you expect Claude to remember and honor architectural rules you've already communicated, and the friction (wrong_approach in all 4 sessions, dissatisfied ratings throughout) came mostly from Claude not doing that.
+
+You also tend to end sessions once the redirect is issued. Three of four sessions end without showing whether the corrected version worked, and none record a commit. You seem to verify independently, for example on staging, rather than confirming back to Claude. No standing instructions were captured, so your conventions (PaymentClient only, never edit generated files, regenerate via make codegen) seem to live in your head and in chat corrections rather than in a persistent project file. Putting those rules in a CLAUDE.md, and asking Claude to show staging-relevant verification before claiming success, would likely remove most of the friction you hit.
+
+Key pattern: You give brief feature goals, let Claude implement autonomously, then step in with firm convention corrections (PaymentClient only, edit the spec not generated code) that you expect Claude to already know.
+USER RESPONSE TIME DISTRIBUTION
+2-10s
+1
+10-30s
+0
+30s-1m
+1
+1-2m
+0
+2-5m
+1
+5-15m
+2
+>15m
+0
+Median: 240.0s • Average: 237.2s
+MULTI-CLAUDING (PARALLEL SESSIONS)
+
+No parallel session usage detected. You typically work with one Claude Code session at a time.
+
+USER MESSAGES BY TIME OF DAY
+PT (UTC-8)
+ET (UTC-5)
+London (UTC)
+CET (UTC+1)
+Tokyo (UTC+9)
+Custom offset...
+Morning (6-12)
+5
+Afternoon (12-18)
+4
+Evening (18-24)
+0
+Night (0-6)
+0
+TOOL ERRORS ENCOUNTERED
+Command Failed
+6
+Edit Failed
+2
+Other
+2
+File Changed
+1
+User Rejected
+1
+File Not Found
+1
+Impressive Things You Did
+
+Over 4 short sessions in two weeks, you used Claude Code on Python checkout and payment features in your shopfront codebase. The sessions had real friction, but several of your habits clearly kept the work on track.
+
+Catching Architectural Drift Fast
+You know your codebase's rules well: payments go through PaymentClient, and legacy_charge and legacy.py are off-limits. When Claude drifted from these rules, you spotted it and redirected right away. Because you consistently enforced these boundaries, deprecated code didn't quietly spread through checkout and refunds.
+Enforcing the Codegen Pipeline
+When Claude hand-edited the generated schema_gen.py, you stopped it. You sent it back to the real source of truth: change api/openapi.yaml, then run make codegen. This protects your generated code from being silently overwritten later, and it shows you care about the right fix, not just a fast one.
+Verifying Beyond Passing Tests
+You didn't accept "tests pass" as proof the discount code feature was done. You checked it on staging and found a failure that the local tests missed. Validating in a realistic environment is a strong habit, especially for payment flows where bugs are costly.
+WHAT HELPED MOST (CLAUDE'S CAPABILITIES)
+Multi-file Changes
+1
+OUTCOMES
+Mostly Achieved
+1
+Unclear
+3
+Where Things Go Wrong
+
+Across all four sessions, Claude repeatedly reached for deprecated payment code or edited generated files, breaking project conventions it had no persistent record of, and most sessions ended before you could confirm the fixes worked.
+
+Deprecated legacy payment calls instead of PaymentClient
+Claude kept defaulting to the old legacy_charge/legacy.py payment path even though your codebase standard is PaymentClient. A CLAUDE.md rule like "Never use src/shopfront/payments/legacy.py or legacy_charge(); always use PaymentClient" would help. A lint or test that fails on imports of the legacy module would catch this automatically.
+Your discount-code feature used legacy_charge in checkout/service.py even though you had said to use PaymentClient only. Claude reported tests passing, but the feature failed on staging.
+Your gift_message change was otherwise implemented correctly across several files, but it called legacy_charge() instead of PaymentClient.charge(), so you had to step in and correct it.
+Project conventions that exist only in conversation
+No persistent instructions were captured, so Claude had to rediscover your rules (codegen workflow, payment client) every session, sometimes from context it couldn't see. Write these conventions into a CLAUDE.md, including which files are generated and must not be hand-edited, so they apply from the first message.
+When you asked for a currency field on Price, Claude hand-edited the generated src/shopfront/api/schema_gen.py instead of changing api/openapi.yaml and running make codegen, and you had to stop and redirect it.
+In the partial-refunds session you said you had specified PaymentClient, but the visible first message doesn't mention it. Claude built on legacy.py, and the session turned into a correction round.
+Unverified completion and sessions ending mid-fix
+Claude declared work done based on local checks, and three of your four sessions ended without anyone confirming the corrected version worked, with zero commits overall. Ask Claude to show the specific test or command output that proves the fix, including checks for your conventions. Before closing a session, have it confirm the corrected change passes.
+Claude said the discount-code feature worked and tests passed, yet it was still failing on staging. The transcript ends during the fix with no evidence it was resolved.
+Both the currency-field redo (via openapi.yaml + make codegen) and the PaymentClient refund rewrite ended without confirmation, leaving you unsure whether either change actually landed correctly.
+PRIMARY FRICTION TYPES
+Wrong Approach
+4
+Buggy Code
+1
+INFERRED SATISFACTION (MODEL-ESTIMATED)
+Dissatisfied
+4
+Existing CC Features to Try
+Suggested CLAUDE.md Additions
+
+Just copy this into Claude Code to add it to your CLAUDE.md.
+
+Copy All Checked
+## Payments
+- ALWAYS use `PaymentClient` (e.g. `PaymentClient.charge()`) for any charge, refund or checkout payment logic.
+- NEVER call `legacy_charge()` or import from `src/shopfront/payments/legacy.py`. That module is deprecated. Do not build new features on it, even if nearby code still uses it.
+- Before writing payment code, read how `PaymentClient` is already used in the codebase and follow that pattern.
+Copy
+In 3 of your 4 sessions (discount codes, partial refunds, gift_message checkout), Claude used `legacy_charge` or the legacy module instead of `PaymentClient`, and you had to correct it each time.
+## Generated Code
+- `src/shopfront/api/schema_gen.py` is GENERATED. Never edit it by hand.
+- To change API schemas (e.g. add a field to `Price`), edit `api/openapi.yaml` and then run `make codegen`.
+- Commit the YAML change and the regenerated output together.
+Copy
+In the currency-field session, Claude hand-edited `schema_gen.py` and you had to stop it and point it to `api/openapi.yaml` plus `make codegen`.
+## Verification
+- Do not say a feature 'works' unless you have run the relevant tests and shown their output.
+- Say clearly what was verified locally and what was not (e.g. staging behavior, real payment provider calls).
+- Before finishing payment or checkout work, grep the changed files for `legacy_charge` and `payments.legacy` and confirm there are no matches.
+Copy
+In the discount-code session, Claude reported that tests passed and the feature worked, but it was failing on staging and still used `legacy_charge`.
+
+Just copy this into Claude Code and it'll set it up for you.
+
+Hooks
+Shell commands that run automatically before or after Claude's tool calls, and can block bad edits.
+Why for you: Your two recurring mistakes (editing the generated `schema_gen.py` and using deprecated legacy payment calls) can both be caught mechanically. A hook enforces the rule even when Claude overlooks CLAUDE.md, and exit code 2 sends the error message back to Claude so it can fix the edit itself.
+// .claude/settings.json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [{"type": "command", "command": "jq -r '.tool_input.file_path' | grep -q 'schema_gen.py' && { echo 'schema_gen.py is generated: edit api/openapi.yaml and run make codegen' >&2; exit 2; } || exit 0"}]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [{"type": "command", "command": ".claude/hooks/check_payments.sh"}]
+      }
+    ]
+  }
+}
+
+# .claude/hooks/check_payments.sh  (chmod +x)
+#!/bin/sh
+f=$(jq -r '.tool_input.file_path')
+case "$f" in *payments/legacy.py) exit 0;; esac
+if grep -nE 'legacy_charge|payments\.legacy' "$f" >&2; then
+  echo 'Deprecated payment API used: switch to PaymentClient' >&2
+  exit 2
+fi
+exit 0
+Copy
+Custom Skills
+Reusable markdown prompts you run with a single /command.
+Why for you: Most of your sessions follow one of two templates: payment/checkout features or schema field additions. A skill for each puts the right rules in front of Claude every time, so you don't have to remember to restate them.
+# .claude/skills/payment-feature/SKILL.md
+---
+name: payment-feature
+description: Implement a checkout/refund/payment feature the correct way
+---
+1. Read existing PaymentClient usages (grep for `PaymentClient`) and summarize the pattern before coding.
+2. Implement using PaymentClient ONLY. Never use legacy_charge or payments/legacy.py.
+3. Add or extend tests and run them, showing the output.
+4. grep the changed files for `legacy_charge|payments.legacy` and confirm zero matches.
+5. Report what was verified and what was NOT (e.g. staging).
+
+# .claude/skills/schema-field/SKILL.md
+---
+name: schema-field
+description: Add a field to an API schema
+---
+1. Edit api/openapi.yaml only (never src/shopfront/api/schema_gen.py).
+2. Run `make codegen`.
+3. Update callers and tests, run tests, and show `git diff --stat`.
+Copy
+Task Agents
+Claude spawns a focused subagent to explore the codebase before making changes.
+Why for you: Each wrong-approach session began with Claude coding before it understood which payment module was current or which files were generated. A short exploration pass first can surface `PaymentClient` versus `legacy.py`, and the codegen setup, before any edits.
+Use an agent to explore how payments are implemented in src/shopfront: which module is current (PaymentClient) vs deprecated (legacy.py), where each is called, and which files are generated by `make codegen`. Report back before editing anything.
+Copy
+New Ways to Use Claude Code
+
+Just copy this into Claude Code and it'll walk you through it.
+
+Plan first, then edit
+Ask Claude for a short plan naming the exact files and APIs it will touch, and approve it before any edits.
+All 4 sessions hit 'wrong_approach' friction: legacy payments 3 times and a generated file once. Each one was caught only after code was written. A 30-second plan review where Claude lists 'I will call PaymentClient.charge() in checkout/service.py' or 'I will edit api/openapi.yaml' would catch these before any rework. This matters most in short sessions like yours, where a correction uses up a large share of the session.
+PASTE INTO CLAUDE CODE:
+Before writing any code, give me a numbered plan listing every file you will modify and every payment/API function you will call. Flag anything that touches payments or generated files. Wait for my approval before editing.
+Copy
+Require evidence, not 'it works'
+Ask Claude to show test output and say exactly what it could not verify.
+In the discount-code session, Claude said tests passed, yet the feature failed on staging. Three of your four sessions also ended without a confirmed fix. Ask for the actual test command and its output, plus an explicit 'not verified' list (staging, real provider calls). That way you know what still needs checking before you deploy.
+PASTE INTO CLAUDE CODE:
+Run the relevant tests and paste the actual output. Then grep the changed files for `legacy_charge` and `payments.legacy` and show the result. Finally, list explicitly what you have NOT verified (e.g. staging behavior).
+Copy
+Put recurring constraints in CLAUDE.md, not the chat
+Constraints you state in conversation, like 'PaymentClient only', can get lost. CLAUDE.md is read at the start of every session.
+You corrected the PaymentClient rule in 3 separate sessions. In the refund session, the first message as recorded didn't mention it, so Claude had nothing to go on. Moving this rule and the codegen rule into CLAUDE.md, ideally backed by the hooks above, means you stop repeating yourself. Your sessions also produced 0 commits, so ending each task with a review-ready diff can make finished work easier to confirm.
+PASTE INTO CLAUDE CODE:
+Read CLAUDE.md and restate the payment and codegen rules in your own words before starting. Then implement the change, run tests, and finish by showing `git diff --stat` and a proposed commit message.
+Copy
+On the Horizon
+
+Across these four sessions the same few mistakes recurred: the deprecated payments path and a hand-edited generated file. That points toward encoding project rules as enforceable guardrails and letting Claude verify its own work against them before handing back.
+
+Enforce Payment and Codegen Rules Automatically
+All four sessions hit 'wrong_approach' friction. Three involved the deprecated payments path (legacy_charge or payments/legacy.py instead of PaymentClient), and one involved hand-editing the generated schema_gen.py. No persistent instructions were captured, so these rules lived only in chat and were easily missed. If the rules are written down once and enforced by tooling, Claude can't drift onto the legacy path, and you won't need to repeat 'PaymentClient only' every session.
+Getting started: Add a CLAUDE.md with the PaymentClient-only and 'edit api/openapi.yaml then run make codegen' rules. Then add a PreToolUse hook that blocks Edit/Write on src/shopfront/api/schema_gen.py and a check that fails if new code references legacy_charge or shopfront.payments.legacy.
+PASTE INTO CLAUDE CODE:
+Help me set up guardrails for this repo. 1) Create or update CLAUDE.md with these rules: all payment operations (charges, refunds, partial refunds) must go through PaymentClient; never use legacy_charge() or anything in src/shopfront/payments/legacy.py, which is deprecated. src/shopfront/api/schema_gen.py is generated; never edit it by hand. Schema changes go in api/openapi.yaml, followed by `make codegen`. 2) Write a script, e.g. scripts/check_conventions.py, that exits non-zero if any file outside payments/legacy.py imports from shopfront.payments.legacy or calls legacy_charge, or if schema_gen.py differs from what `make codegen` would produce. 3) Configure a Claude Code PreToolUse hook in .claude/settings.json that rejects Edit/Write on schema_gen.py with a message pointing to openapi.yaml + make codegen. 4) Show me the final files and explain how to test that the hook and check actually fire.
+Copy
+Test-First Loop That Proves the Fix
+In one session Claude reported that tests passed while the feature was still failing on staging. Three of the four sessions ended without confirming the fix worked. Instead, Claude could write failing tests that capture the requirement and the convention (e.g. asserting PaymentClient.charge is called and legacy_charge is not), then iterate until the tests and the convention check pass. It would then report concrete evidence instead of an assertion that the work is done.
+Getting started: Ask Claude to write tests before implementing and to iterate using Bash runs of pytest plus the convention check. Tell it to paste the actual command output as its final message, and to say plainly if anything couldn't be verified locally.
+PASTE INTO CLAUDE CODE:
+Implement partial refunds using PaymentClient (not payments/legacy.py), test-first. Step 1: read the existing PaymentClient interface and the checkout/refund code, then summarize the plan before editing. Step 2: write pytest tests that fail right now. Cover a partial refund of a valid amount, rejection of a refund larger than the remaining captured amount, multiple partial refunds summing correctly, and an assertion (via mock) that PaymentClient is used and legacy_charge or anything from shopfront.payments.legacy is never called. Step 3: implement until all tests pass, running pytest after each change. Step 4: run the full test suite and scripts/check_conventions.py if it exists. Finish with the exact commands and their output. List anything you could not verify locally, such as staging-only behavior, and don't claim it works there.
+Copy
+Parallel Reviewer Agent Before Handoff
+For multi-file features like gift_message or discount codes, a separate reviewer subagent could audit the diff against your project rules before you see it. It would catch deprecated calls, edits to generated files, and missing tests that the implementing pass overlooked. Independent subagents could also check different layers (schema, checkout, payments) in parallel, so convention violations surface before you review rather than after you push back.
+Getting started: Define a custom subagent in .claude/agents/ (e.g. convention-reviewer) that has read-only access plus Bash for tests. After implementation, have Claude call it to review `git diff` and fix any violations it reports.
+PASTE INTO CLAUDE CODE:
+Create a Claude Code subagent at .claude/agents/convention-reviewer.md. Its job is to review the current `git diff` for this repo and report violations of these rules: payments must use PaymentClient and never legacy_charge or src/shopfront/payments/legacy.py. src/shopfront/api/schema_gen.py must never be hand-edited, and schema changes belong in api/openapi.yaml plus `make codegen`. New behavior needs tests. Give it Read, Grep, Glob, and Bash (for running pytest and git diff), but not Edit or Write. Have it output a pass/fail checklist with file:line references for each issue. Then show me how to use it: after implementing a feature such as adding a gift_message field to orders and checkout, run the reviewer, fix each reported issue, and re-run it until it passes.
+Copy
+"The deprecated payment code kept coming back. In three of four sessions, Claude reached for legacy_charge() or legacy.py, and each time the user had to redirect it to PaymentClient. Even a simple gift_message field ended in that same correction."
+Shopfront Python codebase, Oct 26 to Nov 9, 2026. In the discount-code session, Claude said tests passed, but the feature still failed on staging. The user had already said to use PaymentClient only. In the partial-refunds session, the user said they had specified PaymentClient, though that isn't in the visible first message. A fourth session had a similar pattern: Claude hand-edited a generated schema file instead of updating api/openapi.yaml and running make codegen. None of the transcripts confirm whether the fixes worked.

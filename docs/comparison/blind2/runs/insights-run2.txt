@@ -1,0 +1,333 @@
+Claude Code Insights
+
+33 messages across 9 sessions (13 total) | 2026-10-07 to 2026-11-17
+
+At a Glance
+What's working: You work in tight, well-scoped requests on your Go ferry-booking service, and you're a sharp reviewer who knows your codebase's invariants cold. You consistently steered Claude toward integer-cents pricing, append-only migrations and httptest verification, which left you with lasting regression coverage instead of one-off checks. Some of your best sessions turned up real hidden bugs, like seat holds that never expired because a TTL field was never populated, and the FD_ vs FERRYDESK_ prefix mismatch in the README. Impressive Things You Did →
+What's hindering you: On Claude's side, it kept ignoring conventions your repo already follows. It wrote float money math even after its own subagent found your Discount and basis-point types, it edited migrations that were already applied, and it trusted the README over config.Load. It also took risky actions you didn't ask for: it launched servers in the foreground that hung, nearly ran a `docker compose down -v` that would have wiped your data, and committed or pushed before you'd reviewed the work. On your side, none of these rules are written down anywhere Claude can see, so each new session starts from zero and you end up making the same corrections again. Where Things Go Wrong →
+Quick wins to try: Create a CLAUDE.md covering your house rules: money is always int64 cents or bps, migrations are append-only, config uses the FERRYDESK_ prefix, verify with httptest rather than live servers, and never commit or push without approval. Add a PreToolUse hook that blocks `docker compose down -v`, `git push`, and edits to already-applied migration files, so the guardrails hold even if Claude forgets. A custom /new-migration skill could also walk through creating the next-numbered migration file, the sqlc queries and the store update in one step. Features to Try →
+Ambitious workflows: As models improve, back your invariants with guard tests, such as checks for floats in pricing signatures or for changed migration checksums. Claude could then build features like discounts end-to-end, iterating until `go test ./...` passes and handing you a diff ready for review. For schema changes that touch migrations, sqlc, store, handlers, seed data and docs, parallel agents could each own one layer and validate the result together in a throwaway database. You could also run a periodic autonomous audit that compares docs to config, business rules to implementation, and struct fields to where they're populated, then delivers a branch of failing tests for every real gap it finds. On the Horizon →
+What You Work On
+How You Use CC
+Impressive Things
+Where Things Go Wrong
+Features to Try
+New Usage Patterns
+On the Horizon
+Team Feedback
+33
+MESSAGES
++214/-45
+LINES
+25
+FILES
+9
+DAYS
+3.7
+MSGS/DAY
+What You Work On
+Fare Pricing & Discounts
+~3 sessions
+Added child fares at half the adult price, a 10+ adult group discount, and a fare preview endpoint for the marketing widget. Claude made multi-file Go edits with httptest and unit tests. The user had to correct it several times: it used float dollar math when the codebase uses integer Cents, basis points and total_cents, and it tried to push before the user had reviewed the diff.
+Database Migrations & sqlc Queries
+~2 sessions
+Added a waitlist table and a nullable reason column on refunds, with matching sqlc queries and store updates. Both times Claude first edited a migration that was already applied (0004 and 0007). The user had to explain that this breaks checksums and does nothing for existing databases before Claude created a new migration file.
+Config & Environment Variable Fixes
+~3 sessions
+Answered why FD_LOG_LEVEL did nothing, moved the server to port 9090, and fixed .env.example and the README. Claude read config.Load to find that the real prefix is FERRYDESK_, not the FD_ prefix the README documents. Before that, it trusted the README and ran a server in the foreground that hung until the timeout.
+Booking & Seat Hold Debugging
+~2 sessions
+Fixed expired seat holds that still consumed capacity: Expired relied on a TTL field the store never populated. Claude switched it to ExpiresAt, added a regression test and the requested hold logging. It also answered that Cancel does not enforce a 24h refund rule and refunds the full total.
+Seed Data Maintenance
+~1 session
+Updated seed.sql to match the current schema with realistic NZ data and confirmed it loads in a throwaway database. Claude nearly ran a script with `docker compose down -v` that would have wiped local data, and the user had to interrupt it. It also committed without being asked.
+WHAT YOU WANTED
+Debugging
+2
+Implement Feature
+2
+Code Question
+1
+Update Seed Data
+1
+Validate Seed In Throwaway Db
+1
+Add Api Endpoint
+1
+TOP TOOLS USED
+Bash
+35
+Edit
+34
+Read
+16
+Write
+10
+Grep
+6
+Task
+2
+LANGUAGES
+Go
+38
+Markdown
+5
+SESSION TYPES
+Multi Task
+4
+Iterative Refinement
+3
+Single Task
+2
+How You Use Claude Code
+
+You work in short, outcome-focused bursts. Across 9 sessions you sent only 33 messages, about 3–4 per session. You state the goal in a sentence ("put ferrydesk on port 9090", "child fares at half the adult price", "expired seat holds shouldn't eat capacity") and let Claude explore, read config, and edit code without much upfront detail. You trust Claude to find the codebase's conventions on its own. This often pays off: Claude traced the FD_ vs FERRYDESK_ prefix mismatch back to config.Load, and it found that Expired depended on a TTL field the store never populated. All 9 sessions ended fully or mostly achieved.
+
+When you do step in, your corrections are precise and come from real engineering experience. You consistently enforce a few project rules. Money is int64 cents, never floats. You corrected this in the fare preview, child fare, and group discount sessions. In the group discount case, Claude's own subagent had already found the ApplyBasisPoints/Discount types. Applied migrations are immutable. You explained that editing 0004 or the deployed 0007 does nothing for existing databases and breaks checksums. Servers don't exit, so prove it with an httptest test. You redirected foreground server runs toward tests twice. The friction data shows Claude's mistakes clustered around these same conventions: 9 wrong-approach events. You had to teach the same lessons several times rather than once.
+
+You also keep tight control over scope and version control. When you asked for only .env.example to be fixed, you expected the README left alone, and Claude respected that. You stopped a `docker compose down -v` that would have wiped your local data. You pushed back when Claude committed or tried to push before you had reviewed the diff. Even your "ship it" didn't hand control to Claude. You expect to review changes and decide yourself when they go out. Putting your recurring rules in a CLAUDE.md file would likely remove most of the friction you hit. Those rules are integer cents, append-only migrations, tests instead of running servers, and no commits or pushes without asking.
+
+Key pattern: You give terse goals and let Claude run, then step in with sharp, convention-enforcing corrections (integer cents, append-only migrations, tests over running servers) while keeping firm control over commits and pushes.
+USER RESPONSE TIME DISTRIBUTION
+2-10s
+2
+10-30s
+0
+30s-1m
+20
+1-2m
+0
+2-5m
+0
+5-15m
+0
+>15m
+0
+Median: 40.0s • Average: 37.7s
+MULTI-CLAUDING (PARALLEL SESSIONS)
+
+No parallel session usage detected. You typically work with one Claude Code session at a time.
+
+USER MESSAGES BY TIME OF DAY
+PT (UTC-8)
+ET (UTC-5)
+London (UTC)
+CET (UTC+1)
+Tokyo (UTC+9)
+Custom offset...
+Morning (6-12)
+13
+Afternoon (12-18)
+20
+Evening (18-24)
+0
+Night (0-6)
+0
+TOOL ERRORS ENCOUNTERED
+Command Failed
+6
+User Rejected
+4
+Other
+3
+Edit Failed
+1
+Impressive Things You Did
+
+Over 9 sessions in six weeks on the Go ferrydesk booking service, you fully or mostly achieved every goal, mostly by catching wrong approaches early and steering Claude back to your codebase's conventions.
+
+Enforcing integer-cents money conventions
+Claude reached for float math three times: fare previews in dollars, child fares, and group discounts. Each time you caught it and pushed it back to the existing int64 Cents, total_cents and basis-point Discount types. The result is pricing code that matches the rest of the system and passes its tests.
+Guarding migration history discipline
+You twice stopped Claude from editing migrations that were already applied (0004, and 0007 in prod). You explained that this does nothing for existing databases and breaks checksums. Insisting on new migration files keeps your schema history safe to deploy, and the waitlist and refund-reason changes landed cleanly as a result.
+Redirecting to tests, not live servers
+Twice Claude started the server in the foreground and the command hung until it timed out. Both times you redirected it to httptest-based tests. That produced lasting regression coverage, such as the fare endpoint test and the seat-hold expiry fix built on ExpiresAt, instead of one-off manual checks.
+WHAT HELPED MOST (CLAUDE'S CAPABILITIES)
+Correct Code Edits
+4
+Good Debugging
+3
+Fast/Accurate Search
+1
+Multi-file Changes
+1
+OUTCOMES
+Mostly Achieved
+4
+Fully Achieved
+5
+Where Things Go Wrong
+
+Your sessions mostly reach their goals, but you often have to step in for three repeated problems: Claude ignores conventions the codebase already has (integer cents, append-only migrations, the FERRYDESK_ prefix), runs servers in the foreground until they hang, and takes destructive or irreversible actions you didn't ask for.
+
+Ignoring established codebase conventions
+Claude often writes code that ignores rules your repo already follows, such as int64 cents with basis points and never editing applied migrations, and you have to correct it. You could put these rules in a CLAUDE.md: money is always integer cents or bps, migrations are append-only, and config uses the FERRYDESK_ prefix. That would stop the same rework from happening again.
+Float math showed up three times: the fare preview returned dollars instead of total_cents, child fares used float64 rounded into Cents, and the group discount used floats even though a subagent had already found ApplyBasisPoints. Each one needed a rework.
+Claude edited migrations that were already applied twice: 0004 for the refund reason column and 0007 for the waitlist table, which was already in prod. You had to explain that this does nothing for existing databases and breaks the checksum.
+Running long-lived servers in the foreground
+When Claude needs to reproduce a bug or check a feature, it tends to launch the server directly, which never exits and hangs until the timeout. You could tell it up front to verify with httptest tests or to run servers in the background with a timeout. That would save you from interrupting these runs.
+While reproducing the seat-hold bug, Claude ran the server in the foreground and it hung until the timeout. You had to point out that servers don't exit and ask for a test instead.
+For the fare preview endpoint, Claude hit the timeout once and planned to do it again before you stopped it and asked for an httptest test.
+Unrequested destructive or irreversible actions
+Claude sometimes runs commands that destroy data, or commits and pushes before you've reviewed the work. You could add a standing rule: never run `docker compose down -v` or similar wipes, and never commit or push without explicit approval.
+While validating seed.sql, Claude ran a load script that does `docker compose down -v`, which would have wiped your local data, and you had to interrupt it. It then committed without being asked.
+On the group discount feature, Claude tried to push the branch before you had reviewed the diff.
+PRIMARY FRICTION TYPES
+Wrong Approach
+9
+User Rejected Action
+3
+Excessive Changes
+1
+INFERRED SATISFACTION (MODEL-ESTIMATED)
+Dissatisfied
+8
+Likely Satisfied
+5
+Satisfied
+5
+Happy
+1
+Existing CC Features to Try
+Suggested CLAUDE.md Additions
+
+Just copy this into Claude Code to add it to your CLAUDE.md.
+
+Copy All Checked
+## Money
+- All money is int64 cents (type `Cents`). API responses use integer `total_cents`, never float dollars.
+- Percentages and discounts are basis points, using the existing `Discount{Bps: N}` and `ApplyBasisPoints` helpers. Never use float64 anywhere in pricing, fare, or discount math, including intermediate steps.
+Copy
+In 3 separate sessions (fare preview, group discount, child fares), Claude first wrote float-based money code, and you had to ask for a rework each time.
+## Migrations
+- Never edit an existing migration file. Assume every file already in the migrations directory has been applied in prod.
+- Schema changes always go in a NEW migration file numbered after the highest existing one. Check the directory first.
+- After a schema change, update the sqlc queries, regenerate, and update the store layer.
+Copy
+Claude edited already-applied migrations twice (0004 and 0007), which does nothing for existing databases and breaks the checksum.
+## Config
+- `config.Load` only reads env vars with the `FERRYDESK_` prefix (e.g. `FERRYDESK_PORT`, `FERRYDESK_LOG_LEVEL`). The README's `FD_*` names are wrong; ignore them. When in doubt, read config.Load rather than the docs.
+Copy
+The FD_ vs FERRYDESK_ mismatch came up in 4 sessions and caused a wrong-port launch that hung until the timeout.
+## Running & Testing
+- Never run the server in the foreground. It doesn't exit, so the command will hang until the timeout.
+- To verify HTTP behaviour or reproduce a bug, write an `httptest` test and run `go test ./...`.
+- If a live server is truly needed, start it in the background, curl it, then kill it.
+Copy
+Claude ran the server in the foreground and hit the timeout in at least 3 sessions, and you repeatedly redirected it to httptest tests.
+## Git & Safety
+- Do NOT commit or push unless I explicitly ask. Leave changes uncommitted for my review.
+- When I say 'ship it', commit with a descriptive message and ask before pushing.
+- Never run anything that destroys local data (`docker compose down -v`, dropping volumes, or scripts that do so) without asking first. Read a script before running it.
+- Validate seed or schema changes in a throwaway database, not my local dev DB.
+Copy
+Claude committed or tried to push without being asked in 3 sessions, nearly wiped your local data with `down -v`, and once did nothing visible when you said 'ship it'.
+
+Just copy this into Claude Code and it'll set it up for you.
+
+Hooks
+Shell commands that run automatically before or after Claude's tool calls and can block dangerous actions.
+Why for you: Your worst friction was hard-to-undo actions: `docker compose down -v`, unrequested pushes, and edits to applied migrations. A PreToolUse hook enforces these rules every time, even if CLAUDE.md gets overlooked.
+// .claude/settings.json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{
+          "type": "command",
+          "command": "cmd=$(jq -r '.tool_input.command'); if echo \"$cmd\" | grep -Eq 'git push|down -v|--volumes'; then echo 'Blocked: ask the user before pushing or wiping volumes' >&2; exit 2; fi"
+        }]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [{
+          "type": "command",
+          "command": "f=$(jq -r '.tool_input.file_path'); if echo \"$f\" | grep -q '/migrations/'; then echo 'Blocked: never edit an existing migration; create a new one' >&2; exit 2; fi"
+        }]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [{ "type": "command", "command": "gofmt -l . && go vet ./... 2>&1 | head -20" }]
+      }
+    ]
+  }
+}
+Copy
+Custom Skills
+Reusable markdown prompts you run with a single /command.
+Why for you: You ran the same 'add migration + sqlc queries + store' workflow at least twice, and both times Claude got the migration file wrong. A /migration skill bakes in the correct steps.
+# .claude/skills/migration/SKILL.md
+---
+name: migration
+description: Add a database schema change safely
+---
+1. List the migrations directory and find the highest number. NEVER edit existing files.
+2. Create the next-numbered up/down migration for: $ARGUMENTS
+3. Update or add sqlc queries, then run `sqlc generate`.
+4. Update the store layer and add or adjust tests.
+5. Run `go test ./...`.
+6. Report the changes. Do NOT commit.
+Copy
+Task Agents
+Subagents that explore the codebase in parallel before Claude writes code.
+Why for you: In the group-discount session, a subagent found `ApplyBasisPoints`/`Discount`, but Claude still wrote float math. Asking it to explore first and then follow the findings would prevent this.
+Use an agent to find the existing helpers, types, and conventions for money, discounts, and pricing (and how config env vars are loaded). Summarize them, then implement using ONLY those conventions.
+Copy
+New Ways to Use Claude Code
+
+Just copy this into Claude Code and it'll walk you through it.
+
+Ask for conventions before code
+For pricing and API features, have Claude restate the codebase's conventions before it writes anything.
+Your three money-related features all needed a rework because Claude defaulted to floats instead of int cents and basis points. A short 'conventions check' up front costs one message and saves a full revision. This matters most in ferrydesk, where money types and response field naming are strict.
+PASTE INTO CLAUDE CODE:
+Before writing any code: find how this codebase represents money, discounts, and API money fields (types, helpers, JSON naming) and list them. Then implement [feature] using exactly those conventions, with tests. Don't commit.
+Copy
+Verify with httptest, not a live server
+Ask for httptest-based tests whenever you want endpoint verification or a bug reproduction.
+Three sessions wasted time on a foreground server hanging until the timeout. Your best outcome, the seat-hold TTL fix, came from a regression test, which also guards against the bug coming back. Saying this up front avoids the hang entirely.
+PASTE INTO CLAUDE CODE:
+Reproduce this with a failing Go test (use httptest for HTTP paths; never start the server in the foreground), then fix it and show the test passing: [bug description]
+Copy
+Make the review/ship boundary explicit
+Say clearly what 'done' means: leave changes uncommitted, commit only, or commit and push.
+Claude sometimes overshot by committing or pushing unasked, and sometimes undershot, as when 'ship it' got only a math confirmation. Naming the end state in your request removes the guesswork. Pair this with the CLAUDE.md git rules and the push-blocking hook.
+PASTE INTO CLAUDE CODE:
+Ship it: run go test ./..., then commit with a descriptive message on the current branch, show me the commit hash, and ask before pushing.
+Copy
+On the Horizon
+
+Your ferrydesk sessions show solid Go debugging, but recurring friction around money math, migrations, and long-running processes points to workflows where Claude works autonomously against tests and codified project rules instead of needing correction mid-task.
+
+Codify invariants, then iterate against tests
+Most of your corrections were about the same few rules: integer cents and basis points instead of floats, never editing applied migrations, FERRYDESK_ env prefixes, and no servers run in the foreground. If those rules live in CLAUDE.md and are backed by guard tests (for example, a test that fails if a float type appears in a pricing signature or an applied migration's checksum changes), Claude can implement features like group discounts or child fares end-to-end. It can loop until `go test ./...` passes and hand you a reviewed-ready diff without a single correction.
+Getting started: Add a CLAUDE.md with the money, migration, config, and server rules. Add a pre-commit or PostToolUse hook that runs `go vet` and the guard tests, so violations are caught before Claude reports done.
+PASTE INTO CLAUDE CODE:
+Read the ferrydesk codebase and draft a CLAUDE.md that codifies our conventions. Cover: all money is int64 cents with Discount{Bps} and ApplyBasisPoints for percentages, never float64. Migrations that are already applied (0001-0007 and any in prod) are immutable, so changes always go in a new numbered file. Env vars use the FERRYDESK_ prefix (verify against config.Load). Never run the server in the foreground; use httptest instead. Never commit, push, or run destructive scripts like `docker compose down -v` without asking. Then write Go guard tests: one that parses the pricing and booking packages and fails if any exported function returns or accepts float32/float64 for money, and one that checksums existing migration files against a committed manifest. Run `go test ./...` and iterate until everything passes. Show me the diff but do not commit.
+Copy
+Parallel agents for full-stack schema changes
+Your waitlist and refund-reason tasks each touched migrations, sqlc queries, the store layer, API wiring, docs, and seed data, and API wiring was often left as a follow-up. A coordinator agent could spawn parallel subagents for each layer: one writes the new migration and sqlc queries, one wires the store and HTTP handler with httptest coverage, and one updates seed.sql and the README. The coordinator then validates the result in a throwaway database and runs the full suite before presenting one cohesive change.
+Getting started: Use the Task tool to fan out subagents with clearly scoped responsibilities. Give the validation step its own isolated Postgres container, for example a uniquely named compose project, so it can never touch your local data.
+PASTE INTO CLAUDE CODE:
+I want to finish the refunds.reason feature end-to-end. Act as a coordinator and use the Task tool to run these subagents in parallel:
+(1) Confirm migration 0007 and the sqlc query are correct. Regenerate sqlc and make sure the store compiles.
+(2) Wire `reason` through the Cancel/refund API handler and request/response types. Add httptest tests for with-reason and without-reason cases.
+(3) Update seed.sql with realistic NZ refund reasons, and update README/.env.example docs if needed.
+When all three finish, start a throwaway Postgres container under a unique compose project name (never touch the default project or its volumes). Apply all migrations, load the seed, run `go test ./...`, and tear down only that throwaway container. Report a summary of each layer's changes and the test results. Do not commit or push.
+Copy
+Autonomous spec-vs-code audit with regression tests
+Several of your best sessions uncovered hidden mismatches. The README said FD_ while the code reads FERRYDESK_, Cancel ignores the 24h refund rule, and Expired depended on a TTL field that was never populated. An agent could systematically sweep the codebase for these gaps. It would compare docs to config.Load, business rules to implementation, and struct fields to the places that actually populate them, then write a failing test for each real bug it finds. You'd get a prioritized audit report plus a branch of red tests ready to turn green.
+Getting started: Run this as a headless `claude -p` job or a scheduled CI task with read access and permission to write only to a tests branch. Review the report before letting Claude fix anything.
+PASTE INTO CLAUDE CODE:
+Audit ferrydesk for mismatches between documentation, intent, and implementation. Specifically:
+(a) Every env var mentioned in README, .env.example, and docs vs what config.Load actually reads.
+(b) Business rules implied by names, comments, or docs (refund windows, hold expiry, capacity, discounts) vs what the code does.
+(c) Struct fields that are read somewhere but never populated by the store layer, like the old hold TTL bug.
+(d) Any float usage in money paths.
+For each finding, classify it as doc-bug, code-bug, or ambiguous-intent. For each code-bug, write a failing Go test that demonstrates it, using httptest for HTTP paths and never starting the real server. Output a markdown report sorted by severity, with file:line references. Leave the failing tests uncommitted for my review, and do not fix any production code yet.
+Copy
+"Claude got scolded for editing an already-applied migration, so it dutifully created a fresh migration 0007. Later, it tried to cram a new waitlist table into that same 0007, which by then had shipped to prod."
+This happened in ferrydesk, a Go ferry-booking service. In one session the user explained that editing applied migration 0004 does nothing for existing databases and breaks the checksum, so Claude added 0007 for a refunds 'reason' column. In a later session Claude repeated the mistake with 0007 and needed the same correction again. A second recurring trap: the README's FD_ env vars, which are actually FERRYDESK_, fooled Claude in three separate sessions.

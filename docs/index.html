@@ -242,12 +242,12 @@ footer a { color: var(--muted); }
 
   <section class="wrap" aria-labelledby="output">
     <h2 id="output">One command, a ranked list of what to fix</h2>
-    <p class="section-lede">Run it inside any repository you have used a coding agent on. Scores rank how reliably something hurts across sessions, so one bad afternoon is noise and the same failure in five sessions is a pattern. Below is the real output of <code>agent-friction demo</code>, abridged to its top rows. Advice resting on fewer than 5 events is marked as thin evidence and kept off this list.</p>
+    <p class="section-lede">Run it inside any repository you have used a coding agent on. Scores rank how reliably something hurts across sessions, so one bad afternoon is noise and the same failure in five sessions is a pattern. Below is the real output of <code>agent-friction demo</code>, abridged. Advice resting on fewer than 5 events is marked as thin evidence and kept off this list.</p>
     <div class="term" role="region" aria-label="Example terminal output">
       <div class="bar" aria-hidden="true"><i></i><i></i><i></i></div>
 <pre tabindex="0"><span class="p">$</span> agent-friction demo
 <span class="h">agent-friction · shopfront</span>
-<span class="dim">6 sessions · 74 tool calls · 22 friction events (+11 weak) · ~9m lost · 4 human corrections</span>
+<span class="dim">6 sessions · 74 tool calls · 23 friction events (+10 weak) · ~9m lost · 5 human corrections</span>
 
 <span class="h">What to fix first</span>
   1. src/shopfront/api/schema_gen.py: <span class="ok">Generated file: point agents at its source</span>
@@ -258,8 +258,8 @@ footer a { color: var(--muted); }
 
 <span class="h">Files where agents struggle</span>
 <span class="dim">  score            path                                   sess events    lost</span>
-  <span class="hot">█████▋</span>      56.8 src/shopfront/api/schema_gen.py           4     12      4m
-  <span class="warm">████▎</span>       42.4 src/shopfront/checkout/service.py         3      5      2m</pre>
+  <span class="hot">█████▋</span>      56.4 src/shopfront/api/schema_gen.py           4     11      4m
+  <span class="hot">████▋</span>       46.5 src/shopfront/checkout/service.py         3      5      2m</pre>
     </div>
   </section>
 
@@ -294,7 +294,7 @@ agent-friction compare \
 
   <section class="wrap" id="insights" aria-labelledby="insights-h">
     <h2 id="insights-h">And Claude Code's <code>/insights</code>?</h2>
-    <p class="section-lede">They answer different questions and work well together. We <a href="https://github.com/nurettincoban/agent-friction/blob/main/docs/comparison.md">ran both on the same sessions</a>; both reports are published next to the write-up.</p>
+    <p class="section-lede">They answer different questions and work well together. We <a href="https://github.com/nurettincoban/agent-friction/blob/main/docs/comparison.md">ran both on the same sessions</a>, scored against an answer key committed before the runs; every report is published next to the write-up.</p>
     <table>
       <thead><tr><th scope="col"></th><th scope="col"><code>/insights</code></th><th scope="col">agent-friction</th></tr></thead>
       <tbody>
@@ -302,6 +302,9 @@ agent-friction compare \
         <tr><td>Method</td><td>A model summarizes a sample of your recent sessions</td><td>Documented rules over every session that touched the repo; no model, no network</td></tr>
         <tr><td>Evidence</td><td>Narrative with examples</td><td>Counts per file and command, each event traceable to a transcript line</td></tr>
         <tr><td>Same input, same output</td><td>No</td><td>Yes, so you can compare before and after</td></tr>
+        <tr><td>The fix</td><td>CLAUDE.md sections, hooks and skills to copy</td><td>Lines and deny rules to paste, each deny rule replayed against your sessions</td></tr>
+        <tr><td>On a held-out dataset written blind by an independent author (3 runs of <code>/insights</code>)</td><td>11 of 16 points in every run: found what the humans said (conventions, migrations, a wrong variable prefix); missed what shows only in tool output; read 9 of 13 sessions</td><td>9 of 16: found what shows in tool output (an edit hotspot, a failing lint target), mostly without the cause; missed one rule a human stated; read every session</td></tr>
+        <tr><td>On our own datasets (we built them and tuned agent-friction on them)</td><td>11 of 16</td><td>16 of 16, which says more about the tuning than the tool</td></tr>
         <tr><td>Also covers, in our test</td><td>Prompting and verification habits, larger workflow ideas</td><td><code>pytest</code> vs <code>make test</code>, empty searches, 280 refusals by Claude Code's own <code>sleep</code> rule</td></tr>
       </tbody>
     </table>

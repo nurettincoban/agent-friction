@@ -293,7 +293,29 @@ corroborated: ...").
     file, and the agent's next edit is to that file ("No, wrong file — the
     bug is in parser.py", then an edit of `src/parser.py`): a correction
     (`corroborated: redirected`) attributed to the file it had been editing.
-    Without the agent going to the file named it stays probable. Not cues: "don't forget ...", "don't worry", "don't commit
+    Without the agent going to the file named it stays probable. And one
+    more: a message with only weaker cues ("Actually `legacy_charge()` is
+    deprecated, `PaymentClient.charge()` is what we use instead") that names,
+    in code shape (an underscore inside, a lower-to-upper turn such as
+    `PaymentClient`, a dotted name or `()`; not a file name such as
+    `package.json`, nor a product name such as `GitHub`), something an edit or
+    write of the turn before had just added to a file (in its new text, not
+    its old): that is about that code. It is attributed only to the files the
+    name went into, and it is a correction (`corroborated: followed`) only if
+    the agent then takes that name out again in an edit; a change that keeps
+    it ("getUserById should also handle None") leaves the probable correction
+    its cues give. The name the human says to use instead ("use X", "X only",
+    "X is what we use") is never taken for the one ruled out. Any correction
+    carries what the human said to use as `use_instead`, and, once an edit
+    takes out a name it used that the agent had just added, that name as
+    `ruled_out`: the recommendation states the rule with them. When the
+    agent's last words before the message said the work was done or passing
+    ("all tests pass", "it works now"; not when the same paragraph mentions a
+    failure, an error, a "but" or a question; only that one bit of the
+    agent's prose is kept) and the human reports it still does not work
+    ("still failing", "it doesn't work", "is broken"), the correction carries
+    `claimed_done`, and `checked_with` names the last test, lint, type check
+    or build command of the turn that succeeded. Not cues: "don't forget ...", "don't worry", "don't commit
     yet", "use the factory instead" (may be the next step), "use tabs instead
     of spaces", "No tests are needed here", anything after praise, a
     dismissal, self-blame or "next task:", and an answer to a question the
@@ -430,6 +452,23 @@ we use X?"); single-cue corrections ("use pnpm instead", "use PaymentClient,
 not legacy");
 corrections softened with praise; corrections in other languages. The count of
 corrections is a lower bound.
+
+### Everyday wording, commands, and "done" (added after a blind test)
+
+- Praise followed by a turn ("Thanks. One thing though: ...", "Great, but ...") no longer
+  voids what comes after the "but". "Not that file", "Not that one", "That's the old package"
+  and "Please revert the timing bound change" open a correction. "Please don't ..." at the
+  start of any sentence, "No skipping", "There's already `X` for this", "Hang on: ...", "You
+  don't need ...", "Why is X a float ...?" and "Did you run it?" are instructions: they count
+  once the agent goes back to the work.
+- A correction that names a command the agent ran in that turn and that failed or was stopped
+  ("Please don't kick off `test-all` for every little change"), or "not that one" right after
+  the human stopped a command, is attributed to that command, corroborated by the naming.
+- A failure reported right after the agent said the work was done ("Did you try it? I get an
+  ImportError") is a correction whatever its wording, even after a long pause (trying the work
+  out takes time), unless the message moves on to a new task or shrugs it off.
+- The agent's claim is read from the first and the last paragraph of its reply ("Done: ...",
+  "... and it's applied.", "... Done.").
 
 ## `probable-correction` — Probable correction
 
@@ -643,7 +682,10 @@ reasons; a long-running refactoring that keeps a suite red on purpose.
 
 **What:** the human declined a proposed tool call (Claude Code records this as
 a tool result starting "The user doesn't want to proceed with this tool use").
-The reason, if the human typed one, is kept as the excerpt.
+The reason, if the human typed one, is kept as the excerpt. When the refusal carries no
+reason and the human's next message follows with nothing run in between ("Not that file.
+It's generated ..."), that message is the reason (`reason_from: "next message"`), unless it
+moves on to a new task.
 
 **Why:** the agent tried to do something a human considered wrong or unsafe.
 

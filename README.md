@@ -81,6 +81,9 @@ together. We [ran both on the same sessions](https://github.com/nurettincoban/ag
 | Method | A model summarizes a sample of your recent sessions | Documented rules over every session that touched the repo; no model, no network |
 | Evidence | Narrative with examples | Counts per file and command, each event traceable to a transcript line |
 | Same input, same output | No | Yes, so you can compare before and after |
+| The fix | CLAUDE.md sections, hooks and skills to copy | Lines and deny rules to paste, each deny rule replayed against your sessions |
+| On a held-out dataset written blind by an independent author (3 runs of `/insights`) | 11 of 16 points in every run: found what the humans said (conventions, migrations, a wrong variable prefix); missed what shows only in tool output; read 9 of 13 sessions | 9 of 16: found what shows in tool output (an edit hotspot, a failing lint target), mostly without the cause; missed one rule a human stated; read every session |
+| On our own datasets (we built them and tuned agent-friction on them) | 11 of 16 | 16 of 16, which says more about the tuning than the tool |
 | Also covers, in our test | Prompting and verification habits, larger workflow ideas | `pytest` vs `make test`, empty searches, 280 refusals by Claude Code's own `sleep` rule |
 
 ## How it works

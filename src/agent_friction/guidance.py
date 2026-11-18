@@ -431,6 +431,14 @@ def deny_rules(repo: Path | None) -> list[tuple[str, str]]:
     return rules
 
 
+def parse_deny_rule(rule: str) -> list[tuple[str, str]]:
+    """One ``permissions.deny`` rule as :func:`deny_rules` returns it (``[]`` if malformed)."""
+    match = _DENY_RULE_RE.match(rule)
+    if match is None:
+        return []
+    return [(match.group(1).lower(), (match.group(2) or "").strip())]
+
+
 def _glob(pattern: str) -> re.Pattern[str]:
     """A settings path pattern as a regex: ``**`` crosses directories, ``*`` does not."""
     out = ""
@@ -447,6 +455,47 @@ def _glob(pattern: str) -> re.Pattern[str]:
         else:
             out, index = out + re.escape(pattern[index]), index + 1
     return re.compile(out + r"(?:/.*)?\Z")
+
+
+def typed_pieces(command: str) -> list[str]:
+    """The parts of a command line as the agent typed them, split at ``&&``, ``||``,
+    ``;``, ``|`` and newlines outside quotes: what a ``Bash(prefix:*)`` deny rule is
+    matched against. Wrappers (``sudo``, ``env``, ``bash -c``) are left in place, so a
+    rule for ``rm -rf x`` is not taken to refuse ``sudo rm -rf x``."""
+    pieces: list[str] = []
+    current: list[str] = []
+    quote = ""
+    i = 0
+    while i < len(command):
+        char = command[i]
+        if quote:
+            if char == "\\" and quote == '"' and i + 1 < len(command):
+                current.append(command[i : i + 2])
+                i += 2
+                continue
+            if char == quote:
+                quote = ""
+            current.append(char)
+        elif char in "'\"":
+            quote = char
+            current.append(char)
+        elif char == "\\" and i + 1 < len(command):
+            current.append(command[i : i + 2])
+            i += 2
+            continue
+        elif char in ";|&\n":
+            if char == "&" and command[i + 1 : i + 2] != "&":
+                current.append(char)  # a redirection like 2>&1, or a background job
+            else:
+                pieces.append("".join(current))
+                current = []
+                if command[i : i + 2] in ("&&", "||"):
+                    i += 1
+        else:
+            current.append(char)
+        i += 1
+    pieces.append("".join(current))
+    return [" ".join(piece.split()) for piece in pieces if piece.strip()]
 
 
 def rule_denies(

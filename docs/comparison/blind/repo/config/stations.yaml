@@ -1,0 +1,14 @@
+stations:
+  - id: "8443970"
+    name: Boston
+    source: noaa
+    datum: MLLW
+  - id: "8410140"
+    name: Eastport
+    source: csv_drop
+    datum: MLLW
+    units: ft
+  - id: "8452660"
+    name: Newport
+    source: noaa
+    datum: MLLW

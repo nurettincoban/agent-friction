@@ -18,6 +18,9 @@ from agent_friction.report._common import (
     fmt_minutes,
     is_agent_tool,
     is_thin,
+    paste_deny,
+    paste_lines,
+    paste_settings_json,
     plural,
 )
 
@@ -157,6 +160,28 @@ def render_prompt(result: dict[str, Any]) -> str:
                 f"## {n}. The whole repository: {rec.get('title', '')}",
                 "",
                 str(rec.get("detail", "")).strip(),
+                "",
+            ]
+    lines = paste_lines(result)
+    deny = paste_deny(result)
+    if lines or deny:
+        out += [
+            "## Drafts of the lines above",
+            "",
+            "agent-friction filled these in from the evidence. They are drafts: check each "
+            "against the repository as in step 1, reword to fit the instruction file, and "
+            "propose them like any other change.",
+            "",
+        ]
+        if lines:
+            out += ["For AGENTS.md (or CLAUDE.md):", "", _fence("\n".join(lines)), ""]
+        if deny:
+            out += [
+                "Permission rules for `.claude/settings.json` (ask first, as step 3 says):",
+                "",
+                _fence(paste_settings_json(result)),
+                "",
+                *(f"- `{rule}`: replayed over these sessions, it {what}." for rule, what in deny),
                 "",
             ]
     tool_rules = agent_tool_rules(result)

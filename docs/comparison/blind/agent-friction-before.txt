@@ -1,0 +1,32 @@
+agent-friction · repo
+12 sessions · 173 tool calls · 10 friction events (+2 weak) · ~7m lost · 0 human corrections · 2026-09-02 → 2026-10-20
+
+What to fix first
+  1. tidewater/models/generated.py: Generated file: telling agents was not enough
+     `CLAUDE.md:10` and `CLAUDE.md:13` already has an instruction about this file, yet agents ran
+     into trouble editing it directly once in 1 session. Check that the cited line says not to
+     edit it by hand. If it does, another line will not help; the next step is to enforce it: deny
+     direct edits with a permission rule, or add a pre-edit hook that names the source to change
+     and the command that regenerates the file. (If that line is newer than these sessions, give
+     it time first.)
+  2 more suggestions rest on fewer than 5 events each and are left out here. Each item's own details
+  list them, marked "thin evidence" (in the terminal: `agent-friction show <path>`).
+
+Files where agents struggle
+  score            path                                   sess events    lost  top signals
+  ██▊         27.6 tidewater/transforms/qc.py                2      2      1m  ◐ edit-revert×2
+  ██▌         25.0 tidewater/models/generated.py             2      2      6s  ◐ edit-miss×1, tool-rejected×1
+  █▎          12.8 tests/test_noaa_client.py                 1      1     n/a  ○ tool-rejected×1
+  █▎          12.8 tidewater/cli.py                          1      1     n/a  ○ user-interrupt×1
+
+Commands that keep failing
+  score            command                                sess events    lost  top signals
+  ██▍         24.1 make test-all                             2      2      6m  ◐ command-failure×2
+  █▌          15.2 mkae                                      1      1      6s  ○ command-failure×1
+  █▎          13.0 pip install                               1      1     36s  ○ command-failure×1
+  ▉            8.5 python3 -m tidewater.cli                  1      1     n/a  ○ command-failure×1
+  ▋            6.7 pytest                                    1      1     n/a  ○ command-failure×1
+
+● high ◐ medium ○ low confidence · drill in: agent-friction show <path> · full map: --format html -o map.html
+Per-row time can overlap (one stall can involve a file and a command); n/a means the evidence carries no time estimate; the total counts each minute once.
+Not counted: 9 failed runs of normal work (the agent fixed the failure, or was only waiting and polled until it passed; ~30s of run time).

@@ -7,6 +7,9 @@ from typing import Any
 
 from agent_friction.report._common import (
     AGENT_TOOL_HEADING,
+    LEADS_HEADING,
+    PASTE_HEADING,
+    PASTE_NOTE,
     agent_tool_rules,
     collect_recommendations,
     dropped_note,
@@ -16,6 +19,9 @@ from agent_friction.report._common import (
     grouped_unattributed,
     headline_lost,
     is_thin,
+    paste_deny,
+    paste_lines,
+    paste_settings_json,
     plural,
     repo_recommendations,
     signal_titles,
@@ -168,6 +174,31 @@ def _escape_prose(s: str) -> str:
     return re.sub(r"@(?=[A-Za-z0-9])", "@\u200b", s)
 
 
+def _paste_section(result: dict[str, Any]) -> list[str]:
+    """ "Ready to paste": the AGENTS.md lines and the deny rules, in code blocks."""
+    lines = paste_lines(result)
+    deny = paste_deny(result)
+    if not lines and not deny:
+        return []
+    out = [f"## {PASTE_HEADING}", "", f"_{PASTE_NOTE}_", ""]
+    if lines:
+        body = "\n".join(lines)
+        fence = "`" * max(3, max((len(m) for m in re.findall(r"`+", body)), default=0) + 1)
+        out += ["AGENTS.md (or CLAUDE.md):", "", f"{fence}markdown", body, fence, ""]
+    if deny:
+        out += [
+            "`.claude/settings.json` (merge into what is there):",
+            "",
+            "```json",
+            paste_settings_json(result),
+            "```",
+            "",
+            *(f"- {_code(rule)}: replayed, {_escape_prose(what)}." for rule, what in deny),
+            "",
+        ]
+    return out
+
+
 def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
     titles = signal_titles(result)
     totals = result.get("totals", {})
@@ -198,16 +229,19 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
         return "\n".join(out)
     recs = collect_recommendations(result, limit=5)
     if recs:
-        out += ["## What to fix first", ""]
+        leads = all(is_thin(rec) for _, rec in recs)
+        out += [f"## {LEADS_HEADING if leads else 'What to fix first'}", ""]
         for i, (h, rec) in enumerate(recs, 1):
             title = _html_escape(str(rec.get("title", "")))
             detail = _html_escape(str(rec.get("detail", "")))
             thin = " _(thin evidence)_" if is_thin(rec) else ""
-            out.append(f"{i}. {_code(h.get('path'))}: **{title}**{thin} {detail}")
+            mark = "-" if leads else f"{i}."
+            out.append(f"{mark} {_code(h.get('path'))}: **{title}**{thin} {detail}")
         out.append("")
         said = thin_note(result, recs)
         if said:
             out += [f"_{said}_", ""]
+    out += _paste_section(result)
     note = dropped_note(result)
     if note:
         out += [f"_{note}_", ""]

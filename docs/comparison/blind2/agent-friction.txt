@@ -1,0 +1,65 @@
+agent-friction · repo
+13 sessions · 172 tool calls · 27 friction events (+4 weak) · ~5m lost · 2 human corrections · 2026-10-05 → 2026-11-17
+
+What to fix first
+  1. make lint: Tell agents to use `go vet`
+     `make lint` failed 4 times in 4 sessions; 3 times the agent then got the same job done with
+     `go vet`, and `make lint` did not work later in those sessions. Add a line to AGENTS.md such
+     as: "use `go vet`, not `make lint`".
+  2. internal/api/handlers.go: Large file: split it or add unique anchors
+     7 edits failed to locate the target in this 1174-line file (3 matched several places, 4
+     matched nothing) across 4 sessions. Split it into smaller modules, or give repeated blocks
+     unique nearby text (section comments, distinct names) so an edit can be targeted.
+  3. git push: State the boundary
+     A human declined the agent's action 2 times in 2 sessions. State the boundary explicitly
+     (what must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a
+     permission rule. Reasons given: "I'll push it myself once I've looked at the diff, thanks" /
+     "commit is fine but don't push, I push my own branches"
+  4. docker compose down: State the boundary
+     A human declined the agent's action once in 1 session. State the boundary explicitly (what
+     must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a
+     permission rule. Reasons given: "please stop wiping the db volume, that's where my seed data
+     and the QA bookings live. if you need a db use a separate one, or just unit test it"
+  5. make db-reset: State the boundary
+     A human declined the agent's action once in 1 session. State the boundary explicitly (what
+     must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a
+     permission rule. Reasons given: "no, db-reset wipes my local data, I've got QA bookings in
+     there. just migrate up"
+  2 more suggestions rest on fewer than 5 events each and are left out here. Each item's own details
+  list them, marked "thin evidence" (in the terminal: `agent-friction show <path>`).
+
+Ready to paste
+  The lines the advice above names, filled in from the evidence. Check each against the repository
+  before you commit it; nothing here has been applied.
+  AGENTS.md (or CLAUDE.md):
+    - Use `go vet`, not `make lint`.
+
+Files where agents struggle
+  score            path                                   sess events    lost  top signals
+  ████▍       43.7 internal/api/handlers.go                  4      8     36s  ◐ edit-miss×7, edit-thrash×1
+  █▉          18.4 internal/api/fares.go (not in tree)       1      2      2m  ○ probable-correction×1, user-interrupt×1
+  █▋          15.7 migrations/0004_add_refunds.up.sql        1      1     n/a  ○ user-correction×1
+  █▎          13.0 migrations/0…on.down.sql (not in tree)    1      1      6s  ○ edit-revert×1
+  █▎          12.0 internal/pricing/fare.go                  1      1     12s  ○ user-correction×1
+  █▎          12.0 migrations/0…ason.up.sql (not in tree)    1      1      6s  ○ edit-revert×1
+  █▏          10.9 internal/booking/service.go               1      1     12s  ○ user-correction×1
+
+Commands that keep failing
+  score            command                                sess events    lost  top signals
+  ████▌       44.4 make lint                                 4      4     24s  ◐ command-failure×4
+  ███         29.6 git push                                  2      2     n/a  ◐ tool-rejected×2
+  ██▌         25.2 go test                                   3      3     42s  ◐ command-failure×3
+  ██▍         24.1 go run                                    2      2      1m  ◐ command-failure×2
+  █▋          16.3 docker compose down                       1      1      6s  ○ tool-rejected×1
+  █▋          16.3 make db-reset                             1      1     n/a  ○ tool-rejected×1
+  █▋          16.3 scripts/reset-db.sh                       1      1     n/a  ○ tool-rejected×1
+  █▌          15.2 make run                                  1      1     36s  ○ command-failure×1
+  ▉            8.5 go biuld                                  1      1     n/a  ○ command-failure×1
+
+Directories where agents search in vain (the directory itself; show <dir> rolls up everything inside)
+  score            directory                              sess events    lost  top signals
+  ▊            7.9 .                                         1      1     n/a  ○ search-miss×1
+
+● high ◐ medium ○ low confidence · drill in: agent-friction show <path> · full map: --format html -o map.html
+Per-row time can overlap (one stall can involve a file and a command); n/a means the evidence carries no time estimate; the total counts each minute once.
+Not counted: 5 failed runs of normal work (the agent fixed the failure, or was only waiting and polled until it passed; ~48s of run time).

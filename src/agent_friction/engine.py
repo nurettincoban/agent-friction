@@ -42,8 +42,15 @@ from agent_friction.discovery import (
     repo_roots,
 )
 from agent_friction.errors import AgentFrictionError, BadTranscriptError, NoTranscriptsError
-from agent_friction.guidance import Guidance, deny_rules, rule_denies
+from agent_friction.guidance import (
+    Guidance,
+    deny_rules,
+    parse_deny_rule,
+    rule_denies,
+    typed_pieces,
+)
 from agent_friction.model import Finding, ParsedFile, Stream, Target
+from agent_friction.report._common import paste_candidates
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -329,6 +336,8 @@ BUILD_DIRS = frozenset({"target", "dist", "build"})
 FLAKY_MIN_SESSIONS = 3
 #: Sessions in which another runner must pass, untouched, after a command went red.
 RUNNER_MIN_SESSIONS = 3
+#: Sessions in which a command passed unchanged with a variable set in front.
+ENV_MIN_SESSIONS = 2
 #: Episodes in which the same test must be red, unresolved, to be a standing failure.
 STANDING_TEST_MIN_SESSIONS = 3
 #: A command the human stops in this many sessions is a row of its own.
@@ -419,6 +428,30 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
             )
     # Another runner for the same job passed with nothing changed (``green_as``): in
     # ``RUNNER_MIN_SESSIONS`` sessions or more, the failing command is the wrong one here.
+    # The same command with a variable set in front passed, nothing changed
+    # (``green_with``: `TZ=UTC pytest` after a red `pytest`): in ``ENV_MIN_SESSIONS``
+    # sessions, counting those where another runner passed unchanged, the bare command
+    # is missing what that variable gives it.
+    prefixed = [f for f in findings if "green_with" in f.detail]
+    envs: dict[str, set[str]] = {}
+    for finding in [*prefixed, *(f for f in findings if "green_as" in f.detail)]:
+        for key in _command_keys(finding):
+            envs.setdefault(key, set()).add(finding.unit)
+    for finding in prefixed:
+        form = finding.detail.pop("green_with")
+        if finding.detail.get("variant") != "ordinary" or not any(
+            len(envs.get(key, ())) >= ENV_MIN_SESSIONS for key in _command_keys(finding)
+        ):
+            continue
+        finding.detail["works_with"] = form
+        finding.detail["variant"] = "invocation"
+        finding.targets = [t for t in finding.targets if t.kind == model.COMMAND]
+        finding.weight = 1.0
+        finding.interval = finding.interval or finding.run
+        finding.summary = finding.summary.replace(
+            "ordinary failure", f"`{form}` then passed, with nothing changed"
+        )
+    env_keys = {key for key, units in envs.items() if len(units) >= ENV_MIN_SESSIONS}
     runners: dict[tuple[str, str], set[str]] = {}
     swapped = [f for f in findings if "green_as" in f.detail]
     for finding in swapped:
@@ -428,7 +461,10 @@ def _settle_command_fixes(findings: list[Finding]) -> list[Finding]:
         other = finding.detail.pop("green_as")
         keys = _command_keys(finding)
         if finding.detail.get("variant") != "ordinary" or not any(
-            len(runners.get((key, other), ())) >= RUNNER_MIN_SESSIONS for key in keys
+            len(runners.get((key, other), ())) >= RUNNER_MIN_SESSIONS
+            # ... or fewer, when the same command also passed with a variable set
+            or (key in env_keys and any("works_with" in f.detail for f in prefixed))
+            for key in keys
         ):
             continue
         finding.detail["recovered_by"] = other
@@ -1414,7 +1450,85 @@ class _Analysis:
                 self._expose(exposure, target.kind, target.key, finding.unit)
         self.exposure = exposure
         self.repo_advice = self._baselines(findings)
-        return self._emit(streams, findings, sources)
+        verify = recommend.repo_verify(
+            findings, self.quote if self.options.include_excerpts else None
+        )
+        if verify is not None:
+            self.repo_advice.insert(0, verify)
+        result = self._emit(streams, findings, sources)
+        if verify is not None:
+            # said once for the repository, not again under each file it touched
+            for row in [*result["hotspots"], *result["commands"], *result["directories"]]:
+                row["recommendations"] = [
+                    r for r in row["recommendations"] if r.get("id") != "say-how-to-verify"
+                ]
+        result["paste"] = self._paste(result, streams)
+        return result
+
+    def _paste(self, result: dict[str, Any], streams: Sequence[Stream]) -> dict[str, Any]:
+        """The fixes as text to paste: the AGENTS.md lines and the permission rules the
+        advice names, strongest first. Each deny rule is replayed against every call in
+        these sessions, so that what it would have refused is a count, not a guess."""
+        lines: list[dict[str, Any]] = []
+        deny: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for rec in result.get("recommendations") or []:
+            line = str(rec.get("agents_md") or "")
+            if line and line not in seen:
+                seen.add(line)
+                lines.append({"line": line, "target": None, "rule": rec.get("id")})
+        for item, rec in paste_candidates(result):
+            line = str(rec.get("agents_md") or "")
+            if line and line not in seen:
+                seen.add(line)
+                lines.append({"line": line, "target": item.get("path"), "rule": rec.get("id")})
+            rule = str(rec.get("deny") or "")
+            if rule and rule not in seen:
+                seen.add(rule)
+                deny.append(
+                    {"rule": rule, "target": item.get("path"), **self._replay(rule, streams)}
+                )
+        return {"agents_md": lines, "deny": deny}
+
+    def _replay(self, rule: str, streams: Sequence[Stream]) -> dict[str, Any]:
+        """What ``rule`` would have refused in these sessions: calls, sessions, and which
+        files or commands (``refused_targets``). Sessions of agents the rule does not
+        govern (anything but Claude Code) are counted apart."""
+        rules = parse_deny_rule(rule)
+        calls = 0
+        sessions: set[str] = set()
+        targets: Counter[str] = Counter()
+        other_agents: set[str] = set()
+        for stream in streams:
+            for event in stream.events:
+                if event.kind != model.TOOL_CALL or event.derived:
+                    continue
+                rel = self.resolver.resolve(event.path, event.cwd) if event.path else None
+                command = event.command or ""
+                # As Claude Code matches a Bash rule: the line and its typed parts,
+                # wrappers kept, so nothing is counted that the rule would let through.
+                lines = [command, *typed_pieces(command)] if command else [command]
+                if not rule_denies(rules, event.tool or "", lines, rel or ""):
+                    continue
+                if stream.kind != claude_code.KIND:
+                    other_agents.add(stream.session_id)
+                    continue
+                calls += 1
+                sessions.add(stream.session_id)
+                step = next(
+                    (one for one in lines[1:] if rule_denies(rules, event.tool or "", [one])),
+                    command,
+                )
+                targets[rel or redact.redact(step)[:80] or event.tool] += 1
+        return {
+            "would_refuse": calls,
+            "sessions": len(sessions),
+            "refused_targets": [
+                {"target": key, "calls": n}
+                for key, n in sorted(targets.items(), key=lambda kv: (-kv[1], kv[0]))
+            ],
+            "other_agent_sessions": len(other_agents),
+        }
 
     def _baselines(self, findings: Sequence[Finding]) -> list[dict[str, object]]:
         """Mark mechanical events that are no more than the repository's background rate.

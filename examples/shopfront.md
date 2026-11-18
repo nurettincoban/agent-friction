@@ -1,14 +1,44 @@
 # Agent friction map: shopfront
 
-6 agent sessions analysed · 22 friction events (+11 weak) · ~9m lost · 4 human corrections · 5 files affected
+6 agent sessions analysed · 23 friction events (+10 weak) · ~9m lost · 5 human corrections · 5 files affected
 
 ## What to fix first
 
-1. `src/shopfront/api/schema_gen.py`: **Generated file: point agents at its source** This file says it is generated (it starts with a generated-file header), yet agents ran into trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md which source to change and which command regenerates it, and consider denying direct edits to it.
+1. `src/shopfront/api/schema_gen.py`: **Generated file: point agents at its source** This file says it is generated (it starts with a generated-file header), yet agents ran into trouble editing it directly 7 times in 4 sessions. Its header names the fix: say in AGENTS.md "`src/shopfront/api/schema_gen.py` is generated from `api/openapi.yaml`: never edit it by hand; change `api/openapi.yaml` and run `make codegen` to regenerate it.", and deny direct edits to it.
 2. `pytest`: **Tell agents to use `make test`** `pytest` failed 7 times in 4 sessions; 5 times the agent then got the same job done with `make test`, and `pytest` did not work later in those sessions. Add a line to AGENTS.md such as: "use `make test`, not `pytest`".
-3. `src/shopfront/checkout/service.py`: **Write down the rule the human keeps repeating** A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint." (The human also named `src/shopfront/payments/legacy.py`, which the agent had not touched.)
+3. `src/shopfront/checkout/service.py`: **Write down the rule the human keeps repeating** A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint." / "Actually legacy_charge() is deprecated, PaymentClient.charge() is what we use instead." (The human also named `src/shopfront/payments/legacy.py`, which the agent had not touched.) The rule, as they put it: use `PaymentClient` (said in 3 sessions), not `legacy_charge` (said in 2 sessions).
 4. `src/shopfront`: **Point agents to what they are searching for** Agents searched under src/shopfront/ and found nothing 5 times in 2 sessions. They looked for `RefundPolicy` (2x), `**/*policy*.py`, `DiscountPolicy`. If the concept exists under another name or elsewhere, add a pointer in AGENTS.md (or a comment/alias where agents look). If it does not exist, say so.
 5. `rm`: **State the boundary** A human declined the agent's action once in 1 session. State the boundary explicitly (what must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a permission rule. Reasons given: "never delete existing migrations, add a new revision on top"
+
+## Ready to paste
+
+_The lines the advice above names, filled in from the evidence. Check each against the repository before you commit it; nothing here has been applied._
+
+AGENTS.md (or CLAUDE.md):
+
+```markdown
+- `src/shopfront/api/schema_gen.py` is generated from `api/openapi.yaml`: never edit it by hand; change `api/openapi.yaml` and run `make codegen` to regenerate it.
+- Use `make test`, not `pytest`.
+- In `src/shopfront/checkout/service.py`: use `PaymentClient`, not `legacy_charge`.
+- In `src/shopfront/checkout/service.py`: before saying the work is done, check it the way a human will (passing `make test` was not enough here), and say what you did not verify.
+- Never run `rm -rf migrations/versions`: never delete existing migrations, add a new revision on top.
+```
+
+`.claude/settings.json` (merge into what is there):
+
+```json
+{
+  "permissions": {
+    "deny": [
+      "Edit(/src/shopfront/api/schema_gen.py)",
+      "Bash(rm -rf migrations/versions:*)"
+    ]
+  }
+}
+```
+
+- `Edit(/src/shopfront/api/schema_gen.py)`: replayed, would have refused 9 calls in 3 sessions, all on src/shopfront/api/schema_gen.py; Claude Code settings do not cover the 1 session of another agent that also did this.
+- `Bash(rm -rf migrations/versions:*)`: replayed, would have refused 1 call in 1 session, all on rm -rf migrations/versions; it stops the command as typed, not every way to do the same, so keep the line in AGENTS.md too.
 
 _Not counted: 1 failed run of normal work (the agent fixed the failure, or was only waiting and polled until it passed; ~6s of run time)._
 
@@ -16,8 +46,8 @@ _Not counted: 1 failed run of normal work (the agent fixed the failure, or was o
 
 | # | File | Score | Sessions | Events | Est. time lost | Top signals | Confidence |
 |---:|---|---:|---:|---:|---:|---|---|
-| 1 | `src/shopfront/api/schema_gen.py` | 56.8 | 4 | 12 | 4m | `edit-miss`×6, `user-correction`×2, `probable-correction`×1 | high |
-| 2 | `src/shopfront/checkout/service.py` | 42.4 | 3 | 5 | 2m | `user-correction`×2, `edit-revert`×1, `edit-thrash`×1 | high |
+| 1 | `src/shopfront/api/schema_gen.py` | 56.4 | 4 | 11 | 4m | `edit-miss`×6, `user-correction`×2, `read-loop`×1 | high |
+| 2 | `src/shopfront/checkout/service.py` | 46.5 | 3 | 5 | 2m | `user-correction`×3, `edit-revert`×1, `edit-thrash`×1 | high |
 | 3 | `src/shopfront/payments/refunds.py` (not in tree) | 11.4 | 1 | 1 | 18s | `path-miss`×1 | low |
 | 4 | `api/openapi.yaml` | 9.7 | 1 | 1 | n/a | `search-miss`×1 | low |
 | 5 | `tests/test_refunds.py` (not in tree) | 8.5 | 1 | 1 | n/a | `command-failure`×1 | low |
@@ -42,19 +72,18 @@ Only friction in the directory itself (searches that found nothing there); `agen
 ## Evidence
 
 <details>
-<summary><code>src/shopfront/api/schema_gen.py</code> · score 56.8 · 4 sessions</summary>
+<summary><code>src/shopfront/api/schema_gen.py</code> · score 56.4 · 4 sessions</summary>
 
-12 friction events in all 4 sessions that touched it (6 edit misses, 2 user corrections, 1 probable correction, 3 more signal types); high confidence because it recurs across sessions with several kinds of evidence.
+11 friction events in all 4 sessions that touched it (6 edit misses, 2 user corrections, 1 read loop, 2 more signal types); high confidence because it recurs across sessions with several kinds of evidence.
 
 **Recommendations**
 
-- **Generated file: point agents at its source** This file says it is generated (it starts with a generated-file header), yet agents ran into trouble editing it directly 7 times in 4 sessions. Say in AGENTS.md which source to change and which command regenerates it, and consider denying direct edits to it.
+- **Generated file: point agents at its source** This file says it is generated (it starts with a generated-file header), yet agents ran into trouble editing it directly 7 times in 4 sessions. Its header names the fix: say in AGENTS.md "`src/shopfront/api/schema_gen.py` is generated from `api/openapi.yaml`: never edit it by hand; change `api/openapi.yaml` and run `make codegen` to regenerate it.", and deny direct edits to it.
 - **Large file: split it or add unique anchors** 6 edits failed to locate the target in this 1031-line file (2 matched several places, 4 matched nothing) across 4 sessions. Split it into smaller modules, or give repeated blocks unique nearby text (section comments, distinct names) so an edit can be targeted.
 - **Write down the rule the human keeps repeating** A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "No, stop hand-editing src/shopfront/api/schema_gen.py. It is generated: change api/openapi.yaml and run make codegen." / "That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml."
 
 **Evidence**
 
-- `2026-10-26 10:08 UTC` session `e65615b3` · Probable correction: Wording that could be a correction (confidence 0.4; matched "actually", "instead", "not allowed"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py
 - `2026-11-03 09:01 UTC` session `4132e18c` · Stale edit: Edit on src/shopfront/api/schema_gen.py refused: the file changed on disk after it was read
   > File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.
 - `2026-11-03 09:04 UTC` session `4132e18c` · User interrupt: The user interrupted the agent while it was working on src/shopfront/api/schema_gen.py
@@ -62,21 +91,24 @@ Only friction in the directory itself (searches that found nothing there); `agen
   > That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml.
 - `2026-11-12 11:00 UTC` session `fb4e20bf` · Edit miss: Edit on src/shopfront/api/schema_gen.py failed: the text to replace was not found
   > String to replace not found in file. String: API_VERSION = "2.3"
+- `2026-11-12 11:01 UTC` session `fb4e20bf` · Read loop: src/shopfront/api/schema_gen.py was read 3 times with no edit in between
 
 </details>
 
 <details>
-<summary><code>src/shopfront/checkout/service.py</code> · score 42.4 · 3 sessions</summary>
+<summary><code>src/shopfront/checkout/service.py</code> · score 46.5 · 3 sessions</summary>
 
-5 friction events in all 3 sessions that touched it (2 user corrections, 1 reverted edit, 1 edit thrash episode, 1 more signal type); high confidence because it recurs across sessions with several kinds of evidence.
+5 friction events in all 3 sessions that touched it (3 user corrections, 1 reverted edit, 1 edit thrash episode); high confidence because it recurs across sessions with several kinds of evidence.
 
 **Recommendations**
 
-- **Write down the rule the human keeps repeating** A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint." (The human also named `src/shopfront/payments/legacy.py`, which the agent had not touched.)
+- **Write down the rule the human keeps repeating** A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint." / "Actually legacy_charge() is deprecated, PaymentClient.charge() is what we use instead." (The human also named `src/shopfront/payments/legacy.py`, which the agent had not touched.) The rule, as they put it: use `PaymentClient` (said in 3 sessions), not `legacy_charge` (said in 2 sessions).
+- **Say how to check work here before calling it done** The agent said the work was done once (1 session), and the human then found it does not work. The last check it ran and saw pass was `make test`: it did not cover what broke. Say in AGENTS.md how to check work here before reporting it done (the command, the environment it must pass in, what to compare), and have the agent say what it did not verify.
 
 **Evidence**
 
-- `2026-10-26 10:08 UTC` session `e65615b3` · Probable correction: Wording that could be a correction (confidence 0.4; matched "actually", "instead", "not allowed"; weaker cues only, no clear correction phrase); after edits to src/shopfront/checkout/service.py, src/shopfront/api/schema_gen.py
+- `2026-10-26 10:08 UTC` session `e65615b3` · User correction: The user corrected the agent (confidence 1; matched "actually", "instead", "not allowed", "names code the agent had just added"; the agent then changed src/shopfront/checkout/service.py again); attributed to src/shopfront/checkout/service.py
+  > Actually legacy_charge() is deprecated, PaymentClient.charge() is what we use instead.
 - `2026-10-29 14:11 UTC` session `9f6ff626` · User correction: The user corrected the agent (confidence 1; matched "no, …", "I told you"; the agent then changed src/shopfront/checkout/service.py again); attributed to src/shopfront/checkout/service.py
   > No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.
 - `2026-11-09 15:02 UTC` session `8d986baa` · Edit reverted: Edit on src/shopfront/checkout/service.py undid an earlier edit from the same session, after a check had run on it
@@ -214,7 +246,7 @@ Only friction in the directory itself (searches that found nothing there); `agen
 
 | Signal | Count | Meaning |
 |---|---:|---|
-| `user-correction` User correction | 4 | A human prompt that follows agent work and is worded as a correction of it ("No, …", "I told you …", "revert that", "still failing", "you broke …"), corroborated by behaviour: the agent had changed files, and the human names one of them or the agent then changes one of them again. Wording alone, or two weaker cues together, is only a probable correction. |
+| `user-correction` User correction | 5 | A human prompt that follows agent work and is worded as a correction of it ("No, …", "I told you …", "revert that", "still failing", "you broke …"), corroborated by behaviour: the agent had changed files, and the human names one of them or the agent then changes one of them again. Wording alone, or two weaker cues together, is only a probable correction. |
 | `tool-rejected` Tool call declined | 1 | The human declined a tool call the agent proposed. Declining a plan or a question is not counted. |
 | `user-interrupt` User interrupt | 1 | The human interrupted the agent after it had made at least one tool call in the turn. The interrupt that accompanies a declined tool call is not counted again. |
 | `edit-miss` Edit miss | 6 | An edit failed because the text to replace was not found in the file, or matched several places. |
@@ -222,7 +254,6 @@ Only friction in the directory itself (searches that found nothing there); `agen
 | `command-failure` Command failure | 9 | A shell command failed: it exited non-zero or, where the exit status belongs to a pipe or a later step, its own output says so. Setup and invocation errors (command not found, missing module, bad arguments, …) and environment failures (a service that is not running, missing credentials, an unset variable) count fully; ordinary failures, such as a test that fails, count at 0.3. A red run followed by an edit and a green run of the same job is dropped; one that passed only after a setup step, with no file edited, is kept in full. Read-only inspection commands (ls, grep, …) are ignored. |
 | `edit-thrash` Edit thrash | 1 | One file received 6 or more successful edits within a single turn in which something also went wrong: an edit miss, a stale edit or a reverted edit on that file, or a failed command or retry loop in the turn. Not recorded next to a no-convergence event of the same turn that names the file. |
 | `stale-edit` Stale edit | 1 | An edit or write was refused because the file had not been read first, or changed on disk after it was read. |
-| `probable-correction` Probable correction | 1 | A human prompt that is worded like a correction but is not corroborated by behaviour (the agent had changed nothing, or the human names no changed file and the agent did not go back to what it had changed), or that only contains two or more weaker cues. It may be an ordinary follow-up request. |
 | `path-miss` Path miss | 1 | The agent tried to read or edit a path that does not exist. A read of a missing file that the agent then creates in the same session is not recorded. |
 | `search-miss` Search miss | 6 | A Grep or Glob search returned nothing. A search that only confirms a name is free before the agent creates it is not recorded. |
 | `read-loop` Read loop | 1 | The same range of a file was read 3 or more times in one session with no successful edit to it in between. |

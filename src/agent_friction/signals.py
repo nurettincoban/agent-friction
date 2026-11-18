@@ -1580,7 +1580,10 @@ _SOFTENER_RE = re.compile(
     r"\b(?:thanks|thank you|thx|great|good job|nice(?:ly)?|perfect|awesome|excellent|well done"
     r"|love it|like it|nailed it|keep going|looks good|lgtm|all good|amazing|wonderful"
     r"|no worries|never ?mind|ignore (?:it|that|this)|unrelated|not your fault|flaky"
-    r"|(?:that's|it's|that is|it is|is|are) (?:fine|ok|okay)"
+    r"|(?:that's|it's|that is|it is|this is|that was|it was) (?:fine|ok|okay)"
+    # "... but here spaces are fine"; not "for a CLI flag the unit tests are fine", which
+    # says what to run instead
+    r"|(?:but|here|now|then) (?:\w+ ){0,3}(?:is|are) (?:fine|ok|okay)"
     # a shrug ("not quite what I had in mind but fine") or an afterthought ("no, wait, also")
     r"|but (?:fine|ok|okay|whatever|it works|that works|good enough|i can live with (?:it|that))"
     r"|(?:wait|oh|hang on|hold on),? (?:also|and also|one more thing|additionally|while you)"
@@ -1592,7 +1595,8 @@ _SOFTENER_RE = re.compile(
     r"|as (?:asked|requested|expected|planned|discussed|agreed|i (?:asked|wanted|said))"
     # the problem predates the agent's work
     r"|before your (?:change|changes|edit|edits|commit|commits|fix|pr)|not caused by you(?:r \w+)?"
-    r"|already (?:broken|failing|red|there)|pre-?existing|not (?:related to|because of) your"
+    r"|already (?:broken|failing|red)|(?:was|were|been) already there|pre-?existing"
+    r"|not (?:related to|because of) your"
     r"|since (?:yesterday|last (?:night|week|month|\w+day)|this morning|\w+day|before)"
     r"|for (?:days|weeks|months|a while|ages))\b",
     re.I,
@@ -1602,6 +1606,14 @@ _SOFTENER_RE = re.compile(
 #: pulled your change", "when I run it", "since I can't sign in", "because we use tabs",
 #: which say what is wrong with the agent's work. It voids a phrase like any softener,
 #: but if the agent then changes the same files again its work did need redoing.
+#: The label of a failure reported right after the agent said the work was done.
+_CLAIM_FAILED = "said done, but it fails"
+#: A turn after praise: "thanks, but", "one thing though", "however".
+_CONTRAST_RE = re.compile(
+    r"\b(?:but|though|however|although|that said|one (?:thing|problem|issue|catch))\b"
+    r"(?! (?:fine|ok|okay|whatever|it works|that works|good enough|i can live)\b)",
+    re.I,
+)
 _SELF_BLAME_RE = re.compile(
     r"\b(?:because|after|since|as|cause|cuz) (?:i|we)(?:'d|'ve| had| have| just| accidentally"
     r"| never| also)* "
@@ -1627,7 +1639,7 @@ _NEW_TASK_RE = re.compile(
 #: Interjections that may precede a verdict at the start of a message ("hmm, that's wrong").
 _OPEN = (
     r"^(?:(?:hmm+|ugh+|argh+|wtf|ok(?:ay)?|well|so|sorry|oh|hey|no+|nope|nah|but|and|damn|sigh"
-    r"|um+|uh+|eh|again|man|dude|wait|still)[,.!…:;—-]*\s+)*"
+    r"|um+|uh+|eh|again|man|dude|wait|still|hang on|hold on|hm+)[,.!…:;—-]*\s+)*"
 )
 _YOU_DID = (
     r"\byou (?:broke|removed|deleted|forgot|missed|ignored|misunderstood|overwrote)\b"
@@ -1666,7 +1678,9 @@ _UNDO_OBJECT = (
     r"(?:that|this|it|your|those|these|all (?:of )?(?:that|this|your)|everything|what you"
     r"|(?:the|my) (?:last|previous|latest) (?:change|changes|edit|edits|commit|commits|one"
     r"|thing|step|two|three|few|\d+)"
-    r"|the (?:change|changes|edit|edits|commit|commits))\b"
+    r"|the (?:change|changes|edit|edits|commit|commits)"
+    # "revert the timing bound change", "undo the retry tweak"
+    r"|the (?:[\w-]+ ){1,3}(?:change|changes|edit|edits|tweak|tweaks|bump))\b"
     # "revert the commit abc123 from last week" is about old history, not the agent's work
     r"(?!(?: [0-9a-f]{6,40})? (?:from|of) (?:last|yesterday|earlier|before|\d|an? |the other"
     r"|the previous|(?:mon|tues|wednes|thurs|fri|satur|sun)day|(?:the )?\w+ release))"
@@ -1806,6 +1820,20 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
             False,
         ),
         (
+            # "Not that file. It's generated", "Not that one, it's the slow suite"
+            "not that one",
+            _OPEN
+            + rf"not (?:that|this|those|these) (?:{_THING}|ones)\b(?! (?:i|we) (?:mean|meant))",
+            False,
+        ),
+        (
+            # "That's the old package", "this is the legacy module"
+            "that's the old one",
+            _OPEN + r"(?:that|this|it)(?:'s| is| was) (?:the |an? )?(?:old|legacy|deprecated"
+            rf"|dead|obsolete|unused|stale) (?:{_THING}|copy|version|code)\b",
+            False,
+        ),
+        (
             "that's wrong",
             _OPEN + r"(?:that|this|it)(?:'s| is| was) (?:"
             r"(?:still |just |simply |completely |totally |plain )?(?:wrong|incorrect|broken)"
@@ -1917,6 +1945,45 @@ _INSTRUCTION_CUES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
             _OPEN + r"(?:please |pls )?(?:don't|do not) (?!forget|worry|bother|need|hesitate|mind"
             r"|have to|think|know|see|understand|care|get me wrong|be sorry|apologi[sz]e)\w+\b"
             r"(?!(?: \S+){0,3},? yet\b)",
+        ),
+        (
+            # the same, at the start of a later sentence or clause: "Thanks. Please don't
+            # kick off test-all", "In the parser, don't route feet through metres"
+            "… don't …",
+            r"(?:[.!?;:,]|\bthough)\s+(?:please |pls |and |so )?(?:don't|do not) "
+            r"(?!forget|worry|bother|need|hesitate|mind|have to|think|know|see|understand|care"
+            r"|get me wrong|be sorry|apologi[sz]e)\w+\b(?!(?: \S+){0,3},? yet\b)",
+        ),
+        (
+            # "No skipping, and no bumping the number either"
+            "no …ing",
+            _OPEN + r"no (?:more )?(?!thing\b|nothing\b)\w{3,}ing\b",
+        ),
+        (
+            # what is already there, by name: "There's already `units.mm_from_m` for this"
+            "there's already X",
+            r"\bthere(?:'s| is| are) already (?:an? |the )?`?[\w./-]+`?(?: \w+){0,3} "
+            r"(?:for (?:this|that|it|these)|that (?:does|handles|converts))\b",
+        ),
+        (
+            # "Hang on: threshold in mm please"
+            "hang on: …",
+            r"^(?:hang on|hold on|wait)\s*[:,.!—-]+\s*\S",
+        ),
+        (
+            "you don't need …",
+            r"(?:^|[.!?;:]\s+)you (?:don't|do not|didn't|did not) need (?:the|to|a|an|that|this)\b",
+        ),
+        (
+            # "Why is --min-level a float in metres?", "why are these in the legacy package"
+            "why is it …",
+            r"\bwhy (?:is|are|was|were) (?:\S+ ){1,4}?(?:a|an|in|still|here|there|using|not)\b",
+        ),
+        (
+            # asked after the agent said it was done: "Did you run anything after that?"
+            "did you run it?",
+            r"\b(?:did|have) you (?:actually |even )?(?:run|test|try|check|verify)(?:ed)?\b"
+            r"|\bapplied where\b",
         ),
         (
             "I don't want …",
@@ -2156,6 +2223,22 @@ _WRONG_PLACE_RE = re.compile(
 )
 
 
+def _first_sentences(text: str, limit: int = 300) -> str:
+    """The opening of a message, cut at a sentence end near ``limit`` characters."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = max(text.rfind(". ", 0, limit), text.rfind("? ", 0, limit), text.rfind("! ", 0, limit))
+    return text[: cut + 1] if cut > 0 else text[:limit]
+
+
+def _softens(head: str) -> bool:
+    """Does praise or a shrug ("unrelated, ignore it") stand after the last "but"?"""
+    softeners = [m.start() for m in _SOFTENER_RE.finditer(head)]
+    contrast = [m.start() for m in _CONTRAST_RE.finditer(head)]
+    return bool(softeners) and not (contrast and max(contrast) > max(softeners))
+
+
 def _judge(
     text: str, after_question: bool, idle_seconds: float | None
 ) -> tuple[float, list[str], list[str], list[str]]:
@@ -2169,6 +2252,11 @@ def _judge(
     head = _REPORTED_SPEECH_RE.sub(" ", head)
     softeners = [m.start() for m in _SOFTENER_RE.finditer(head)]
     last_softener = max(softeners) if softeners else -1
+    # "Thanks. One thing though: ..." / "Great, but ...": what follows the "but" is the point
+    contrast = [m.start() for m in _CONTRAST_RE.finditer(head)]
+    if contrast and max(contrast) > last_softener >= 0:
+        softeners = []
+        last_softener = -1
     blame = [m.start() for m in _SELF_BLAME_RE.finditer(head)]
     last_blame = max(blame) if blame else -1
     softened: list[str] = []
@@ -2376,6 +2464,107 @@ def _scope(call: Event, ctx: DetectContext) -> str | None:
     return base
 
 
+#: A name in code shape, as a human types it in a correction: ``legacy_charge``,
+#: ``PaymentClient``, ``PaymentClient.charge()``. Not part of a path.
+_CODE_NAME_RE = re.compile(
+    r"(?<![\w./\\-])`?([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)(?:\(\))?`?(?![\w/\\-])"
+)
+#: ... which only counts with a mark of code: an underscore inside, a lower-to-upper
+#: turn (``camelCase``, ``PaymentClient``), or a call's parentheses.
+_CODE_SHAPE_RE = re.compile(r"[A-Za-z0-9]_[A-Za-z0-9]|[a-z0-9][A-Z]|\.[a-z]")
+#: What the human says to use instead: "use X", "X only", "X is what we use".
+_USE_INSTEAD_RE = re.compile(
+    r"\b(?:use|using|via|call)\s+`?([A-Za-z_][\w.]*)(?:\(\))?`?"
+    r"|`?([A-Za-z_][\w.]*)(?:\(\))?`?\s+(?:only\b|is what we use|instead\b)",
+    re.I,
+)
+#: A human reporting that the result does not work ("still failing", "doesn't work").
+_REPORTS_FAILURE_RE = re.compile(
+    r"\bstill\s+(?:fail(?:s|ing)?|broken|crash(?:es|ing)?|errors?|(?:does ?n[o']t|is ?n[o']t)\b)"
+    r"|\b(?:it|this|that|which|still)\s+(?:does ?n[o']t|did ?n[o']t|is ?n[o']t|does not|did not"
+    r"|is not)\s+work(?:ing)?\b(?!\s+(?:like|that way|the way|on it|today))"
+    r"|\b(?:is|it's|it is) broken\b|\bfails? (?:on|in|for) (?:staging|prod|ci|my|me)\b"
+    # "The staging ingest blew up with ...", "I get an ImportError", "it's not in my local db"
+    r"|\b(?:blew|blows) up\b|\bi(?:'m| am)? (?:get|got|getting|see|seeing) (?:an? |the )?\w*"
+    r"(?:Error|Exception|Traceback|crash|failure)\b|\bit(?:'s| is) not in my\b",
+    re.I,
+)
+
+
+#: A file name, not a name in code: ``README.md``, ``package.json``, ``node.js``.
+_FILE_SHAPED_RE = re.compile(
+    r"\.(?:md|json|jsonc|js|mjs|cjs|ts|tsx|jsx|py|pyi|yaml|yml|toml|txt|lock|cfg|ini|sh|go|rs"
+    r"|rb|java|kt|css|scss|html|xml|sql|env|csv|proto|c|h|cpp|hpp|cs|php|swift|vue)$",
+    re.I,
+)
+#: Product names written in camel case, never a name in this code.
+_PROSE_NAMES = frozenset(
+    name.casefold()
+    for name in [
+        *("GitHub", "GitLab", "macOS", "iOS", "iPadOS", "JavaScript", "TypeScript"),
+        *("PostgreSQL", "MySQL", "MongoDB", "OpenAI", "YouTube", "LinkedIn", "PowerShell"),
+        *("VSCode", "PyPI", "DevOps", "OAuth", "GraphQL", "WebSocket", "LaTeX", "NumPy"),
+        *("SciPy", "FastAPI", "WordPress", "DynamoDB", "CloudFlare", "BitBucket", "iPhone"),
+        *("eBay", "PayPal", "DockerHub", "NodeJS", "ChatGPT"),
+    ]
+)
+
+
+def _name_pattern(name: str) -> re.Pattern[str]:
+    return re.compile(r"(?<![\w.])" + re.escape(name) + r"(?!\w)")
+
+
+def code_names(text: str) -> list[str]:
+    """Names in code shape a human wrote (in order, once each)."""
+    out: list[str] = []
+    for match in _CODE_NAME_RE.finditer(text):
+        name = match.group(1)
+        shaped = _CODE_SHAPE_RE.search(name) or match.group(0).rstrip("`").endswith("()")
+        prose = _FILE_SHAPED_RE.search(name) or name.casefold() in _PROSE_NAMES
+        if shaped and not prose and len(name) >= 4 and name not in out:
+            out.append(name)
+    return out
+
+
+#: Words just before "use X" that turn it around: "don't use X", "why are you using X".
+_NEGATED_BEFORE_RE = re.compile(
+    r"\b(?:don'?t|do not|never|stop|quit|avoid|why|no more|not|instead of|rather than"
+    r"|without)\b(?:\W+\w+){0,2}\W*$",
+    re.I,
+)
+#: "X instead of Y" names the one that was wrongly used first.
+_INSTEAD_OF_RE = re.compile(r"\s*of\b", re.I)
+
+
+def use_instead(text: str, ruled_out: str) -> str:
+    """The name in code shape the human says to use instead, or ``""``.
+
+    A name the sentence turns around ("don't use X", "you used X instead of Y") is
+    skipped, and the last name left wins: people tend to end on what to do.
+    """
+    names = code_names(text)
+    found = ""
+    for match in _USE_INSTEAD_RE.finditer(text):
+        name = (match.group(1) or match.group(2) or "").rstrip(".")
+        if not name or name == ruled_out or name not in names:
+            continue
+        clause = re.split(r"[,.;:!?\n]", text[max(0, match.start() - 40) : match.start()])[-1]
+        if _NEGATED_BEFORE_RE.search(clause):
+            continue
+        instead_of = match.group(0).lower().endswith("instead") and _INSTEAD_OF_RE.match(
+            text, match.end()
+        )
+        if match.group(2) and instead_of:
+            continue
+        found = name
+    return found
+
+
+def reports_failure(text: str) -> bool:
+    """Does the human say the result still does not work?"""
+    return _REPORTS_FAILURE_RE.search(text) is not None
+
+
 @dataclass
 class _Unconfirmed:
     """A correction whose wording is clear but whose effect is not yet seen."""
@@ -2401,6 +2590,9 @@ class _Unconfirmed:
     untouched: bool = False
     redirected: bool = False
     followed: list[str] = field(default_factory=list)  # which of ``files`` it went back to
+    #: Weaker cues only, carried by naming code the agent had just added: only an edit
+    #: that takes that code out confirms it, not any change to the file.
+    needs_removal: bool = False
 
 
 @dataclass
@@ -2419,6 +2611,10 @@ class _State:
     """Mutable per-stream detector state."""
 
     rework: _Rework | None = None
+    #: The last correction and the names in code shape it used that the agent had just
+    #: added (and the files they went into): an edit that takes one out confirms which
+    #: name the human ruled out.
+    named_code: tuple[Finding, tuple[str, ...], frozenset[str]] | None = None
 
     turn: list[_Action] = field(default_factory=list)
     agent_seen: float | None = None  # last agent prose in this turn
@@ -2479,6 +2675,8 @@ class _State:
     missing_reads: dict[str, list[Finding]] = field(default_factory=dict)
     # a strongly worded correction waiting for the agent to act on it
     unconfirmed: _Unconfirmed | None = None
+    # a refusal without a reason, and ``ok_actions`` then: the next message may give it
+    unexplained: tuple[Finding, int] | None = None
     # a correction the human blamed on themselves: (prompt, files changed before it, phrases)
     softened: tuple[Event, frozenset[str], str] | None = None
     # this turn: did anything go wrong, how did its last command end, which searches missed
@@ -3232,7 +3430,13 @@ class _Detector:
             state.removed.append((call.old_text, call.new_text))
             del state.removed[:-REMOVED_TEXTS_KEPT]
         self._explain_probes(path, call)
-        self._confirm_correction({path}, f"the agent then changed {path} again")
+        took_out = self._took_out_named_code(path, call)
+        pending = state.unconfirmed
+        # With weaker cues only, a change to the file is not enough: it must take out the
+        # code the human named.
+        if pending is None or not pending.needs_removal or took_out:
+            self._confirm_correction({path}, f"the agent then changed {path} again")
+
         pending = state.unconfirmed
         if (
             pending is not None
@@ -4505,6 +4709,13 @@ class _Detector:
                 setups = list(dict.fromkeys(label for label, setup in ran if setup))
                 others = [label for label, setup in ran if not setup]
                 red_line = finding.detail.get("command", "")
+                if (
+                    not setups
+                    and not others
+                    and id(finding) not in state.looped
+                    and self._green_unchanged(finding, failed_key, actual, line, exact)
+                ):
+                    continue  # another form of the job passed with no file edited (engine)
                 if line and failed_key == actual and id(finding) not in state.looped:
                     if not same_invocation(red_line, line, failed_key, actual, loose=True):
                         # The agent changed what it ran (another snippet, another value)
@@ -4556,6 +4767,12 @@ class _Detector:
                     # a script given another value (`--month 2026-13`, then `2026-12`).
                     fixed.add(id(finding))
                     continue
+                if (
+                    failed_key == actual
+                    and finding.detail.get("variant") == "ordinary"
+                    and self._green_unchanged(finding, failed_key, actual, line, exact)
+                ):
+                    continue  # `TZ=UTC pytest` after a red `pytest` (engine)
                 if failed_key != actual:
                     # the package was there; another way of running the job found it
                     promoted = self._promote(finding)
@@ -4601,6 +4818,36 @@ class _Detector:
                     # it is, only its recurring across sessions can say (engine).
                     finding.detail["rerun_green"] = "1"
         self._drop(fixed, DROPPED_DEV_LOOP)
+
+    def _green_unchanged(
+        self, finding: Finding, failed_key: str, actual: str, line: str, exact: bool
+    ) -> bool:
+        """An ordinary red run, then the job passing in another form with no file edited
+        in between: another runner (``green_as``: `make test` after `pytest`) or the same
+        command with a variable set in front (``green_with``: `TZ=UTC pytest`). Whether
+        that is how the job must be run here, recurrence across sessions decides."""
+        state = self.state
+        if (
+            exact
+            or finding.detail.get("variant") != "ordinary"
+            or state.changes_at.get(id(finding)) != state.changes
+        ):
+            return False
+        if failed_key == actual:
+            prefix = _env_prefix(line, self.ctx.command_key is str)
+            if prefix and not _env_prefix(finding.detail.get("command", ""), True):
+                finding.detail["green_with"] = f"{prefix} {self.ctx.command_key(actual)}"
+                return True
+            return False
+        if (
+            is_replacement(failed_key, actual)
+            and not is_aggregate_check(actual)
+            and actual not in state.red_seen
+        ):
+            finding.detail["green_as"] = self.ctx.command_key(actual)
+            state.replaced.setdefault(failed_key, []).append(finding)
+            return True
+        return False
 
     def _failed_under(self, finding: Finding, label: str) -> bool:
         """Do the failing tests the red run named (if any) all lie in ``label``'s directory?"""
@@ -4748,6 +4995,7 @@ class _Detector:
         """The turn after a strongly worded correction is over: did the agent act on it?"""
         rework, self.state.rework = self.state.rework, None
         self.state.softened = None
+        self.state.named_code = None
         self._settle_wording()
         if rework is not None and rework.finding.signal == USER_CORRECTION:
             # A correction costs the rework it caused: from the agent's first call after
@@ -4849,7 +5097,7 @@ class _Detector:
             excerpt_parts.append(f"$ {call.command}")
         if result.reason:
             excerpt_parts.append(f"user said: {result.reason}")
-        self._emit(
+        rejected = self._emit(
             TOOL_REJECTED,
             result,
             f"The user declined {declined}" + (" and said why" if result.reason else ""),
@@ -4860,6 +5108,10 @@ class _Detector:
             interval=_capped(_epoch(result), _resumed(action)),
             detail={"reason": result.reason, "command": call.command or ""},
         )
+        if not result.reason:
+            # The reason may come as the human's next message, typed after the refusal
+            # stopped the turn ("Not that file. It's generated ...").
+            self.state.unexplained = (rejected, self.state.ok_actions)
 
     def _on_denied(self, action: _Action, result: Event) -> None:
         """A permission rule, hook or safety check refused the call: it never ran."""
@@ -4995,6 +5247,57 @@ class _Detector:
                     files.append(rel)
         return files
 
+    def _added_names(self, text: str, instead: str) -> tuple[list[str], set[str]]:
+        """The names in code shape in ``text`` that an edit or write of this turn put
+        into a file (and were not there before), and the files they went into. The name
+        the human says to use instead is not one of them."""
+        names: list[str] = []
+        files: set[str] = set()
+        for name in code_names(text):
+            if instead and (name == instead or name.split(".")[0] == instead.split(".")[0]):
+                continue
+            pattern = _name_pattern(name)
+            into = {
+                action.file
+                for action in self.state.turn
+                if action.file is not None
+                and action.call.op in (model.OP_EDIT, model.OP_WRITE)
+                and (action.result is None or action.result.ok)
+                and pattern.search(action.call.new_text)
+                and not pattern.search(action.call.old_text)
+            }
+            if into:
+                names.append(name)
+                files |= into
+        return names, files
+
+    def _last_green_check(self) -> str:
+        """The command key of the turn's last shell command that succeeded, if any."""
+        for action in reversed(self.state.turn):
+            if (
+                action.cmd is not None
+                and action.result is not None
+                and action.result.ok
+                and action.call.op == model.OP_SHELL
+                and command_role(action.cmd.key) in ("test", "lint", "typecheck", "build")
+            ):
+                return self.ctx.command_key(action.cmd.key)
+        return ""
+
+    def _took_out_named_code(self, path: str, call: Event) -> bool:
+        """Did this edit take out a name the last correction used? Then that is the name
+        the human ruled out (``ruled_out`` on the correction)."""
+        named = self.state.named_code
+        if named is None or path not in named[2]:
+            return False
+        finding, names, _ = named
+        for name in names:
+            pattern = _name_pattern(name)
+            if pattern.search(call.old_text) and not pattern.search(call.new_text):
+                finding.detail.setdefault("ruled_out", name)
+                return True
+        return False
+
     def _turn_changes(self) -> tuple[list[str], list[str], bool]:
         """Files the turn so far touched and changed (most recent first), by any means.
 
@@ -5031,6 +5334,33 @@ class _Detector:
         start = next((s for s in (_epoch(a.call) for a in turn) if s is not None), None)
         stamps = [s for a in turn for s in (_epoch(a.call), _epoch(a.result)) if s is not None]
         return start, max(stamps) if stamps else None
+
+    def _command_named(self, head: str) -> str | None:
+        """The command of the last turn that a message names ("`test-all`", "make test-all"),
+        as its hotspot is keyed; ``None`` if it names none or several."""
+        found: list[str] = []
+        lowered = head.lower()
+        for action in self.state.turn:
+            cmd = action.cmd
+            if cmd is None or not cmd.key or cmd.inspection or is_inline_code(cmd.key):
+                continue
+            words = cmd.key.split()
+            tail = words[-1].lower()
+            # the whole key, or its last word if that is distinctive (`test-all`, not `test`)
+            distinct = len(tail) >= 6 or "-" in tail or ":" in tail
+            said = re.search(rf"(?<![\w-]){re.escape(cmd.key.lower())}(?![\w-])", lowered) or (
+                distinct
+                and len(words) > 1
+                and re.search(rf"(?<![\w-]){re.escape(tail)}(?![\w-])", lowered)
+            )
+            # a command that ran fine is more likely named as what to run instead
+            # ("`make test` was enough"); only a failed or stopped one is the subject
+            went_ok = action.result is not None and action.result.ok
+            if said and not went_ok:
+                label = self._label(cmd.key, self._primary(action), action.call.cwd)
+                if label not in found:
+                    found.append(label)
+        return found[0] if len(found) == 1 else None
 
     def _on_interrupt(self, event: Event) -> None:
         turn = self.state.turn
@@ -5111,6 +5441,33 @@ class _Detector:
         confidence, labels, softened, instructed = _judge(event.text, event.after_question, idle)
         stopped, self.state.interrupted = self.state.interrupted, None
         head = event.text[:CORRECTION_HEAD_CHARS]
+        unexplained, self.state.unexplained = self.state.unexplained, None
+        if (
+            unexplained is not None
+            and unexplained[1] == self.state.ok_actions
+            and not _NEW_TASK_RE.search(head)
+            and not _ADDITIVE_RE.match(head)
+        ):
+            # Nothing ran between the refusal and this message: it says why.
+            rejected = unexplained[0]
+            reason = _first_sentences(event.text)
+            rejected.detail["reason"] = reason
+            rejected.detail["reason_from"] = "next message"
+            rejected.excerpt = "\n".join(p for p in (rejected.excerpt, f"user said: {reason}") if p)
+            rejected.summary += " and then said why"
+        if (
+            event.after_claim
+            and confidence < CORRECTION_STRONG
+            and not softened
+            and reports_failure(head)
+            and not _softens(head.replace("’", "'"))
+            # not a new request ("next task: ..."). A long pause is no reason to doubt it:
+            # trying the work out (on staging, by hand) is what takes the time.
+            and not _NEW_TASK_RE.search(head)
+        ):
+            # The agent had just said the work was done or passing, and the human answers
+            # that it fails: a verdict on that work, however it is worded.
+            confidence, labels = CORRECTION_STRONG, [*labels, _CLAIM_FAILED]
         if (
             stopped is not None
             and confidence <= 0
@@ -5135,14 +5492,29 @@ class _Detector:
             # it. A stopped server stays: it should not have been in the foreground.
             self._drop({id(stopped)})
         touched, edited, blind = self._turn_changes()
+        # A name the human writes that the agent had just put into a file ("you used
+        # legacy_charge again"): the message is about that code, in those files.
+        said = event.text[:CORRECTION_SCAN_CHARS]
+        added, added_in = self._added_names(said, use_instead(said, ""))
+        if added_in and confidence > 0:
+            edited = [rel for rel in edited if rel in added_in] or edited
         before = frozenset(edited)
         # An instruction that redirects the work just done ("don't use X here") is a
         # correction if the agent goes back to that work, and nothing if it does not.
-        tentative = bool(instructed) and bool(before)
+        tentative = bool(instructed) and bool(before) and _CLAIM_FAILED not in labels
+        weak_by_name = False
         fallback = ""
         if tentative:
             fallback = ", ".join(f'"{label}"' for label in labels)
             confidence, labels = CORRECTION_STRONG, instructed
+        elif added_in and before and 0 < confidence < CORRECTION_STRONG:
+            weak_by_name = True
+            # Weaker cues only ("actually X is deprecated"), but about code the agent had
+            # just written: a correction if the agent goes back and changes it.
+            tentative = True
+            fallback = ", ".join(f'"{label}"' for label in labels)
+            confidence = CORRECTION_STRONG
+            labels = [*labels, "names code the agent had just added"]
         if confidence <= 0:
             if softened and before:
                 matched = ", ".join(f'"{label}"' for label in softened)
@@ -5255,10 +5627,37 @@ class _Detector:
         if blind and blamed and not changed:
             pinned = blamed[:CORRECTION_MAX_FILES]
         corroborated = ""
-        if not strong:
+        ran = self._command_named(head) if strong and not stale else None
+        # the human stopped a command and says "not that one": that command
+        if (
+            ran is None
+            and strong
+            and stopped is not None
+            and stopped.detail.get("interrupted")
+            and any(label.startswith("not that one") for label in labels)
+        ):
+            ran = stopped.detail["interrupted"]
+        if ran is not None:
+            # "Please don't kick off `test-all` for every little change": the message is
+            # about a command the agent had just run (or that the human stopped), not
+            # about the files of the turn.
+            targets = [Target(model.COMMAND, ran)]
+            how = f"the user names `{ran}`, which the agent had just run"
+            note, corroborated = how, "named"
+            confidence = CORRECTION_STRONG
+            tentative = False
+            changed, named_changed = frozenset(), []
+            if stopped is not None and stopped.detail.get("interrupted"):
+                stopped.targets = [Target(model.COMMAND, ran)]
+                stopped.detail["reason"] = _first_sentences(event.text)
+        elif not strong:
             note = "weaker cues only, no clear correction phrase"
         elif named_changed and not stale and not tentative:
             note, corroborated = f"the user names {named_changed[0]}, which it had changed", "named"
+        elif _CLAIM_FAILED in labels and changed and not stale:
+            # The agent's own words were the verdict on its work; the human's answer is that
+            # the work fails. Nothing the agent does next needs to confirm it.
+            note, corroborated = "the agent had said the work was done", "claim"
         elif changed or pinned:
             confidence = CORRECTION_STRONG
             note = "awaiting the agent's response"
@@ -5280,6 +5679,17 @@ class _Detector:
             detail={"confidence": f"{confidence:g}", **({"quote": event.text} if certain else {})},
         )
         self.state.corrected = frozenset(t.key for t in targets)
+        # Which name the human ruled out is known once an edit takes it out again.
+        self.state.named_code = (finding, tuple(added), frozenset(added_in)) if added else None
+        instead = use_instead(said, "")
+        if instead:
+            finding.detail["use_instead"] = instead
+        if event.after_claim and reports_failure(head):
+            # The agent had just said it was done; the human says it does not work.
+            finding.detail["claimed_done"] = "1"
+            check = self._last_green_check()
+            if check:
+                finding.detail["checked_with"] = check
         if others and not blamed and not pinned and targets:
             finding.detail["also_named"] = others[0]  # recommendations say so
         if corroborated:
@@ -5307,6 +5717,7 @@ class _Detector:
                 how,
                 tentative=tentative,
                 fallback=fallback,
+                needs_removal=weak_by_name,
                 elsewhere=frozenset(elsewhere - set(touched)),
                 settled=bool(blamed),
                 named=frozenset() if blamed or wrong_place else frozenset(others),

@@ -1,0 +1,13 @@
+{
+  "type": "record",
+  "name": "Reading",
+  "namespace": "tidewater",
+  "fields": [
+    {"name": "station_id", "type": "string"},
+    {"name": "observed_at", "type": "long", "doc": "unix seconds, UTC"},
+    {"name": "level_mm", "type": "int", "doc": "water level above datum, millimetres"},
+    {"name": "sigma_mm", "type": ["null", "int"], "default": null},
+    {"name": "source", "type": "string"},
+    {"name": "qc_flags", "type": "int", "default": 0}
+  ]
+}

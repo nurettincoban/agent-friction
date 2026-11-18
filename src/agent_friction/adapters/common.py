@@ -129,6 +129,36 @@ def asks_question(text: str) -> bool:
     return any(_OFFER_RE.search(q) is not None and _CLOSER_RE.search(q) is None for q in questions)
 
 
+#: Agent prose that reports the work finished or passing.
+_CLAIM_RE = re.compile(
+    r"\b(?:all (?:the )?tests? (?:now )?pass(?:es|ed|ing)?|tests? (?:now )?pass(?:es|ed)?"
+    r"|(?:it|this|that|everything|they) (?:now )?works?(?=\s*(?:[.!]|$|now\b))|works? now"
+    r"|(?:is|are|it's) (?:now )?(?:done|working|fixed|complete)\b|should (?:now )?work\b"
+    r"|(?:it's|it is|is|are|been|was) (?:now |also )?(?:applied|deployed|migrated|in place)\b"
+    r"|(?:^|[.!]\s+)\W*(?:done|fixed|implemented)\s*(?:[.!:]|$))",
+    re.I | re.M,
+)
+#: ... unless the same paragraph also reports a problem, a gap ("couldn't run"), or asks something.
+_HEDGED_RE = re.compile(
+    r"\b(?:fail\w*|error\w*|broken|but|however|except|though|although|not|untested"
+    r"|\w+n't|cannot|unable|tomorrow|later)\b|\?",
+    re.I,
+)
+
+
+def claims_done(text: str) -> bool:
+    """Does agent prose, in its first or last paragraph, say the work is done or passing?
+    Only this one bit is kept of the text."""
+    paragraphs = [p for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+    if not paragraphs:
+        return False
+    # The verdict opens the reply ("Done: ...") or closes it ("All tests pass.")
+    return any(
+        _CLAIM_RE.search(part) is not None and _HEDGED_RE.search(part) is None
+        for part in dict.fromkeys((paragraphs[0], paragraphs[-1]))
+    )
+
+
 def edit_pairs(
     pairs: list[tuple[str, str]],
 ) -> tuple[tuple[tuple[str, str], ...], frozenset[tuple[str, str]]]:

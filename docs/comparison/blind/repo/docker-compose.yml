@@ -1,0 +1,9 @@
+services:
+  timescale:
+    image: timescale/timescaledb:2.14.2-pg16
+    environment:
+      POSTGRES_USER: tide
+      POSTGRES_PASSWORD: tide
+      POSTGRES_DB: tide
+    ports:
+      - "5433:5432"

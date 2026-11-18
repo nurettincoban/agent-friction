@@ -322,6 +322,26 @@ def _line_events(obj: dict[str, Any], line: int) -> list[Event] | None:
     return events
 
 
+def _claims_done(content: object) -> bool | None:
+    """Whether an assistant message ends by saying the work is done (``None``: no text).
+
+    A tool call after the text means it went on working: no claim stands.
+    """
+    if isinstance(content, str):
+        return common.claims_done(content)
+    if not isinstance(content, list):
+        return None
+    verdict: bool | None = None
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text" and isinstance(block.get("text"), str):
+            verdict = common.claims_done(block["text"])
+        elif block.get("type") == "tool_use":
+            verdict = False
+    return verdict
+
+
 def _asks_question(content: object) -> bool | None:
     """Whether an assistant message asks the human something (``None``: no say either way).
 
@@ -404,6 +424,7 @@ def parse_file(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFi
     side = Stream(session_id=session, source=path, kind=KIND, sidechain=True)
     parsed = ParsedFile(path=path, kind=KIND, streams=[])
     asking = {False: False, True: False}  # per stream: did the agent just ask something?
+    claimed = {False: False, True: False}  # ... and did it just say it was done?
     # (stream, text) -> was it a queued one, and when
     delivered: dict[tuple[bool, str], tuple[bool, datetime | None]] = {}
     with model.open_transcript(path) as handle:
@@ -459,11 +480,16 @@ def parse_file(path: Path, seen_uuids: dict[str, str] | None = None) -> ParsedFi
                 asked = _asks_question(obj["message"].get("content"))
                 if asked is not None:
                     asking[target.sidechain] = asked
+                done = _claims_done(obj["message"].get("content"))
+                if done is not None:
+                    claimed[target.sidechain] = done
             else:
                 for event in events:
                     if event.kind == model.USER_MESSAGE:
                         event.after_question = asking[target.sidechain]
                         asking[target.sidechain] = False
+                        event.after_claim = claimed[target.sidechain]
+                        claimed[target.sidechain] = False
             target.events.extend(events)
     main.events = common.pair_background(main.events)
     side.events = common.pair_background(side.events)
