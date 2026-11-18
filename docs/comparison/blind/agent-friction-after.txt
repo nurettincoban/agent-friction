@@ -1,0 +1,83 @@
+agent-friction · repo
+12 sessions · 173 tool calls · 23 friction events (+2 weak) · ~10m lost · 12 human corrections · 2026-09-02 → 2026-10-20
+
+What to fix first
+  1. Across the repository: Agents say the work is done before checking it
+     The agent said the work was done or passing 3 times in 3 sessions, and each time the human
+     then found it failing: 2 times it had run no test, lint or build since its last change; once
+     the last check it saw pass was `make test`, which did not cover what broke. Say in AGENTS.md
+     how to check work here before reporting it done (the command that covers the change, run
+     after the last edit; the environment it must pass in), and have the agent say what it did not
+     verify. In their words: "Did you run anything after the warehouse change? The staging ingest
+     blew up with `psycopg.ProgrammingError: the query has 6 placeholders but 7 parameters were…"
+     / "Applied where? It's not in my local db, and I didn't see you run migrate. Or the tests,
+     for that matter." / "Did you try it? I get an ImportError. I don't think pyarrow is even in
+     our deps."
+  2. make test-all: Write down the rule the human keeps repeating
+     A human corrected the agent here 2 times in 2 sessions. Put the rule in AGENTS.md / CLAUDE.md
+     (or where the command is defined) so it is read before the next attempt. In their words: "Not
+     that one, it's the 6-minute docker run. For a CLI flag the unit tests are fine. Nightly
+     covers the DB side." / "Thanks. Please don't kick off `test-all` for every little change,
+     though. It holds docker for six minutes and the unit tests already cover parse_file.
+     Nightly…"
+  3. tidewater/transforms/qc.py: Check whether these corrections are standing rules
+     A human corrected the agent here 2 times in 1 session, each time about something else. If
+     what they said is a standing rule rather than a one-off, put it in AGENTS.md / CLAUDE.md (or
+     a comment at the top of the file). In their words: "That's the old package. Nothing imports
+     `transforms` any more. The spike flag lives in tidewater/transform/qc.py (no s)." / "Applied
+     where? It's not in my local db, and I didn't see you run migrate. Or the tests, for that
+     matter." (The human also named `tidewater/transform/qc.py`, which the agent had not touched.)
+  4. tests/test_noaa_client.py: Check whether these corrections are standing rules
+     A human corrected the agent here 2 times in 2 sessions, each time about something else. If
+     what they said is a standing rule rather than a one-off, put it in AGENTS.md / CLAUDE.md (or
+     a comment at the top of the file). In their words: "Please revert the timing bound change.
+     Loosening it hides the flake, and it isn't part of this PR. We'll deal with that test
+     separately." / "No skipping, and no bumping the number either (that was tried last month).
+     The client should take a sleep function so the test can pass a fake one and not touc…"
+  5. tidewater/ingest/csv_drop.py: Write down the rule the human keeps repeating
+     A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md
+     (or a comment at the top of the file) so it is read before the next attempt. In their words:
+     "Thanks. One thing though: `float(row["level_m"]) * 1000` hands a float to `level_mm` (and
+     e.g. 1.005 * 1000 is 1004.9999999999999). That field is an int everyw…" / "Did you run
+     anything after the warehouse change? The staging ingest blew up with
+     `psycopg.ProgrammingError: the query has 6 placeholders but 7 parameters were…" / "Two
+     things. In the parser, don't route feet through metres: call `mm_from_ft` directly. I don't
+     want a float metre value existing in the ingest path, even tran…" The rule, as they put it:
+     use `mm_from_ft` (said in 1 session).
+  1 more suggestion rests on fewer than 5 events each and is left out here. Each item's own details
+  list them, marked "thin evidence" (in the terminal: `agent-friction show <path>`).
+
+Ready to paste
+  The lines the advice above names, filled in from the evidence. Check each against the repository
+  before you commit it; nothing here has been applied.
+  AGENTS.md (or CLAUDE.md):
+    - Before saying the work is done, run the check that covers it after your last change, and say
+      what you did not verify.
+    - In `tidewater/ingest/csv_drop.py`: use `mm_from_ft`.
+    - In `tidewater/transform/units.py`: use `mm_from_ft`.
+
+Files where agents struggle
+  score            path                                   sess events    lost  top signals
+  ███▏        31.7 tidewater/transforms/qc.py                2      3      1m  ◐ user-correction×2, edit-revert×1
+  ███         30.5 tests/test_noaa_client.py                 2      3     54s  ◐ user-correction×2, tool-rejected×1
+  ███         29.9 tidewater/ingest/csv_drop.py              3      3     48s  ◐ user-correction×3
+  ██▉         28.7 tidewater/models/generated.py             2      3     12s  ◐ edit-miss×1, tool-rejected×1
+  ██▌         24.4 tests/test_spikes.py (not in tree)        2      2     18s  ◐ user-correction×2
+  ██▌         24.4 tidewater/transform/qc.py                 2      2     18s  ◐ user-correction×2
+  ██          20.5 tests/test_csv_drop.py (not in tree)      2      2     36s  ◐ user-correction×2
+  █▌          15.2 tidewater/export.py (not in tree)         1      1      6s  ○ user-correction×1
+  █▎          13.0 tidewater/transform/units.py              1      1      6s  ○ user-correction×1
+  █▎          12.0 tidewater/cli.py                          1      1      6s  ○ user-correction×1
+
+Commands that keep failing
+  score            command                                sess events    lost  top signals
+  ████▌       45.5 make test-all                             3      5      6m  ● command-failure×2, user-correction×2
+  ██▍         24.1 pytest                                    2      2      6s  ◐ command-failure×2
+  █▌          15.2 mkae                                      1      1      6s  ○ command-failure×1
+  █▎          13.0 pip install                               1      1     36s  ○ command-failure×1
+  ▉            8.5 python -m pytest                          1      1     n/a  ○ command-failure×1
+  ▉            8.5 python3 -m tidewater.cli                  1      1     n/a  ○ command-failure×1
+
+● high ◐ medium ○ low confidence · drill in: agent-friction show <path> · full map: --format html -o map.html
+Per-row time can overlap (one stall can involve a file and a command); n/a means the evidence carries no time estimate; the total counts each minute once.
+Not counted: 7 failed runs of normal work (the agent fixed the failure, or was only waiting and polled until it passed; ~24s of run time).
