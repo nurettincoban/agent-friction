@@ -798,7 +798,21 @@ fact about the repository or in a human's own words, whatever the count
 (`edit-the-source-not-the-output`, `document-what-rewrites-this-file`,
 `write-down-the-rule`, `say-how-to-verify`, `name-the-missing-target`, `file-is-gone`,
 `note-the-background-rate`, and `state-the-boundary` when the human gave a
-reason).
+reason). Nor thin, however few the events: advice resting on what a tool reported (a
+command failure, a missed edit, a retry) when those events come from 3 or more separate
+sessions (`RECURRING_SESSIONS`): the default test command failing the same way in three
+sessions is how the repository is, not an afternoon. Interruptions and declined calls do
+not qualify; three of those can still be chance.
+
+**Error signatures.** Under each hotspot, `signatures` lists the error lines that recur
+in the output of its tool-output events (command failures, missed edits, retries): a
+line qualifies by looking like an error line, not by matching a list of known errors.
+Lines are compared after folding what varies from run to run (numbers, durations, hex
+ids, temporary paths; a port or a `file:line` reference is kept), and a line seen in
+only one event of several is not a signature. The most widespread come first; between
+equals, a line that says why (`connection refused`, `No such file or directory`) comes
+before one that only names a failed test. "What to fix first" quotes the top one ("The
+tool said: …") when the advice rests on such events.
 
 | Id | Fires when |
 | --- | --- |
