@@ -22,7 +22,8 @@ monorepo, 16 sessions) and [blind set 4](comparison/blind4/) (kilnlog, 15 sessio
 tool ran three times per set, plus agent-friction's plain scan once, on 2026-11-18, with
 Claude Code 2.1.327 and its default model for both tools. The diagnosis sessions ran in a copy
 of each set's `repo/` alone; their own transcripts show that none opened an answer key or a
-generator. An independent grader got the seven reports per set shuffled as A to G, with no
+generator (those transcripts are not published: they hold this machine's paths). An
+independent grader got the seven reports per set shuffled as A to G, with no
 names, and checked every claim it could against the transcripts. The formats differ enough
 that a grader could guess which is which, so this is blind in name more than in fact; the
 score sheets quote each report's own words for every point, so the grading can be checked.
@@ -45,10 +46,10 @@ What this shows:
   against 11.5, and 7.5 working fixes of 8 against 5.3. Every `/insights` run read only 9
   sessions, and the gap is mostly the problems that show in tool output alone: none of the
   `/insights` runs found blind set 3's slow lint configuration, and none got the cause of
-  blind set 4's test that fails only in the evening, both of which most diagnoses explained
-  from the repository's own files. Not all: two of the three blind set 3 diagnoses named the
-  lint cause only as a candidate, and one blind set 4 diagnosis dismissed the evening test as
-  normal red-then-green work.
+  blind set 4's test that fails only in the evening. One blind set 3 diagnosis explained the
+  lint cause from the repository's files (the other two saw the timeouts but left the cause
+  unconfirmed or conditional), and two blind set 4 diagnoses explained the evening test (the
+  third dismissed it as normal red-then-green work).
 - **It is not more accurate yet.** The diagnoses made about as many wrong statements as
   `/insights` (2.5 per report against 3.0). Several came from the scan's own counts: it sets
   aside failures it judges normal work, and the diagnoses repeated its short session lists.

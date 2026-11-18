@@ -306,8 +306,11 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     if (!sigs.length || !said.length) return "";
     var top = said[0], text = String(top.text);
     if (String(r.detail || "").indexOf(text) >= 0) return "";
-    var events = Number(top.events || 0), sessions = Number(top.sessions || 0), total = Number(h.events || 0);
-    var quoted = text.indexOf("`") >= 0 ? "`` " + text + " ``" : "`" + text + "`";
+    var events = Number(top.events || 0), sessions = Number(top.sessions || 0), total = Number(h.output_events || 0) || events;
+    var longest = 0;
+    (text.match(/`+/g) || []).forEach(function (run) { longest = Math.max(longest, run.length); });
+    var fence = new Array(longest + 2).join("`"), pad = longest ? " " : "";
+    var quoted = fence + pad + text + pad + fence;
     if (events <= 1) return "The tool said: " + quoted + ".";
     return "The tool said: " + quoted + " (" + events + " of " + total + " events" +
       (sessions > 1 ? ", " + plural(sessions, "session") : "") +

@@ -585,7 +585,7 @@ class _Rules:
         session_ids = len({f.session_id for signal in based_on for f in self.get(signal)})
         thin = (
             events < THIN_EVIDENCE_EVENTS
-            # the same failure in three separate sessions is a pattern, not an afternoon
+            # failures of one target in three separate sessions are a pattern, not an afternoon
             and not (session_ids >= RECURRING_SESSIONS and set(based_on) <= signals.OUTPUT_SIGNALS)
             and not stated
             and rule_id not in FACT_BACKED_RULES

@@ -50,7 +50,9 @@ def _inline(text: str) -> str:
 def _labels(result: dict[str, Any]) -> dict[str, str]:
     """Session id -> S01…, by start time. Sessions known only from evidence (no human
     words, as in a subagent's or a git-only event) come after, by id."""
-    ordered = [str(s.get("session_id")) for s in result.get("conversation") or []]
+    ordered = list(
+        dict.fromkeys(str(s.get("session_id")) for s in result.get("conversation") or [])
+    )
     extra = {
         str(s.get("session_id"))
         for item in all_items(result)
@@ -172,7 +174,8 @@ def _hotspots(result: dict[str, Any], labels: dict[str, str]) -> list[str]:
         ]
         for sig in item.get("signatures") or []:
             out.append(
-                f"- error line, in {sig.get('events')} events / {sig.get('sessions')} sessions: "
+                f"- error line, in {plural(int(sig.get('events') or 0), 'event')} / "
+                f"{plural(int(sig.get('sessions') or 0), 'session')}: "
                 f"{_inline(str(sig.get('text')))}"
             )
             for variant in sig.get("variants") or []:

@@ -119,8 +119,7 @@ def tool_said(hotspot: dict[str, Any], rec: dict[str, Any]) -> str:
         return ""
     events, sessions = int(top.get("events", 0)), int(top.get("sessions", 0))
     # out of the events that have tool output, not the corrections beside them
-    counts = hotspot.get("signals") or {}
-    total = sum(int(n) for name, n in counts.items() if name in OUTPUT_SIGNALS) or events
+    total = int(hotspot.get("output_events") or 0) or events
     quoted = code_span(text)
     if events <= 1:
         return f"The tool said: {quoted}."

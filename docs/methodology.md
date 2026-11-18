@@ -800,8 +800,9 @@ fact about the repository or in a human's own words, whatever the count
 `note-the-background-rate`, and `state-the-boundary` when the human gave a
 reason). Nor thin, however few the events: advice resting on what a tool reported (a
 command failure, a missed edit, a retry) when those events come from 3 or more separate
-sessions (`RECURRING_SESSIONS`): the default test command failing the same way in three
-sessions is how the repository is, not an afternoon. Interruptions and declined calls do
+sessions (`RECURRING_SESSIONS`): the same target failing in three sessions is how the
+repository is, not an afternoon. The rule does not check that the failures are alike; the
+error signatures show whether they are. Interruptions and declined calls do
 not qualify; three of those can still be chance.
 
 **Error signatures.** Under each hotspot, `signatures` lists the error lines that recur

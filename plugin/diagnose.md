@@ -69,7 +69,7 @@ Problems first, the ones that cost the most sessions first. For each:
 ```markdown
 ## 1. <what keeps happening, in plain words>
 
-**Seen in:** S03, S09, S11 (3 of 13 sessions) · `go test ./...` failed each time
+**Seen in:** at least S03, S09, S11 (3 of 13 sessions) · `go test ./...` failed each time
 **What happens:** <the mechanism, one or two sentences, naming files and lines you checked>
 **Evidence:** <the recurring error line or the human's words, verbatim, with session labels>
 **Why it keeps happening:** <what is missing or wrong in the repository: not written down,

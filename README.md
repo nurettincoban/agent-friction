@@ -77,7 +77,8 @@ a sample of your sessions. agent-friction finds where **this repository** trips 
 deterministic scan of every session that touched it, then (in the plugin) a diagnosis that
 checks each cause against the repository and writes the exact fix. We
 [tested both on held-out sessions](https://github.com/nurettincoban/agent-friction/blob/main/docs/comparison.md)
-written blind by independent authors, graded blind against keys committed before any run:
+written blind by independent authors, graded against keys committed before any run, with the
+reports shuffled and unnamed:
 
 | | `/insights` | agent-friction |
 | --- | --- | --- |
@@ -85,7 +86,7 @@ written blind by independent authors, graded blind against keys committed before
 | Problems found, two held-out sets (of 16 each, 3 runs) | 11 to 13 | 13 to 16 (`/agent-friction:scan`) |
 | Fixes that work as given (of 8 each) | 5 to 6 | 7 to 8 |
 | Wrong statements per report | 2 to 4 | 1 to 5, about the same |
-| Cause found in | What the session says | The error output and the repository's own files |
+| Cause found in | Mostly what the session says | The error output and the repository's own files |
 | Same input, same output | No | The scan, yes, so `compare` can measure before and after |
 
 The scan alone, without the diagnosis, found 5 and 6 of 16: it is the evidence and the
@@ -107,7 +108,9 @@ measurement, not the answer.
 ## Privacy
 
 Everything runs locally: no network calls, and the HTML report loads nothing. Excerpts are
-redacted and truncated, and `--no-excerpts` removes all transcript text. Details in
+redacted and truncated. The JSON scan (and so every saved `.agent-friction/scan-*.json`) also
+keeps every message the humans typed, redacted, for the diagnosis. `--no-excerpts` removes all
+transcript text. Details in
 [docs/usage.md](https://github.com/nurettincoban/agent-friction/blob/main/docs/usage.md#privacy) and [SECURITY.md](https://github.com/nurettincoban/agent-friction/blob/main/SECURITY.md).
 
 ## Learn more

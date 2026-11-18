@@ -42,7 +42,8 @@ _ERROR_RE = re.compile(
 #: harness adds, a bare FAIL/ok marker, summary lines of a test runner.
 _NOISE_RE = re.compile(
     r"^\s*(?:\$ |String: |Exit code \d+\s*$|FAIL\s*$|ok\s|---\s*$|=+\s*$|-+\s*$|\.+\s*$"
-    r"|\d+ (?:failed|passed)|Tests?:\s|Test Files\s|Ran \d+ tests?|FAILED \("
+    r"|FAIL\s+\S+\s+[\d.]+s\s*$|\d+ (?:failed|passed)|Tests?:\s|Test Files\s"
+    r"|Ran \d+ tests?|FAILED \("
     r"|make: \*\*\* \[.*\] Error \d+\s*$|error: Recipe"
     r"|npm ERR! (?:A complete log|code|path|errno|syscall)|ELIFECYCLE)",
     re.I,

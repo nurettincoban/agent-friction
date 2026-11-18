@@ -297,3 +297,14 @@ def test_the_html_map_knows_the_same_output_signals() -> None:
     start = template.index("var OUTPUT_SIGNALS = [")
     listed = template[start : template.index("];", start)]
     assert sorted(re.findall(r'"([a-z-]+)"', listed)) == sorted(signals.OUTPUT_SIGNALS)
+
+
+def test_tool_said_counts_against_the_events_with_output() -> None:
+    hotspot = {
+        "events": 12,
+        "output_events": 9,
+        "signals": {"command-failure": 9, "retry-loop": 3},
+        "signatures": [{"text": "boom", "events": 9, "sessions": 3}],
+    }
+    said = tool_said(hotspot, {"signals": ["command-failure"], "detail": ""})
+    assert "(9 of 9 events, 3 sessions)" in said

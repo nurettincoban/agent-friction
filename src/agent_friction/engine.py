@@ -2056,8 +2056,11 @@ class _Analysis:
         )
         entry["evidence"] = [self._evidence(f) for f in _pick_evidence(found, options.max_evidence)]
         if options.include_excerpts:
-            said = signatures.signatures([f for f in found if f.signal in signals.OUTPUT_SIGNALS])
+            output = [f for f in found if f.signal in signals.OUTPUT_SIGNALS]
+            said = signatures.signatures(output)
             if said:
+                # what "N of M" is out of: distinct transcript lines with tool output
+                entry["output_events"] = len({(f.source, f.line) for f in output})
                 entry["signatures"] = [
                     {
                         "text": redact.one_line(s.text, signatures.SIGNATURE_CHARS),

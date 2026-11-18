@@ -1355,7 +1355,7 @@ SERVER_OUTPUT_RE = re.compile(
     r"|\bstarted server\b|Server (?:is )?(?:running|started|listening)",
     re.I,
 )
-_TEST_COMMAND_RE = re.compile(r"test|spec\b|jest|mocha", re.I)
+_TEST_COMMAND_RE = re.compile(r"(?<![a-z])(?:\w*test\w*|spec|jest|vitest|mocha)(?![a-z])", re.I)
 #: How many of the latest edits are remembered for "did the agent just add this import?".
 ADDED_TEXTS_KEPT = 8
 #: The shell could not change directory, so what came after `cd x &&` never ran.
