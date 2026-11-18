@@ -2223,6 +2223,15 @@ _WRONG_PLACE_RE = re.compile(
 )
 
 
+def _first_sentences(text: str, limit: int = 300) -> str:
+    """The opening of a message, cut at a sentence end near ``limit`` characters."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = max(text.rfind(". ", 0, limit), text.rfind("? ", 0, limit), text.rfind("! ", 0, limit))
+    return text[: cut + 1] if cut > 0 else text[:limit]
+
+
 def _softens(head: str) -> bool:
     """Does praise or a shrug ("unrelated, ignore it") stand after the last "but"?"""
     softeners = [m.start() for m in _SOFTENER_RE.finditer(head)]
@@ -2666,6 +2675,8 @@ class _State:
     missing_reads: dict[str, list[Finding]] = field(default_factory=dict)
     # a strongly worded correction waiting for the agent to act on it
     unconfirmed: _Unconfirmed | None = None
+    # a refusal without a reason, and ``ok_actions`` then: the next message may give it
+    unexplained: tuple[Finding, int] | None = None
     # a correction the human blamed on themselves: (prompt, files changed before it, phrases)
     softened: tuple[Event, frozenset[str], str] | None = None
     # this turn: did anything go wrong, how did its last command end, which searches missed
@@ -5086,7 +5097,7 @@ class _Detector:
             excerpt_parts.append(f"$ {call.command}")
         if result.reason:
             excerpt_parts.append(f"user said: {result.reason}")
-        self._emit(
+        rejected = self._emit(
             TOOL_REJECTED,
             result,
             f"The user declined {declined}" + (" and said why" if result.reason else ""),
@@ -5097,6 +5108,10 @@ class _Detector:
             interval=_capped(_epoch(result), _resumed(action)),
             detail={"reason": result.reason, "command": call.command or ""},
         )
+        if not result.reason:
+            # The reason may come as the human's next message, typed after the refusal
+            # stopped the turn ("Not that file. It's generated ...").
+            self.state.unexplained = (rejected, self.state.ok_actions)
 
     def _on_denied(self, action: _Action, result: Event) -> None:
         """A permission rule, hook or safety check refused the call: it never ran."""
@@ -5320,6 +5335,33 @@ class _Detector:
         stamps = [s for a in turn for s in (_epoch(a.call), _epoch(a.result)) if s is not None]
         return start, max(stamps) if stamps else None
 
+    def _command_named(self, head: str) -> str | None:
+        """The command of the last turn that a message names ("`test-all`", "make test-all"),
+        as its hotspot is keyed; ``None`` if it names none or several."""
+        found: list[str] = []
+        lowered = head.lower()
+        for action in self.state.turn:
+            cmd = action.cmd
+            if cmd is None or not cmd.key or cmd.inspection or is_inline_code(cmd.key):
+                continue
+            words = cmd.key.split()
+            tail = words[-1].lower()
+            # the whole key, or its last word if that is distinctive (`test-all`, not `test`)
+            distinct = len(tail) >= 6 or "-" in tail or ":" in tail
+            said = re.search(rf"(?<![\w-]){re.escape(cmd.key.lower())}(?![\w-])", lowered) or (
+                distinct
+                and len(words) > 1
+                and re.search(rf"(?<![\w-]){re.escape(tail)}(?![\w-])", lowered)
+            )
+            # a command that ran fine is more likely named as what to run instead
+            # ("`make test` was enough"); only a failed or stopped one is the subject
+            went_ok = action.result is not None and action.result.ok
+            if said and not went_ok:
+                label = self._label(cmd.key, self._primary(action), action.call.cwd)
+                if label not in found:
+                    found.append(label)
+        return found[0] if len(found) == 1 else None
+
     def _on_interrupt(self, event: Event) -> None:
         turn = self.state.turn
         if not turn:
@@ -5399,6 +5441,20 @@ class _Detector:
         confidence, labels, softened, instructed = _judge(event.text, event.after_question, idle)
         stopped, self.state.interrupted = self.state.interrupted, None
         head = event.text[:CORRECTION_HEAD_CHARS]
+        unexplained, self.state.unexplained = self.state.unexplained, None
+        if (
+            unexplained is not None
+            and unexplained[1] == self.state.ok_actions
+            and not _NEW_TASK_RE.search(head)
+            and not _ADDITIVE_RE.match(head)
+        ):
+            # Nothing ran between the refusal and this message: it says why.
+            rejected = unexplained[0]
+            reason = _first_sentences(event.text)
+            rejected.detail["reason"] = reason
+            rejected.detail["reason_from"] = "next message"
+            rejected.excerpt = "\n".join(p for p in (rejected.excerpt, f"user said: {reason}") if p)
+            rejected.summary += " and then said why"
         if (
             event.after_claim
             and confidence < CORRECTION_STRONG
@@ -5571,7 +5627,30 @@ class _Detector:
         if blind and blamed and not changed:
             pinned = blamed[:CORRECTION_MAX_FILES]
         corroborated = ""
-        if not strong:
+        ran = self._command_named(head) if strong and not stale else None
+        # the human stopped a command and says "not that one": that command
+        if (
+            ran is None
+            and strong
+            and stopped is not None
+            and stopped.detail.get("interrupted")
+            and any(label.startswith("not that one") for label in labels)
+        ):
+            ran = stopped.detail["interrupted"]
+        if ran is not None:
+            # "Please don't kick off `test-all` for every little change": the message is
+            # about a command the agent had just run (or that the human stopped), not
+            # about the files of the turn.
+            targets = [Target(model.COMMAND, ran)]
+            how = f"the user names `{ran}`, which the agent had just run"
+            note, corroborated = how, "named"
+            confidence = CORRECTION_STRONG
+            tentative = False
+            changed, named_changed = frozenset(), []
+            if stopped is not None and stopped.detail.get("interrupted"):
+                stopped.targets = [Target(model.COMMAND, ran)]
+                stopped.detail["reason"] = _first_sentences(event.text)
+        elif not strong:
             note = "weaker cues only, no clear correction phrase"
         elif named_changed and not stale and not tentative:
             note, corroborated = f"the user names {named_changed[0]}, which it had changed", "named"

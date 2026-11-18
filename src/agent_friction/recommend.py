@@ -681,10 +681,11 @@ class _Rules:
             else "here"
         )
         said = ""
+        # a file can carry its own comment; a command is described where it is defined
+        aside = "a comment at the top of the file" if self.key else "where the command is defined"
         detail = (
             f"A human corrected the agent {here} {_in_sessions(found)}. Put the rule in "
-            "AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read "
-            "before the next attempt."
+            f"AGENTS.md / CLAUDE.md (or {aside}) so it is read before the next attempt."
         )
         if not repeated:
             detail = (
@@ -692,7 +693,7 @@ class _Rules:
                 + ("once" if len(found) == 1 else _in_sessions(found))
                 + (", each time about something else" if _differ(found) else "")
                 + ". If what they said is a standing rule rather than a one-off, put it in "
-                "AGENTS.md / CLAUDE.md (or a comment at the top of the file)."
+                f"AGENTS.md / CLAUDE.md (or {aside})."
             )
         if self.quote is not None:
             # Only unambiguous corrections are quoted: a "probable" one may be small talk.
@@ -2154,6 +2155,8 @@ def recommend(
             rules.gone(facts)
     elif kind == model.COMMAND:
         rules.command(key)
+        # "Please don't kick off `test-all` for every little change": said of a command
+        rules.corrections()
     else:
         rules.search_misses(f"under {key}/" if key != "." else "the whole repo")
         rules.corrections()
