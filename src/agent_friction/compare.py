@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from agent_friction.report._common import all_items, fmt_minutes, plural
+from agent_friction.report._common import all_items, fmt_count, fmt_minutes, plural
 
 STATUSES = (
     "regressed",
@@ -231,9 +231,27 @@ def summary_line(before: dict[str, Any], after: dict[str, Any]) -> str:
     bs, as_ = int(bt.get("sessions", 0)), int(at.get("sessions", 0))
     b_per = float(bt.get("est_minutes_lost", 0)) / max(bs, 1)
     a_per = float(at.get("est_minutes_lost", 0)) / max(as_, 1)
+    b_tok, a_tok = _tokens_per_session(bt), _tokens_per_session(at)
+    if not (b_tok and a_tok):
+        b_tok = a_tok = ""  # one scan without usage: nothing to set the other against
     return (
-        f"before: {plural(bs, 'session')}, ~{fmt_minutes(b_per)} lost per session · "
-        f"after: {plural(as_, 'session')}, ~{fmt_minutes(a_per)} lost per session"
+        f"before: {plural(bs, 'session')}, ~{fmt_minutes(b_per)} lost per session{b_tok} · "
+        f"after: {plural(as_, 'session')}, ~{fmt_minutes(a_per)} lost per session{a_tok}"
+    )
+
+
+def _tokens_per_session(totals: dict[str, Any]) -> str:
+    """ ", 6.2k tokens (+79k cache reads) in turns counted as lost per session", averaged
+    over the sessions that record usage; "" when the scan has none."""
+    lost, total = totals.get("tokens_lost"), totals.get("tokens_total")
+    if not isinstance(lost, dict) or not isinstance(total, dict):
+        return ""
+    sessions = max(int(total.get("sessions", 0) or 0), 1)
+    fresh = sum(int(lost.get(k, 0) or 0) for k in ("input", "cache_write", "output"))
+    cached = int(lost.get("cache_read", 0) or 0)
+    return (
+        f", {fmt_count(round(fresh / sessions))} tokens (+{fmt_count(round(cached / sessions))} "
+        "cache reads) in turns counted as lost per session"
     )
 
 

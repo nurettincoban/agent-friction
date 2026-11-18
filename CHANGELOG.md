@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Measured token cost: the model's usage as Claude Code records it in each transcript, summed
+  over the turns counted against each file and command (the stretches behind its time lost),
+  with cache reads shown apart. JSON `tokens_lost` on every hotspot, command and directory, and
+  `totals.tokens_lost` / `totals.tokens_total`; a "Cost of … so far" line under each item of "What to fix
+  first"; tokens per session in `compare`. Which turns belong to which problem is
+  agent-friction's assignment; the counts are the transcripts'.
 - A diagnosis step in the Claude Code plugin: `/agent-friction:scan` hands the session
   everything the scan saw and has it find each cause in the repository and write
   `.agent-friction/diagnosis.md` with an exact fix (steps in `plugin/diagnose.md`);

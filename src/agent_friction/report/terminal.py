@@ -10,9 +10,11 @@ from agent_friction.report._common import (
     LEADS_HEADING,
     PASTE_HEADING,
     PASTE_NOTE,
+    TOKENS_NOTE,
     agent_tool_rules,
     all_items,
     collect_recommendations,
+    cost_line,
     dropped_note,
     events_phrase,
     fmt_lost,
@@ -20,6 +22,7 @@ from agent_friction.report._common import (
     gone_note,
     grouped_unattributed,
     headline_lost,
+    headline_tokens,
     is_thin,
     paste_deny,
     paste_lines,
@@ -27,6 +30,7 @@ from agent_friction.report._common import (
     repo_recommendations,
     signal_titles,
     thin_note,
+    tokens_phrase,
     tool_said,
     top_signals,
     unattributed_heading,
@@ -224,6 +228,10 @@ def _fix_first(result: dict[str, Any], st: Style, width: int) -> list[str]:
         if detail:
             for line in textwrap.wrap(detail, width=max(40, width - 7)):
                 out.append(st.dim(f"     {line}"))
+        cost = cost_line(h)
+        if cost:
+            wrapped = textwrap.wrap(cost, width=max(40, width - 7))
+            out.extend(st.dim(f"     {line}") for line in wrapped)
     note = thin_note(result, recs)
     if note:
         out.extend(st.dim(f"  {line}") for line in textwrap.wrap(note, width=max(40, width - 2)))
@@ -289,6 +297,9 @@ def render_terminal(
             f" · {plural(int(totals.get('corrections', 0)), 'human correction')}{span}"
         )
     )
+    tokens = headline_tokens(result)
+    if tokens:
+        out.append(st.dim(f"tokens: {tokens}"))
     out.append("")
 
     hotspots = list(result.get("hotspots", []))[:top]
@@ -351,9 +362,17 @@ def render_terminal(
     )
     out.append(
         st.dim(
-            "Per-row time can overlap (one stall can involve a file and a command); "
-            "n/a means the evidence carries no time estimate; "
-            "the total counts each minute once."
+            (
+                "Per-row time and tokens can overlap (one stall can involve a file and a "
+                "command); n/a means the evidence carries no time estimate; "
+                "the total counts each minute and each response once."
+            )
+            if isinstance(totals.get("tokens_total"), dict)
+            else (
+                "Per-row time can overlap (one stall can involve a file and a command); "
+                "n/a means the evidence carries no time estimate; "
+                "the total counts each minute once."
+            )
         )
     )
     note = dropped_note(result)
@@ -396,12 +415,15 @@ def render_detail(
             f"  · {plural(int(item.get('sessions', 0)), 'session')}"
             f" · {plural(int(item.get('events', 0)), 'event')}"
             f" · {_lost_phrase(float(item.get('est_minutes_lost', 0)))}"
-            f" · {item.get('confidence', 'low')} confidence"
+            + (f" · {tokens}" if (tokens := tokens_phrase(item.get("tokens_lost"))) else "")
+            + f" · {item.get('confidence', 'low')} confidence"
         )
     )
     why = str(item.get("why", "")).strip()
     if why:
         out.extend(textwrap.wrap(why, width=width))
+    if tokens:
+        out.extend(st.dim(line) for line in textwrap.wrap(TOKENS_NOTE, width=width))
     out.append("")
 
     out.append(st.bold("Signals"))

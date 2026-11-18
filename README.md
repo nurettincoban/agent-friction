@@ -21,9 +21,9 @@ wrong **in this repository**, and gives you a short list of fixes, each with the
 it. Each fix removes a round trip that kept coming back:
 
 - **Fewer wasted turns and tokens.** Every failed command, missed edit and retry is a turn the
-  agent pays for. The report counts them per file and command, with an estimate of the agent
-  time each one cost (time is estimated; tokens are not measured), so you can fix the costliest
-  first.
+  agent pays for. The report counts them per file and command, with the agent time each one cost
+  (estimated from timestamps) and the tokens the model used in those turns (as Claude Code's
+  transcripts record them, cache reads apart), so you can fix the costliest first.
 - **Faster sessions.** With the missing line written down, the agent can get it right the first
   time: `make test`, not three failing `pytest` runs; the spec, not the generated file.
 - **Fewer corrections from you.** The rule you keep repeating moves into `AGENTS.md` or
@@ -88,6 +88,7 @@ reports shuffled and unnamed:
 | Wrong statements per report | 2 to 4 | 1 to 5, about the same |
 | Cause found in | Mostly what the session says | The error output and the repository's own files |
 | Same input, same output | No | The scan, yes, so `compare` can measure before and after |
+| Token cost per problem | In none of the 18 reports we published | Measured usage of the turns counted against each file and command |
 
 The scan alone, without the diagnosis, found 5 and 6 of 16: it is the evidence and the
 measurement, not the answer.

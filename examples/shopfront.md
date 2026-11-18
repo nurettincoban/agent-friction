@@ -2,13 +2,15 @@
 
 6 agent sessions analysed · 23 friction events (+10 weak) · ~9m lost · 5 human corrections · 5 files affected
 
+Tokens: 43k (+589k cache reads) in the turns counted as lost, of 143k (+1.9M cache reads) in the whole sessions. Token counts are the model's usage as the transcripts recorded it (tokens: input, output and cache writes; cache reads apart, as they re-read the conversation so far and cost a fraction per token), in the responses written inside the stretches counted as time lost (for a failed run alone, the response that read its output). The counts are measured; which stretches belong to which problem is agent-friction's assignment, not something the transcripts say. Rows can share turns, as they share minutes.
+
 ## What to fix first
 
-1. `src/shopfront/api/schema_gen.py`: **Generated file: point agents at its source** This file says it is generated (it starts with a generated-file header), yet agents ran into trouble editing it directly 7 times in 4 sessions. Its header names the fix: say in AGENTS.md "`src/shopfront/api/schema_gen.py` is generated from `api/openapi.yaml`: never edit it by hand; change `api/openapi.yaml` and run `make codegen` to regenerate it.", and deny direct edits to it. The tool said: `String to replace not found in file.` (3 of 7 events, 3 sessions).
-2. `pytest`: **Tell agents to use `make test`** `pytest` failed 7 times in 4 sessions; 5 times the agent then got the same job done with `make test`, and `pytest` did not work later in those sessions. Add a line to AGENTS.md such as: "use `make test`, not `pytest`". The tool said: `E ModuleNotFoundError: No module named 'shopfront'` (5 of 7 events, 4 sessions).
-3. `src/shopfront/checkout/service.py`: **Write down the rule the human keeps repeating** A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint." / "Actually legacy_charge() is deprecated, PaymentClient.charge() is what we use instead." (The human also named `src/shopfront/payments/legacy.py`, which the agent had not touched.) The rule, as they put it: use `PaymentClient` (said in 3 sessions), not `legacy_charge` (said in 2 sessions).
+1. `src/shopfront/api/schema_gen.py`: **Generated file: point agents at its source** This file says it is generated (it starts with a generated-file header), yet agents ran into trouble editing it directly 7 times in 4 sessions. Its header names the fix: say in AGENTS.md "`src/shopfront/api/schema_gen.py` is generated from `api/openapi.yaml`: never edit it by hand; change `api/openapi.yaml` and run `make codegen` to regenerate it.", and deny direct edits to it. The tool said: `String to replace not found in file.` (3 of 7 events, 3 sessions). Cost of `src/shopfront/api/schema_gen.py` so far: 16k tokens (+190k cache reads) in the agent turns counted against it, in 3 sessions.
+2. `pytest`: **Tell agents to use `make test`** `pytest` failed 7 times in 4 sessions; 5 times the agent then got the same job done with `make test`, and `pytest` did not work later in those sessions. Add a line to AGENTS.md such as: "use `make test`, not `pytest`". The tool said: `E ModuleNotFoundError: No module named 'shopfront'` (5 of 7 events, 4 sessions). Cost of `pytest` so far: 8.2k tokens (+111k cache reads) in the agent turns counted against it, in 3 sessions.
+3. `src/shopfront/checkout/service.py`: **Write down the rule the human keeps repeating** A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md (or a comment at the top of the file) so it is read before the next attempt. In their words: "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only." / "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint." / "Actually legacy_charge() is deprecated, PaymentClient.charge() is what we use instead." (The human also named `src/shopfront/payments/legacy.py`, which the agent had not touched.) The rule, as they put it: use `PaymentClient` (said in 3 sessions), not `legacy_charge` (said in 2 sessions). Cost of `src/shopfront/checkout/service.py` so far: 12k tokens (+190k cache reads) in the agent turns counted against it, in 3 sessions.
 4. `src/shopfront`: **Point agents to what they are searching for** Agents searched under src/shopfront/ and found nothing 5 times in 2 sessions. They looked for `RefundPolicy` (2x), `**/*policy*.py`, `DiscountPolicy`. If the concept exists under another name or elsewhere, add a pointer in AGENTS.md (or a comment/alias where agents look). If it does not exist, say so.
-5. `rm`: **State the boundary** A human declined the agent's action once in 1 session. State the boundary explicitly (what must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a permission rule. Reasons given: "never delete existing migrations, add a new revision on top"
+5. `rm`: **State the boundary** A human declined the agent's action once in 1 session. State the boundary explicitly (what must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a permission rule. Reasons given: "never delete existing migrations, add a new revision on top" Cost of `rm` so far: 2k tokens (+29k cache reads) in the agent turns counted against it, in 1 session.
 
 ## Ready to paste
 
@@ -72,7 +74,7 @@ Only friction in the directory itself (searches that found nothing there); `agen
 ## Evidence
 
 <details>
-<summary><code>src/shopfront/api/schema_gen.py</code> · score 56.4 · 4 sessions</summary>
+<summary><code>src/shopfront/api/schema_gen.py</code> · score 56.4 · 4 sessions · 16k tokens (+190k cache reads)</summary>
 
 11 friction events in all 4 sessions that touched it (6 edit misses, 2 user corrections, 1 read loop, 2 more signal types); high confidence because it recurs across sessions with several kinds of evidence.
 
@@ -96,7 +98,7 @@ Only friction in the directory itself (searches that found nothing there); `agen
 </details>
 
 <details>
-<summary><code>src/shopfront/checkout/service.py</code> · score 46.5 · 3 sessions</summary>
+<summary><code>src/shopfront/checkout/service.py</code> · score 46.5 · 3 sessions · 12k tokens (+190k cache reads)</summary>
 
 5 friction events in all 3 sessions that touched it (3 user corrections, 1 reverted edit, 1 edit thrash episode); high confidence because it recurs across sessions with several kinds of evidence.
 
@@ -119,7 +121,7 @@ Only friction in the directory itself (searches that found nothing there); `agen
 </details>
 
 <details>
-<summary><code>src/shopfront/payments/refunds.py</code> · score 11.4 · 1 session</summary>
+<summary><code>src/shopfront/payments/refunds.py</code> · score 11.4 · 1 session · 2k tokens (+20k cache reads)</summary>
 
 1 friction event in the only session that touched it (1 path miss); low confidence because there is too little independent evidence so far.
 
@@ -155,7 +157,7 @@ Only friction in the directory itself (searches that found nothing there); `agen
 </details>
 
 <details>
-<summary><code>pytest</code> · score 48.6 · 4 sessions</summary>
+<summary><code>pytest</code> · score 48.6 · 4 sessions · 8.2k tokens (+111k cache reads)</summary>
 
 7 friction events in all 4 sessions that touched it (7 command failures); medium confidence because it recurs across sessions.
 
@@ -179,7 +181,7 @@ Only friction in the directory itself (searches that found nothing there); `agen
 </details>
 
 <details>
-<summary><code>rm</code> · score 16.3 · 1 session</summary>
+<summary><code>rm</code> · score 16.3 · 1 session · 2k tokens (+29k cache reads)</summary>
 
 1 friction event in the only session that touched it (1 declined tool call); low confidence because there is too little independent evidence so far.
 
@@ -195,7 +197,7 @@ Only friction in the directory itself (searches that found nothing there); `agen
 </details>
 
 <details>
-<summary><code>curl</code> · score 15.2 · 1 session</summary>
+<summary><code>curl</code> · score 15.2 · 1 session · 2k tokens (+43k cache reads)</summary>
 
 1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far.
 
@@ -207,7 +209,7 @@ Only friction in the directory itself (searches that found nothing there); `agen
 </details>
 
 <details>
-<summary><code>python -m pytest</code> · score 15.2 · 1 session</summary>
+<summary><code>python -m pytest</code> · score 15.2 · 1 session · 2k tokens (+29k cache reads)</summary>
 
 1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far.
 

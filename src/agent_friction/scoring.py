@@ -6,15 +6,17 @@ so a score means the same thing in every run.
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
-from agent_friction.model import Finding
+from agent_friction.model import Finding, Stream, Usage
 from agent_friction.signals import (
     COMMAND_FAILURE,
     EDIT_MISS,
     EDIT_THRASH,
     HUMAN_REWORK,
+    IDLE_GAP_SECONDS,
     NO_CONVERGENCE,
     PATH_MISS,
     PERMISSION_DENIED,
@@ -266,24 +268,110 @@ def claimed(finding: Finding) -> list[tuple[float, float]]:
     return [*first, *finding.intervals]
 
 
-def lost_seconds(findings: Iterable[Finding]) -> float:
-    """Length of the union of the findings' intervals, merged per stream."""
+def _stretches(findings: Iterable[Finding]) -> dict[str, list[tuple[float, float]]]:
+    """The union of the findings' intervals, per stream, as disjoint sorted stretches."""
     by_stream: dict[str, list[tuple[float, float]]] = {}
     for finding in findings:
         for interval in claimed(finding):
             by_stream.setdefault(finding.stream, []).append(interval)
-    total = 0.0
-    for intervals in by_stream.values():
+    merged: dict[str, list[tuple[float, float]]] = {}
+    for stream, intervals in by_stream.items():
         intervals.sort()
-        start, end = intervals[0]
+        out = [intervals[0]]
         for nxt_start, nxt_end in intervals[1:]:
+            start, end = out[-1]
             if nxt_start > end:
-                total += end - start
-                start, end = nxt_start, nxt_end
+                out.append((nxt_start, nxt_end))
             else:
-                end = max(end, nxt_end)
-        total += end - start
-    return total
+                out[-1] = (start, max(end, nxt_end))
+        merged[stream] = out
+    return merged
+
+
+def lost_seconds(findings: Iterable[Finding]) -> float:
+    """Length of the union of the findings' intervals, merged per stream."""
+    return sum(end - start for spans in _stretches(findings).values() for start, end in spans)
+
+
+#: The counts of a token tally, in the order they are reported.
+TOKEN_FIELDS = ("input", "output", "cache_write", "cache_read")
+
+
+class TokenIndex:
+    """Each stream's model responses by time, to tally the tokens a set of findings claims.
+
+    A finding claims the responses that started inside the stretches it claims for
+    time lost (``claimed``): after a stretch's start (the failing call was written by
+    the response before it) and up to its end. A stretch inside which no response
+    started (only a tool's own run, from the call to its result) claims the response
+    that read the result: the next one, unless an idle gap came first. The stretches
+    of several findings are merged first, as for time lost, so no response is counted
+    twice in one tally. Which stretches belong to a problem is agent-friction's
+    assignment; the counts in them are what the transcripts recorded.
+    """
+
+    def __init__(self, streams: Iterable[Stream]) -> None:
+        self._times: dict[str, list[float]] = {}
+        self._rows: dict[str, list[Usage]] = {}
+        self._session: dict[str, str] = {}
+        for stream in streams:
+            if not stream.usage:
+                continue
+            self._session[stream.key] = stream.session_id
+            timed = sorted((u for u in stream.usage if u.ts is not None), key=lambda u: u.ts or 0.0)
+            self._times[stream.key] = [u.ts or 0.0 for u in timed]
+            self._rows[stream.key] = timed
+        #: does any scanned stream record usage at all?
+        self.known = bool(self._session)
+
+    def tally(self, rows: Iterable[tuple[str, Usage]]) -> dict[str, int]:
+        """Counts per field, responses, and the sessions they came from."""
+        counts = dict.fromkeys(TOKEN_FIELDS, 0)
+        responses = 0
+        sessions: set[str] = set()
+        for stream, row in rows:
+            responses += 1
+            sessions.add(self._session.get(stream, stream))
+            for name in TOKEN_FIELDS:
+                counts[name] += getattr(row, name)
+        return {**counts, "responses": responses, "sessions": len(sessions)}
+
+    def total(self) -> dict[str, int] | None:
+        """Every response in the scanned streams; ``None`` without usage."""
+        if not self.known:
+            return None
+        return self.tally((key, row) for key, rows in self._rows.items() for row in rows)
+
+    def claimed_by(self, findings: Iterable[Finding]) -> dict[str, int] | None:
+        """Tokens of the responses inside the findings' stretches.
+
+        ``None`` when nothing the findings claim lies in a stream that records usage
+        (and the scan has any): no count, rather than a count of 0.
+        """
+        if not self.known:
+            return None
+        stretches = _stretches(findings)
+        if stretches and not any(stream in self._session for stream in stretches):
+            return None
+        rows: list[tuple[str, Usage]] = []
+        for stream, spans in stretches.items():
+            if stream not in self._session:
+                continue  # a transcript that records no usage: nothing to count
+            times = self._times[stream]
+            taken = -1  # the last response claimed, so that none is claimed twice
+            for start, end in spans:
+                inside, last = bisect_right(times, start), bisect_right(times, end)
+                if inside >= last:
+                    # nothing written inside: the response that read the result, if it
+                    # came before an idle gap and no earlier stretch already took it
+                    if inside < len(times) and times[inside] - end <= IDLE_GAP_SECONDS:
+                        last = inside + 1
+                    first = inside if inside > taken else last
+                else:
+                    first = max(inside, taken + 1)
+                rows.extend((stream, row) for row in self._rows[stream][first:last])
+                taken = max(taken, last - 1)
+        return self.tally(rows)
 
 
 def lost_minutes(findings: Iterable[Finding]) -> float:

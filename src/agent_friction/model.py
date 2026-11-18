@@ -132,6 +132,23 @@ class Event:
 
 
 @dataclass
+class Usage:
+    """Tokens of one model response, as the transcript records them.
+
+    ``input`` is the uncached input, ``cache_write`` the input written to the prompt
+    cache and ``cache_read`` the input read back from it: three disjoint parts of what
+    the model was given. ``ts`` is when the response started (epoch seconds), or
+    ``None`` when its lines carry no timestamp.
+    """
+
+    ts: float | None
+    input: int = 0
+    output: int = 0
+    cache_write: int = 0
+    cache_read: int = 0
+
+
+@dataclass
 class Stream:
     """An ordered run of events from one transcript file and one (sub)agent."""
 
@@ -140,6 +157,9 @@ class Stream:
     kind: str  # "claude-code" | "generic"
     sidechain: bool = False  # subagent stream: its "user" turns are not human
     events: list[Event] = field(default_factory=list)
+    #: the model's token usage, one entry per response, in transcript order; empty when
+    #: the transcript does not record it
+    usage: list[Usage] = field(default_factory=list)
 
     @property
     def key(self) -> str:
