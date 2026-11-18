@@ -1,0 +1,15 @@
+S01	32b0e700-a6fe-526a-aa97-f323aaa18736	2026-10-06 09:10	feat/cones-list	single prompt	kilnctl cones subcommand
+S02	8958b03d-b4b2-5cf1-8247-1596753a3399	2026-10-08 10:20	feat/ramp-validation	multi-turn	ramp-rate validation
+S03	a9cddce3-0d40-5d25-948b-630abad2e2fb	2026-10-09 15:05	main	single prompt	release binary size
+S04	00ee659a-539c-5471-a620-9b17e43c05c1	2026-10-13 19:40	feat/slow-cool	multi-turn	Glaze6SlowCool preset
+S05	354341df-d2af-50a1-9d51-0cdfc302a6c6	2026-10-15 11:30	feat/plan-json	multi-turn	kilnctl plan --json
+S06	cd8e4133-5d05-5fe2-a023-8464be57d35b	2026-10-17 14:00	feat/firing-notes	single prompt + typed rejection	firing notes field (hub)
+S07	7bff9e60-361d-595a-a0c7-bea2613d197f	2026-10-20 09:45	feat/export-csv	multi-turn	CSV export (core + hub)
+S08	a30749e4-5fff-5214-8c34-e5da0de2dfd1	2026-10-22 16:20	chore/clap-bump	single prompt	clap bump + release build
+S09	051a0402-c618-50d1-8086-f40cb584a0ab	2026-10-27 10:05	feat/import	multi-turn + interrupt	kilnctl firings import
+S10	db777cda-6c26-5992-95b5-602476a954ca	2026-10-29 21:15	refactor/cone-peak-name	multi-turn + subagent	rename cone_to_celsius
+S11	942f228b-1eeb-5278-8ace-a9590e1662f2	2026-11-02 11:00	feat/total-hold	multi-turn + interrupt	total hold time + cones_v1 check
+S12	739859b7-9334-520d-a5af-e1edc819dfb8	2026-11-04 14:30	feat/kiln-index	multi-turn + rejection	firings(kiln_id, started_at) index
+S13	5d2b53e7-d55b-5bfb-962f-a3a740454386	2026-11-06 10:40	release/v0.4.0	single prompt + subagent + background	v0.4.0 release prep
+S14	32dd3638-3d1b-5399-88eb-c4b0fae7dbdd	2026-11-10 18:30	feat/import-dry-run	multi-turn	firings import --dry-run
+S15	8d518568-e464-51a3-b692-005aadc9f16f	2026-11-13 09:20	chore/clippy	single prompt	clippy fixes in kilnctl

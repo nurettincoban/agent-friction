@@ -27,6 +27,7 @@ from agent_friction.report._common import (
     repo_recommendations,
     signal_titles,
     thin_note,
+    tool_said,
     top_signals,
     unattributed_heading,
 )
@@ -217,7 +218,9 @@ def _fix_first(result: dict[str, Any], st: Style, width: int) -> list[str]:
         thin = st.yellow(" (thin evidence)") if is_thin(rec) else ""
         mark = "-" if leads else f"{i}."
         out.append(f"  {mark} {st.cyan(str(h.get('path')))}: {rec.get('title', '')}{thin}")
-        detail = str(rec.get("detail", "")).strip()
+        detail = " ".join(
+            part for part in (str(rec.get("detail", "")).strip(), tool_said(h, rec)) if part
+        )
         if detail:
             for line in textwrap.wrap(detail, width=max(40, width - 7)):
                 out.append(st.dim(f"     {line}"))

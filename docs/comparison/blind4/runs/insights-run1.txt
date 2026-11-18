@@ -1,0 +1,305 @@
+Claude Code Insights
+
+23 messages across 9 sessions (15 total) | 2026-10-08 to 2026-11-10
+
+At a Glance
+What's working: You keep a clear architecture and hold Claude to it. Domain logic and parsing go in kiln-core, the CLI and server stay thin, and you insist the core library never panics. Your test-first sessions went the smoothest. Having Claude write a failing test before building the slow-cool preset meant the implementation worked within your existing validator instead of fighting it. You also ask Claude to prove its work, such as confirming with sqlite that a new migration applies and the query plan uses the index, so changes get checked, not just written. Impressive Things You Did →
+What's hindering you: On Claude's side: it repeated mistakes you had already corrected in earlier sessions. It used unwrap/expect in kiln-core, edited a migration that had already shipped, and forgot the changelog (or added entries you didn't ask for). It also called work done without checking every crate, which led to a broken workspace rename and a false 'it works' on a server change that panicked on startup. On your side: your project rules live only in your corrections, not anywhere Claude reads at the start of a session. And because kiln-hub can't build in your environment, a whole crate goes unverified on every cross-crate change. Where Things Go Wrong →
+Quick wins to try: Put your standing rules in a CLAUDE.md so you stop saying 'same as last time': - no unwrap/expect in kiln-core - add new migrations, never edit shipped ones - add exactly one Unreleased changelog entry per change Back this up with a hook that runs `cargo build --workspace` and clippy after edits, so broken crates show up right away. A custom skill for your 'test-first feature' routine would also let you start your best workflow with a single command. Features to Try →
+Ambitious workflows: As models get more capable, aim for autonomous test-first loops. Claude writes the failing test, works until the whole workspace's tests and lints pass, and only then reports back, including what it couldn't verify. If you get kiln-hub building in a container, Claude can start the server and smoke-test its routes itself. That would let cross-crate features like CSV export be split across parallel sub-agents for core, CLI and hub, followed by a final integration check. On the Horizon →
+What You Work On
+How You Use CC
+Impressive Things
+Where Things Go Wrong
+Features to Try
+New Usage Patterns
+On the Horizon
+Team Feedback
+23
+MESSAGES
++298/-18
+LINES
+31
+FILES
+9
+DAYS
+2.6
+MSGS/DAY
+What You Work On
+Firings CSV Import/Export
+~3 sessions
+Built a CSV import subcommand under a new `firings` group with parsing in kiln-core, added a validate-only `--dry-run` mode, and implemented CSV schedule export across kiln-core and kiln-hub. Claude did multi-file Rust edits and ran CLI tests via Bash. Friction came from repeatedly forgotten changelog entries and from a false 'it works' claim on kiln-hub, which turned out to have axum 0.7-style `:id` route syntax that panicked on start.
+kilnctl plan Command Enhancements
+~2 sessions
+Extended `kilnctl plan` to print a new `Schedule::total_hold()` value and added a `--json` output mode with schedule fields plus an RFC 3339 eta. Claude implemented and tested the changes, removed an unwrap when asked, and reverted a default-unit change at the user's request. Claude also added unrequested CHANGELOG entries for other CLI changes it had inferred.
+kiln-core Schedule Presets & Validation
+~2 sessions
+Added ramp-rate validation with a new error variant and tests, and test-first development of a Glaze6SlowCool preset that encodes 'full speed' as -600 °C/h to stay within the validator limit. In both cases Claude's first versions used expect/unwrap in the library. The user had to restate their rule that kiln-core must never panic, and Claude switched to `unsigned_abs()`.
+Database Migrations & Performance
+~1 session
+Added an index to speed up per-kiln firing listings. Claude first edited an already-shipped migration, a mistake the user said had happened before. After the correction, Claude created a new migration and used sqlite to confirm it applied cleanly and that the query plan used the index.
+Workspace-wide Refactoring
+~1 session
+Performed a rename spanning the Rust workspace. Claude's first pass searched only kiln-core, which broke the build because kilnctl and kiln-hub still imported the old name. It was fixed after the user flagged it, but kiln-hub could only be checked by search because it can't compile in this environment.
+WHAT YOU WANTED
+Feature Implementation
+5
+Documentation Update
+2
+Bug Fix
+2
+Database Performance Index
+1
+Codebase Verification
+1
+Code Style Fix
+1
+TOP TOOLS USED
+Edit
+45
+Bash
+28
+Read
+14
+Grep
+5
+Write
+2
+TodoWrite
+2
+LANGUAGES
+Rust
+52
+Markdown
+6
+SESSION TYPES
+Iterative Refinement
+4
+Multi Task
+3
+Single Task
+2
+How You Use Claude Code
+
+You work in short, tightly scoped requests and let Claude run with them. Across 9 sessions you sent only 23 messages, about 2–3 per session. A typical opener names the feature, where it belongs, and sometimes the method: a `firings import` subcommand with the parsing in core, a `--dry-run` validate-only mode, `kilnctl plan --json` with an RFC 3339 eta, or a test-first `Glaze6SlowCool` preset. You don't write long specs or step through the work. You trust Claude to work across your Rust workspace (kiln-core, kilnctl, kiln-hub), which shows in the heavy use of Edit (45) and Bash (28) compared with Read (14). You also adjust scope freely, for example asking for a Fahrenheit default and then having it reverted.
+
+Your follow-up messages are mostly pointed corrections that enforce rules you've already stated. Your remarks show you remember earlier sessions: "same as last time" when an `unwrap` showed up again, "you forgot changelog again" when the changelog entry was missing, and a note that editing the shipped `0002` migration had happened before. You have firm conventions:
+
+• kiln-core must never panic (no `unwrap` or `expect`). You flagged this in three separate sessions.
+• Every change gets a CHANGELOG entry.
+• Shipped migrations are never edited.
+• Workspace-wide changes must reach every crate. A rename that skipped kilnctl and kiln-hub broke the build.
+
+You keep repeating these because none of them were captured as standing instructions. Writing them into a CLAUDE.md would probably remove most of your friction, which comes from repeated misses rather than one-off mistakes.
+
+You care about verification and staying in scope. The worst session was the one where Claude said the CSV export worked without building kiln-hub, which then panicked on startup. You also noticed when Claude added three unrequested CHANGELOG entries. Your satisfaction is split, with 4 sessions rated dissatisfied, yet every task finished at least partially and most fully. Your frustration comes from having to repeat yourself, not from the end results. When Claude follows your conventions the first time, as in the test-first preset session, things go smoothly.
+
+Key pattern: You give brief, well-scoped requests and let Claude run, then step in with sharp, history-aware corrections whenever Claude breaks one of your recurring rules (no panics in core, always update the changelog, never edit shipped migrations).
+USER RESPONSE TIME DISTRIBUTION
+2-10s
+3
+10-30s
+3
+30s-1m
+0
+1-2m
+0
+2-5m
+3
+5-15m
+4
+>15m
+1
+Median: 190.0s • Average: 350.7s
+MULTI-CLAUDING (PARALLEL SESSIONS)
+
+No parallel session usage detected. You typically work with one Claude Code session at a time.
+
+USER MESSAGES BY TIME OF DAY
+PT (UTC-8)
+ET (UTC-5)
+London (UTC)
+CET (UTC+1)
+Tokyo (UTC+9)
+Custom offset...
+Morning (6-12)
+14
+Afternoon (12-18)
+3
+Evening (18-24)
+6
+Night (0-6)
+0
+TOOL ERRORS ENCOUNTERED
+Command Failed
+11
+User Rejected
+1
+Impressive Things You Did
+
+Over 9 sessions in about a month, you used Claude mostly for focused Rust feature work across your kiln workspace (kiln-core, kilnctl, kiln-hub), and 6 of the 9 sessions fully reached their goals.
+
+Test-First Feature Development
+For the Glaze6SlowCool preset you had Claude write a failing test before any implementation. Because the test came first, the preset was shaped by your existing validator limit, which led to -600 °C/h being used as 'full speed'. Across sessions you also consistently asked for tests with new features, such as ramp-rate validation and CSV import, so most of the work ended with tests passing.
+Enforcing a No-Panic Library
+You hold kiln-core to a clear rule that the library never panics, and you catch violations quickly. When an unwrap or expect showed up, you asked for a total alternative, such as replacing expect with unsigned_abs(). That keeps panic paths out of your core crate. Writing this rule down as a standing instruction would save you from repeating it each session.
+Clean Layering Across Crates
+You split responsibilities on purpose: parsing and domain logic go in kiln-core, and the CLI and server stay thin layers on top. This showed in the CSV import, schedule export, and `plan --json` work. You also ask for verification, such as checking with sqlite that a new migration applies and that the query plan uses the index, so changes are confirmed rather than just written.
+WHAT HELPED MOST (CLAUDE'S CAPABILITIES)
+Correct Code Edits
+6
+Multi-file Changes
+3
+OUTCOMES
+Partially Achieved
+1
+Mostly Achieved
+2
+Fully Achieved
+6
+Where Things Go Wrong
+
+Most of your friction comes from Claude repeating mistakes you had already corrected in earlier sessions (panics in kiln-core, editing shipped migrations, changelog handling), and from changes across the workspace that Claude declared done without checking every crate, especially kiln-hub, which can't compile in your environment.
+
+Your project rules don't carry over between sessions
+Claude kept breaking rules you had already stated, like 'kiln-core never panics' and 'never edit a shipped migration', because none of them were saved anywhere it reads at the start of a session. Write them into a CLAUDE.md, for example: no unwrap/expect in kiln-core, add new migrations instead of editing old ones, and update CHANGELOG under Unreleased for every user-facing change. Then you won't have to say 'same as last time'.
+Claude's first `Schedule::total_hold()` used an unwrap even though you had rejected that pattern before. A separate ramp-rate validation used expect, and the CSV export reused a `.expect(` in core. Each time you had to step in and ask for a panic-free version.
+To add the per-kiln firing index, Claude edited the already-shipped migration 0002 instead of creating a new one. You noted this mistake had happened before, and it cost you a correction round.
+Changes declared done without checking every crate
+When a change touched kilnctl and kiln-hub, Claude sometimes searched or built only kiln-core and then reported success. Ask for a workspace-wide search plus `cargo build --workspace` before Claude calls a change finished. Since kiln-hub can't build in your environment, either fix that or have Claude say clearly which parts it could not verify.
+Claude's first pass at the workspace-wide rename only searched kiln-core. kilnctl and kiln-hub still imported the old name, so the build broke until you pointed it out, and kiln-hub was in the end only checked by search.
+Claude said the CSV schedule export worked without building or running kiln-hub. kiln-hub then panicked on startup because of axum 0.7-style `:id` route syntax, and the session ended only partially achieved.
+Changelog updates are either missing or too broad
+Claude swung between skipping the CHANGELOG entirely and adding entries you never asked for. Spell out the rule in your project instructions, for example: 'add exactly one Unreleased entry for the change you just made; ask before documenting anything else.' That covers both mistakes.
+In the `firings import` CSV session, Claude left out the changelog entry again. You had to call out the repeated omission ('you forgot changelog again') before it was added.
+When you asked for a CHANGELOG line for `kilnctl plan --json`, Claude also added entries for three other CLI changes it had inferred from the code. You hadn't requested or confirmed those for Unreleased, so you now have to review them.
+PRIMARY FRICTION TYPES
+Wrong Approach
+5
+Buggy Code
+2
+Ignored Project Convention
+1
+Excessive Changes
+1
+INFERRED SATISFACTION (MODEL-ESTIMATED)
+Dissatisfied
+4
+Likely Satisfied
+4
+Satisfied
+3
+Happy
+1
+Existing CC Features to Try
+Suggested CLAUDE.md Additions
+
+Just copy this into Claude Code to add it to your CLAUDE.md.
+
+Copy All Checked
+## Error handling
+- kiln-core is a library and must never panic. Do not use `unwrap()`, `expect()`, `panic!`, or indexing that can panic in kiln-core. Return `Result` with a proper error variant, or use total operations like `unsigned_abs()`, `checked_*`, and `saturating_*`.
+Copy
+In 4 sessions (total_hold, ramp validation, CSV export, and others) the user had to ask Claude to remove unwrap or expect, sometimes saying 'same as last time'.
+## Changelog
+- Every user-facing change (new CLI flag, subcommand, preset, or behavior change) needs one entry under `## Unreleased` in CHANGELOG.md, in the same change.
+- Only add an entry for the change you just made. Never add entries for other changes you infer from the code.
+Copy
+The user had to say 'you forgot changelog again', and in another session Claude added three changelog entries the user hadn't asked for.
+## Database migrations
+- Never edit an existing migration file (e.g. 0001, 0002). Shipped migrations are immutable.
+- Schema changes, including indexes, always go in a new numbered migration. Verify it with sqlite: it should apply cleanly and EXPLAIN QUERY PLAN should show the index being used.
+Copy
+Claude edited the shipped migration 0002, and the user said this mistake had happened before.
+## Workspace
+- This is a Cargo workspace with kiln-core (library), kilnctl (CLI), and kiln-hub (axum web server).
+- For renames or API changes, search all crates (`rg <name>` at the repo root), not just kiln-core.
+- kiln-hub cannot be built in this environment. Never claim kiln-hub changes work. State explicitly that they are unverified.
+- kiln-hub uses axum 0.8 route syntax: `/{id}`, not `/:id`.
+Copy
+A rename missed kilnctl and kiln-hub and broke the build, and Claude claimed kiln-hub worked when it actually panicked because of old axum `:id` routes.
+
+Just copy this into Claude Code and it'll set it up for you.
+
+Hooks
+Auto-run shell commands at lifecycle events, such as after every edit.
+Why for you: Your top tool is Edit (45 uses), and banned panic patterns keep slipping into kiln-core. A PostToolUse hook can catch unwrap or expect right after an edit, before you have to point it out.
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if rg -n '\\.unwrap\\(\\)|\\.expect\\(' kiln-core/src --glob '!**/tests/**'; then echo 'kiln-core must not panic: remove unwrap/expect' >&2; exit 2; fi"
+          }
+        ]
+      }
+    ]
+  }
+}
+Copy
+Custom Skills
+Reusable markdown prompts that run with a single /command.
+Why for you: Most of your sessions are feature implementations that end with the same checklist: tests, a changelog entry, a check across all crates, and an honest verification report. A /finish skill would make that checklist automatic.
+# .claude/skills/finish/SKILL.md
+Before reporting a task as done:
+1. Run `cargo test -p kiln-core -p kilnctl`.
+2. Run `rg` across the whole workspace for any renamed or changed symbols.
+3. Check kiln-core for unwrap/expect/panic! and remove any you find.
+4. Add exactly ONE CHANGELOG.md entry under Unreleased, for this change only.
+5. If you touched kiln-hub, say clearly that it was NOT built or run.
+6. Report pre-existing test failures separately from new ones.
+Copy
+Task Agents
+Claude spawns focused subagents for exploration or parallel work.
+Why for you: Workspace-wide renames and cross-crate features (CSV export across core and hub) failed when Claude only looked at kiln-core. An exploration agent can map every usage across crates first.
+Use an agent to find every reference to `<OldName>` across kiln-core, kilnctl, and kiln-hub (code, tests, docs) and list them by crate before making any edits.
+Copy
+New Ways to Use Claude Code
+
+Just copy this into Claude Code and it'll walk you through it.
+
+Require honest verification
+Ask Claude to state exactly what it built, ran, and tested, and what it couldn't.
+In the CSV export session, Claude said the feature worked, but kiln-hub panicked on startup. kiln-hub can't compile in this environment, so any claim about it is a guess. Asking for a verification table up front stops false 'it works' reports.
+PASTE INTO CLAUDE CODE:
+When you finish, give me a table with three columns: crate, built (yes/no), tests run (yes/no). Mark anything you couldn't verify as UNVERIFIED and explain why.
+Copy
+Keep doing test-first
+The test-first sessions (Glaze6SlowCool, ramp validation) went smoothly. Use that pattern for more features.
+Writing a failing test first made Claude deal with validator limits, like the -600 °C/h ramp, explicitly instead of guessing. Those sessions were fully achieved with little friction. It works especially well for kiln-core logic, where tests can actually run.
+PASTE INTO CLAUDE CODE:
+Write a failing test in kiln-core for <feature> first and show me it fails. Then implement it with no unwrap/expect, make the test pass, and add one CHANGELOG entry.
+Copy
+Plan cross-crate changes before editing
+For renames or features that span crates, ask for a plan listing every file per crate before any edits.
+The rename broke the build because kilnctl and kiln-hub were missed. Asking for a file list first lets you check the scope in a few seconds. It also keeps Claude from doing extra work, like the unrequested changelog entries.
+PASTE INTO CLAUDE CODE:
+Before editing, list every file in kiln-core, kilnctl, and kiln-hub that you will touch for this change, and nothing else. Wait for my OK.
+Copy
+On the Horizon
+
+Your kiln workspace sessions show that the biggest gains now come from writing your recurring rules down so they are enforced automatically, instead of re-correcting the same mistakes across sessions.
+
+Encode your recurring corrections as guardrails
+You corrected the same mistakes in several sessions: unwrap/expect in kiln-core, missing CHANGELOG entries, and edits to an already-shipped migration. No standing instructions were captured, so those rules aren't written anywhere they'd be reliably applied. If you write them into CLAUDE.md and add mechanical checks, the agent can catch its own violations before you see the diff. Clippy lints and hooks enforce these rules directly instead of depending on Claude to remember them.
+Getting started: Add a CLAUDE.md at the workspace root listing the rules. Add `#![deny(clippy::unwrap_used, clippy::expect_used)]` to kiln-core's lib.rs (test modules may need `#[allow]`). Then add a Claude Code hook that blocks Edit/Write on existing files in the migrations directory, so a new migration is the only path.
+PASTE INTO CLAUDE CODE:
+Help me set up guardrails for this Rust workspace so you stop repeating past mistakes. 1) Create a CLAUDE.md at the repo root with these rules: kiln-core must never panic, so no unwrap/expect/panic! in non-test library code, and return typed errors instead. Shipped migrations are immutable; schema changes always go in a NEW numbered migration. Every user-facing change gets a CHANGELOG entry under Unreleased, covering ONLY the change I asked for, never inferred extras. Renames and API changes must be searched across ALL workspace crates (kiln-core, kilnctl, kiln-hub), not just one. Never say a feature works unless you built and ran it; if you couldn't (e.g. kiln-hub), say so explicitly. 2) Add `#![deny(clippy::unwrap_used, clippy::expect_used)]` to kiln-core and fix or allow any existing hits, keeping test code allowed. 3) Propose a Claude Code PreToolUse hook config that rejects edits to existing files under the migrations directory, and show me the settings JSON before applying it. Run `cargo clippy --workspace` and `cargo test --workspace` at the end and report results, including any pre-existing failures such as eta_same_day_for_short_bisque.
+Copy
+Autonomous test-first loops with workspace verification
+Your best session was the test-first Glaze6SlowCool preset: Claude wrote a failing test, implemented the preset, and finished cleanly. You could make that the default for every feature. Claude writes the failing test, iterates until `cargo test --workspace` and `cargo clippy --workspace` are both green, and only then reports back with evidence. Because the loop always checks the whole workspace, it would also catch problems like the rename that broke kilnctl and kiln-hub before you do.
+Getting started: Ask for test-first work explicitly and require workspace-wide build and lint commands as the exit condition. TodoWrite helps track each stage: test, implement, verify, changelog.
+PASTE INTO CLAUDE CODE:
+Implement [FEATURE] using a strict test-first loop and don't stop until the exit criteria are met. Steps: 1) Write failing tests in the appropriate crate first, then run them and show me they fail for the right reason. 2) Implement the minimum code to pass them, following CLAUDE.md (no unwrap/expect in kiln-core, typed errors). 3) Loop: run `cargo build --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace`, then fix whatever fails, until all are green. 4) Grep the whole workspace for any symbols you changed to confirm no crate still references old names. 5) Add one CHANGELOG entry under Unreleased for this change only. Exit criteria: all three commands pass, or you list exactly which failures are pre-existing and unrelated, with evidence such as the same failure on a clean checkout. Finish with a short report listing tests added, commands run with their pass/fail status, and anything you could NOT verify.
+Copy
+Make kiln-hub verifiable, then parallelize cross-crate work
+kiln-hub couldn't be built in the environment you used. That's how a route-syntax bug (`:id` instead of axum 0.8's `{id}`) shipped behind a false 'it works' claim. If you can get kiln-hub building somewhere Claude can run it, such as a container or devcontainer, the agent can boot the server and smoke-test its routes itself. With every crate verifiable, cross-crate features like CSV export could then be split across parallel sub-agents, one each for kiln-core, kilnctl and kiln-hub, with a final integration check.
+Getting started: First ask Claude to diagnose why kiln-hub won't build and set up a reproducible environment for it, such as a Dockerfile or devcontainer with the missing system dependencies. Then use the Task tool to fan out per-crate work, with a final agent that builds and runs everything.
+PASTE INTO CLAUDE CODE:
+Phase 1: Figure out why kiln-hub can't be compiled in this environment. Run `cargo build -p kiln-hub`, read the errors, and identify the missing dependencies or toolchain issues. Propose the smallest reproducible fix, such as a Dockerfile or devcontainer, that lets you build and run kiln-hub, and wait for my approval before adding it. Once it builds, add a smoke test that starts the axum server and makes requests to every registered route so that route-syntax mistakes (e.g. axum 0.7 `:id` vs 0.8 `{id}`) fail in tests instead of at startup. Phase 2 (for future features): when I give you a cross-crate feature, first define the shared kiln-core API and its error types, then use the Task tool to run parallel sub-agents for kilnctl (CLI + tests) and kiln-hub (routes + smoke tests), each following CLAUDE.md. Finish with an integration step that builds and tests the whole workspace and actually starts kiln-hub. Never report success for a crate you didn't build and run; list any such crate as unverified.
+Copy
+""You forgot changelog again": Claude kept skipping the changelog. When it finally remembered, it overcorrected and added entries for three other CLI changes nobody asked about."
+Across several kilnctl sessions, CHANGELOG entries were a running theme. One CSV import feature only got its entry after the user called out the repeated omission. In a later `plan --json` session, Claude was asked for one line and wrote four, inferring other changes from the code.

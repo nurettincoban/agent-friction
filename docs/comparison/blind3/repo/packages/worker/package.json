@@ -1,0 +1,17 @@
+{
+  "name": "@tallyhook/worker",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p .",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@tallyhook/shared": "workspace:*",
+    "bullmq": "^5.21.0",
+    "ioredis": "^5.4.1"
+  }
+}

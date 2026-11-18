@@ -1,0 +1,47 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Endpoint {
+  id         String     @id @default(cuid())
+  tenantId   String
+  url        String
+  secret     String
+  maxRetries Int        @default(3)
+  disabledAt DateTime?
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  deliveries Delivery[]
+
+  @@index([tenantId])
+}
+
+model Delivery {
+  id            String         @id @default(cuid())
+  endpointId    String
+  endpoint      Endpoint       @relation(fields: [endpointId], references: [id])
+  eventType     String
+  payload       Json
+  status        DeliveryStatus @default(PENDING)
+  attempts      Int            @default(0)
+  lastError     String?
+  nextAttemptAt DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([endpointId, createdAt])
+  @@index([status, nextAttemptAt])
+}
+
+enum DeliveryStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  DEAD
+}

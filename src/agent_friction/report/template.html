@@ -275,6 +275,16 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
         d.appendChild(rich("span", r.detail)); detail.appendChild(d);
       });
     }
+    if ((h.signatures || []).length) {
+      detail.appendChild(el("h2", null, "What the tool kept saying"));
+      h.signatures.forEach(function (sig) {
+        var d = el("div", { class: "ev" });
+        d.appendChild(el("div", { class: "meta" }, plural(sig.events, "event") + " · " + plural(sig.sessions, "session")));
+        d.appendChild(el("blockquote", null, sig.text));
+        (sig.variants || []).forEach(function (v) { d.appendChild(el("blockquote", null, "also: " + v)); });
+        detail.appendChild(d);
+      });
+    }
     if ((h.evidence || []).length) {
       detail.appendChild(el("h2", null, "Evidence"));
       h.evidence.forEach(function (e) {
@@ -286,6 +296,25 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
         detail.appendChild(d);
       });
     }
+  }
+  // The recurring error line behind a piece of advice: same as tool_said in report/_common.py.
+  var OUTPUT_SIGNALS = ["command-failure", "retry-loop", "no-convergence", "tool-failure",
+    "edit-miss", "path-miss", "file-too-large", "stale-edit"];
+  function toolSaid(h, r) {
+    var sigs = (r.signals || []).filter(function (s) { return OUTPUT_SIGNALS.indexOf(s) >= 0; });
+    var said = (h.signatures || []).filter(function (s) { return s && s.text; });
+    if (!sigs.length || !said.length) return "";
+    var top = said[0], text = String(top.text);
+    if (String(r.detail || "").indexOf(text) >= 0) return "";
+    var events = Number(top.events || 0), sessions = Number(top.sessions || 0), total = Number(h.output_events || 0) || events;
+    var longest = 0;
+    (text.match(/`+/g) || []).forEach(function (run) { longest = Math.max(longest, run.length); });
+    var fence = new Array(longest + 2).join("`"), pad = longest ? " " : "";
+    var quoted = fence + pad + text + pad + fence;
+    if (events <= 1) return "The tool said: " + quoted + ".";
+    return "The tool said: " + quoted + " (" + events + " of " + total + " events" +
+      (sessions > 1 ? ", " + plural(sessions, "session") : "") +
+      ((top.variants || []).length ? "; the numbers in it differ between events" : "") + ").";
   }
   // What to fix first: the same choice as collect_recommendations in report/_common.py.
   (function () {
@@ -329,6 +358,8 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
       li.appendChild(go); li.appendChild(document.createTextNode(": ")); li.appendChild(rich("b", r.title));
       if (r.evidence === "thin") li.appendChild(el("span", { class: "thin", style: "display:inline" }, " (thin evidence)"));
       li.appendChild(rich("span", r.detail));
+      var said = toolSaid(h, r);
+      if (said) li.appendChild(rich("span", " " + said));
       list.appendChild(li);
     });
     var thinShown = shown.some(function (p) { return p[1].evidence === "thin"; }), left = 0;

@@ -1087,7 +1087,11 @@ def test_probable_corrections_are_never_quoted(tmp_path: Path) -> None:
     out = _scan(tmp_path, [s])
     evidence = [e for h in out["hotspots"] for e in h["evidence"]]
     assert [e["signal"] for e in evidence] == ["probable-correction"]
-    assert evidence[0]["excerpt"] is None and "retry here" not in json.dumps(out)
+    findings = {k: v for k, v in out.items() if k != "conversation"}
+    assert evidence[0]["excerpt"] is None and "retry here" not in json.dumps(findings)
+    # The words are in the raw list of what humans said, as a message, judged by nobody.
+    (turn,) = out["conversation"][0]["turns"]
+    assert turn["kind"] == "message" and "retry here" in turn["text"]
 
 
 def test_drive_letter_aliases_ignore_case(tmp_path: Path) -> None:

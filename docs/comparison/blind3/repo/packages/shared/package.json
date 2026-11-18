@@ -1,0 +1,21 @@
+{
+  "name": "@tallyhook/shared",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc -p .",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "vitest run",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev"
+  },
+  "dependencies": {
+    "@prisma/client": "5.20.0",
+    "pino": "^9.4.0",
+    "zod": "3.22.4"
+  },
+  "devDependencies": {
+    "prisma": "5.20.0"
+  }
+}

@@ -57,6 +57,7 @@ agent-friction show src/api/client.py        # why one file scores high, with ev
 agent-friction show "npm test"               # the same for a command, or a directory
 agent-friction sources                       # which transcripts it found
 agent-friction scan -f prompt                # the fixes, as a task for your agent
+agent-friction scan -f investigate           # all the evidence, laid out for a diagnosis
 agent-friction scan --since before.json      # only what came after a saved scan
 ```
 
@@ -179,10 +180,17 @@ agent-friction, so there is nothing else to install; it needs Python 3.10 or new
 
 Then, inside a repository:
 
-- `/agent-friction:scan` maps the friction, lists what to fix first, and saves the scan and an
-  interactive map under `.agent-friction/`. It changes nothing else.
-- `/agent-friction:fix` scans, checks each recommendation against the repository, shows the
-  changes it proposes with the evidence behind each one, and applies only the ones you approve.
+- `/agent-friction:scan` maps the friction, then **diagnoses** it: the session reads
+  everything the scan saw (`scan -f investigate`: every session, every human turn, the error
+  lines that keep recurring), opens the files the evidence points at, and writes
+  `.agent-friction/diagnosis.md`: each problem with the sessions it cost, the cause it found
+  in the repository, and an exact fix, plus what it looked at and judged normal work. The
+  steps it follows are in [plugin/diagnose.md](https://github.com/nurettincoban/agent-friction/blob/main/plugin/diagnose.md).
+  It saves the scan and an interactive map there too, and changes nothing else.
+- `/agent-friction:fix` works from that diagnosis (or makes one), checks each problem against
+  the repository, shows the changes it proposes with the evidence behind each one (the change
+  that removes the cause, and the line for your instruction file), and applies only the ones
+  you approve.
   Run it again later and it first tells you what went down since the last time.
 - `/agent-friction:compare` reads only the sessions since the last saved scan
   (`scan --since that-scan.json`) and compares the two, file by file and command by command.
@@ -208,6 +216,10 @@ The task lists the advice that rests on enough events, strongest first, with the
 few cited events behind each item, and tells the agent to check every claim, make the smallest
 change, propose everything before writing, and wait for approval. Advice on thin evidence is
 listed separately, as something not to act on yet.
+
+For a diagnosis like the plugin's, give the agent `agent-friction scan -f investigate` and
+the steps in [plugin/diagnose.md](https://github.com/nurettincoban/agent-friction/blob/main/plugin/diagnose.md).
+The scan itself stays deterministic and offline; the diagnosis is the agent's reading of it.
 
 ## Windows
 
@@ -282,6 +294,9 @@ Transcripts contain your code and sometimes your secrets, so:
 - Excerpts are redacted (API keys and tokens, `Authorization` headers, private keys, common
   password forms, credentials in URLs and `curl -u`, emails, high-entropy strings, your home
   directory) and truncated. Thinking blocks and assistant prose are never included.
+- With excerpts on (the default), the JSON scan and `-f investigate` also list every message a
+  human typed in these sessions, redacted, so that a diagnosis can read them; the HTML map does
+  not carry that list.
 - `--no-excerpts` removes all transcript text: prompts, quoted corrections, search patterns,
   command lines, and output. What remains is paths, counts, timestamps, and normalized command
   names built only from publicly known words (`git commit`, `npm test`, `python -m pytest`).

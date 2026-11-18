@@ -40,8 +40,10 @@ def _template() -> str:
 def render_html(result: dict[str, Any]) -> str:
     """Render a self-contained interactive HTML friction map."""
     # The "Ready to paste" text, made by the same code as the other formats.
+    # The raw list of what humans said is material for a diagnosis, not for the map: the
+    # page never shows it, so it does not carry it either.
     shown = {
-        **result,
+        **{k: v for k, v in result.items() if k != "conversation"},
         "paste_text": {
             "note": PASTE_NOTE,
             "agents_md": "\n".join(paste_lines(result)),

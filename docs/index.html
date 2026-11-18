@@ -294,25 +294,23 @@ agent-friction compare \
 
   <section class="wrap" id="insights" aria-labelledby="insights-h">
     <h2 id="insights-h">And Claude Code's <code>/insights</code>?</h2>
-    <p class="section-lede">They answer different questions and work well together. We <a href="https://github.com/nurettincoban/agent-friction/blob/main/docs/comparison.md">ran both on the same sessions</a>, scored against an answer key committed before the runs; every report is published next to the write-up.</p>
+    <p class="section-lede"><code>/insights</code> coaches how you and Claude work together. agent-friction finds where this repository trips agents up, then diagnoses each cause against the repository. We <a href="https://github.com/nurettincoban/agent-friction/blob/main/docs/comparison.md">tested both on held-out sessions</a> written blind by independent authors, graded against keys committed before any run, reports shuffled and unnamed; every report is published.</p>
     <table>
       <thead><tr><th scope="col"></th><th scope="col"><code>/insights</code></th><th scope="col">agent-friction</th></tr></thead>
       <tbody>
-        <tr><td>Question</td><td>How do you and Claude work together?</td><td>Where does this repository trip agents up?</td></tr>
-        <tr><td>Method</td><td>A model summarizes a sample of your recent sessions</td><td>Documented rules over every session that touched the repo; no model, no network</td></tr>
-        <tr><td>Evidence</td><td>Narrative with examples</td><td>Counts per file and command, each event traceable to a transcript line</td></tr>
-        <tr><td>Same input, same output</td><td>No</td><td>Yes, so you can compare before and after</td></tr>
-        <tr><td>The fix</td><td>CLAUDE.md sections, hooks and skills to copy</td><td>Lines and deny rules to paste, each deny rule replayed against your sessions</td></tr>
-        <tr><td>On a held-out dataset written blind by an independent author (3 runs of <code>/insights</code>)</td><td>11 of 16 points in every run: found what the humans said (conventions, migrations, a wrong variable prefix); missed what shows only in tool output; read 9 of 13 sessions</td><td>9 of 16: found what shows in tool output (an edit hotspot, a failing lint target), mostly without the cause; missed one rule a human stated; read every session</td></tr>
-        <tr><td>On our own datasets (we built them and tuned agent-friction on them)</td><td>11 of 16</td><td>16 of 16, which says more about the tuning than the tool</td></tr>
-        <tr><td>Also covers, in our test</td><td>Prompting and verification habits, larger workflow ideas</td><td><code>pytest</code> vs <code>make test</code>, empty searches, 280 refusals by Claude Code's own <code>sleep</code> rule</td></tr>
+        <tr><td>Sessions read</td><td>A sample (9 of 16, 9 of 15 in our tests)</td><td>Every session that touched the repository</td></tr>
+        <tr><td>Problems found, two held-out sets (of 16 each, 3 runs)</td><td>11 to 13</td><td>13 to 16 (<code>/agent-friction:scan</code>)</td></tr>
+        <tr><td>Fixes that work as given (of 8 each)</td><td>5 to 6</td><td>7 to 8</td></tr>
+        <tr><td>Wrong statements per report</td><td>2 to 4</td><td>1 to 5, about the same</td></tr>
+        <tr><td>Cause found in</td><td>Mostly what the session says</td><td>The error output and the repository's own files</td></tr>
+        <tr><td>Same input, same output</td><td>No</td><td>The scan, yes, so you can compare before and after</td></tr>
       </tbody>
     </table>
   </section>
 
   <section class="wrap" id="signals" aria-labelledby="signals-h">
     <h2 id="signals-h">18 deterministic signals, each one documented</h2>
-    <p class="section-lede">No model calls: every signal is a fixed rule over the transcript with its exact definition, attribution and known false positives written down in <a href="https://github.com/nurettincoban/agent-friction/blob/main/docs/signals.md">docs/signals.md</a>. A red test the agent then fixes is normal work and is not counted.</p>
+    <p class="section-lede">The scan makes no model calls: every signal is a fixed rule over the transcript with its exact definition, attribution and known false positives written down in <a href="https://github.com/nurettincoban/agent-friction/blob/main/docs/signals.md">docs/signals.md</a>. A red test the agent then fixes is normal work and is not counted.</p>
     <ul class="signals">
       <li class="sig"><b>user-correction</b><span>The human corrected the agent, and it went back to the work it had just done</span></li>
       <li class="sig"><b>retry-loop</b><span>The same command failed 3+ times with nothing changed in between</span></li>

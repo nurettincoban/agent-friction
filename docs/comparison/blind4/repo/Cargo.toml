@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = ["crates/kiln-core", "crates/kilnctl", "crates/kiln-hub"]
+
+[workspace.package]
+version = "0.3.2"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/emberworks/kilnlog"
+
+[workspace.dependencies]
+anyhow = "1.0.89"
+axum = "0.8.1"
+chrono = { version = "0.4.38", default-features = false, features = ["clock", "serde", "std"] }
+clap = { version = "4.5.17", features = ["derive"] }
+dotenvy = "0.15.7"
+serde = { version = "1.0.210", features = ["derive"] }
+serde_json = "1.0.128"
+sqlx = { version = "0.8.2", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono"] }
+thiserror = "1.0.64"
+tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread", "net"] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+
+# Release binaries go onto the studio box and the kiln tablets, so we squeeze them.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+strip = true
+panic = "abort"

@@ -1,0 +1,6 @@
+[alias]
+kc = "run -q -p kilnctl --"
+hub = "run -p kiln-hub"
+
+[term]
+color = "auto"

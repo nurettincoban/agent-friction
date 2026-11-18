@@ -22,7 +22,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from agent_friction import __version__, gitsignals, model, recommend, redact, scoring, signals
+from agent_friction import (
+    __version__,
+    conversation,
+    gitsignals,
+    model,
+    recommend,
+    redact,
+    scoring,
+    signals,
+    signatures,
+)
 from agent_friction.adapters import claude_code, parse_transcript
 from agent_friction.attribution import (
     PUBLIC_HASH_DIGITS,
@@ -1463,6 +1473,17 @@ class _Analysis:
                     r for r in row["recommendations"] if r.get("id") != "say-how-to-verify"
                 ]
         result["paste"] = self._paste(result, streams)
+        if options.include_excerpts:
+            result["conversation"] = conversation.session_turns(
+                streams,
+                lambda text, limit: redact.one_line(text, limit),
+                lambda stream: self.source_labels.get(str(stream.source)),
+                lambda call: (
+                    (self.resolver.resolve(call.path, call.cwd) or call.path or "")
+                    if call.path
+                    else ""
+                ),
+            )
         return result
 
     def _paste(self, result: dict[str, Any], streams: Sequence[Stream]) -> dict[str, Any]:
@@ -2034,6 +2055,30 @@ class _Analysis:
             self._known_targets(key, found) if kind == model.COMMAND else (),
         )
         entry["evidence"] = [self._evidence(f) for f in _pick_evidence(found, options.max_evidence)]
+        if options.include_excerpts:
+            output = [f for f in found if f.signal in signals.OUTPUT_SIGNALS]
+            said = signatures.signatures(output)
+            if said:
+                # what "N of M" is out of: distinct transcript lines with tool output
+                entry["output_events"] = len({(f.source, f.line) for f in output})
+                entry["signatures"] = [
+                    {
+                        "text": redact.one_line(s.text, signatures.SIGNATURE_CHARS),
+                        "events": s.events,
+                        "sessions": s.sessions,
+                        **(
+                            {
+                                "variants": [
+                                    redact.one_line(v, signatures.SIGNATURE_CHARS)
+                                    for v in s.variants
+                                ]
+                            }
+                            if s.variants
+                            else {}
+                        ),
+                    }
+                    for s in said
+                ]
         transcript_sessions = entry["episodes"] - entry["agent_commits"]
         if transcript_sessions == 1 and entry["score"] < SINGLE_SESSION_ADVICE_MIN_SCORE:
             # One session and a low score is a lead to look at, not grounds for telling

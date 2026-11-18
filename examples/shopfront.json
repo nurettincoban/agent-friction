@@ -65,6 +65,7 @@
       "friction_rate": 1.0,
       "guardrail_hits": 0,
       "kind": "command",
+      "output_events": 7,
       "path": "pytest",
       "recommendations": [
         {
@@ -120,6 +121,23 @@
       "signals": {
         "command-failure": 7
       },
+      "signatures": [
+        {
+          "events": 5,
+          "sessions": 4,
+          "text": "E ModuleNotFoundError: No module named 'shopfront'"
+        },
+        {
+          "events": 2,
+          "sessions": 2,
+          "text": "E KeyError: 'DATABASE_URL'"
+        },
+        {
+          "events": 2,
+          "sessions": 2,
+          "text": "ERROR tests/test_checkout.py - KeyError: 'DATABASE_URL'"
+        }
+      ],
       "why": "7 friction events in all 4 sessions that touched it (7 command failures); medium confidence because it recurs across sessions."
     },
     {
@@ -209,6 +227,7 @@
       "friction_rate": 1.0,
       "guardrail_hits": 0,
       "kind": "command",
+      "output_events": 1,
       "path": "curl",
       "recommendations": [],
       "score": 15.2,
@@ -233,6 +252,13 @@
       "signals": {
         "command-failure": 1
       },
+      "signatures": [
+        {
+          "events": 1,
+          "sessions": 1,
+          "text": "curl: (7) Failed to connect to staging.shopfront.example port 443: Connection refused"
+        }
+      ],
       "why": "1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far."
     },
     {
@@ -259,6 +285,7 @@
       "friction_rate": 1.0,
       "guardrail_hits": 0,
       "kind": "command",
+      "output_events": 1,
       "path": "python -m pytest",
       "recommendations": [],
       "score": 15.2,
@@ -283,7 +310,141 @@
       "signals": {
         "command-failure": 1
       },
+      "signatures": [
+        {
+          "events": 1,
+          "sessions": 1,
+          "text": "E ModuleNotFoundError: No module named 'shopfront'"
+        }
+      ],
       "why": "1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far."
+    }
+  ],
+  "conversation": [
+    {
+      "opening": "Add an optional gift_message field to orders and expose it in the checkout API.",
+      "session_id": "e65615b3-b6e0-5853-afdf-c13d1b54f9b5",
+      "source": "claude-code:shopfront/e65615b3-b6e0-5853-afdf-c13d1b54f9b5.jsonl",
+      "started": "2026-10-26T10:00:00Z",
+      "tool_calls": 14,
+      "turns": [
+        {
+          "after": [
+            "Bash PYTHONPATH=src pytest tests/test_checkout.py -q → exit 1",
+            "Bash cat Makefile → ok",
+            "Bash make test → ok"
+          ],
+          "after_done_claim": true,
+          "kind": "message",
+          "line": 28,
+          "text": "Actually legacy_charge() is deprecated, PaymentClient.charge() is what we use instead.",
+          "timestamp": "2026-10-26T10:08:42Z"
+        }
+      ]
+    },
+    {
+      "opening": "Implement partial refunds for orders. Follow the existing refund rules.",
+      "session_id": "9f6ff626-1218-53fb-8455-b4bc68c5c60d",
+      "source": "claude-code:shopfront/9f6ff626-1218-53fb-8455-b4bc68c5c60d.jsonl",
+      "started": "2026-10-29T14:00:00Z",
+      "tool_calls": 14,
+      "turns": [
+        {
+          "after": [
+            "Bash pytest tests/test_refunds.py -x → exit 1",
+            "Bash make test → ok",
+            "Edit src/shopfront/checkout/service.py → ok"
+          ],
+          "kind": "message",
+          "line": 29,
+          "text": "No, I said use PaymentClient, not the legacy module. src/shopfront/payments/legacy.py is deprecated and is being deleted next sprint.",
+          "timestamp": "2026-10-29T14:11:05Z"
+        }
+      ]
+    },
+    {
+      "opening": "Add a currency field (ISO 4217, default EUR) to the Price schema.",
+      "session_id": "4132e18c-d843-510d-aee7-82374ae93389",
+      "source": "claude-code:shopfront/4132e18c-d843-510d-aee7-82374ae93389.jsonl",
+      "started": "2026-11-03T09:00:00Z",
+      "tool_calls": 14,
+      "turns": [
+        {
+          "after": [
+            "Bash rm -rf migrations/versions && alembic revision --autogenerate -m currency → declined by the human"
+          ],
+          "kind": "declined",
+          "line": 19,
+          "text": "never delete existing migrations, add a new revision on top",
+          "timestamp": "2026-11-03T09:03:15Z"
+        },
+        {
+          "after": [
+            "Bash alembic revision --autogenerate -m currency → ok",
+            "Edit src/shopfront/api/schema_gen.py → ok"
+          ],
+          "kind": "interrupt",
+          "line": 24,
+          "text": "[Request interrupted by user]",
+          "timestamp": "2026-11-03T09:04:16Z"
+        },
+        {
+          "after": [],
+          "kind": "message",
+          "line": 25,
+          "text": "No, stop hand-editing src/shopfront/api/schema_gen.py. It is generated: change api/openapi.yaml and run make codegen.",
+          "timestamp": "2026-11-03T09:04:56Z"
+        }
+      ]
+    },
+    {
+      "opening": "Add a sku field to LineItem.",
+      "session_id": "aider-2026-11-05",
+      "source": "tests/fixtures/transcripts/other-agents/aider-2026-11-05.jsonl",
+      "started": "2026-11-05T16:00:00Z",
+      "tool_calls": 4,
+      "turns": [
+        {
+          "after": [
+            "edit src/shopfront/api/schema_gen.py → ok",
+            "shell pytest -q → exit 4",
+            "shell make test → ok"
+          ],
+          "kind": "message",
+          "line": 10,
+          "text": "That's wrong, schema_gen.py is generated. Revert that, edit api/openapi.yaml.",
+          "timestamp": "2026-11-05T16:06:40Z"
+        }
+      ]
+    },
+    {
+      "opening": "Add percentage discount codes to checkout.",
+      "session_id": "8d986baa-9cb3-55b1-86a0-2682baf32c58",
+      "source": "claude-code:shopfront/8d986baa-9cb3-55b1-86a0-2682baf32c58.jsonl",
+      "started": "2026-11-09T15:00:00Z",
+      "tool_calls": 15,
+      "turns": [
+        {
+          "after": [
+            "Edit src/shopfront/checkout/service.py → ok",
+            "Edit src/shopfront/checkout/service.py → ok",
+            "Bash make test 2>&1 | tail -5 → ok"
+          ],
+          "after_done_claim": true,
+          "kind": "message",
+          "line": 27,
+          "text": "It's still failing for me on staging, and you used legacy_charge again in src/shopfront/checkout/service.py. I told you: PaymentClient only.",
+          "timestamp": "2026-11-09T15:14:23Z"
+        }
+      ]
+    },
+    {
+      "opening": "Bump the API version to 2.4 in the schema and make sure tests still pass.",
+      "session_id": "fb4e20bf-8179-51b6-93e1-be4a26ada996",
+      "source": "claude-code:shopfront/fb4e20bf-8179-51b6-93e1-be4a26ada996.jsonl",
+      "started": "2026-11-12T11:00:00Z",
+      "tool_calls": 9,
+      "turns": []
     }
   ],
   "directories": [
@@ -492,6 +653,7 @@
       "friction_rate": 1.0,
       "guardrail_hits": 0,
       "kind": "file",
+      "output_events": 7,
       "path": "src/shopfront/api/schema_gen.py",
       "recommendations": [
         {
@@ -574,6 +736,21 @@
         "user-correction": 2,
         "user-interrupt": 1
       },
+      "signatures": [
+        {
+          "events": 3,
+          "sessions": 3,
+          "text": "String to replace not found in file."
+        },
+        {
+          "events": 2,
+          "sessions": 2,
+          "text": "Found 4 matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identi…",
+          "variants": [
+            "Found 3 matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identi…"
+          ]
+        }
+      ],
       "why": "11 friction events in all 4 sessions that touched it (6 edit misses, 2 user corrections, 1 read loop, 2 more signal types); high confidence because it recurs across sessions with several kinds of evidence."
     },
     {
@@ -851,6 +1028,7 @@
       "friction_rate": 1.0,
       "guardrail_hits": 0,
       "kind": "file",
+      "output_events": 1,
       "path": "tests/test_refunds.py",
       "recommendations": [],
       "score": 8.5,
@@ -875,6 +1053,18 @@
       "signals": {
         "command-failure": 1
       },
+      "signatures": [
+        {
+          "events": 1,
+          "sessions": 1,
+          "text": "E KeyError: 'DATABASE_URL'"
+        },
+        {
+          "events": 1,
+          "sessions": 1,
+          "text": "ERROR tests/test_checkout.py - KeyError: 'DATABASE_URL'"
+        }
+      ],
       "why": "1 friction event in the only session that touched it (1 command failure); low confidence because there is too little independent evidence so far. Only weak signals, which also accompany productive work: the score is capped at 19 and nothing is recommended."
     }
   ],

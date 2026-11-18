@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from agent_friction.recommend import THIN_EVIDENCE_EVENTS
+from agent_friction.signals import OUTPUT_SIGNALS
 
 
 def gone_note(h: dict[str, Any]) -> str:
@@ -94,6 +95,38 @@ def top_signals(hotspot: dict[str, Any], limit: int = 3) -> list[tuple[str, int]
 
 def plural(n: int, word: str) -> str:
     return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def code_span(text: str) -> str:
+    """``text`` as an inline code span, fenced with more backticks than it contains."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    pad = " " if longest else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
+
+
+def tool_said(hotspot: dict[str, Any], rec: dict[str, Any]) -> str:
+    """ "The tool said: `…` (4 of 4 failures, 4 sessions)": the error line that keeps
+    coming back in the output behind this advice, or "" when there is none to show."""
+    if not OUTPUT_SIGNALS.intersection(rec.get("signals") or ()):
+        return ""
+    said = [s for s in hotspot.get("signatures") or [] if isinstance(s, dict) and s.get("text")]
+    if not said:
+        return ""
+    top = said[0]
+    text = str(top["text"])
+    if text in str(rec.get("detail", "")):
+        return ""
+    events, sessions = int(top.get("events", 0)), int(top.get("sessions", 0))
+    # out of the events that have tool output, not the corrections beside them
+    total = int(hotspot.get("output_events") or 0) or events
+    quoted = code_span(text)
+    if events <= 1:
+        return f"The tool said: {quoted}."
+    where = f", {plural(sessions, 'session')}" if sessions > 1 else ""
+    if top.get("variants"):
+        where += "; the numbers in it differ between events"
+    return f"The tool said: {quoted} ({events} of {total} events{where})."
 
 
 def is_thin(rec: dict[str, Any]) -> bool:

@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- A diagnosis step in the Claude Code plugin: `/agent-friction:scan` hands the session
+  everything the scan saw and has it find each cause in the repository and write
+  `.agent-friction/diagnosis.md` with an exact fix (steps in `plugin/diagnose.md`);
+  `/agent-friction:fix` works from it. On two new held-out datasets it found 13 to 16 of 16
+  planted problems against 11 to 13 for `/insights` (docs/comparison.md).
+- `scan -f investigate`: every session, every human turn and the recurring error lines, laid
+  out for a diagnosis.
+- JSON: `signatures` (the error lines that recur in a hotspot's output, with `output_events`)
+  and `conversation` (every message a human typed after the agent started, with the agent's
+  last calls before it; only with excerpts, never in the HTML map). "What to fix first" quotes
+  the top error line ("The tool said: …").
+- A command that says it is listening and then times out is recognised as a server, whatever
+  its name; advice resting on tool failures of one target in 3+ sessions is no longer thin.
 - `agent-friction scan`: friction map of a repository from Claude Code transcripts (including
   subagents and sessions started in a parent directory), the generic JSONL format, and git
   history. Output as terminal, Markdown, JSON, or a self-contained interactive HTML treemap.

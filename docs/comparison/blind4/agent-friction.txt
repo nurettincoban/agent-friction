@@ -1,0 +1,61 @@
+agent-friction · repo
+15 sessions · 158 tool calls · 15 friction events (+14 weak) · ~4m lost · 2 human corrections · 2026-10-06 → 2026-11-13
+
+What to fix first
+  1. cargo test: `cargo test` looks flaky
+     `cargo test` fails and then passes on a re-run with nothing changed in between (5 times in 4
+     sessions): it looks flaky. Fix or quarantine the flaky test, and until then say in AGENTS.md
+     that a red run should be re-run once before anything is changed. (Also mentioned at
+     `CLAUDE.md:12`: check whether it already says this. If it does, enforce it with a hook, a
+     permission rule or a wrapper rather than adding another line.) The tool said: `error: error
+     returned from database: (code: 14) unable to open database file` (4 of 9 events, 4 sessions).
+  2. crates/kiln-hub/migrations/0002_firings.sql: State the boundary
+     A human declined the agent's action 2 times in 2 sessions. State the boundary explicitly
+     (what must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a
+     permission rule. Reasons given: "no — never edit a migration that's already been applied, the
+     studio box ran 0002 months ago. add a new one" / "same thing as before.. new file pls, we
+     never touch old migrations once they shipped"
+  3. crates/kiln-hub/src/routes.rs: Check whether this correction is a standing rule
+     A human corrected the agent here once. If what they said is a standing rule rather than a
+     one-off, put it in AGENTS.md / CLAUDE.md (or a comment at the top of the file). In their
+     words: "two things. 1) again with the .expect( in core... we talked about this. KilnError or
+     make it infallible. 2) you said it works but hub panics on start: ``` thre…" The rule, as
+     they put it: use `without_v07_checks` (said in 1 session).
+  4. crates/kilnctl/src/cli.rs: Check whether this correction is a standing rule
+     A human corrected the agent here once. If what they said is a standing rule rather than a
+     one-off, put it in AGENTS.md / CLAUDE.md (or a comment at the top of the file). In their
+     words: "actually no sorry, keep celsius default, they can pass --fahrenheit. our EU users are
+     90% of installs. revert that pls"
+  1 more suggestion rests on fewer than 5 events each and is left out here. Each item's own details
+  list them, marked "thin evidence" (in the terminal: `agent-friction show <path>`).
+
+Ready to paste
+  The lines the advice above names, filled in from the evidence. Check each against the repository
+  before you commit it; nothing here has been applied.
+  AGENTS.md (or CLAUDE.md):
+    - In `crates/kiln-hub/src/routes.rs`: use `without_v07_checks`.
+
+Files where agents struggle
+  score            path                                   sess events    lost  top signals
+  ███▏        31.6 crates/kiln-…grations/0002_firings.sql    2      3      6s  ◐ tool-rejected×2, probable-correction×1
+  ██▊         26.9 crates/kiln-hub/src/routes.rs             2      2     12s  ◐ edit-miss×1, user-correction×1
+  ██▍         24.2 crates/kilnctl/src/cli.rs                 2      4     12s  ◐ user-interrupt×2, probable-correction×1
+  █▊          17.8 crates/kilnc…/firings.rs (not in tree)    2      2      6s  ○ edit-miss×1, probable-correction×1
+  ▌            4.5 crates/kilnctl/src/commands/mod.rs        1      1     n/a  ○ probable-correction×1
+  ▌            4.5 crates/kilnctl/src/main.rs                1      1     n/a  ○ probable-correction×1
+  ▍            3.7 crates/kiln-core/src/schedule.rs          1      1     n/a  ○ probable-correction×1
+
+Commands that keep failing
+  score            command                                sess events    lost  top signals
+  ███▎        33.1 cargo test                                7      9      1m  ◐ command-failure×9
+  █▉          19.0 cargo build                               6      7      1m  ◐ command-failure×7
+  █▌          15.2 just check-size                           1      1     36s  ○ command-failure×1
+  █▌          15.2 just release-build                        1      1     36s  ○ command-failure×1
+
+Directories where agents search in vain (the directory itself; show <dir> rolls up everything inside)
+  score            directory                              sess events    lost  top signals
+  █            9.7 .                                         1      1     n/a  ○ search-miss×1
+
+● high ◐ medium ○ low confidence · drill in: agent-friction show <path> · full map: --format html -o map.html
+Per-row time can overlap (one stall can involve a file and a command); n/a means the evidence carries no time estimate; the total counts each minute once.
+Not counted: 1 failed run of normal work (the agent fixed the failure, or was only waiting and polled until it passed; ~6s of run time).

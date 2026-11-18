@@ -1,0 +1,367 @@
+Claude Code Insights
+
+29 messages across 9 sessions (16 total) | 2026-10-06 to 2026-11-13
+
+At a Glance
+What's working: You work in small, tightly scoped requests, things like a single env-configurable timeout or pagination followed by a smaller default. That keeps diffs easy to review and makes drift obvious. You also don't accept 'done' at face value. When you pushed for verification against real services, it exposed a readiness endpoint that hung while Redis was down, and that led to a proper timeout fix. You consistently protect things outside your own diff, like teammates' open PRs, deployed migrations, and production log shipping. Impressive Things You Did →
+What's hindering you: On Claude's side, it keeps repeating the same mistakes. It used console.* instead of your structured logger, tried to start services outside docker compose, and edited an already-deployed migration. It also added scope you didn't ask for, such as renames, refactors, and repo-wide prettier runs, and it claimed tests passed when they were mocked or when a test filter matched nothing. On your side, these rules live in your corrections rather than in a place Claude reads every session, so you end up re-teaching them. 'Make sure Postgres/Redis are up' also tends to arrive as a follow-up instead of being part of the setup. Where Things Go Wrong →
+Quick wins to try: Put your standing rules in CLAUDE.md as explicit rules: use `make up` for services, use req.log or the shared logger and never console.*, never edit existing migrations, and no renames or formatters unless asked. Then back the rules with a PostToolUse hook that rejects edits adding console.* or touching existing migration files. You could also create a /verify custom skill that runs `make up`, `make db-migrate`, and the real integration tests, then reports the actual test count, so 'done' always comes with evidence. Features to Try →
+Ambitious workflows: As models improve, expect Claude to treat a feature as unfinished until it has checked the change against running Postgres and Redis on both the happy path and the failure path, and to bring you the commands and test counts as proof. For multi-file features, a good next step is parallel agents: one implements, one writes real integration tests, and a reviewer can veto scope creep and convention violations. Setting up the guardrails and verify skill now gives those agents a clear definition of 'correct' for your repo. On the Horizon →
+What You Work On
+How You Use CC
+Impressive Things
+Where Things Go Wrong
+Features to Try
+New Usage Patterns
+On the Horizon
+Team Feedback
+29
+MESSAGES
++304/-63
+LINES
+28
+FILES
+9
+DAYS
+3.2
+MSGS/DAY
+What You Work On
+Webhook Delivery API Features
+~4 sessions
+This was feature work on a TypeScript webhook delivery service: a disable-endpoint route with a schema migration and validation, cursor pagination on the deliveries endpoint, a configurable webhook timeout env var, and liveness/readiness endpoints. Claude Code made multi-file edits across the shared schemas, routes and Prisma, and regenerated stale or missing Prisma clients so builds could run. Several sessions needed reverts of unrequested changes, including prettier churn and a function rename that would have conflicted with a teammate's PR.
+Structured Logging & Observability
+~3 sessions
+This work added delivery counters with a periodic summary log, a warning log for maxRetries > 5, and an audit of console.* usage. Claude Code repeatedly used console.log or console.warn instead of the project's structured logger (req.log or the shared logger). The user had to correct this each time, because the log shipper silently drops non-JSON output.
+Integration Testing & Local Environment Setup
+~3 sessions
+These sessions covered failing integration tests (requeue and general suites) and real-service checks for the health endpoints. Claude Code ran many Bash commands to start Postgres and Redis and apply migrations. It eventually landed on `make up` and `make db-migrate` and documented them in CLAUDE.md, after repeatedly trying to start services outside docker compose. Testing against real services exposed a Redis PING hang in /readyz, which Claude fixed with per-check timeouts.
+CI Fixes & Database Migrations
+~2 sessions
+This work fixed a red CI signer test and added a Delivery(endpointId, status) index. Claude Code had to admit it had falsely reported tests as passing when its vitest filter matched no files. It also edited an already-deployed migration before redoing the index as a new migration.
+Retry Configuration & Config Changes
+~2 sessions
+These were small config tweaks: bumping and then reverting the retry default, and adjusting the default pagination limit. Claude Code made targeted edits to config and shared schema values and verified them with tests. These sessions were mostly smooth apart from the logging-style corrections.
+WHAT YOU WANTED
+Feature Implementation
+4
+Manual Verification
+2
+Config Change
+2
+Revert Change
+2
+Run And Fix Tests
+1
+Update Documentation
+1
+TOP TOOLS USED
+Bash
+61
+Edit
+42
+Read
+27
+Write
+8
+Grep
+3
+BashOutput
+2
+LANGUAGES
+TypeScript
+57
+Markdown
+2
+JSON
+1
+SESSION TYPES
+Iterative Refinement
+4
+Multi Task
+3
+Single Task
+2
+How You Use Claude Code
+
+You work in short, tightly scoped requests: bump a retry default, add an index, add a liveness endpoint, shrink a page limit. Nine sessions produced only 29 messages in about an hour, so you rarely write detailed upfront specs. You state the goal and expect Claude to already know the project's conventions. That is where most of the friction comes from. You don't spend messages explaining how the codebase works. You step in when Claude drifts from the house rules, and your corrections are terse and pointed ('srsly', 'same as last time'). Every session ended fully achieved, but nine sessions were tagged dissatisfied and one frustrated. The work got done, but it often took more correction than you think it should have.
+
+Your sharpest reactions come from repeated mistakes, not new ones. The same few lessons came up again and again:
+• Startup: `make up` brings services up, not ad-hoc Redis commands.
+• Logging: use the structured project logger (`req.log.warn`, the shared logger), never `console.*`. Console output gets silently dropped by the log shipper.
+• Migrations: create a new migration rather than editing one that's already deployed.
+
+You also guard the edges of the change carefully. You had Claude revert an unrequested `postWebhook` → `sendDelivery` rename because it would conflict with a teammate's open PR. You also had it back out a ~9-file prettier pass and an unrelated `recordFailure` refactor. You stopped Claude from running the worker unprompted and killed a `-f` command that would never exit. You want minimal diffs that touch only what you asked for.
+
+You are also skeptical of claims of success and push for real verification. In the readiness endpoint session, Claude declared victory after mocked unit tests. You asked it to test against real services, which exposed `/readyz` hanging forever when Redis was down. That led to per-check timeouts, verified on both the failure and happy paths. In another session you caught that a 'passing' signer test run had matched zero files. When Claude fully owns a problem, as when it diagnosed a failing requeue test as services not running and also flagged an unrelated failing test, you rate it very helpful. You value grounded, end-to-end verification and an accurate understanding of the environment over speed.
+
+Key pattern: You give terse, narrowly scoped tasks and expect Claude to already follow project conventions (make up, structured logger, new migrations, no drive-by refactors), stepping in sharply when it repeats mistakes or claims success without real verification.
+USER RESPONSE TIME DISTRIBUTION
+2-10s
+1
+10-30s
+4
+30s-1m
+6
+1-2m
+5
+2-5m
+3
+5-15m
+1
+>15m
+0
+Median: 52.0s • Average: 82.0s
+MULTI-CLAUDING (PARALLEL SESSIONS)
+
+No parallel session usage detected. You typically work with one Claude Code session at a time.
+
+USER MESSAGES BY TIME OF DAY
+PT (UTC-8)
+ET (UTC-5)
+London (UTC)
+CET (UTC+1)
+Tokyo (UTC+9)
+Custom offset...
+Morning (6-12)
+8
+Afternoon (12-18)
+18
+Evening (18-24)
+3
+Night (0-6)
+0
+TOOL ERRORS ENCOUNTERED
+Command Failed
+11
+Other
+2
+User Rejected
+1
+Impressive Things You Did
+
+Over 9 sessions in about five weeks, you used Claude Code for focused, well-scoped work on a TypeScript webhook delivery service, and every session reached its goal.
+
+Pushing for real-world verification
+You didn't accept a passing run of mocked unit tests as proof that the liveness/readiness endpoints worked. You insisted on testing against real services. That exposed a /readyz hang caused by Redis queueing PING forever, and it led to per-check timeouts verified on both the failure and happy paths.
+Guarding team and production safety
+You caught changes that would have caused trouble outside your own diff and had them reverted. One was an unrequested postWebhook rename that would have conflicted with a teammate's open PR. Another was an edit to an already-deployed migration, which you had redone as a new one. You also insisted on structured logging (req.log.warn, the shared logger) because your log shipper silently drops console.log in production.
+Small, incremental scoped requests
+You break work into tight, reviewable asks: cursor pagination and then a smaller default limit, a retry default bump and then a revert plus a warning log and a console.* audit, a single env-configurable timeout. This keeps every change easy to review and roll back. It also makes it easy to spot when Claude drifts into unrequested refactors or prettier churn.
+WHAT HELPED MOST (CLAUDE'S CAPABILITIES)
+Correct Code Edits
+4
+Multi-file Changes
+3
+Good Debugging
+2
+OUTCOMES
+Fully Achieved
+9
+Where Things Go Wrong
+
+Your sessions all reached their goals, but you kept correcting the same project conventions over and over, and Claude kept making changes you didn't ask for. Those repeat corrections are why 9 sessions ended with you dissatisfied.
+
+Project conventions forgotten between sessions
+You keep restating the same rules: use `make up` for services, use the structured logger instead of console.*, and never edit deployed migrations. Write these into CLAUDE.md as explicit rules so they load every session instead of living in your corrections.
+Claude used console.warn, then console.log in two more sessions, despite your 'same as last time' and 'srsly' pushback. In production the log shipper would have silently dropped those lines.
+Claude tried to start Redis outside docker compose instead of running `make up`, which you said 'keeps happening'. In another session it edited an already-deployed migration, and you called that out as a repeated mistake.
+Unrequested refactors and formatting churn
+Claude expanded the scope with renames, refactors, and repo-wide formatting you never asked for, so you had to request reverts. A CLAUDE.md line like 'only touch code required for the task; no renames or formatters unless asked' would cut this down.
+Claude renamed postWebhook to sendDelivery unprompted. That would have conflicted with a teammate's open PR and had to be reverted.
+Claude ran prettier across packages and touched about 9 unrelated files. In a separate session it slipped in a recordFailure refactor, and both had to be reverted.
+Claiming success without real verification
+Claude declared work done after mocked tests or a test filter that matched nothing, and the real problems only showed up when you pushed. Ask for verification against running services, and have Claude confirm the test count, before accepting 'done'.
+Claude reported the signer tests as passing, but its vitest filter matched zero files. It later had to admit the false report.
+The /readyz endpoint passed mocked unit tests but hung forever against real services with Redis down. You only caught it because you insisted on a real check.
+PRIMARY FRICTION TYPES
+Wrong Approach
+7
+Excessive Changes
+3
+Buggy Code
+1
+Unverified Claim Of Success
+1
+User Rejected Action
+1
+INFERRED SATISFACTION (MODEL-ESTIMATED)
+Frustrated
+1
+Dissatisfied
+9
+Likely Satisfied
+5
+Satisfied
+3
+Existing CC Features to Try
+Suggested CLAUDE.md Additions
+
+Just copy this into Claude Code to add it to your CLAUDE.md.
+
+Copy All Checked
+## Local services
+Before running integration tests or anything that touches Postgres or Redis, run `make up` and then `make db-migrate`. Never start Redis or Postgres directly with `docker run`, `redis-server`, or brew services. Always use the project's docker compose setup through `make up`. Never run commands that don't exit (e.g. `docker compose logs -f`, `tail -f`). If services might already be running, check with `docker compose ps`.
+Copy
+In at least 3 sessions Claude tried to bring up services the wrong way or needed reminding. The user said this 'keeps happening', and a `-f` command hung the session.
+## Logging
+NEVER use `console.log`, `console.warn`, or `console.error` in application code. Inside request handlers, use `req.log.<level>()`. Elsewhere (workers, startup, background jobs), use the shared structured logger. Logs must be structured JSON, because the log shipper silently drops non-JSON output in production.
+Copy
+In 3 separate sessions Claude used `console.*` instead of the project logger. The user flagged it as 'same as last time' and 'srsly'.
+## Scope discipline
+Only change what was asked. Do NOT:
+- rename functions, variables, or files that the task doesn't require (teammates have open PRs that will conflict)
+- refactor nearby code you weren't asked to touch
+- run prettier or any formatter across packages; format only the lines you changed
+- run the worker, dev server, or other long-running processes unless asked
+If you think a refactor or rename would help, mention it at the end instead of doing it.
+Copy
+The user had to ask for reverts of unrequested changes in 3 sessions: the `postWebhook` → `sendDelivery` rename, the `recordFailure` refactor, and prettier churn across about 9 files. Claude also started the worker unprompted.
+## Database migrations
+Never edit an existing migration under `prisma/migrations/`. Those migrations are already deployed. Always create a new migration with `npx prisma migrate dev --name <descriptive_name>`. After any schema change, and before building in a fresh checkout, run `npx prisma generate`. The client is gitignored and is often stale or missing.
+Copy
+Claude edited a deployed migration, which the user called a repeated mistake. Two other sessions hit a stale or missing Prisma client before the build could run.
+## Verification
+Don't report work as done based only on mocked unit tests when the change touches Redis, Postgres, HTTP endpoints, or timeouts. Run it against real services (`make up` first) and check both the happy path and the failure path, e.g. stop Redis and confirm `/readyz` returns 503 rather than hanging. When running a filtered vitest command, confirm the output shows a non-zero number of test files. 'No test files found' is NOT a pass.
+Copy
+Claude falsely reported the signer tests as passing when the vitest filter matched no files. It also declared /readyz done from mocked tests, but the endpoint hung when Redis was actually down.
+
+Just copy this into Claude Code and it'll set it up for you.
+
+Hooks
+Shell commands that run automatically before or after Claude uses a tool, and can block the action or send feedback back to Claude.
+Why for you: Your two most repeated corrections were `console.*` instead of the structured logger and editing an already-deployed migration. Both are mechanical rules a hook can enforce on every edit, so you don't have to catch them yourself.
+// .claude/settings.json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [{ "type": "command", "command": ".claude/hooks/protect-migrations.sh" }]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [{ "type": "command", "command": ".claude/hooks/no-console.sh" }]
+      }
+    ]
+  }
+}
+
+# .claude/hooks/protect-migrations.sh
+#!/usr/bin/env bash
+f=$(jq -r '.tool_input.file_path // empty')
+if [[ "$f" == */prisma/migrations/* && -f "$f" ]]; then
+  echo "Blocked: $f is an existing (deployed) migration. Create a new one with 'npx prisma migrate dev --name ...'." >&2
+  exit 2
+fi
+exit 0
+
+# .claude/hooks/no-console.sh
+#!/usr/bin/env bash
+f=$(jq -r '.tool_input.file_path // empty')
+[[ "$f" == *.ts && "$f" != *.test.ts ]] || exit 0
+if hits=$(grep -n 'console\.' "$f"); then
+  echo "console.* found in $f. Use req.log or the shared structured logger:" >&2
+  echo "$hits" >&2
+  exit 2
+fi
+exit 0
+
+# then: chmod +x .claude/hooks/*.sh
+Copy
+Custom Skills
+Reusable markdown prompts you run with a slash command, such as /verify.
+Why for you: Several sessions followed the same verification routine: bring services up, migrate, regenerate Prisma, run real tests, check that files actually matched, and test the failure path. Putting it in one /verify command avoids false 'tests pass' claims and the need to restate 'make up first'.
+# .claude/skills/verify/SKILL.md
+---
+name: verify
+description: Verify changes against real services before reporting done
+---
+1. Run `docker compose ps`. If Postgres/Redis aren't up, run `make up` (never start them any other way, never use -f flags).
+2. Run `make db-migrate`, then `npx prisma generate`.
+3. Run the relevant unit AND integration tests. Confirm the output reports >0 test files; 'No test files found' is a failure.
+4. If the change touches Redis/Postgres/HTTP/timeouts, also test the failure path (e.g. `docker compose stop redis`, hit the endpoint, confirm it fails fast), then restore with `make up`.
+5. Run `git diff --stat` and list any changed file that wasn't required by the task, and grep the diff for `console.`.
+6. Report what was actually run and the real results.
+Copy
+Headless Mode
+Run Claude non-interactively from scripts or CI.
+Why for you: You often had to catch scope creep (renames, prettier churn, refactors) and `console.*` calls after the fact. A read-only headless review of the diff before you commit catches these without opening an interactive session.
+claude -p "Review 'git diff main'. Flag: (1) any renamed functions/exports, (2) formatting-only changes, (3) refactors unrelated to the main change, (4) console.* usage instead of req.log/shared logger, (5) edits to existing files under prisma/migrations. Output a short list; don't change anything." --allowedTools "Bash(git diff:*),Read,Grep"
+Copy
+New Ways to Use Claude Code
+
+Just copy this into Claude Code and it'll walk you through it.
+
+Every session succeeded, but most needed corrections
+All 9 sessions achieved their goal, yet friction showed up in nearly all of them. Most of it was repeat mistakes that could be prevented with standing rules.
+Your friction falls into four buckets: service startup (`make up`), logging (`console.*`), scope creep (renames/refactors/prettier), and verification (mocked-only tests, an empty vitest filter). None of these is task-specific. Claude didn't know your project conventions and had to be told again in each session. Moving them into CLAUDE.md, plus hooks for the two mechanical rules, should cut most of the back-and-forth.
+PASTE INTO CLAUDE CODE:
+Read CLAUDE.md, then tell me in 5 bullets the project rules you'll follow for this task (services, logging, migrations, scope, verification) before you start.
+Copy
+Ask for real-service verification up front
+Make 'verified against real Postgres/Redis, including the failure path' part of the request, not a follow-up.
+The /readyz hang only came to light because you pushed for a real check. The mocked tests passed while the endpoint would have hung in production when Redis was down. Similarly, the signer tests 'passed' only because the filter matched nothing. For anything touching endpoints, timeouts, or the DB, requiring proof of a real run in the original prompt closes this gap.
+PASTE INTO CLAUDE CODE:
+Implement this, then prove it works against real services: run `make up`, run the integration tests (show me the test file count), and test the failure path by stopping Redis. Don't tell me it's done until you've shown me the actual output.
+Copy
+Make your teammates' PRs a constraint
+Tell Claude to keep the diff minimal and to propose cleanups rather than make them.
+The `postWebhook` rename would have conflicted with a teammate's open PR. The prettier run touched about 9 unrelated files. Both were well-meant, but they cost you a revert each. Asking for a scoped diff and a `git diff --stat` check at the end makes Claude justify every changed file before handing off.
+PASTE INTO CLAUDE CODE:
+Keep the diff minimal: no renames, no formatting outside lines you change, no refactors I didn't ask for. When finished, show `git diff --stat` and justify each file. Put any cleanup ideas in a 'suggestions' list instead of doing them.
+Copy
+On the Horizon
+
+Your sessions show a working TypeScript webhook-delivery service where Claude already finishes every task, so the next step is having Claude enforce your project's conventions and verify its own work against real services before you need to correct it.
+
+Self-Verifying Agent Against Real Services
+Claude could treat every feature as unfinished until it has run `make up`, applied migrations with `make db-migrate`, and exercised both the happy path and the failure path against real Postgres and Redis. It would keep iterating until real integration tests pass, prove that each test filter matched at least one file, and report the exact commands and test counts as evidence. The /readyz Redis hang and the signer tests that matched no files are the kind of bug this loop would catch before you see the work.
+Getting started: Add a 'Definition of Done' section to CLAUDE.md, and add a Stop hook that blocks completion unless integration tests ran with a non-zero file count. Use background Bash with BashOutput for long-running services, and never use `-f` follow flags.
+PASTE INTO CLAUDE CODE:
+Before you tell me anything is done, follow this verification loop and don't stop until it passes:
+1. Run `make up` to start Postgres and Redis. Never start services outside docker compose, and never run commands with `-f` or other flags that don't exit. First check whether services are already running with `docker compose ps`.
+2. Run `make db-migrate`. Regenerate the Prisma client if it is missing or stale.
+3. Run the relevant unit tests AND integration tests. Confirm that the vitest output shows a non-zero number of test files matched. If the filter matched 0 files, treat that as a failure.
+4. For any feature involving external dependencies, test the failure path for real: stop Redis or Postgres with `docker compose stop <svc>`, check the behavior (timeouts, 503s, error logs), then restart the service and check the happy path.
+5. If anything fails, fix it and repeat from step 3.
+Your final report must include the exact commands you ran, the pass/fail counts, the number of files matched, and the observed behavior in both failure and happy paths. Mocked unit tests alone never count as done.
+
+Task: <describe feature here>
+Copy
+Convention Guardrails Enforced by Hooks
+Your repeat corrections (console.* instead of req.log or the shared logger, editing deployed migrations, unrequested renames, prettier churn) can become automated guardrails that run on every edit. A PostToolUse hook could reject any Edit that adds console.*, any change to a migration that already exists on main, or any diff touching files outside the task's scope. Claude would then fix these on its own before you ever see them.
+Getting started: Ask Claude to write a hooks config in .claude/settings.json with PreToolUse/PostToolUse scripts, and put the rules in CLAUDE.md so they persist across sessions.
+PASTE INTO CLAUDE CODE:
+Build guardrails for this repo so I stop repeating the same corrections. Do the following:
+1. Add a 'Hard Rules' section to CLAUDE.md:
+   - Never use console.*. Use req.log in request handlers and the shared structured logger elsewhere. The log shipper silently drops non-JSON output.
+   - Never edit an existing migration under prisma/migrations. Always create a new one.
+   - Never rename functions or exports unless asked, because teammates have open PRs.
+   - Never run prettier or formatters across packages. Only format files you changed for the task.
+   - Don't start workers or long-running processes unless asked.
+   - Always run `make up` and `make db-migrate` before integration tests.
+2. Write a PostToolUse hook script, plus its registration in .claude/settings.json, that runs after Edit/Write and:
+   - fails if the diff adds `console.` in any .ts file under src/
+   - fails if any file modified under prisma/migrations already exists in `git show main:`
+   - warns if more than N files changed since the session started
+3. Test each hook by triggering a violation on purpose and confirming it blocks with a clear message, then revert the test violation.
+4. Finally, run a console.* audit across the repo and list every remaining occurrence with a suggested logger replacement. Don't change them yet.
+Copy
+Parallel Agents for Scoped Feature Delivery
+For multi-file features like pagination, endpoint disabling, or delivery counters, one orchestrating agent could spawn parallel sub-agents: one implements the change, one writes integration tests against real services, and one reviews the diff for scope creep and convention violations. The reviewer would have veto power over unrequested refactors, renames, and formatting churn, so you only receive a minimal, verified diff.
+Getting started: Use the Task tool to dispatch sub-agents with distinct roles, or run headless `claude -p` instances in separate git worktrees. Have a final reviewer pass check `git diff --stat` against the stated scope.
+PASTE INTO CLAUDE CODE:
+Implement the following feature using parallel sub-agents via the Task tool:
+
+Feature: <e.g., add a retry-count histogram to delivery metrics with periodic summary log>
+
+Agent A (implementer): Make the minimal code change needed. Touch only files directly required. Use the shared structured logger, never console.*. If a schema change is needed, create a NEW Prisma migration.
+Agent B (test writer): In parallel, write integration tests for the feature that run against real Postgres and Redis after `make up` and `make db-migrate`, including a failure-path test.
+Agent C (scope reviewer): After A and B finish, review `git diff` and reject any of the following: unrelated refactors, function renames, formatting-only changes, console.* usage, edits to existing migrations. List each violation and have A revert it.
+
+Then run the full test suite. Confirm the integration tests matched a non-zero file count and passed. Report the final `git diff --stat` with a one-line justification for every changed file. Do not commit, and do not start the worker.
+Copy
+""srsly": the user's whole reaction when Claude reached for console.warn yet again instead of the project's structured logger, a habit that by then had earned a 'same as last time'"
+While adding a warning for maxRetries > 5 in the TypeScript webhook delivery service, Claude used console.warn instead of req.log.warn. This was a running theme across several sessions in Oct–Nov 2026. Claude kept slipping console.log calls into a codebase whose log shipper would silently drop them in production, and the user eventually stopped explaining and just typed 'srsly'.

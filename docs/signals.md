@@ -492,7 +492,9 @@ corrections, put words in a human's mouth, or trigger "write down the rule".
 
 **Never quoted.** The human's words are not kept for a guess: the event has a
 summary (which cues matched) and a transcript line to open, but its `excerpt`
-is always `null`, with or without `--no-excerpts`.
+is always `null`, with or without `--no-excerpts`. (With excerpts on, the scan JSON
+also lists every human message as it was typed, under `conversation`, judged by
+nobody: the material for a diagnosis. That list never calls anything a correction.)
 
 ## `retry-loop` — Retry loop
 
