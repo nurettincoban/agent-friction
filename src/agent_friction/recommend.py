@@ -32,22 +32,10 @@ MIN_EVENTS = 2
 #: interruptions of `ls` over hundreds of runs is not a reason to change AGENTS.md.
 THIN_EVIDENCE_EVENTS = 5
 #: Sessions in which the same advice's events recur for it not to be "thin", however few
-#: the events: three separate sessions tripping on one thing is a pattern.
+#: the events: three separate sessions tripping on one thing is a pattern. Only for advice
+#: resting on what a tool reported (``signals.OUTPUT_SIGNALS``: a failure, a missed edit),
+#: not on a human stopping or declining something, where three can still be chance.
 RECURRING_SESSIONS = 3
-#: ... for advice resting on what a tool reported (a failure, a missed edit), not on a
-#: human stopping or declining something, where three can still be chance.
-RECURRING_SIGNALS = frozenset(
-    {
-        signals.COMMAND_FAILURE,
-        signals.RETRY_LOOP,
-        signals.NO_CONVERGENCE,
-        signals.TOOL_FAILURE,
-        signals.EDIT_MISS,
-        signals.PATH_MISS,
-        signals.FILE_TOO_LARGE,
-        signals.STALE_EDIT,
-    }
-)
 #: Rules resting on the same job seen to pass another way, with nothing changed: from two
 #: sessions on they are not thin.
 SEEN_WORKING_RULES = frozenset({"use-the-working-command"})
@@ -593,10 +581,12 @@ class _Rules:
         if events is None:
             events = len({f.fid for signal in based_on for f in self.get(signal)})
         sessions = len({f.unit for signal in based_on for f in self.get(signal)})
+        # separate sessions, not episodes of one long session picked up again
+        session_ids = len({f.session_id for signal in based_on for f in self.get(signal)})
         thin = (
             events < THIN_EVIDENCE_EVENTS
             # the same failure in three separate sessions is a pattern, not an afternoon
-            and not (sessions >= RECURRING_SESSIONS and set(based_on) <= RECURRING_SIGNALS)
+            and not (session_ids >= RECURRING_SESSIONS and set(based_on) <= signals.OUTPUT_SIGNALS)
             and not stated
             and rule_id not in FACT_BACKED_RULES
             # the job done another way, with nothing changed, in two sessions: a fact of

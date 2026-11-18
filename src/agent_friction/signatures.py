@@ -23,7 +23,7 @@ from agent_friction.model import Finding
 MAX_SIGNATURES = 3
 #: Other spellings of a signature kept.
 MAX_VARIANTS = 2
-#: Characters of a signature line kept.
+#: Characters of a signature line shown (after redaction).
 SIGNATURE_CHARS = 200
 #: Lines of one event's output that are looked at, at most (head and tail).
 MAX_LINES = 400
@@ -61,7 +61,14 @@ _TEST_NAME_RE = re.compile(r"^\s*(?:--- FAIL:|FAIL:|FAILED\b|[✗✘×] )", re.I
 _HEX_RE = re.compile(r"\b0x[0-9a-f]+\b|\b[0-9a-f]{7,}\b", re.I)
 _DURATION_RE = re.compile(r"\b\d+(?:\.\d+)?\s?(?:ms|s|m|h|sec|secs|seconds|minutes)\b")
 _NUMBER_RE = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?![\w.])")
-_TMP_RE = re.compile(r"/(?:tmp|var/folders|private/var)/\S+")
+_TMP_RE = re.compile(
+    r"/(?:tmp|var/folders|private/var)/\S+|[A-Za-z]:\\\S*?\\(?:Temp|tmp)\\\S+", re.I
+)
+#: A date or a clock time, as log lines start with: different in every run.
+_CLOCK_RE = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?"
+    r"|\b\d{1,2}:\d{2}:\d{2}(?:[.,]\d+)?\b"
+)
 _WS_RE = re.compile(r"\s+")
 #: The parts of a line kept as they are: a port, a line:col reference, an exit status are
 #: part of what went wrong and the same every time.
@@ -90,7 +97,8 @@ def _fold(line: str) -> str:
         kept.append(match.group(0))
         return chr(_MARK + len(kept) - 1)
 
-    text = _KEEP_RE.sub(keep, line)
+    text = _CLOCK_RE.sub("<clock>", line)
+    text = _KEEP_RE.sub(keep, text)
     text = _TMP_RE.sub("/tmp/…", text)
     text = _HEX_RE.sub("#", text)
     text = _DURATION_RE.sub("<t>", text)
@@ -127,27 +135,29 @@ def signatures(findings: Sequence[Finding], limit: int = MAX_SIGNATURES) -> list
     same (``events`` 1), so a single failure still shows its cause.
     """
     first: dict[str, str] = {}
-    events: dict[str, set[int]] = {}
+    events: dict[str, set[tuple[str, int]]] = {}
     sessions: dict[str, set[str]] = {}
     order: dict[str, int] = {}
     spellings: dict[str, list[str]] = {}
-    with_output = 0
+    with_output: set[tuple[str, int]] = set()
     for finding in findings:
         lines = error_lines(finding.excerpt)
         if lines:
-            with_output += 1
+            with_output.add((finding.source, finding.line))
         for line in lines:
             key = _fold(line)
             first.setdefault(key, line)
             if line != first[key] and line not in spellings.setdefault(key, []):
                 spellings[key].append(line)
             order.setdefault(key, len(order))
-            events.setdefault(key, set()).add(finding.fid)
-            sessions.setdefault(key, set()).add(finding.unit)
+            # one tool result can be behind two findings (a failure and the retry loop it
+            # is part of): an event is a transcript line, counted once
+            events.setdefault(key, set()).add((finding.source, finding.line))
+            sessions.setdefault(key, set()).add(finding.session_id)
     if not first:
         return []
     keys = list(first)
-    if with_output > 1:
+    if len(with_output) > 1:
         keys = [k for k in keys if len(events[k]) > 1]
     keys.sort(
         key=lambda k: (
@@ -159,11 +169,10 @@ def signatures(findings: Sequence[Finding], limit: int = MAX_SIGNATURES) -> list
         )
     )
     return [
+        # whole lines: whoever shows them redacts first and then shortens, so that a
+        # secret is never cut in half and slips past the patterns
         Signature(
-            first[k][:SIGNATURE_CHARS],
-            len(events[k]),
-            len(sessions[k]),
-            tuple(v[:SIGNATURE_CHARS] for v in spellings.get(k, [])[:MAX_VARIANTS]),
+            first[k], len(events[k]), len(sessions[k]), tuple(spellings.get(k, [])[:MAX_VARIANTS])
         )
         for k in keys[:limit]
     ]

@@ -85,7 +85,7 @@ written blind by independent authors, graded blind against keys committed before
 | Problems found, two held-out sets (of 16 each, 3 runs) | 11 to 13 | 13 to 16 (`/agent-friction:scan`) |
 | Fixes that work as given (of 8 each) | 5 to 6 | 7 to 8 |
 | Wrong statements per report | 2 to 4 | 1 to 5, about the same |
-| Cause found in | What the session says | The error output and the repository's own files, with the line |
+| Cause found in | What the session says | The error output and the repository's own files |
 | Same input, same output | No | The scan, yes, so `compare` can measure before and after |
 
 The scan alone, without the diagnosis, found 5 and 6 of 16: it is the evidence and the

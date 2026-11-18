@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import dataclasses
+import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agent_friction import model, recommend, signals
+import pytest
+
+from agent_friction import conversation, model, recommend, redact, signals
 from agent_friction.engine import AnalyzeOptions, analyze
 from agent_friction.model import Finding, Target
-from agent_friction.report import render_investigate, render_terminal
+from agent_friction.report import render_html, render_investigate, render_terminal
 from agent_friction.report._common import tool_said
-from agent_friction.signatures import error_lines, signatures
+from agent_friction.signatures import SIGNATURE_CHARS, error_lines, signatures
 from tests.builders import Session, detect
 
 NOW = datetime(2026, 11, 20, tzinfo=timezone.utc)
@@ -198,3 +203,97 @@ def test_three_sessions_of_one_failure_are_not_thin_but_three_interruptions_are(
         f.detail.update(variant="environment", environment="service", service="PostgreSQL")
     recs = recommend.recommend(model.COMMAND, "go test", failures)
     assert recs and not any(recommend.is_thin(r) for r in recs)
+
+
+# ---- what the critic found ---------------------------------------------------------------
+
+
+def test_a_subagent_s_prompts_are_not_human_turns(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    main = Session("sc", cwd=str(repo)).user("look into it").edit(f"{repo}/src/a.py")
+    side = Session("sc", cwd=str(repo), sidechain=True).user("search the code for X")
+    side.grep("X", found=True).user("now also look at Y")
+    out = _scan(tmp_path, [main, side])
+    assert [s["opening"] for s in out["conversation"]] == ["look into it"]
+    assert "now also look at Y" not in json.dumps(out["conversation"])
+
+
+def test_when_turns_are_cut_the_latest_stay_and_the_count_is_said(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(conversation, "MAX_TURNS", 2)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    s = Session("cut", cwd=str(repo)).user("start")
+    for i in range(4):
+        s.edit(f"{repo}/src/a.py").user(f"turn {i}")
+    out = _scan(tmp_path, [s])
+    (session,) = out["conversation"]
+    assert [t["text"] for t in session["turns"]] == ["turn 2", "turn 3"]
+    assert session["cut"] == 2
+    text = render_investigate(out)
+    assert "2 earlier turns in this session left out" in text
+    assert "| 4 | start |" in text  # the table counts every turn, kept or not
+
+
+def test_an_older_scan_is_not_mistaken_for_one_without_excerpts(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out = _scan(tmp_path, [_with_turns(repo)])
+    older = {k: v for k, v in out.items() if k != "conversation"}
+    text = render_investigate(older)
+    assert "older agent-friction" in text and "--no-excerpts" not in text
+    assert "typed only the opening request" not in text
+    assert "nothing is known about it" in text
+
+
+def test_the_html_map_does_not_carry_what_the_humans_said(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out = _scan(tmp_path, [_with_turns(repo)])
+    assert "one thing though" not in render_html(out)
+
+
+@pytest.mark.parametrize(
+    "command", ["pytest tests/e2e.py", "npx jest api", "npx vitest run", "go test ./server/"]
+)
+def test_a_test_run_that_logs_listening_is_not_a_server(tmp_path: Path, command: str) -> None:
+    out = "Command timed out after 2m 0.0s\nlistening on :8000"
+    s = Session().user("run it")
+    s.tool("Bash", {"command": command}, out, is_error=True)
+    (failure,) = detect(s, tmp_path)
+    assert "server" not in failure.detail
+
+
+def test_a_secret_across_the_display_cut_is_still_redacted() -> None:
+    token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    line = "error: auth failed " + "x" * 170 + " token " + token
+    found = [_failure(i, f"s{i}", line) for i in range(2)]
+    (said,) = signatures(found)
+    shown = redact.one_line(said.text, SIGNATURE_CHARS)
+    assert "ghp_A1b2" not in shown and len(shown) <= SIGNATURE_CHARS
+
+
+def test_log_lines_fold_over_their_timestamps() -> None:
+    found = [
+        _failure(1, "a", "2026-11-02T09:00:12Z ERROR db: connection refused"),
+        _failure(2, "b", "2026-11-05T14:31:45Z ERROR db: connection refused"),
+    ]
+    (said,) = signatures(found)
+    assert said.events == 2
+
+
+def test_one_tool_result_behind_two_findings_is_one_event() -> None:
+    a = _failure(1, "a", "error: boom happened")
+    b = dataclasses.replace(a, signal=signals.RETRY_LOOP, fid=2)
+    assert signatures([a, b])[0].events == 1
+
+
+def test_the_html_map_knows_the_same_output_signals() -> None:
+    template = (
+        Path(__file__).parent.parent / "src" / "agent_friction" / "report" / "template.html"
+    ).read_text(encoding="utf-8")
+    start = template.index("var OUTPUT_SIGNALS = [")
+    listed = template[start : template.index("];", start)]
+    assert sorted(re.findall(r'"([a-z-]+)"', listed)) == sorted(signals.OUTPUT_SIGNALS)

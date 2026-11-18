@@ -20,14 +20,14 @@ from agent_friction import model
 from agent_friction.model import Event, Stream
 
 #: Characters kept of a human message, and of a session's opening request.
-TURN_CHARS = 500
+TURN_CHARS = 400
 OPENING_CHARS = 280
 #: Agent actions shown before each human turn, at most (the most recent ones).
 ACTIONS_BEFORE = 3
 #: Characters of a command or path in an action line.
 ACTION_CHARS = 120
 #: Turns listed for the whole scan, at most (newest sessions win when cut).
-MAX_TURNS = 300
+MAX_TURNS = 200
 
 
 def _iso(ts: datetime | None) -> str | None:
@@ -135,8 +135,10 @@ def session_turns(
     kept: list[dict[str, Any]] = []
     for session in reversed(sessions):  # newest first when the budget runs out
         if total + len(session["turns"]) > MAX_TURNS:
-            session = {**session, "turns": session["turns"][: max(0, MAX_TURNS - total)]}
-            session["cut"] = True
+            had = len(session["turns"])
+            room = max(0, MAX_TURNS - total)
+            session = {**session, "turns": session["turns"][had - room :] if room else []}
+            session["cut"] = had - len(session["turns"])  # turns left out
         total += len(session["turns"])
         kept.append(session)
     return list(reversed(kept))

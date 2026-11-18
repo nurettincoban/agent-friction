@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent_friction.report._common import all_items, dropped_note, plural
+from agent_friction.report._common import all_items, code_span, dropped_note, plural
 
 #: Hotspots listed, at most (strongest first).
 MAX_HOTSPOTS = 40
@@ -44,19 +44,19 @@ def _fence(text: str) -> str:
 
 
 def _inline(text: str) -> str:
-    tick = "``" if "`" in text else "`"
-    pad = " " if tick == "``" else ""
-    return f"{tick}{pad}{text}{pad}{tick}"
+    return code_span(text)
 
 
 def _labels(result: dict[str, Any]) -> dict[str, str]:
-    """Session id -> S01…, by start time; sessions seen only in evidence come after."""
+    """Session id -> S01…, by start time. Sessions known only from evidence (no human
+    words, as in a subagent's or a git-only event) come after, by id."""
     ordered = [str(s.get("session_id")) for s in result.get("conversation") or []]
-    for item in all_items(result):
-        for s in (item.get("score_detail") or {}).get("sessions") or []:
-            sid = str(s.get("session_id"))
-            if sid not in ordered:
-                ordered.append(sid)
+    extra = {
+        str(s.get("session_id"))
+        for item in all_items(result)
+        for s in (item.get("score_detail") or {}).get("sessions") or []
+    }
+    ordered += sorted(extra - set(ordered))
     width = max(2, len(str(len(ordered))))
     return {sid: f"S{i:0{width}d}" for i, sid in enumerate(ordered, 1)}
 
@@ -83,7 +83,7 @@ def _session_table(result: dict[str, Any], labels: dict[str, str]) -> list[str]:
     for s in sessions:
         opening = str(s.get("opening") or "").replace("|", "\\|") or "_(none)_"
         started = str(s.get("started") or "")[:16].replace("T", " ")
-        turns = len(s.get("turns") or [])
+        turns = len(s.get("turns") or []) + int(s.get("cut") or 0)
         out.append(
             f"| {labels.get(str(s.get('session_id')), '?')} | {started} | "
             f"{str(s.get('session_id'))[:8]} | {s.get('tool_calls', 0)} | {turns} | {opening} |"
@@ -93,8 +93,10 @@ def _session_table(result: dict[str, Any], labels: dict[str, str]) -> list[str]:
 
 
 def _turns(result: dict[str, Any], labels: dict[str, str]) -> list[str]:
-    sessions = [s for s in result.get("conversation") or [] if s.get("turns")]
     out = ["## What the humans said after the agent started working", ""]
+    if "conversation" not in result:
+        return [*out, "_Not in this scan (see above): nothing is known about it._", ""]
+    sessions = [s for s in result["conversation"] or [] if s.get("turns") or s.get("cut")]
     if not sessions:
         out += ["Nothing: in every session the human typed only the opening request.", ""]
         return out
@@ -126,7 +128,8 @@ def _turns(result: dict[str, Any], labels: dict[str, str]) -> list[str]:
             if text:
                 out.append(f"  > {text}")
         if s.get("cut"):
-            out.append("- _(more turns in this session were left out to keep this short)_")
+            left = plural(int(s["cut"]), "earlier turn")
+            out.append(f"- _({left} in this session left out to keep this file short)_")
         out.append("")
     return out
 
@@ -207,10 +210,16 @@ def render_investigate(result: dict[str, Any]) -> str:
         "",
         _HEAD,
     ]
-    if (result.get("settings") or {}).get("excerpts") is False or "conversation" not in result:
+    if (result.get("settings") or {}).get("excerpts") is False:
         out += [
             "_This scan was made without transcript text (`--no-excerpts`): the humans' words "
             "and the error lines are missing, so a diagnosis can only go by counts._",
+            "",
+        ]
+    elif "conversation" not in result:
+        out += [
+            "_This scan was saved by an older agent-friction, which did not keep the humans' "
+            "words or the error lines: scan again for a full picture._",
             "",
         ]
     out += _session_table(result, labels)

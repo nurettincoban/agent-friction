@@ -294,6 +294,9 @@ Transcripts contain your code and sometimes your secrets, so:
 - Excerpts are redacted (API keys and tokens, `Authorization` headers, private keys, common
   password forms, credentials in URLs and `curl -u`, emails, high-entropy strings, your home
   directory) and truncated. Thinking blocks and assistant prose are never included.
+- With excerpts on (the default), the JSON scan and `-f investigate` also list every message a
+  human typed in these sessions, redacted, so that a diagnosis can read them; the HTML map does
+  not carry that list.
 - `--no-excerpts` removes all transcript text: prompts, quoted corrections, search patterns,
   command lines, and output. What remains is paths, counts, timestamps, and normalized command
   names built only from publicly known words (`git commit`, `npm test`, `python -m pytest`).

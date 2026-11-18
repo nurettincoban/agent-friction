@@ -34,9 +34,8 @@ earlier scan, say so in one line. Either way, go on.
 
 ## 3. Scan and diagnose
 
-If `.agent-friction/diagnosis.md` is newer than the newest `.agent-friction/scan-*.json` and
-was written today, use it and skip to step 4. Otherwise, from the repository root, as one
-command (`$ARGUMENTS` are the user's extra scan options, if any):
+From the repository root, as one command (`$ARGUMENTS` are the user's extra scan options, if
+any):
 
 ```sh
 mkdir -p .agent-friction && scan=.agent-friction/scan-$(date -u +%Y-%m-%d-%H%M%S).json && sh "${CLAUDE_PLUGIN_ROOT}/plugin/agent-friction" scan $ARGUMENTS -f json -o "$scan" && sh "${CLAUDE_PLUGIN_ROOT}/plugin/agent-friction" scan --from "$scan" -f investigate -o .agent-friction/evidence.md && sh "${CLAUDE_PLUGIN_ROOT}/plugin/agent-friction" scan --from "$scan" -f prompt
@@ -45,9 +44,11 @@ mkdir -p .agent-friction && scan=.agent-friction/scan-$(date -u +%Y-%m-%d-%H%M%S
 If the scan fails because no session touched the repository, show the user its message (it
 names `--repo-alias` and `--since` when they would help) and stop.
 
-Then print the diagnosis instructions with `cat "${CLAUDE_PLUGIN_ROOT}/plugin/diagnose.md"` and follow them, to write
-`.agent-friction/diagnosis.md`. (With `--no-excerpts` there is no transcript text: work
-from the `-f prompt` output alone.)
+If `.agent-friction/diagnosis.md` was written today by `/agent-friction:scan`, use it.
+Otherwise, unless the user passed `--no-excerpts`, print the diagnosis instructions with
+`cat "${CLAUDE_PLUGIN_ROOT}/plugin/diagnose.md"` and follow them, to write
+`.agent-friction/diagnosis.md`. With `--no-excerpts` there is no transcript text to diagnose
+from: skip the diagnosis and work from the `-f prompt` output alone.
 
 ## 4. Propose, then apply what the user approves
 

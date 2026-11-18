@@ -356,20 +356,6 @@ INTERRUPTED_COMMAND_MIN_SESSIONS = 3
 INTERRUPTED_COMMAND_SHARE = 0.3
 #: Below this score a hotspot seen in a single session is a lead: it gets no advice.
 SINGLE_SESSION_ADVICE_MIN_SCORE = 20.0
-#: Signals whose excerpt is the output of a tool, from which error signatures are taken
-#: (a human's words are quoted as such, never mined for error lines).
-SIGNATURE_SIGNALS = frozenset(
-    {
-        signals.COMMAND_FAILURE,
-        signals.RETRY_LOOP,
-        signals.NO_CONVERGENCE,
-        signals.TOOL_FAILURE,
-        signals.EDIT_MISS,
-        signals.PATH_MISS,
-        signals.FILE_TOO_LARGE,
-        signals.STALE_EDIT,
-    }
-)
 #: ... except what rests on a human's own words (a correction, a stated reason).
 HUMAN_STATED_RULES = frozenset({"write-down-the-rule", "state-the-boundary"})
 #: Evidence items listed for events that belong to no hotspot (``unattributed``).
@@ -2070,7 +2056,7 @@ class _Analysis:
         )
         entry["evidence"] = [self._evidence(f) for f in _pick_evidence(found, options.max_evidence)]
         if options.include_excerpts:
-            said = signatures.signatures([f for f in found if f.signal in SIGNATURE_SIGNALS])
+            said = signatures.signatures([f for f in found if f.signal in signals.OUTPUT_SIGNALS])
             if said:
                 entry["signatures"] = [
                     {

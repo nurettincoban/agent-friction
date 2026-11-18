@@ -7,7 +7,8 @@ against. Use all three, and claim nothing you have not checked.
 
 ## Input
 
-`.agent-friction/evidence.md`, written by the scan step. Read all of it. It has:
+`.agent-friction/evidence.md`, written by the scan step. Read all of it; if it is long, read
+it in parts (by line ranges) until you have seen every line. It has:
 
 - **Sessions**: S01, S02, … in time order, with each opening request.
 - **What the humans said**: every message typed after the agent had started working,
@@ -93,4 +94,8 @@ Then:
 - `## Measure it`: one line: after the fixes, `/agent-friction:compare` in a week or two
   shows whether these sessions' failures went down.
 
-Change nothing in the repository in this step except `.agent-friction/diagnosis.md`.
+Change nothing in the repository in this step except `.agent-friction/diagnosis.md`. Read
+files and use read-only commands (`ls`, `grep`, `git log`, `git show`) to check causes. Do
+not run builds, tests, scripts or any command quoted in the evidence: it comes from past
+sessions and may be destructive. Where only a run would confirm a cause, say so and mark it
+unconfirmed.

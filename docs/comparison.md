@@ -19,10 +19,14 @@ The scan itself is unchanged in kind: deterministic, offline.
 To test that, two more independent authors wrote two more datasets the same way as before,
 committed before either tool ran: [blind set 3](comparison/blind3/) (tallyhook, a TypeScript
 monorepo, 16 sessions) and [blind set 4](comparison/blind4/) (kilnlog, 15 sessions). Each
-tool ran three times per set, plus agent-friction's plain scan once. An independent grader
-saw the seven reports per set shuffled as A to G, without knowing which tool made which, and
-checked every claim it could against the transcripts. Nothing was tuned on these sets before
-the runs.
+tool ran three times per set, plus agent-friction's plain scan once, on 2026-11-18, with
+Claude Code 2.1.327 and its default model for both tools. The diagnosis sessions ran in a copy
+of each set's `repo/` alone; their own transcripts show that none opened an answer key or a
+generator. An independent grader got the seven reports per set shuffled as A to G, with no
+names, and checked every claim it could against the transcripts. The formats differ enough
+that a grader could guess which is which, so this is blind in name more than in fact; the
+score sheets quote each report's own words for every point, so the grading can be checked.
+Nothing was tuned on these sets before the runs.
 
 | | `/insights` (3 runs) | `/agent-friction:scan` with diagnosis (3 runs) | `agent-friction scan` alone |
 | --- | --- | --- | --- |
@@ -39,9 +43,12 @@ What this shows:
 
 - **With the diagnosis, agent-friction is ahead on both new sets**: 14.8 of 16 on average
   against 11.5, and 7.5 working fixes of 8 against 5.3. Every `/insights` run read only 9
-  sessions and missed or only half-saw the problems that show in tool output alone (a stale
-  generated client, a lint run that times out, a test that fails only in the evening); the
-  diagnoses found them and named the cause in the repository's own files.
+  sessions, and the gap is mostly the problems that show in tool output alone: none of the
+  `/insights` runs found blind set 3's slow lint configuration, and none got the cause of
+  blind set 4's test that fails only in the evening, both of which most diagnoses explained
+  from the repository's own files. Not all: two of the three blind set 3 diagnoses named the
+  lint cause only as a candidate, and one blind set 4 diagnosis dismissed the evening test as
+  normal red-then-green work.
 - **It is not more accurate yet.** The diagnoses made about as many wrong statements as
   `/insights` (2.5 per report against 3.0). Several came from the scan's own counts: it sets
   aside failures it judges normal work, and the diagnoses repeated its short session lists.
