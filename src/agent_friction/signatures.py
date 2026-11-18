@@ -21,6 +21,8 @@ from agent_friction.model import Finding
 
 #: Signatures kept per hotspot, at most.
 MAX_SIGNATURES = 3
+#: Other spellings of a signature kept.
+MAX_VARIANTS = 2
 #: Characters of a signature line kept.
 SIGNATURE_CHARS = 200
 #: Lines of one event's output that are looked at, at most (head and tail).
@@ -75,6 +77,9 @@ class Signature:
     text: str  # the first occurrence, as printed
     events: int
     sessions: int
+    #: Other spellings of the line among the events (a different duration or count),
+    #: at most ``MAX_VARIANTS``: the first one alone would misstate the others.
+    variants: tuple[str, ...] = ()
 
 
 def _fold(line: str) -> str:
@@ -125,6 +130,7 @@ def signatures(findings: Sequence[Finding], limit: int = MAX_SIGNATURES) -> list
     events: dict[str, set[int]] = {}
     sessions: dict[str, set[str]] = {}
     order: dict[str, int] = {}
+    spellings: dict[str, list[str]] = {}
     with_output = 0
     for finding in findings:
         lines = error_lines(finding.excerpt)
@@ -133,6 +139,8 @@ def signatures(findings: Sequence[Finding], limit: int = MAX_SIGNATURES) -> list
         for line in lines:
             key = _fold(line)
             first.setdefault(key, line)
+            if line != first[key] and line not in spellings.setdefault(key, []):
+                spellings[key].append(line)
             order.setdefault(key, len(order))
             events.setdefault(key, set()).add(finding.fid)
             sessions.setdefault(key, set()).add(finding.unit)
@@ -151,6 +159,11 @@ def signatures(findings: Sequence[Finding], limit: int = MAX_SIGNATURES) -> list
         )
     )
     return [
-        Signature(first[k][:SIGNATURE_CHARS], len(events[k]), len(sessions[k]))
+        Signature(
+            first[k][:SIGNATURE_CHARS],
+            len(events[k]),
+            len(sessions[k]),
+            tuple(v[:SIGNATURE_CHARS] for v in spellings.get(k, [])[:MAX_VARIANTS]),
+        )
         for k in keys[:limit]
     ]

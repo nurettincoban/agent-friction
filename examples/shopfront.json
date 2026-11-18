@@ -741,7 +741,10 @@
         {
           "events": 2,
           "sessions": 2,
-          "text": "Found 4 matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identif"
+          "text": "Found 4 matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identif",
+          "variants": [
+            "Found 3 matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identif"
+          ]
         }
       ],
       "why": "11 friction events in all 4 sessions that touched it (6 edit misses, 2 user corrections, 1 read loop, 2 more signal types); high confidence because it recurs across sessions with several kinds of evidence."

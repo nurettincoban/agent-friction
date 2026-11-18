@@ -70,6 +70,15 @@ def test_durations_and_numbers_are_folded_but_ports_are_kept() -> None:
     ]
     (said,) = signatures(found)
     assert said.events == 2 and said.text == "Command timed out after 2m 0.0s"
+    # ... and the other spelling is kept, so nobody reads "2m both times"
+    assert said.variants == ("Command timed out after 20.0s",)
+    hotspot = {
+        "events": 2,
+        "signatures": [
+            {"text": said.text, "events": 2, "sessions": 2, "variants": list(said.variants)}
+        ],
+    }
+    assert "numbers in it differ" in tool_said(hotspot, {"signals": ["command-failure"]})
     other_port = [
         _failure(1, "a", "dial tcp 127.0.0.1:5432: connect: connection refused"),
         _failure(2, "b", "dial tcp 127.0.0.1:6379: connect: connection refused"),

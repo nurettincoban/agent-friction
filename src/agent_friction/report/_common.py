@@ -130,6 +130,8 @@ def tool_said(hotspot: dict[str, Any], rec: dict[str, Any]) -> str:
     if events <= 1:
         return f"The tool said: {quoted}."
     where = f", {plural(sessions, 'session')}" if sessions > 1 else ""
+    if top.get("variants"):
+        where += "; the numbers in it differ between events"
     return f"The tool said: {quoted} ({events} of {total} events{where})."
 
 

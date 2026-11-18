@@ -2077,6 +2077,16 @@ class _Analysis:
                         "text": redact.one_line(s.text, signatures.SIGNATURE_CHARS),
                         "events": s.events,
                         "sessions": s.sessions,
+                        **(
+                            {
+                                "variants": [
+                                    redact.one_line(v, signatures.SIGNATURE_CHARS)
+                                    for v in s.variants
+                                ]
+                            }
+                            if s.variants
+                            else {}
+                        ),
                     }
                     for s in said
                 ]

@@ -281,6 +281,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
         var d = el("div", { class: "ev" });
         d.appendChild(el("div", { class: "meta" }, plural(sig.events, "event") + " · " + plural(sig.sessions, "session")));
         d.appendChild(el("blockquote", null, sig.text));
+        (sig.variants || []).forEach(function (v) { d.appendChild(el("blockquote", null, "also: " + v)); });
         detail.appendChild(d);
       });
     }
@@ -309,7 +310,8 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     var quoted = text.indexOf("`") >= 0 ? "`` " + text + " ``" : "`" + text + "`";
     if (events <= 1) return "The tool said: " + quoted + ".";
     return "The tool said: " + quoted + " (" + events + " of " + total + " events" +
-      (sessions > 1 ? ", " + plural(sessions, "session") : "") + ").";
+      (sessions > 1 ? ", " + plural(sessions, "session") : "") +
+      ((top.variants || []).length ? "; the numbers in it differ between events" : "") + ").";
   }
   // What to fix first: the same choice as collect_recommendations in report/_common.py.
   (function () {

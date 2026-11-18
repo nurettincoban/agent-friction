@@ -172,6 +172,8 @@ def _hotspots(result: dict[str, Any], labels: dict[str, str]) -> list[str]:
                 f"- error line, in {sig.get('events')} events / {sig.get('sessions')} sessions: "
                 f"{_inline(str(sig.get('text')))}"
             )
+            for variant in sig.get("variants") or []:
+                out.append(f"  - also printed as: {_inline(str(variant))}")
         for rec in item.get("recommendations") or []:
             thin = " _(thin evidence)_" if rec.get("evidence") == "thin" else ""
             out.append(
