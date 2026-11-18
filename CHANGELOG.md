@@ -70,6 +70,18 @@ All notable changes to this project are documented here. The format follows
   the agent takes that code out. New advice `say-how-to-verify` when the agent said it was done
   and the human found it failing. With only thin evidence, reports say "Nothing to fix yet".
 - `docs/comparison.md` re-measured: an answer key committed before the runs, three `/insights`
-  runs per dataset, two graders.
+  runs per dataset, two graders; then on two held-out datasets written blind by independent
+  authors. On the first, agent-friction scored 5 of 14 to `/insights`' 13 to 14; after the
+  changes below, 12 of 14 there (tuned on it) and 9 of 16 on the second, untouched set, to
+  `/insights`' 11.
+- Corrections in everyday words ("Thanks. One thing though: ...", "Not that file", "Please
+  revert the timing bound change", "Please don't kick off `test-all`"); a correction that names
+  a command the agent had just run is that command's; a refusal's reason may come in the next
+  message; a failure reported right after the agent said it was done is a correction, and from
+  two sessions on "Agents say the work is done before checking it" is one item for the
+  repository, first in "What to fix first".
+- A command that fails and then passes with a variable set (`TZ=UTC pytest`) or as another
+  runner (`make test`), nothing changed, in two sessions: advice to use the working form.
+  `git stash && pytest; git stash pop` is no longer counted as a change.
 
 [0.1.0]: https://github.com/nurettincoban/agent-friction/commits/main

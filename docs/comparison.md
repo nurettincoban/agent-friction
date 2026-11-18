@@ -7,6 +7,55 @@ different questions. `/insights` coaches **how you and Claude work**. agent-fric
 **where this repository trips agents up**, with the evidence counted, and hands over the fix as
 text to paste.
 
+## The result to trust: held-out data written blind
+
+Our first comparison (further down) used datasets we built ourselves, and agent-friction had
+been tuned on them. To check whether that result holds, two independent authors (separate
+model sessions told not to read anything of agent-friction) each wrote a dataset in the real
+Claude Code transcript format: a repository, a dozen sessions with recurring problems and
+decoys planted, and an answer key. Each key was committed before either tool ran. An
+independent grader scored every report against the key. Everything is published:
+[blind set 1](comparison/blind/) (tidewater, a Python data pipeline) and
+[blind set 2](comparison/blind2/) (ferrydesk, a Go service), each with its sessions, key,
+`/insights` runs, agent-friction outputs and score sheet.
+
+| | `/insights` (3 runs) | agent-friction |
+| --- | --- | --- |
+| Blind set 1, before any change (of 14) | 14 / 14 / 13 | **5** |
+| Blind set 1, after the changes below (of 14; now tuned on it) | | 12 |
+| **Blind set 2, untouched (of 16)** | **11 / 11 / 11** | **9** |
+| Fixes that work as given, blind set 2 (of 8) | 5 / 5 / 4 | 2 |
+| Decoys raised as a problem, blind set 2 | 1 / 2 / 1 | 1 |
+| Sessions read, blind set 2 | 9 of 13 | 13 of 13 |
+
+What this shows:
+
+- **On data nobody tuned for, `/insights` is ahead: 11 to 9.** The first blind set exposed
+  that agent-friction recognized almost none of the corrections real people type ("Thanks.
+  One thing though: ...", "Not that file", "Please revert the timing bound change"). It also
+  missed a command that only works with a variable set, and "done" said before checking. We
+  fixed those (see "What changed"), and the second, untouched set is the measure of that fix.
+  It took agent-friction from far behind to close, not ahead.
+- **They see different things.** `/insights` found every problem that the humans put into
+  words: an unwritten money-in-cents rule, editing applied migrations, a wrong
+  environment-variable prefix. It missed every problem that shows only in tool output: an
+  integration test that cannot pass locally, a lint target that fails, edits that keep missing
+  in one large file. Part of that is coverage: it read 9 of 13 sessions. agent-friction found
+  the tool-output problems, and was the only one to find the edit hotspot. But it mostly gave
+  no cause ("`make lint` failed 4 times"), and once advised a substitute (`go vet`) that would
+  hide the real check. It missed one rule a human stated twice.
+- **Neither is enough alone.** The honest summary is the one this page started with: they
+  answer different questions. The numbers now say so too.
+
+These are two small synthetic datasets, one grader each, so they say what each tool can see,
+not how often it will on your sessions.
+
+## Our own datasets (first comparison)
+
+The rest of this page is the comparison as first run, on datasets we built and tuned
+agent-friction on. Read its totals with that in mind: 16 of 16 there became 5 of 14 on the
+first blind set.
+
 ## Method
 
 - **Date:** 2026-11-17. Claude Code 2.1.326 and agent-friction from this repository.
@@ -151,6 +200,25 @@ while agent-friction left homework ("say in AGENTS.md which source to change"). 
   done and the human found it failing (S6, which `/insights` caught and agent-friction did not).
 - With only thin evidence, the list is "Nothing to fix yet: leads to watch", not "What to fix
   first".
+
+After blind set 1, and before blind set 2 was read:
+
+- Corrections in everyday words. "Thanks" no longer voids what follows a "but" or "one thing
+  though". "Not that file", "That's the old package" and "Please revert the timing bound
+  change" count as corrections. "Please don't ...", "No skipping", "There's already X for
+  this" and "Did you run it?" count as instructions, once the agent acts on them.
+- A correction that names a command the agent had just run ("don't kick off `test-all`") is
+  that command's. A refusal followed by the human's message gets that message as its reason.
+- A failure reported right after the agent said it was done is a correction, even after a long
+  pause. From two sessions on, "Agents say the work is done before checking it" is one item
+  for the repository, first in "What to fix first".
+- A command that fails and then passes with a variable set (`TZ=UTC pytest`) or as another
+  runner (`make test`), with nothing changed, in two sessions: "use the working form".
+  `git stash && pytest; git stash pop` is no longer counted as a change.
+
+Still missing, per the blind set 2 grader: the cause behind a failing command (it says
+`make lint` failed, not why), rules that span several files (a units convention), and a
+deterministic tool cannot summarize a convention from varied wording the way a model can.
 
 ## Which to use
 

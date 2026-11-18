@@ -72,3 +72,33 @@ Borderline, not counted: runs 2 and 3 call the S3 `pipeline.toml` change from 25
 - The P1 score for agent-friction is a judgement call. It names the target, says the file is generated, and notes that CLAUDE.md already covers it (the key counts this as a plus). It never names the source or the command, as the key's "must" requires, so I gave it 1. A more lenient grader would give 2, for a total of 6.
 - agent-friction lists the decoys D1 and D4 only as low-confidence rows, outside "What to fix first", so neither counts as a false positive. It also has no unit-convention item (P4) and no unverified-completion item (P7). Both are themes carried by what the human said, and its "0 human corrections" header shows that signal was not captured.
 - The insights runs' false or garbled claims are mostly about attribution: which session, what order, and whether the user objected. None of them changes a found score.
+
+## agent-friction after the changes
+
+This section scores `agent-friction-after.txt` against the same key, with the same standards as above. As before, items under "What to fix first" and "Ready to paste" are proposals, and low-confidence rows are listings. A quote of the human stating the mechanism on the right target counts as naming it.
+
+| Item | agent-friction (after) |
+|---|---|
+| **P1** generated.py | **1 / fix N**: listed only as a row, "tidewater/models/generated.py 2 3 12s ◐ edit-miss×1, tool-rejected×1". It names the target, but not the schema source or `make schema`. The "before" report's proposal and fix are gone, so this item has regressed. |
+| **P2** TZ / bare pytest | **1 / fix N**: "pytest 2 2 6s ◐ command-failure×2" and "python -m pytest 1 … ○". Symptom only: no test name, no TZ, no `make test` contrast. |
+| **P3** transforms/ | **2 / fix Y**: proposal 3, "tidewater/transforms/qc.py", quotes "That's the old package. Nothing imports `transforms` any more. The spike flag lives in tidewater/transform/qc.py (no s)." Fix: "put it in AGENTS.md / CLAUDE.md (or a comment at the top of the file)". This is hedged ("If what they said is a standing rule"), but it names the file, the place and the rule. |
+| **P4** int mm | **2 / fix N**: proposal 5, "Write down the rule the human keeps repeating … 3 times in 3 sessions", quotes "`float(row["level_m"]) * 1000` hands a float to `level_mm` … That field is an int everyw…" and "I don't want a float metre value existing in the ingest path". These quotes carry the int-mm / no-float-metres rule and its repetition. No fix: the rule it extracts and pastes is "use `mm_from_ft`" (for `csv_drop.py` and `units.py`), not "levels are int mm; convert once via `units`". |
+| **P5** flaky retry test | **2 / fix Y**: proposal 4, "tests/test_noaa_client.py", quotes "Loosening it hides the flake" and "No skipping, and no bumping the number either … The client should take a sleep function so the test can pass a fake one". These give the agent's loosen/skip responses and the real-sleep mechanism. Fix: put that standing rule in AGENTS.md or atop the file, the same hedged form as P3. |
+| **P6** make test-all | **2 / fix Y**: proposal 2, "make test-all: Write down the rule the human keeps repeating", quotes "it's the 6-minute docker run. For a CLI flag the unit tests are fine" and "Please don't kick off `test-all` for every little change". Fix: "Put the rule in AGENTS.md / CLAUDE.md". Like the other reports, it does not mention the 2-minute timeout. |
+| **P7** unverified "done" | **2 / fix Y**: proposal 1, "Agents say the work is done before checking it … 3 times in 3 sessions … 2 times it had run no test, lint or build since its last change", with the placeholder, "Applied where?" and pyarrow quotes. Fix: "Before saying the work is done, run the check that covers it after your last change, and say what you did not verify." |
+| **Total** | **12 / 4 fixes** |
+
+**Decoys:** 0 raised as a fix. D4 `mkae` and D1 `pip install` appear only as low-confidence rows. D2 falls under "Not counted: 7 failed runs of normal work". D3 is not raised.
+
+**Statements the transcripts contradict:**
+1. Proposal 3 counts "Applied where? It's not in my local db, and I didn't see you run migrate…" as a correction about `tidewater/transforms/qc.py`. In S8 that remark is about the unapplied `004_spike_idx.sql` migration and the tests that never ran, not the legacy package.
+2. Proposal 5 counts "Did you run anything after the warehouse change? … 6 placeholders but 7 parameters" as a correction about `tidewater/ingest/csv_drop.py`. In S5 it concerns `warehouse.write_readings`. The unit corrections on `csv_drop.py` came in 2 sessions (S1, S11), not "3 times in 3 sessions".
+3. Ready to paste: "In `tidewater/transform/units.py`: use `mm_from_ft`." `mm_from_ft` is defined in `units.py` (S11 implemented it there). The human's point about it was to compute `value_ft * MM_PER_FT` directly instead of going through metres.
+4. "pytest … 2 sess" / "python -m pytest … 1". Bare `pytest` failed in S1, S4 and S10, and `python -m pytest` failed in S7. That is 4 sessions, against the 3 shown.
+
+**Grader notes:**
+- Found goes from 5 to 12 and fixes from 1 to 4. Almost all of the gain comes from quoting the human under each proposal, which raises P3, P5 and P6 to 2 and adds P4 and P7 from nothing. The header now reports 12 human corrections instead of 0.
+- P1 regressed, from 1 / fix Y to 1 / fix N. The "before" report proposed a permission rule or pre-edit hook for `generated.py`. The "after" report lists the file only as a row.
+- The fix credit on P3 and P5 is a judgement call. The advice is conditional ("Check whether these corrections are standing rules … If what they said is a standing rule"), and "Ready to paste" carries no line for either item. A grader who requires an unconditional, concrete line would give N on both, for 12 / 2 fixes.
+- The P4 score of 2 rests on the quotes. The report's own framing pins the rule to one file and distils it to the wrong rule ("use `mm_from_ft`"). A stricter grader would give 1, for a total of 11.
+- The quote attribution is loose. Two of the five proposals (3 and 5) attach a quote about another target (items 1 and 2 above). This does not change any score, but a reader acting on proposal 5 would write a csv_drop rule from a warehouse incident.

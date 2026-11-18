@@ -453,6 +453,23 @@ not legacy");
 corrections softened with praise; corrections in other languages. The count of
 corrections is a lower bound.
 
+### Everyday wording, commands, and "done" (added after a blind test)
+
+- Praise followed by a turn ("Thanks. One thing though: ...", "Great, but ...") no longer
+  voids what comes after the "but". "Not that file", "Not that one", "That's the old package"
+  and "Please revert the timing bound change" open a correction. "Please don't ..." at the
+  start of any sentence, "No skipping", "There's already `X` for this", "Hang on: ...", "You
+  don't need ...", "Why is X a float ...?" and "Did you run it?" are instructions: they count
+  once the agent goes back to the work.
+- A correction that names a command the agent ran in that turn and that failed or was stopped
+  ("Please don't kick off `test-all` for every little change"), or "not that one" right after
+  the human stopped a command, is attributed to that command, corroborated by the naming.
+- A failure reported right after the agent said the work was done ("Did you try it? I get an
+  ImportError") is a correction whatever its wording, even after a long pause (trying the work
+  out takes time), unless the message moves on to a new task or shrugs it off.
+- The agent's claim is read from the first and the last paragraph of its reply ("Done: ...",
+  "... and it's applied.", "... Done.").
+
 ## `probable-correction` — Probable correction
 
 > **In short:** A human prompt that is worded like a correction but is not
@@ -665,7 +682,10 @@ reasons; a long-running refactoring that keeps a suite red on purpose.
 
 **What:** the human declined a proposed tool call (Claude Code records this as
 a tool result starting "The user doesn't want to proceed with this tool use").
-The reason, if the human typed one, is kept as the excerpt.
+The reason, if the human typed one, is kept as the excerpt. When the refusal carries no
+reason and the human's next message follows with nothing run in between ("Not that file.
+It's generated ..."), that message is the reason (`reason_from: "next message"`), unless it
+moves on to a new task.
 
 **Why:** the agent tried to do something a human considered wrong or unsafe.
 
