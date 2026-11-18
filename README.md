@@ -62,7 +62,7 @@ Then, inside any repository:
 
 | Command | What it does |
 | --- | --- |
-| `/agent-friction:scan` | Maps the friction and lists what to fix first. Changes nothing. |
+| `/agent-friction:scan` | Maps the friction, then diagnoses it: reads every session and the error output, finds each cause in the repository and writes `.agent-friction/diagnosis.md` with the exact fix. Changes nothing else. |
 | `/agent-friction:fix` | Checks each finding against the repository, proposes the smallest change for each (a line in `AGENTS.md`, a hook, a deny rule) and applies only what you approve. |
 | `/agent-friction:compare` | A week or two later: measures the sessions since that scan against it, so you see what went down. |
 
@@ -72,19 +72,24 @@ session. Details: [docs/usage.md](https://github.com/nurettincoban/agent-frictio
 
 ## How it differs from `/insights`
 
-Claude Code's `/insights` and agent-friction answer different questions, and work well
-together. We [ran both on the same sessions](https://github.com/nurettincoban/agent-friction/blob/main/docs/comparison.md):
+Claude Code's `/insights` coaches how you and Claude work together, from a model's reading of
+a sample of your sessions. agent-friction finds where **this repository** trips agents up: a
+deterministic scan of every session that touched it, then (in the plugin) a diagnosis that
+checks each cause against the repository and writes the exact fix. We
+[tested both on held-out sessions](https://github.com/nurettincoban/agent-friction/blob/main/docs/comparison.md)
+written blind by independent authors, graded blind against keys committed before any run:
 
 | | `/insights` | agent-friction |
 | --- | --- | --- |
-| Question | How do you and Claude work together? | Where does this repository trip agents up? |
-| Method | A model summarizes a sample of your recent sessions | Documented rules over every session that touched the repo; no model, no network |
-| Evidence | Narrative with examples | Counts per file and command, each event traceable to a transcript line |
-| Same input, same output | No | Yes, so you can compare before and after |
-| The fix | CLAUDE.md sections, hooks and skills to copy | Lines and deny rules to paste, each deny rule replayed against your sessions |
-| On a held-out dataset written blind by an independent author (3 runs of `/insights`) | 11 of 16 points in every run: found what the humans said (conventions, migrations, a wrong variable prefix); missed what shows only in tool output; read 9 of 13 sessions | 9 of 16: found what shows in tool output (an edit hotspot, a failing lint target), mostly without the cause; missed one rule a human stated; read every session |
-| On our own datasets (we built them and tuned agent-friction on them) | 11 of 16 | 16 of 16, which says more about the tuning than the tool |
-| Also covers, in our test | Prompting and verification habits, larger workflow ideas | `pytest` vs `make test`, empty searches, 280 refusals by Claude Code's own `sleep` rule |
+| Sessions read | A sample (9 of 16, 9 of 15 in our tests) | Every session that touched the repository |
+| Problems found, two held-out sets (of 16 each, 3 runs) | 11 to 13 | 13 to 16 (`/agent-friction:scan`) |
+| Fixes that work as given (of 8 each) | 5 to 6 | 7 to 8 |
+| Wrong statements per report | 2 to 4 | 1 to 5, about the same |
+| Cause found in | What the session says | The error output and the repository's own files, with the line |
+| Same input, same output | No | The scan, yes, so `compare` can measure before and after |
+
+The scan alone, without the diagnosis, found 5 and 6 of 16: it is the evidence and the
+measurement, not the answer.
 
 ## How it works
 

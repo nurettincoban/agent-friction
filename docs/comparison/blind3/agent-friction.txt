@@ -1,0 +1,65 @@
+agent-friction · repo
+16 sessions · 248 tool calls · 14 friction events (+12 weak) · ~3m lost · 0 human corrections · 2026-10-06 → 2026-11-13
+
+What to fix first
+  1. pnpm test:int: Document the setup `pnpm test:int` needs
+     `pnpm test:int` failed 3 times in 3 sessions; 2 times it worked after the agent ran `make
+     up`. Say so in AGENTS.md ("run `make up` before `pnpm test:int`"), or make the environment
+     ready before the agent starts. The tool said: `[ioredis] Unhandled error event: Error:
+     connect ECONNREFUSED 127.0.0.1:6379` (3 of 3 events, 3 sessions).
+  2. brew services: State the boundary
+     A human declined the agent's action once in 1 session. State the boundary explicitly (what
+     must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a
+     permission rule. Reasons given: "make up. it's docker compose, not brew. and honestly can you
+     put that in CLAUDE.md so we stop going through this every single time"
+  3. packages/shared/prisma/migrations/20261002120000_add_endpoint_secret/migration.sql: State the boundary
+     A human declined the agent's action once in 1 session. State the boundary explicitly (what
+     must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a
+     permission rule. Reasons given: "don't touch that one, it's already been applied on staging
+     and prod. new migration please"
+  2 more suggestions rest on fewer than 5 events each and are left out here. Each item's own details
+  list them, marked "thin evidence" (in the terminal: `agent-friction show <path>`).
+
+Ready to paste
+  The lines the advice above names, filled in from the evidence. Check each against the repository
+  before you commit it; nothing here has been applied.
+  AGENTS.md (or CLAUDE.md):
+    - Run `make up` before `pnpm test:int`.
+
+Files where agents struggle
+  score            path                                   sess events    lost  top signals
+  █▊          17.4 packages/shared/prisma/schema.prisma      2      2      6s  ◐ edit-revert×1, search-miss×1
+  █▍          14.0 packages/sha…oint_secret/migration.sql    1      1      6s  ○ tool-rejected×1
+  █▎          13.0 packages/shared/src/retry.ts              1      1      6s  ○ edit-revert×1
+  █▎          12.0 packages/shared/package.json              1      1      6s  ○ edit-miss×1
+  █▏          11.7 .env.example                              1      1     n/a  ○ probable-correction×1
+  █            9.7 .eslintrc.cjs                             1      1     n/a  ○ search-miss×1
+  ▉            8.7 packages/wor…ics.test.ts (not in tree)    1      1     n/a  ○ user-interrupt×1
+  ▉            8.7 packages/wor…/metrics.ts (not in tree)    1      1     n/a  ○ user-interrupt×1
+  ▋            6.8 packages/worker/src/index.ts              1      1     n/a  ○ user-interrupt×1
+  ▋            6.5 packages/worker/src/deliver.ts            1      1     n/a  ○ user-interrupt×1
+
+Commands that keep failing
+  score            command                                sess events    lost  top signals
+  ███▊        37.0 pnpm test:int                             3      3      2m  ◐ command-failure×3
+  ██▍         24.1 pnpm lint                                 2      2      1m  ◐ command-failure×2
+  █▋          16.7 pnpm typecheck                            2      2     18s  ◐ command-failure×2
+  █▋          16.3 brew services                             1      1     n/a  ○ tool-rejected×1
+  █▌          15.2 redis-cli                                 1      1      6s  ○ command-failure×1
+  █▎          12.4 pnpm test                                 3      3     n/a  ○ command-failure×3
+  ▊            7.3 pnpm install                              1      1     n/a  ○ command-failure×1
+
+Directories where agents search in vain (the directory itself; show <dir> rolls up everything inside)
+  score            directory                              sess events    lost  top signals
+  █▏          11.4 .                                         1      1     n/a  ○ search-miss×1
+  █▏          11.4 packages/api/src                          1      1     n/a  ○ search-miss×1
+  █▏          11.4 packages/worker/src                       1      1     n/a  ○ search-miss×1
+  ▉            8.4 packages                                  1      1     n/a  ○ search-miss×1
+
+Not tied to a file or command (1 event)
+  2026-11-13 16:46 UTC user-interrupt · The user interrupted the agent while it was running `docker co…
+      ↳ claude-code:repo/489e74f7-612a-5dab-9e8c-62c30a3c1694.jsonl:14
+
+● high ◐ medium ○ low confidence · drill in: agent-friction show <path> · full map: --format html -o map.html
+Per-row time can overlap (one stall can involve a file and a command); n/a means the evidence carries no time estimate; the total counts each minute once.
+Not counted: 6 failed runs of normal work (the agent fixed the failure, or was only waiting and polled until it passed; ~4m of run time).

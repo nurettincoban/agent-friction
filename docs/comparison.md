@@ -7,7 +7,57 @@ different questions. `/insights` coaches **how you and Claude work**. agent-fric
 **where this repository trips agents up**, with the evidence counted, and hands over the fix as
 text to paste.
 
-## The result to trust: held-out data written blind
+## The latest result: two new held-out sets, with the diagnosis step
+
+After the results below, agent-friction gained a diagnosis step: the plugin's
+`/agent-friction:scan` now hands the Claude Code session everything the scan saw
+(`scan -f investigate`: every session, every human turn, the error lines that recur) and has
+it work out each cause in the repository and write an exact fix
+([plugin/diagnose.md](https://github.com/nurettincoban/agent-friction/blob/main/plugin/diagnose.md)).
+The scan itself is unchanged in kind: deterministic, offline.
+
+To test that, two more independent authors wrote two more datasets the same way as before,
+committed before either tool ran: [blind set 3](comparison/blind3/) (tallyhook, a TypeScript
+monorepo, 16 sessions) and [blind set 4](comparison/blind4/) (kilnlog, 15 sessions). Each
+tool ran three times per set, plus agent-friction's plain scan once. An independent grader
+saw the seven reports per set shuffled as A to G, without knowing which tool made which, and
+checked every claim it could against the transcripts. Nothing was tuned on these sets before
+the runs.
+
+| | `/insights` (3 runs) | `/agent-friction:scan` with diagnosis (3 runs) | `agent-friction scan` alone |
+| --- | --- | --- | --- |
+| Blind set 3, found (of 16) | 12 / 11 / 13 | **15 / 16 / 15** | 5 |
+| Blind set 4, found (of 16) | 11 / 11 / 11 | **13 / 15 / 15** | 6 |
+| Fixes that work as given, set 3 (of 8) | 5 / 5 / 5 | **7 / 8 / 7** | 1 |
+| Fixes that work as given, set 4 (of 8) | 5 / 6 / 6 | **7 / 8 / 8** | 0 |
+| Decoys raised as a problem (sets 3 + 4) | 0 / 0 / 0 | 0 / 0 / 0 | 1 |
+| Statements the transcripts contradict, set 3 | 3 / 4 / 2 | 5 / 4 / 1 | 3 |
+| Statements the transcripts contradict, set 4 | 3 / 4 / 2 | 3 / 1 / 1 | 3 |
+| Sessions read | 9 of 16, 9 of 15 | all | all |
+
+What this shows:
+
+- **With the diagnosis, agent-friction is ahead on both new sets**: 14.8 of 16 on average
+  against 11.5, and 7.5 working fixes of 8 against 5.3. Every `/insights` run read only 9
+  sessions and missed or only half-saw the problems that show in tool output alone (a stale
+  generated client, a lint run that times out, a test that fails only in the evening); the
+  diagnoses found them and named the cause in the repository's own files.
+- **It is not more accurate yet.** The diagnoses made about as many wrong statements as
+  `/insights` (2.5 per report against 3.0). Several came from the scan's own counts: it sets
+  aside failures it judges normal work, and the diagnoses repeated its short session lists.
+  Others were line numbers off by one and a timeout given as 2 minutes "both times" when the
+  second was 10. Since this grading, the evidence keeps every spelling of an error line and
+  the diagnosis steps ask for "at least" and for line numbers read from the file; that change
+  has not been tested on held-out data yet.
+- **The scan alone is not the product.** On its own it found 5 and 6 of 16: it counts well and
+  reads every session, but it does not say why. Its job now is the evidence the diagnosis
+  stands on, and the measurement before and after (`compare`).
+
+Two datasets, one grader each, three runs per tool: this says what each can see on sessions
+like these, not how often it will on yours. A third and fourth set are spent now too: the next
+detection change needs new held-out data.
+
+## Earlier: held-out data written blind, before the diagnosis step
 
 Our first comparison (further down) used datasets we built ourselves, and agent-friction had
 been tuned on them. To check whether that result holds, two independent authors (separate
