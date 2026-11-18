@@ -5403,9 +5403,9 @@ class _Detector:
             and not softened
             and reports_failure(head)
             and not _softens(head.replace("’", "'"))
-            # not a new request ("next task: ...") nor one typed long after
+            # not a new request ("next task: ..."). A long pause is no reason to doubt it:
+            # trying the work out (on staging, by hand) is what takes the time.
             and not _NEW_TASK_RE.search(head)
-            and not (idle is not None and idle > CORRECTION_STALE_SECONDS)
         ):
             # The agent had just said the work was done or passing, and the human answers
             # that it fails: a verdict on that work, however it is worded.
