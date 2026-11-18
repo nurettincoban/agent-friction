@@ -1333,6 +1333,14 @@ READY_BANNER_RE = re.compile(
     r"|Development server (?:is )?running|webpack \S+ compiled",
     re.I,
 )
+#: Output by which a command that sat until the time limit shows itself a server, whatever
+#: its name (`go run ./cmd/api` logging "listening addr=:8080").
+SERVER_OUTPUT_RE = re.compile(
+    r"\blistening (?:on|at)\b|\blistening\b.{0,20}(?:addr|port|:\d{2,5}\b)|\bServing HTTP\b"
+    r"|\bstarted server\b|Server (?:is )?(?:running|started|listening)",
+    re.I,
+)
+_TEST_COMMAND_RE = re.compile(r"\btests?\b|test_|_test\b|\bspec\b")
 #: How many of the latest edits are remembered for "did the agent just add this import?".
 ADDED_TEXTS_KEPT = 8
 #: The shell could not change directory, so what came after `cd x &&` never ran.
@@ -4455,7 +4463,13 @@ class _Detector:
                     f"`{shown(key)}` ran until the harness timed it out: it was in watch "
                     "mode, waiting for file changes, and never exits on its own"
                 )
-            if DEV_SERVER_RE.search(call.command or ""):
+            if DEV_SERVER_RE.search(call.command or "") or (
+                # whatever its name, a command that said it was listening and then sat
+                # until the time limit is a server
+                SERVER_OUTPUT_RE.search(result.output)
+                and "watcher" not in detail
+                and not _TEST_COMMAND_RE.search(call.command or "")
+            ):
                 detail["server"] = "1"
                 summary = (
                     f"`{shown(key)}` ran until the harness timed it out: it is a server or "

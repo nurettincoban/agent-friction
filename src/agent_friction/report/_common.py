@@ -96,6 +96,43 @@ def plural(n: int, word: str) -> str:
     return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
 
+#: Signals of advice whose evidence is a tool's output, under which the recurring error
+#: line is shown (same set as ``engine.SIGNATURE_SIGNALS``).
+_OUTPUT_SIGNALS = frozenset(
+    {
+        "command-failure",
+        "retry-loop",
+        "no-convergence",
+        "tool-failure",
+        "edit-miss",
+        "path-miss",
+        "file-too-large",
+        "stale-edit",
+    }
+)
+
+
+def tool_said(hotspot: dict[str, Any], rec: dict[str, Any]) -> str:
+    """ "The tool said: `…` (4 of 4 failures, 4 sessions)": the error line that keeps
+    coming back in the output behind this advice, or "" when there is none to show."""
+    if not _OUTPUT_SIGNALS.intersection(rec.get("signals") or ()):
+        return ""
+    said = [s for s in hotspot.get("signatures") or [] if isinstance(s, dict) and s.get("text")]
+    if not said:
+        return ""
+    top = said[0]
+    text = str(top["text"])
+    if text in str(rec.get("detail", "")):
+        return ""
+    events, sessions = int(top.get("events", 0)), int(top.get("sessions", 0))
+    total = int(hotspot.get("events", 0) or 0)
+    quoted = f"`` {text} ``" if "`" in text else f"`{text}`"
+    if events <= 1:
+        return f"The tool said: {quoted}."
+    where = f", {plural(sessions, 'session')}" if sessions > 1 else ""
+    return f"The tool said: {quoted} ({events} of {total} events{where})."
+
+
 def is_thin(rec: dict[str, Any]) -> bool:
     """Advice that rests on too few events to act on (``"evidence": "thin"``)."""
     return rec.get("evidence") == "thin"

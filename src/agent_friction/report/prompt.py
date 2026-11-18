@@ -22,6 +22,7 @@ from agent_friction.report._common import (
     paste_lines,
     paste_settings_json,
     plural,
+    tool_said,
 )
 
 #: Pieces of advice in the task, at most (highest-scoring hotspots first).
@@ -149,6 +150,7 @@ def render_prompt(result: dict[str, Any]) -> str:
             "",
             str(rec.get("detail", "")).strip(),
             "",
+            *([tool_said(item, rec), ""] if tool_said(item, rec) else []),
         ]
         cited = _cited(item, rec)
         if cited:

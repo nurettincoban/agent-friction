@@ -287,6 +287,21 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
       });
     }
   }
+  // The recurring error line behind a piece of advice: same as tool_said in report/_common.py.
+  var OUTPUT_SIGNALS = ["command-failure", "retry-loop", "no-convergence", "tool-failure",
+    "edit-miss", "path-miss", "file-too-large", "stale-edit"];
+  function toolSaid(h, r) {
+    var sigs = (r.signals || []).filter(function (s) { return OUTPUT_SIGNALS.indexOf(s) >= 0; });
+    var said = (h.signatures || []).filter(function (s) { return s && s.text; });
+    if (!sigs.length || !said.length) return "";
+    var top = said[0], text = String(top.text);
+    if (String(r.detail || "").indexOf(text) >= 0) return "";
+    var events = Number(top.events || 0), sessions = Number(top.sessions || 0), total = Number(h.events || 0);
+    var quoted = text.indexOf("`") >= 0 ? "`` " + text + " ``" : "`" + text + "`";
+    if (events <= 1) return "The tool said: " + quoted + ".";
+    return "The tool said: " + quoted + " (" + events + " of " + total + " events" +
+      (sessions > 1 ? ", " + plural(sessions, "session") : "") + ").";
+  }
   // What to fix first: the same choice as collect_recommendations in report/_common.py.
   (function () {
     var THIN = 5;
@@ -329,6 +344,8 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
       li.appendChild(go); li.appendChild(document.createTextNode(": ")); li.appendChild(rich("b", r.title));
       if (r.evidence === "thin") li.appendChild(el("span", { class: "thin", style: "display:inline" }, " (thin evidence)"));
       li.appendChild(rich("span", r.detail));
+      var said = toolSaid(h, r);
+      if (said) li.appendChild(rich("span", " " + said));
       list.appendChild(li);
     });
     var thinShown = shown.some(function (p) { return p[1].evidence === "thin"; }), left = 0;

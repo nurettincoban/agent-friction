@@ -22,6 +22,7 @@ from agent_friction.errors import AgentFrictionError
 from agent_friction.report import (
     FORMATS,
     render_html,
+    render_investigate,
     render_json,
     render_markdown,
     render_prompt,
@@ -871,6 +872,8 @@ def _cmd_scan(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
         text = render_html(result)
     elif fmt == "prompt":
         text = render_prompt(result)
+    elif fmt == "investigate":
+        text = render_investigate(result)
     else:
         color = args.output is None and _use_color(args.color, stdout)
         text = render_terminal(

@@ -26,6 +26,7 @@ from agent_friction.report._common import (
     repo_recommendations,
     signal_titles,
     thin_note,
+    tool_said,
     top_signals,
     unattributed_heading,
 )
@@ -234,6 +235,9 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
         for i, (h, rec) in enumerate(recs, 1):
             title = _html_escape(str(rec.get("title", "")))
             detail = _html_escape(str(rec.get("detail", "")))
+            said = tool_said(h, rec)
+            if said:
+                detail += " " + _html_escape(said)
             thin = " _(thin evidence)_" if is_thin(rec) else ""
             mark = "-" if leads else f"{i}."
             out.append(f"{mark} {_code(h.get('path'))}: **{title}**{thin} {detail}")
