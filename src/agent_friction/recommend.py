@@ -2158,3 +2158,62 @@ def recommend(
         rules.search_misses(f"under {key}/" if key != "." else "the whole repo")
         rules.corrections()
     return _strong_first(rules.out)
+
+
+#: Sessions in which the agent said it was done and the human found it failing before
+#: that is one habit of agents in this repository, not something about one file.
+REPO_VERIFY_MIN_SESSIONS = 2
+
+
+def repo_verify(findings: Sequence[Finding], quote: Quoter | None) -> dict[str, object] | None:
+    """One repository-level item for "said done, then it failed", when it recurs.
+
+    Each such correction lands on the files of its own turn (a migration, a parser, a
+    CLI); what they share is not a file but a habit: reporting work done on a check that
+    did not cover it, or on none. Two or more sessions of it are said once, here.
+    """
+    claimed = [
+        f for f in findings if f.signal == signals.USER_CORRECTION and f.detail.get("claimed_done")
+    ]
+    if _sessions(claimed) < REPO_VERIFY_MIN_SESSIONS:
+        return None
+    checks = _top([f.detail.get("checked_with", "") for f in claimed], 1)
+    unchecked = sum(1 for f in claimed if not f.detail.get("checked_with"))
+    how = []
+    if unchecked:
+        how.append(f"{_times(unchecked)} it had run no test, lint or build since its last change")
+    if checks and quote is not None:
+        how.append(
+            f"{_times(checks[0][1])} the last check it saw pass was {code(checks[0][0])}, "
+            "which did not cover what broke"
+        )
+    said = ""
+    if quote is not None:
+        quotes = [
+            f'"{quote(f.detail.get("quote", ""), QUOTE_CHARS)}"'
+            for f in claimed[:MAX_QUOTES]
+            if f.detail.get("quote")
+        ]
+        said = f" In their words: {' / '.join(quotes)}" if quotes else ""
+    item: dict[str, object] = {
+        "id": "say-how-to-verify",
+        "title": "Agents say the work is done before checking it",
+        "detail": (
+            f"The agent said the work was done or passing {_times(len(claimed))} in "
+            f"{_n(_sessions(claimed), 'session')}, and each time the human then found it "
+            "failing" + (f": {'; '.join(how)}." if how else ".") + " Say in AGENTS.md how to "
+            "check work here before reporting it done (the command that covers the change, "
+            "run after the last edit; the environment it must pass in), and have the agent "
+            "say what it did not verify." + said
+        ),
+        "signals": [signals.USER_CORRECTION],
+        "events": len(claimed),
+        "sessions": _sessions(claimed),
+        "rank": "first",  # a habit across files: in "What to fix first", not at the end
+    }
+    if quote is not None:
+        item["agents_md"] = (
+            "before saying the work is done, run the check that covers it after your last "
+            "change, and say what you did not verify."
+        )
+    return item

@@ -1605,6 +1605,8 @@ _SOFTENER_RE = re.compile(
 #: pulled your change", "when I run it", "since I can't sign in", "because we use tabs",
 #: which say what is wrong with the agent's work. It voids a phrase like any softener,
 #: but if the agent then changes the same files again its work did need redoing.
+#: The label of a failure reported right after the agent said the work was done.
+_CLAIM_FAILED = "said done, but it fails"
 #: A turn after praise: "thanks, but", "one thing though", "however".
 _CONTRAST_RE = re.compile(
     r"\b(?:but|though|however|although|that said|one (?:thing|problem|issue|catch))\b"
@@ -2217,6 +2219,13 @@ _WRONG_PLACE_RE = re.compile(
     r"| should (?:be|go)) in\b",
     re.I,
 )
+
+
+def _softens(head: str) -> bool:
+    """Does praise or a shrug ("unrelated, ignore it") stand after the last "but"?"""
+    softeners = [m.start() for m in _SOFTENER_RE.finditer(head)]
+    contrast = [m.start() for m in _CONTRAST_RE.finditer(head)]
+    return bool(softeners) and not (contrast and max(contrast) > max(softeners))
 
 
 def _judge(
@@ -5389,6 +5398,19 @@ class _Detector:
         stopped, self.state.interrupted = self.state.interrupted, None
         head = event.text[:CORRECTION_HEAD_CHARS]
         if (
+            event.after_claim
+            and confidence < CORRECTION_STRONG
+            and not softened
+            and reports_failure(head)
+            and not _softens(head.replace("’", "'"))
+            # not a new request ("next task: ...") nor one typed long after
+            and not _NEW_TASK_RE.search(head)
+            and not (idle is not None and idle > CORRECTION_STALE_SECONDS)
+        ):
+            # The agent had just said the work was done or passing, and the human answers
+            # that it fails: a verdict on that work, however it is worded.
+            confidence, labels = CORRECTION_STRONG, [*labels, _CLAIM_FAILED]
+        if (
             stopped is not None
             and confidence <= 0
             and not instructed
@@ -5421,7 +5443,7 @@ class _Detector:
         before = frozenset(edited)
         # An instruction that redirects the work just done ("don't use X here") is a
         # correction if the agent goes back to that work, and nothing if it does not.
-        tentative = bool(instructed) and bool(before)
+        tentative = bool(instructed) and bool(before) and _CLAIM_FAILED not in labels
         weak_by_name = False
         fallback = ""
         if tentative:
@@ -5551,6 +5573,10 @@ class _Detector:
             note = "weaker cues only, no clear correction phrase"
         elif named_changed and not stale and not tentative:
             note, corroborated = f"the user names {named_changed[0]}, which it had changed", "named"
+        elif _CLAIM_FAILED in labels and changed and not stale:
+            # The agent's own words were the verdict on its work; the human's answer is that
+            # the work fails. Nothing the agent does next needs to confirm it.
+            note, corroborated = "the agent had said the work was done", "claim"
         elif changed or pinned:
             confidence = CORRECTION_STRONG
             note = "awaiting the agent's response"

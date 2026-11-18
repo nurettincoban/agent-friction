@@ -1450,7 +1450,18 @@ class _Analysis:
                 self._expose(exposure, target.kind, target.key, finding.unit)
         self.exposure = exposure
         self.repo_advice = self._baselines(findings)
+        verify = recommend.repo_verify(
+            findings, self.quote if self.options.include_excerpts else None
+        )
+        if verify is not None:
+            self.repo_advice.insert(0, verify)
         result = self._emit(streams, findings, sources)
+        if verify is not None:
+            # said once for the repository, not again under each file it touched
+            for row in [*result["hotspots"], *result["commands"], *result["directories"]]:
+                row["recommendations"] = [
+                    r for r in row["recommendations"] if r.get("id") != "say-how-to-verify"
+                ]
         result["paste"] = self._paste(result, streams)
         return result
 
@@ -1461,6 +1472,11 @@ class _Analysis:
         lines: list[dict[str, Any]] = []
         deny: list[dict[str, Any]] = []
         seen: set[str] = set()
+        for rec in result.get("recommendations") or []:
+            line = str(rec.get("agents_md") or "")
+            if line and line not in seen:
+                seen.add(line)
+                lines.append({"line": line, "target": None, "rule": rec.get("id")})
         for item, rec in paste_candidates(result):
             line = str(rec.get("agents_md") or "")
             if line and line not in seen:

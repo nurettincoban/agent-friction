@@ -134,7 +134,8 @@ _CLAIM_RE = re.compile(
     r"\b(?:all (?:the )?tests? (?:now )?pass(?:es|ed|ing)?|tests? (?:now )?pass(?:es|ed)?"
     r"|(?:it|this|that|everything|they) (?:now )?works?(?=\s*(?:[.!]|$|now\b))|works? now"
     r"|(?:is|are|it's) (?:now )?(?:done|working|fixed|complete)\b|should (?:now )?work\b"
-    r"|^\W*(?:done|fixed|implemented)\s*(?:[.!:]|$))",
+    r"|(?:it's|it is|is|are|been|was) (?:now |also )?(?:applied|deployed|migrated|in place)\b"
+    r"|(?:^|[.!]\s+)\W*(?:done|fixed|implemented)\s*(?:[.!:]|$))",
     re.I | re.M,
 )
 #: ... unless the same paragraph also reports a problem, a gap ("couldn't run"), or asks something.
@@ -146,13 +147,16 @@ _HEDGED_RE = re.compile(
 
 
 def claims_done(text: str) -> bool:
-    """Does agent prose, in its last paragraph, say the work is done or passing?
+    """Does agent prose, in its first or last paragraph, say the work is done or passing?
     Only this one bit is kept of the text."""
     paragraphs = [p for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
     if not paragraphs:
         return False
-    last = paragraphs[-1]
-    return _CLAIM_RE.search(last) is not None and _HEDGED_RE.search(last) is None
+    # The verdict opens the reply ("Done: ...") or closes it ("All tests pass.")
+    return any(
+        _CLAIM_RE.search(part) is not None and _HEDGED_RE.search(part) is None
+        for part in dict.fromkeys((paragraphs[0], paragraphs[-1]))
+    )
 
 
 def edit_pairs(

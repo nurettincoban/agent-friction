@@ -215,7 +215,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
   document.getElementById("subtitle").textContent =
     (w.start || w.end ? String(w.start || "…").slice(0, 10) + " → " + String(w.end || "…").slice(0, 10) + " · " : "") +
     "generated " + utc(R.generated_at);
-  (R.recommendations || []).forEach(function (r) {
+  (R.recommendations || []).filter(function (r) { return r.rank !== "first"; }).forEach(function (r) {
     var box = el("div", { class: "rec sub" }); box.appendChild(rich("b", r.title)); box.appendChild(rich("span", r.detail));
     document.getElementById("stats").insertAdjacentElement("afterend", box);
   });
@@ -310,7 +310,10 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
       });
       return out.slice(0, 5);
     }
-    var shown = pick(false);
+    // Advice about the repository as a whole that belongs here (same as repo_fix_first).
+    var repoFirst = (R.recommendations || []).filter(function (r) { return r.rank === "first"; })
+      .map(function (r, i) { return [{ path: "Across the repository", kind: "repo" }, r, i]; });
+    var shown = repoFirst.concat(pick(false)).slice(0, 5);
     if (!shown.length) {
       shown = pick(true);
       // Same wording as LEADS_HEADING in report/_common.py: nothing here is a fix yet.
@@ -321,8 +324,8 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
     var list = document.getElementById("fixfirst-list");
     shown.forEach(function (pair) {
       var h = pair[0], r = pair[1], li = el("li");
-      var go = el("button", { type: "button", class: "linkbtn mono" }, h.path);
-      go.addEventListener("click", function () { showItem(h); detail.scrollIntoView({ block: "nearest" }); detail.focus(); });
+      var go = h.kind === "repo" ? el("span", { class: "mono" }, h.path) : el("button", { type: "button", class: "linkbtn mono" }, h.path);
+      if (h.kind !== "repo") go.addEventListener("click", function () { showItem(h); detail.scrollIntoView({ block: "nearest" }); detail.focus(); });
       li.appendChild(go); li.appendChild(document.createTextNode(": ")); li.appendChild(rich("b", r.title));
       if (r.evidence === "thin") li.appendChild(el("span", { class: "thin", style: "display:inline" }, " (thin evidence)"));
       li.appendChild(rich("span", r.detail));

@@ -17,9 +17,28 @@ def gone_note(h: dict[str, Any]) -> str:
     return " (renamed)" if f.get("renamed_to") else " (not in tree)"
 
 
+#: How "What to fix first" names advice that is about the repository, not one target.
+REPO_LABEL = "Across the repository"
+
+
 def repo_recommendations(result: dict[str, Any]) -> list[dict[str, Any]]:
-    """Advice about the repository as a whole (a background rate), not one target."""
-    return [r for r in result.get("recommendations") or [] if isinstance(r, dict)]
+    """Advice about the repository as a whole (a background rate), not one target; not
+    the items that go to "What to fix first" (``rank: "first"``), which are shown there."""
+    return [
+        r
+        for r in result.get("recommendations") or []
+        if isinstance(r, dict) and r.get("rank") != "first"
+    ]
+
+
+def repo_fix_first(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Repository-level advice that belongs in "What to fix first" (a habit of agents
+    here that recurs across sessions and files, such as reporting work done unchecked)."""
+    return [
+        r
+        for r in result.get("recommendations") or []
+        if isinstance(r, dict) and r.get("rank") == "first"
+    ]
 
 
 def events_phrase(totals: dict[str, Any]) -> str:
@@ -101,8 +120,9 @@ def collect_recommendations(
             h.get("path", ""),
         ),
     )
-    strong = _first_recs(ranked, limit, thin=False)
-    return strong or _first_recs(ranked, limit, thin=True)
+    repo = [({"path": REPO_LABEL, "kind": "repo"}, rec) for rec in repo_fix_first(result)]
+    strong = repo + _first_recs(ranked, limit, thin=False)
+    return strong[:limit] or _first_recs(ranked, limit, thin=True)
 
 
 def is_agent_tool(rec: dict[str, Any]) -> bool:
