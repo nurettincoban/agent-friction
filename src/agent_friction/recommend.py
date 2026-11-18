@@ -1735,14 +1735,14 @@ class _Rules:
         elif fixes and forms and fixes[0][1] + forms[0][1] >= MIN_EVENTS:
             # `make test` passed after a red `pytest` in one session, `TZ=UTC pytest` in
             # another, nothing changed either time: the bare command lacks what both set.
-            (fix, ran), (form, count) = fixes[0], forms[0]
+            (fix, fixed), (form, count) = fixes[0], forms[0]
             place = _place(key)
             line = f"use {_typed(fix, place)} (or {_typed(form, place)}), not {_typed(key, place)}"
             self.add(
                 "use-the-working-command",
                 f"Tell agents to use {code(_bare(fix))}, not {code(_bare(key))}",
                 f"{_located(key)} failed {_in_sessions(failures)}, and with no file changed the "
-                f"same job then passed as {code(_bare(fix))} ({_times(ran)}) and as "
+                f"same job then passed as {code(_bare(fix))} ({_times(fixed)}) and as "
                 f"{code(_bare(form))} ({_times(count)}). Add a line to AGENTS.md such as: "
                 f'"{_agents_line(place, line)}", or make {code(_bare(key))} work on its own '
                 "(set the variable in the test setup).",

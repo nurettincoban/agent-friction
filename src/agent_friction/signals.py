@@ -1595,7 +1595,8 @@ _SOFTENER_RE = re.compile(
     r"|as (?:asked|requested|expected|planned|discussed|agreed|i (?:asked|wanted|said))"
     # the problem predates the agent's work
     r"|before your (?:change|changes|edit|edits|commit|commits|fix|pr)|not caused by you(?:r \w+)?"
-    r"|already (?:broken|failing|red)|(?:was|were|been) already there|pre-?existing|not (?:related to|because of) your"
+    r"|already (?:broken|failing|red)|(?:was|were|been) already there|pre-?existing"
+    r"|not (?:related to|because of) your"
     r"|since (?:yesterday|last (?:night|week|month|\w+day)|this morning|\w+day|before)"
     r"|for (?:days|weeks|months|a while|ages))\b",
     re.I,
@@ -1821,7 +1822,8 @@ _STRONG_CORRECTION: tuple[tuple[str, re.Pattern[str], bool], ...] = tuple(
         (
             # "Not that file. It's generated", "Not that one, it's the slow suite"
             "not that one",
-            _OPEN + rf"not (?:that|this|those|these) (?:{_THING}|ones)\b(?! (?:i|we) (?:mean|meant))",
+            _OPEN
+            + rf"not (?:that|this|those|these) (?:{_THING}|ones)\b(?! (?:i|we) (?:mean|meant))",
             False,
         ),
         (
