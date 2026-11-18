@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO firings (kiln_id, preset, peak_c, started_at) VALUES (?, ?, ?, datetime('now')) RETURNING id, kiln_id, preset, peak_c, started_at, finished_at",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "kiln_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "preset",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "peak_c",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "started_at",
+        "ordinal": 4,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "finished_at",
+        "ordinal": 5,
+        "type_info": "Datetime"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "ca4a34baf9ad53cf07d35bb2b39ac4b36768536a77d0c8547b3074201ed25a75"
+}

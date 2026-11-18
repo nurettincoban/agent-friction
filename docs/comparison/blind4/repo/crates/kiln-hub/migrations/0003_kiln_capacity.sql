@@ -1,0 +1,1 @@
+ALTER TABLE kilns ADD COLUMN capacity_l INTEGER;

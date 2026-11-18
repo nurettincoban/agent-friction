@@ -1,0 +1,33 @@
+set dotenv-load := true
+
+default:
+    @just --list
+
+# run all tests (uses the committed .sqlx query cache, no database needed)
+test:
+    SQLX_OFFLINE=true cargo test --workspace
+
+lint:
+    cargo fmt --all -- --check
+    SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings
+
+# create + migrate the local sqlite db that kiln-hub uses
+db-setup:
+    mkdir -p data
+    sqlx database create
+    sqlx migrate run --source crates/kiln-hub/migrations
+
+# regenerate .sqlx/ after changing a query (run db-setup first)
+sqlx-prepare:
+    cargo sqlx prepare --workspace
+
+hub:
+    cargo run -p kiln-hub
+
+# size of the shipped CLI binary
+check-size:
+    cargo build --release -p kilnctl
+    ls -lh target/release/kilnctl
+
+release-build:
+    cargo build --release --workspace
