@@ -219,7 +219,7 @@ def test_the_scan_counts_the_tokens_of_the_turns_a_problem_took(tmp_path: Path) 
 
     text = render_terminal(out, width=120)
     assert "tokens: " in text and "cache reads" in text
-    assert "Cost so far: " in text
+    assert "Cost of `go test` so far: " in text
     assert "cache reads" in render_markdown(out)
     assert "agent-friction's assignment" in render_investigate(out)
     assert "tokens_note" in render_html(out)
@@ -232,7 +232,7 @@ def test_without_usage_no_token_count_is_shown(tmp_path: Path) -> None:
     assert out["totals"]["tokens_lost"] is None and out["totals"]["tokens_total"] is None
     assert all(c["tokens_lost"] is None for c in out["commands"])
     text = render_terminal(out, width=120)
-    assert "tokens" not in text and "Cost so far" not in text
+    assert "tokens" not in text and "so far: " not in text
 
 
 def test_usage_outside_the_window_is_left_out(tmp_path: Path) -> None:
@@ -260,7 +260,14 @@ def test_counts_are_short_and_cache_reads_are_named_apart() -> None:
     assert tokens_phrase({**tally, "responses": 0}) == ""
     assert tokens_phrase(None) == ""
     totals = {"tokens_lost": tally, "tokens_total": {**tally, "responses": 9}}
-    assert headline_tokens(totals).startswith("6.2k (+79k cache reads) in the turns counted")
+    assert headline_tokens({"totals": totals}) == (
+        "6.2k (+79k cache reads) in the turns counted as lost, of 6.2k (+79k cache reads) in "
+        "the whole sessions"
+    )
+    windowed = {"totals": totals, "window": {"since": "2026-11-01T00:00:00Z"}}
+    assert headline_tokens(windowed).endswith("in the window")
+    # usage recorded elsewhere, but not where time was lost: no count rather than 0
+    assert headline_tokens({"totals": {**totals, "tokens_lost": None}}) == ""
 
 
 def test_compare_sets_tokens_per_session_side_by_side_only_when_both_have_them() -> None:
@@ -313,7 +320,7 @@ def test_every_format_names_cache_reads_apart_and_the_assignment(tmp_path: Path)
     investigate = render_investigate(out)
     assert "lost; " in investigate and "in the turns counted against it" in investigate
     markdown = render_markdown(out)
-    assert "Cost so far: " in markdown and "agent-friction's assignment" in markdown
+    assert "so far: " in markdown and "agent-friction's assignment" in markdown
 
 
 def test_the_html_map_formats_counts_as_the_other_reports_do() -> None:

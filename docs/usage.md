@@ -26,8 +26,8 @@ What to fix first
   2. pytest: Tell agents to use `make test`
      `pytest` failed 7 times in 4 sessions; 5 times the agent then got the same job done with
      `make test`, and `pytest` did not work later in those sessions.
-     Cost so far: 8.2k tokens (+111k cache reads) in the agent turns counted against it, in 3
-     sessions.
+     Cost of `pytest` so far: 8.2k tokens (+111k cache reads) in the agent turns counted against
+     it, in 3 sessions.
   3. src/shopfront/checkout/service.py: Write down the rule the human keeps repeating
      A human corrected the agent here 3 times in 3 sessions...
 

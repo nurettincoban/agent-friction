@@ -297,7 +297,7 @@ def render_terminal(
             f" · {plural(int(totals.get('corrections', 0)), 'human correction')}{span}"
         )
     )
-    tokens = headline_tokens(totals)
+    tokens = headline_tokens(result)
     if tokens:
         out.append(st.dim(f"tokens: {tokens}"))
     out.append("")

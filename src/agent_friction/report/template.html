@@ -212,7 +212,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
   function costLine(h) {
     var tokens = tokensPhrase(h.tokens_lost);
     if (!tokens) return "";
-    return "Cost so far: " + tokens + " in the agent turns counted against it, in " + plural(Number(h.tokens_lost.sessions) || 0, "session") + ".";
+    return "Cost of " + h.path + " so far: " + tokens + " in the agent turns counted against it, in " + plural(Number(h.tokens_lost.sessions) || 0, "session") + ".";
   }
   function mins(m) {
     m = Number(m) || 0;
@@ -286,11 +286,13 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
   (function () {
     var all = tokenParts(R.totals && R.totals.tokens_total);
     if (!all) return;
-    var lost = tokenParts(R.totals.tokens_lost) || [0, 0];
+    var lost = tokenParts(R.totals.tokens_lost);
+    if (!lost) return;
+    var w = R.window || {}, where = w.since || w.until ? "the window" : "the whole sessions";
     var box = el("div", { class: "stat", title: TOKENS_NOTE });
     box.appendChild(el("b", null, fmtCount(lost[0])));
     box.appendChild(el("span", null, "tokens in turns counted as lost (+" + fmtCount(lost[1]) + " cache reads), of " +
-      tokenPair(all) + " in the whole sessions"));
+      tokenPair(all) + " in " + where));
     document.getElementById("stats").appendChild(box);
   })();
 

@@ -10,15 +10,15 @@ What to fix first
      hand; change `api/openapi.yaml` and run `make codegen` to regenerate it.", and deny direct
      edits to it. The tool said: `String to replace not found in file.` (3 of 7 events, 3
      sessions).
-     Cost so far: 16k tokens (+190k cache reads) in the agent turns counted against it, in 3
-     sessions.
+     Cost of `src/shopfront/api/schema_gen.py` so far: 16k tokens (+190k cache reads) in the agent
+     turns counted against it, in 3 sessions.
   2. pytest: Tell agents to use `make test`
      `pytest` failed 7 times in 4 sessions; 5 times the agent then got the same job done with
      `make test`, and `pytest` did not work later in those sessions. Add a line to AGENTS.md such
      as: "use `make test`, not `pytest`". The tool said: `E ModuleNotFoundError: No module named
      'shopfront'` (5 of 7 events, 4 sessions).
-     Cost so far: 8.2k tokens (+111k cache reads) in the agent turns counted against it, in 3
-     sessions.
+     Cost of `pytest` so far: 8.2k tokens (+111k cache reads) in the agent turns counted against
+     it, in 3 sessions.
   3. src/shopfront/checkout/service.py: Write down the rule the human keeps repeating
      A human corrected the agent here 3 times in 3 sessions. Put the rule in AGENTS.md / CLAUDE.md
      (or a comment at the top of the file) so it is read before the next attempt. In their words:
@@ -29,8 +29,8 @@ What to fix first
      is what we use instead." (The human also named `src/shopfront/payments/legacy.py`, which the
      agent had not touched.) The rule, as they put it: use `PaymentClient` (said in 3 sessions),
      not `legacy_charge` (said in 2 sessions).
-     Cost so far: 12k tokens (+190k cache reads) in the agent turns counted against it, in 3
-     sessions.
+     Cost of `src/shopfront/checkout/service.py` so far: 12k tokens (+190k cache reads) in the
+     agent turns counted against it, in 3 sessions.
   4. src/shopfront: Point agents to what they are searching for
      Agents searched under src/shopfront/ and found nothing 5 times in 2 sessions. They looked for
      `RefundPolicy` (2x), `**/*policy*.py`, `DiscountPolicy`. If the concept exists under another
@@ -40,7 +40,7 @@ What to fix first
      A human declined the agent's action once in 1 session. State the boundary explicitly (what
      must not be touched or run, and what to do instead) in AGENTS.md, or encode it as a
      permission rule. Reasons given: "never delete existing migrations, add a new revision on top"
-     Cost so far: 2k tokens (+29k cache reads) in the agent turns counted against it, in 1
+     Cost of `rm` so far: 2k tokens (+29k cache reads) in the agent turns counted against it, in 1
      session.
 
 Ready to paste

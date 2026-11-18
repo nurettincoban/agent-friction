@@ -232,7 +232,7 @@ def render_investigate(result: dict[str, Any]) -> str:
         "",
         _HEAD,
     ]
-    tokens = headline_tokens(totals)
+    tokens = headline_tokens(result)
     if tokens:
         out += [f"Tokens: {tokens}. {TOKENS_NOTE}", ""]
     if (result.get("settings") or {}).get("excerpts") is False:

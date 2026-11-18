@@ -123,7 +123,7 @@ TOKENS_NOTE = (
 
 
 def cost_line(item: dict[str, Any]) -> str:
-    """ "Cost so far: 6.2k tokens (+79k cache reads) in the agent turns counted against
+    """ "Cost of `pytest` so far: 6.2k tokens (+79k cache reads) in the agent turns counted against
     it, in 3 sessions." for one item: "" when no usage was counted for it."""
     tokens = item.get("tokens_lost")
     phrase = tokens_phrase(tokens)
@@ -131,22 +131,23 @@ def cost_line(item: dict[str, Any]) -> str:
         return ""
     sessions = int(tokens.get("sessions", 0) or 0)
     return (
-        f"Cost so far: {phrase} in the agent turns counted against it, in "
+        f"Cost of {code_span(str(item.get('path') or 'this'))} so far: {phrase} in the agent "
+        "turns counted against it, in "
         f"{plural(sessions, 'session')}."
     )
 
 
-def headline_tokens(totals: dict[str, Any]) -> str:
+def headline_tokens(result: dict[str, Any]) -> str:
     """ "20k (+304k cache reads) in the turns counted as lost, of 391k (+7.5M cache reads)
     in the whole sessions": "" without usage. The whole sessions include any work they did
     outside this repository (see ``totals.tokens_total``)."""
+    totals = result.get("totals") or {}
     lost, total = _token_parts(totals.get("tokens_lost")), _token_parts(totals.get("tokens_total"))
-    if total is None:
-        return ""
-    return (
-        f"{_pair(lost or (0, 0))} in the turns counted as lost, of {_pair(total)} in the "
-        "whole sessions"
-    )
+    if total is None or lost is None:
+        return ""  # no usage, or none recorded where time was lost: no count, not 0
+    window = result.get("window") or {}
+    where = "the window" if window.get("since") or window.get("until") else "the whole sessions"
+    return f"{_pair(lost)} in the turns counted as lost, of {_pair(total)} in {where}"
 
 
 def fmt_minutes(minutes: float) -> str:

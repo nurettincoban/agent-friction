@@ -219,8 +219,8 @@ def render_markdown(result: dict[str, Any], *, top: int = 10) -> str:
         f"{plural(int(totals.get('files_affected', 0)), 'file')} affected",
         "",
     ]
-    if headline_tokens(totals):
-        out += [f"Tokens: {headline_tokens(totals)}. {TOKENS_NOTE}", ""]
+    if headline_tokens(result):
+        out += [f"Tokens: {headline_tokens(result)}. {TOKENS_NOTE}", ""]
     hotspots = list(result.get("hotspots", []))[:top]
     commands = list(result.get("commands", []))[:top]
     if not hotspots and not commands and not result.get("directories"):
